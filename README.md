@@ -1,18 +1,8 @@
----
-license: mit
-datasets:
-- tiiuae/falcon-refinedweb
-language:
-- en
----
-
 # NeoBERT
 
 Code is coming soon!
 
 ## Description
-
-[![Hugging Face Model Card](https://img.shields.io/badge/Hugging%20Face-Model%20Card-blue)](https://huggingface.co/chandar-lab/NeoBERT)
 
 NeoBERT is a **next-generation encoder** model for English text representation, pre-trained from scratch on the RefinedWeb dataset. NeoBERT integrates state-of-the-art advancements in architecture, modern data, and optimized pre-training methodologies. It is designed for seamless adoption: it serves as a plug-and-play replacement for existing base models, relies on an **optimal depth-to-width ratio**, and leverages an extended context length of **4,096 tokens**. Despite its compact 250M parameter footprint, it is the most efficient model of its kind and achieves **state-of-the-art results** on the massive MTEB benchmark, outperforming BERT large, RoBERTa large, NomicBERT, and ModernBERT under identical fine-tuning conditions. 
 
