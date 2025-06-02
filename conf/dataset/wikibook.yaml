@@ -1,0 +1,3 @@
+name: wikibook
+column: text
+path_to_disk: tokenized_datasets/wikibook_google

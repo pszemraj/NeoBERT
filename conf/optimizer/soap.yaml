@@ -1,0 +1,7 @@
+name: SOAP
+hparams:
+  lr: 1e-4
+  betas: [0.95, 0.95]
+  precondition_frequency: 10
+  eps: 1e-8
+  weight_decay: 0.01

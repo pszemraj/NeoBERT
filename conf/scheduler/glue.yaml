@@ -1,0 +1,5 @@
+warmup_percent: 6
+warmup_steps: null
+decay_percent: 90
+decay_steps: null
+decay: linear
