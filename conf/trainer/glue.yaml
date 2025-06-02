@@ -1,0 +1,15 @@
+tf32: True
+mixed_precision: fp16
+dir: null
+train_batch_size: 8
+eval_batch_size: 8
+gradient_accumulation_steps: 1
+max_steps: null
+num_train_epochs: 10
+early_stopping: -1
+eval_steps: 1000
+resume_from_checkpoint: False
+checkpoint_dir: null
+max_ckpt: 1
+smart: False
+smart_weight: 0.02

@@ -1,0 +1,8 @@
+rope: True
+rms_norm: True
+hidden_act: swiglu
+dropout_prob: 0
+norm_eps: 1e-05
+embedding_init_range: 0.02
+decoder_init_range: 0.02
+classifier_init_range: 0.02

@@ -1,0 +1,3 @@
+mlm_probability: 0.20
+pad_to_multiple_of: 8
+mask_all: true

@@ -1,0 +1,24 @@
+seed: 0
+
+hydra:
+  run:
+    dir: logs/hydra
+
+model:
+  pretrained_config_path: ${oc.env:SCRATCH}/logs/neobert-opt-dgxh100-refinedweb/hydra/.hydra/config.yaml
+  pretrained_checkpoint_dir: ${oc.env:SCRATCH}/logs/neobert-opt-dgxh100-refinedweb/model_checkpoints
+  pretrained_checkpoint: latest
+  deepspeed: True
+
+tokenizer:
+  pretrained_model_name_or_path: meta-llama/Llama-2-7b-hf
+  trust_remote_code: True
+  max_length: 1024
+  vocab_size: 32064
+  token: hf_token
+
+mteb:
+  pooling: avg
+  overwrite_results: False
+  task_type: all
+  batch_size: 32

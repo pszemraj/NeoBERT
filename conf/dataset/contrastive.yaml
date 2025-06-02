@@ -1,0 +1,4 @@
+path: ${oc.env:HF_DATASETS_CACHE}/neobert_finetuning/
+load_all_from_disk: False
+force_redownload: False
+alpha: 0.5
