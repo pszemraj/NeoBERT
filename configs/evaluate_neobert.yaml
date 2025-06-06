@@ -1,0 +1,112 @@
+# NeoBERT Evaluation Configuration
+# This is a reference configuration for evaluating NeoBERT on downstream tasks
+
+task: glue  # Options: glue, mteb, contrastive
+
+model:
+  # Model architecture (should match pretrained model)
+  hidden_size: 768
+  num_hidden_layers: 12
+  num_attention_heads: 12
+  intermediate_size: 3072
+  max_position_embeddings: 512
+  vocab_size: 30522
+  
+  # NeoBERT-specific features
+  rope: true
+  rms_norm: true
+  hidden_act: swiglu
+  dropout_prob: 0.1  # Dropout for fine-tuning
+  norm_eps: 1.0e-05
+  
+  # Load from checkpoint
+  pretrained_model_path: null  # Path to pretrained model checkpoint
+
+dataset:
+  # GLUE-specific settings
+  name: cola  # GLUE task: cola, mnli, mrpc, qnli, qqp, rte, sst2, stsb, wnli
+  path: null
+  num_workers: 4
+  max_seq_length: 128  # Shorter for most GLUE tasks
+  validation_split: null
+  
+  # MTEB-specific settings (when task: mteb)
+  # mteb_tasks: ["STS12", "STS13", "STS14", "STS15", "STS16", "STSBenchmark", "SICK-R"]
+  # mteb_langs: ["en"]
+
+tokenizer:
+  name: bert-base-uncased
+  path: null
+  max_length: 128
+  padding: max_length
+  truncation: true
+
+optimizer:
+  name: adamw
+  lr: 2.0e-05  # Lower LR for fine-tuning
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  eps: 1.0e-08
+
+scheduler:
+  name: linear  # Linear decay for fine-tuning
+  warmup_steps: 0.1  # As ratio of total steps
+  total_steps: null
+
+trainer:
+  # Batch sizes
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 64
+  gradient_accumulation_steps: 1
+  
+  # Training steps (for GLUE)
+  num_train_epochs: 3  # Use epochs for fine-tuning
+  max_steps: -1  # -1 means use num_train_epochs
+  save_steps: 500
+  eval_steps: 500
+  logging_steps: 50
+  
+  # Evaluation
+  evaluation_strategy: steps  # Options: steps, epoch, no
+  save_strategy: steps
+  save_total_limit: 2
+  load_best_model_at_end: true
+  metric_for_best_model: eval_accuracy  # Depends on task
+  greater_is_better: true
+  
+  # Output
+  output_dir: ./output/glue
+  overwrite_output_dir: true
+  
+  # Mixed precision
+  fp16: false
+  bf16: true
+  
+  # Early stopping
+  early_stopping_patience: 3
+  
+  # Random seed
+  seed: 42
+
+datacollator:
+  # No MLM for downstream tasks
+  mlm_probability: 0.0
+  pad_to_multiple_of: null
+
+wandb:
+  project: neo-bert-eval
+  entity: null
+  name: null
+  tags: ["glue", "evaluation"]
+  mode: online
+  log_interval: 50
+  resume: never
+  dir: logs/wandb
+
+# Accelerate configuration
+accelerate_config_file: null
+mixed_precision: bf16
+
+# Global settings
+seed: 42
+debug: false

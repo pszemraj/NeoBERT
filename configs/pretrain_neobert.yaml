@@ -1,0 +1,105 @@
+# NeoBERT Pretraining Configuration
+# This is a reference configuration for pretraining NeoBERT models
+
+task: pretraining
+
+model:
+  # Model architecture
+  hidden_size: 768
+  num_hidden_layers: 12
+  num_attention_heads: 12
+  intermediate_size: 3072
+  max_position_embeddings: 512
+  vocab_size: 30522
+  
+  # NeoBERT-specific features
+  rope: true  # Rotary Position Embeddings
+  rms_norm: true  # RMSNorm instead of LayerNorm
+  hidden_act: swiglu  # SwiGLU activation
+  dropout_prob: 0.0
+  norm_eps: 1.0e-05
+  
+  # Initialization ranges
+  embedding_init_range: 0.02
+  decoder_init_range: 0.02
+  classifier_init_range: 0.02
+
+dataset:
+  name: refinedweb  # Options: refinedweb, wikibook
+  path: ""  # Path to dataset (if local)
+  num_workers: 16
+  streaming: true
+  cache_dir: null
+  max_seq_length: 512
+  validation_split: 0.01
+
+tokenizer:
+  name: bert-base-uncased  # Or path to custom tokenizer
+  path: null
+  max_length: 512
+  padding: max_length
+  truncation: true
+
+optimizer:
+  name: adamw  # Options: adam, adamw, soap
+  lr: 1.0e-04
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  eps: 1.0e-08
+
+scheduler:
+  name: cosine  # Options: cosine, linear
+  warmup_steps: 10000
+  total_steps: null  # If null, computed from max_steps
+  num_cycles: 0.5
+
+trainer:
+  # Batch sizes
+  per_device_train_batch_size: 16
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 1
+  
+  # Training steps
+  max_steps: 1000000
+  save_steps: 10000
+  eval_steps: 10000
+  logging_steps: 100
+  
+  # Output
+  output_dir: ./output/pretrain
+  overwrite_output_dir: true
+  
+  # Mixed precision
+  fp16: false
+  bf16: true
+  
+  # Memory optimization
+  gradient_checkpointing: false
+  
+  # Resume training
+  resume_from_checkpoint: null
+  
+  # Random seed
+  seed: 42
+
+datacollator:
+  mlm_probability: 0.15  # Masked Language Modeling probability
+  pad_to_multiple_of: null
+
+wandb:
+  project: neo-bert
+  entity: null  # Your WandB entity
+  name: null  # Run name (auto-generated if null)
+  tags: []
+  mode: online  # Options: online, offline, disabled
+  log_interval: 100
+  resume: never
+  dir: logs/wandb
+
+# Accelerate configuration
+accelerate_config_file: null  # Path to accelerate config if using multi-GPU
+mixed_precision: bf16
+
+# Global settings
+seed: 0
+debug: false
