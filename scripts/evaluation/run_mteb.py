@@ -2,20 +2,16 @@
 
 from __future__ import annotations
 
-import os
 import logging
+import os
 
 import hydra
-from omegaconf import DictConfig, OmegaConf
-from transformers import AutoTokenizer
-from tokenizers.processors import TemplateProcessing
-
 import torch
-
-from mteb import MTEB
-
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
-from neobert.model import NeoBERTForMTEB, NeoBERTConfig
+from mteb import MTEB
+from omegaconf import DictConfig, OmegaConf
+
+from neobert.model import NeoBERTConfig, NeoBERTForMTEB
 from neobert.tokenizer import get_tokenizer
 
 logging.basicConfig(level=logging.INFO)
@@ -145,7 +141,12 @@ def evaluate_mteb(cfg: DictConfig):
             raise ValueError(f"Unable to find 'latest' file at {latest_path}")
 
     # Define path to store results
-    output_folder = os.path.join(cfg.model.pretrained_checkpoint_dir, "mteb", str(ckpt), str(cfg.tokenizer.max_length))
+    output_folder = os.path.join(
+        cfg.model.pretrained_checkpoint_dir,
+        "mteb",
+        str(ckpt),
+        str(cfg.tokenizer.max_length),
+    )
 
     # Cuda
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -165,7 +166,11 @@ def evaluate_mteb(cfg: DictConfig):
 
     # Load pretrained weights
     if cfg.model.deepspeed:
-        model = load_state_dict_from_zero_checkpoint(model, os.path.join(cfg.model.pretrained_checkpoint_dir, "model_checkpoints"), tag=str(ckpt))
+        model = load_state_dict_from_zero_checkpoint(
+            model,
+            os.path.join(cfg.model.pretrained_checkpoint_dir, "model_checkpoints"),
+            tag=str(ckpt),
+        )
     else:
         raise NotImplementedError
 
@@ -178,7 +183,12 @@ def evaluate_mteb(cfg: DictConfig):
         eval_splits = ["dev"] if task == "MSMARCO" else ["test"]
         evaluation = MTEB(tasks=[task], task_langs=["en"])
         with torch.autocast(device_type=device, dtype=torch.float16):
-            evaluation.run(model, output_folder=output_folder, eval_splits=eval_splits, overwrite_results=cfg.mteb.overwrite_results)
+            evaluation.run(
+                model,
+                output_folder=output_folder,
+                eval_splits=eval_splits,
+                overwrite_results=cfg.mteb.overwrite_results,
+            )
 
 
 if __name__ == "__main__":

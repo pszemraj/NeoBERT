@@ -3,29 +3,28 @@
 # From https://github.com/facebookresearch/llama/blob/main/llama/model.py
 
 import math
+from functools import partial
+from typing import Any, Dict, List, Optional
+
 import numpy as np
-
 import torch
+from datasets import Dataset
 from torch import nn
-from torch.utils.data import DataLoader
-
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from torch.nn.functional import scaled_dot_product_attention
-
-from typing import Any, Dict, List, Optional
-from functools import partial
-
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from transformers import (
+    DataCollatorWithPadding,
+    PretrainedConfig,
+    PreTrainedModel,
+    PreTrainedTokenizerFast,
+)
+from transformers.modeling_outputs import SequenceClassifierOutput
 from xformers.ops import SwiGLU, memory_efficient_attention
 
-from datasets import Dataset
-
-from transformers import PreTrainedModel, PretrainedConfig, PreTrainedTokenizerFast, DataCollatorWithPadding
-from transformers.modeling_outputs import SequenceClassifierOutput
-
-from tqdm import tqdm
-
 from .rmsnorm import RMSNorm
-from .rotary import precompute_freqs_cis, apply_rotary_emb
+from .rotary import apply_rotary_emb, precompute_freqs_cis
 
 
 class NeoBERTConfig(PretrainedConfig):
@@ -87,8 +86,14 @@ class EncoderBlock(nn.Module):
         self.config = config
 
         # Attention
-        self.qkv = nn.Linear(in_features=config.hidden_size, out_features=config.hidden_size * 3, bias=False)
-        self.wo = nn.Linear(in_features=config.hidden_size, out_features=config.hidden_size, bias=False)
+        self.qkv = nn.Linear(
+            in_features=config.hidden_size,
+            out_features=config.hidden_size * 3,
+            bias=False,
+        )
+        self.wo = nn.Linear(
+            in_features=config.hidden_size, out_features=config.hidden_size, bias=False
+        )
         self.resid_dropout = nn.Dropout(config.dropout)
 
         # Feedforward network
@@ -99,8 +104,15 @@ class EncoderBlock(nn.Module):
                 # avoid RuntimeError due to misaligned operand
                 multiple_of = 8
                 intermediate_size = int(2 * config.intermediate_size / 3)
-                intermediate_size = multiple_of * ((intermediate_size + multiple_of - 1) // multiple_of)
-                self.ffn = SwiGLU(config.hidden_size, intermediate_size, config.hidden_size, bias=False)
+                intermediate_size = multiple_of * (
+                    (intermediate_size + multiple_of - 1) // multiple_of
+                )
+                self.ffn = SwiGLU(
+                    config.hidden_size,
+                    intermediate_size,
+                    config.hidden_size,
+                    bias=False,
+                )
             case "gelu":
                 self.ffn = nn.Sequential(
                     nn.Linear(config.hidden_size, config.intermediate_size, bias=False),
@@ -109,10 +121,14 @@ class EncoderBlock(nn.Module):
                 )
 
         self.attention_norm = (
-            RMSNorm(config.hidden_size, config.norm_eps) if config.rms_norm else nn.LayerNorm(config.hidden_size, config.norm_eps)
+            RMSNorm(config.hidden_size, config.norm_eps)
+            if config.rms_norm
+            else nn.LayerNorm(config.hidden_size, config.norm_eps)
         )
         self.ffn_norm = (
-            RMSNorm(config.hidden_size, config.norm_eps) if config.rms_norm else nn.LayerNorm(config.hidden_size, config.norm_eps)
+            RMSNorm(config.hidden_size, config.norm_eps)
+            if config.rms_norm
+            else nn.LayerNorm(config.hidden_size, config.norm_eps)
         )
 
         self.ffn_dropout = nn.Dropout(config.dropout)
@@ -122,16 +138,29 @@ class EncoderBlock(nn.Module):
         x = x + self._ff_block(self.ffn_norm(x))
         return x
 
-    def _att_block(self, x: torch.Tensor, pad_mask: torch.Tensor, freqs_cis: torch.Tensor):
+    def _att_block(
+        self, x: torch.Tensor, pad_mask: torch.Tensor, freqs_cis: torch.Tensor
+    ):
         batch_size, seq_len, _ = x.shape
 
-        xq, xk, xv = self.qkv(x).view(batch_size, seq_len, self.config.num_attention_heads, self.config.dim_head * 3).chunk(3, axis=-1)
+        xq, xk, xv = (
+            self.qkv(x)
+            .view(
+                batch_size,
+                seq_len,
+                self.config.num_attention_heads,
+                self.config.dim_head * 3,
+            )
+            .chunk(3, axis=-1)
+        )
 
         if self.config.rope:
             xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
 
         if self.config.flash_attention:
-            attn = memory_efficient_attention(query=xq, key=xk, value=xv, attn_bias=pad_mask, p=0)
+            attn = memory_efficient_attention(
+                query=xq, key=xk, value=xv, attn_bias=pad_mask, p=0
+            )
         else:
             # Input and output are of dimension (B, H, M, K)
             attn = scaled_dot_product_attention(
@@ -142,7 +171,15 @@ class EncoderBlock(nn.Module):
                 dropout_p=self.config.dropout_prob if self.training else 0,
             ).transpose(1, 2)
 
-        return self.resid_dropout(self.wo(attn.reshape(batch_size, seq_len, self.config.num_attention_heads * self.config.dim_head)))
+        return self.resid_dropout(
+            self.wo(
+                attn.reshape(
+                    batch_size,
+                    seq_len,
+                    self.config.num_attention_heads * self.config.dim_head,
+                )
+            )
+        )
 
     def _ff_block(self, x: torch.Tensor):
         return self.ffn_dropout(self.ffn(x))
@@ -157,31 +194,49 @@ class NormEncoderBlock(nn.Module):
         self.config = config
 
         # Attention
-        self.qkv = nn.Linear(in_features=config.hidden_size, out_features=config.hidden_size * 3, bias=False)
-        self.wo = nn.Linear(in_features=config.hidden_size, out_features=config.hidden_size, bias=False)
+        self.qkv = nn.Linear(
+            in_features=config.hidden_size,
+            out_features=config.hidden_size * 3,
+            bias=False,
+        )
+        self.wo = nn.Linear(
+            in_features=config.hidden_size, out_features=config.hidden_size, bias=False
+        )
         self.resid_dropout = nn.Dropout(config.dropout)
 
-        self.c_fc = nn.Linear(config.hidden_size, 2 * config.intermediate_size, bias=False)
+        self.c_fc = nn.Linear(
+            config.hidden_size, 2 * config.intermediate_size, bias=False
+        )
         self.silu = nn.SiLU()
-        self.mlp_c_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
+        self.mlp_c_proj = nn.Linear(
+            config.intermediate_size, config.hidden_size, bias=False
+        )
 
         self.ffn_dropout = nn.Dropout(config.dropout)
 
         self.attn_alpha_init_value = 0.05
         self.attn_alpha_init_scaling = config.base_scale
-        self.attn_alpha = torch.nn.Parameter(self.attn_alpha_init_scaling * torch.ones(config.hidden_size))
+        self.attn_alpha = torch.nn.Parameter(
+            self.attn_alpha_init_scaling * torch.ones(config.hidden_size)
+        )
 
         self.mlp_alpha_init_value = 0.05
         self.mlp_alpha_init_scaling = config.base_scale
-        self.mlp_alpha = torch.nn.Parameter(self.mlp_alpha_init_scaling * torch.ones(config.hidden_size))
+        self.mlp_alpha = torch.nn.Parameter(
+            self.mlp_alpha_init_scaling * torch.ones(config.hidden_size)
+        )
 
         self.sqk_init_value = 1.0
         self.sqk_init_scaling = config.base_scale
-        self.sqk = torch.nn.Parameter(self.sqk_init_scaling * torch.ones(config.hidden_size))
+        self.sqk = torch.nn.Parameter(
+            self.sqk_init_scaling * torch.ones(config.hidden_size)
+        )
 
         self.suv_init_value = 1.0
         self.suv_init_scaling = 1.0
-        self.suv = torch.nn.Parameter(self.suv_init_scaling * torch.ones(2 * config.intermediate_size))
+        self.suv = torch.nn.Parameter(
+            self.suv_init_scaling * torch.ones(2 * config.intermediate_size)
+        )
 
     def justnorm(self, x):
         res = x / x.norm(p=2, dim=-1, keepdim=True)
@@ -190,7 +245,9 @@ class NormEncoderBlock(nn.Module):
     def forward(self, x: torch.Tensor, pad_mask: torch.Tensor, freqs_cis: torch.Tensor):
         x_attn = self._att_block(x, pad_mask, freqs_cis)
 
-        lr = self.attn_alpha * (self.attn_alpha_init_value / self.attn_alpha_init_scaling)
+        lr = self.attn_alpha * (
+            self.attn_alpha_init_value / self.attn_alpha_init_scaling
+        )
         lr = torch.abs(lr)
 
         A_norm = self.justnorm(x)
@@ -208,24 +265,42 @@ class NormEncoderBlock(nn.Module):
 
         return x
 
-    def _att_block(self, x: torch.Tensor, pad_mask: torch.Tensor, freqs_cis: torch.Tensor):
+    def _att_block(
+        self, x: torch.Tensor, pad_mask: torch.Tensor, freqs_cis: torch.Tensor
+    ):
         batch_size, seq_len, _ = x.shape
 
-        xq, xk, xv = self.qkv(x).view(batch_size, seq_len, self.config.num_attention_heads, self.config.dim_head * 3).chunk(3, axis=-1)
+        xq, xk, xv = (
+            self.qkv(x)
+            .view(
+                batch_size,
+                seq_len,
+                self.config.num_attention_heads,
+                self.config.dim_head * 3,
+            )
+            .chunk(3, axis=-1)
+        )
 
         if self.config.rope:
             xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
 
         sqk = (self.sqk * (self.sqk_init_value / self.sqk_init_scaling)).view(
-            1, 1, self.config.num_attention_heads, self.config.hidden_size // self.config.num_attention_heads
+            1,
+            1,
+            self.config.num_attention_heads,
+            self.config.hidden_size // self.config.num_attention_heads,
         )
         xq = sqk * self.justnorm(xq)
         xk = sqk * self.justnorm(xk)
 
-        softmax_scale = (self.config.hidden_size / self.config.num_attention_heads) ** 0.5
+        softmax_scale = (
+            self.config.hidden_size / self.config.num_attention_heads
+        ) ** 0.5
 
         if self.config.flash_attention:
-            attn = memory_efficient_attention(query=xq, key=xk, value=xv, attn_bias=pad_mask, p=0, scale=softmax_scale)
+            attn = memory_efficient_attention(
+                query=xq, key=xk, value=xv, attn_bias=pad_mask, p=0, scale=softmax_scale
+            )
         else:
             # Input and output are of dimension (B, H, M, K)
             attn = scaled_dot_product_attention(
@@ -237,11 +312,16 @@ class NormEncoderBlock(nn.Module):
                 scale=softmax_scale,
             ).transpose(1, 2)
 
-        return self.resid_dropout(self.wo(attn.reshape(batch_size, seq_len, self.config.hidden_size)))
+        return self.resid_dropout(
+            self.wo(attn.reshape(batch_size, seq_len, self.config.hidden_size))
+        )
 
     def _ff_block(self, x: torch.Tensor):
         uv = self.c_fc(x)
-        suv = self.suv * ((self.suv_init_value / self.suv_init_scaling) * (self.config.hidden_size**0.5))
+        suv = self.suv * (
+            (self.suv_init_value / self.suv_init_scaling)
+            * (self.config.hidden_size**0.5)
+        )
         uv = suv * uv
 
         u, v = torch.chunk(uv, 2, dim=-1)
@@ -257,11 +337,15 @@ class NeoBERTPreTrainedModel(PreTrainedModel):
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
-            module.weight.data.uniform_(-self.config.decoder_init_range, self.config.decoder_init_range)
+            module.weight.data.uniform_(
+                -self.config.decoder_init_range, self.config.decoder_init_range
+            )
             if module.bias is not None:
                 module.bias.data.zero_()
         elif isinstance(module, nn.Embedding):
-            module.weight.data.uniform_(-self.config.embedding_init_range, self.config.embedding_init_range)
+            module.weight.data.uniform_(
+                -self.config.embedding_init_range, self.config.embedding_init_range
+            )
 
 
 class NeoBERT(NeoBERTPreTrainedModel):
@@ -272,19 +356,29 @@ class NeoBERT(NeoBERTPreTrainedModel):
 
         self.config = config
 
-        self.encoder = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
+        self.encoder = nn.Embedding(
+            config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id
+        )
 
         if self.config.rope:
-            self.freqs_cis = precompute_freqs_cis(config.hidden_size // config.num_attention_heads, config.max_length)
+            self.freqs_cis = precompute_freqs_cis(
+                config.hidden_size // config.num_attention_heads, config.max_length
+            )
         else:
-            self.positional_embedding = nn.Embedding(config.max_length + 1, config.hidden_size, padding_idx=config.pad_token_id)
+            self.positional_embedding = nn.Embedding(
+                config.max_length + 1,
+                config.hidden_size,
+                padding_idx=config.pad_token_id,
+            )
 
         self.transformer_encoder = nn.ModuleList()
         for _ in range(config.num_hidden_layers):
             self.transformer_encoder.append(EncoderBlock(config))
 
         self.layer_norm = (
-            RMSNorm(config.hidden_size, config.norm_eps) if config.rms_norm else nn.LayerNorm(config.hidden_size, config.norm_eps)
+            RMSNorm(config.hidden_size, config.norm_eps)
+            if config.rms_norm
+            else nn.LayerNorm(config.hidden_size, config.norm_eps)
         )
 
         # Initialize weights and apply final processing
@@ -293,8 +387,14 @@ class NeoBERT(NeoBERTPreTrainedModel):
     def forward(self, src, pad_mask=None):
         # Expand and repeat: (Batch, Length) -> (Batch, Heads, Length, Length)
         if pad_mask is not None:
-            assert pad_mask.dtype != torch.bool and 1.0 not in pad_mask, "NeoBERT expects an additive pad_mask"
-            pad_mask = pad_mask.unsqueeze(1).unsqueeze(1).repeat(1, self.config.num_attention_heads, pad_mask.size(-1), 1)
+            assert pad_mask.dtype != torch.bool and 1.0 not in pad_mask, (
+                "NeoBERT expects an additive pad_mask"
+            )
+            pad_mask = (
+                pad_mask.unsqueeze(1)
+                .unsqueeze(1)
+                .repeat(1, self.config.num_attention_heads, pad_mask.size(-1), 1)
+            )
 
         # RoPE
         freqs_cis = None
@@ -331,19 +431,29 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
 
         self.config = config
 
-        self.encoder = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
+        self.encoder = nn.Embedding(
+            config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id
+        )
 
         if self.config.rope:
-            self.freqs_cis = precompute_freqs_cis(config.hidden_size // config.num_attention_heads, config.max_length)
+            self.freqs_cis = precompute_freqs_cis(
+                config.hidden_size // config.num_attention_heads, config.max_length
+            )
         else:
-            self.positional_embedding = nn.Embedding(config.max_length + 1, config.hidden_size, padding_idx=config.pad_token_id)
+            self.positional_embedding = nn.Embedding(
+                config.max_length + 1,
+                config.hidden_size,
+                padding_idx=config.pad_token_id,
+            )
 
         self.transformer_encoder = nn.ModuleList()
         for _ in range(config.num_hidden_layers):
             self.transformer_encoder.append(NormEncoderBlock(config))
 
         self.layer_norm = (
-            RMSNorm(config.hidden_size, config.norm_eps) if config.rms_norm else nn.LayerNorm(config.hidden_size, config.norm_eps)
+            RMSNorm(config.hidden_size, config.norm_eps)
+            if config.rms_norm
+            else nn.LayerNorm(config.hidden_size, config.norm_eps)
         )
 
         # Initialize weights and apply final processing
@@ -351,17 +461,29 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
 
         for pn, p in self.named_parameters():
             if pn.endswith("c_proj.weight"):
-                torch.nn.init.normal_(p, mean=0.0, std=config.base_scale / math.sqrt(2 * config.num_hidden_layers))
+                torch.nn.init.normal_(
+                    p,
+                    mean=0.0,
+                    std=config.base_scale / math.sqrt(2 * config.num_hidden_layers),
+                )
 
         self.sz_init_value = 1.00
         self.sz_init_scaling = config.base_scale
-        self.sz = torch.nn.Parameter(self.sz_init_scaling * torch.ones(config.vocab_size, dtype=torch.float32))
+        self.sz = torch.nn.Parameter(
+            self.sz_init_scaling * torch.ones(config.vocab_size, dtype=torch.float32)
+        )
 
     def forward(self, src, pad_mask=None):
         # Expand and repeat: (Batch, Length) -> (Batch, Heads, Length, Length)
         if pad_mask is not None:
-            assert pad_mask.dtype != torch.bool and 1.0 not in pad_mask, "NeoBERT expects an additive pad_mask"
-            pad_mask = pad_mask.unsqueeze(1).unsqueeze(1).repeat(1, self.config.num_attention_heads, pad_mask.size(-1), 1)
+            assert pad_mask.dtype != torch.bool and 1.0 not in pad_mask, (
+                "NeoBERT expects an additive pad_mask"
+            )
+            pad_mask = (
+                pad_mask.unsqueeze(1)
+                .unsqueeze(1)
+                .repeat(1, self.config.num_attention_heads, pad_mask.size(-1), 1)
+            )
 
         # RoPE
         freqs_cis = None
@@ -408,7 +530,6 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
 
 
 class NeoBERTForSequenceClassification(NeoBERTPreTrainedModel):
-
     def __init__(
         self,
         config: NeoBERTConfig,
@@ -491,7 +612,6 @@ class NeoBERTHFForSequenceClassification(NeoBERTPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ):
-
         hidden_representation = self.model.forward(input_ids, attention_mask)
 
         x = hidden_representation[:, 0, :]
@@ -507,7 +627,9 @@ class NeoBERTHFForSequenceClassification(NeoBERTPreTrainedModel):
             if self.config.problem_type is None:
                 if self.num_labels == 1:
                     self.config.problem_type = "regression"
-                elif self.num_labels > 1 and (labels.dtype == torch.long or labels.dtype == torch.int):
+                elif self.num_labels > 1 and (
+                    labels.dtype == torch.long or labels.dtype == torch.int
+                ):
                     self.config.problem_type = "single_label_classification"
                 else:
                     self.config.problem_type = "multi_label_classification"
@@ -561,8 +683,13 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
     def encode_queries(self, queries: List[str], **kwargs):
         if "instructions" in kwargs:
             if kwargs["instructions"] is not None:
-                queries = [(query + " " + kwargs["instructions"][query]).strip() for query in queries]
-            new_kwargs = {k: v for k, v in kwargs.items() if k not in ["instructions", "qid"]}
+                queries = [
+                    (query + " " + kwargs["instructions"][query]).strip()
+                    for query in queries
+                ]
+            new_kwargs = {
+                k: v for k, v in kwargs.items() if k not in ["instructions", "qid"]
+            }
         else:
             new_kwargs = kwargs
 
@@ -574,17 +701,26 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
     def encode_corpus(self, corpus: List[Dict[str, str]], batch_size: int, **kwargs):
         if isinstance(corpus, dict):
             sentences = [
-                (corpus["title"][i] + " " + corpus["text"][i]).strip() if "title" in corpus else corpus["text"][i].strip()
+                (corpus["title"][i] + " " + corpus["text"][i]).strip()
+                if "title" in corpus
+                else corpus["text"][i].strip()
                 for i in range(len(corpus["text"]))
             ]
         else:
             if isinstance(corpus[0], dict):
-                sentences = [(doc["title"] + " " + doc["text"]).strip() if "title" in doc else doc["text"].strip() for doc in corpus]
+                sentences = [
+                    (doc["title"] + " " + doc["text"]).strip()
+                    if "title" in doc
+                    else doc["text"].strip()
+                    for doc in corpus
+                ]
             else:
                 sentences = corpus
 
         if "instructions" in kwargs:  # not used on the doc side
-            new_kwargs = {k: v for k, v in kwargs.items() if k not in ["instructions", "qid"]}
+            new_kwargs = {
+                k: v for k, v in kwargs.items() if k not in ["instructions", "qid"]
+            }
         else:
             new_kwargs = kwargs
 
@@ -621,7 +757,9 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
         dataset: Dataset = Dataset.from_dict({"input_texts": sentences})
         dataset.set_transform(partial(_transform_func, self.tokenizer))
 
-        data_collator = data_collator = DataCollatorWithPadding(self.tokenizer, pad_to_multiple_of=8)
+        data_collator = data_collator = DataCollatorWithPadding(
+            self.tokenizer, pad_to_multiple_of=8
+        )
         dataloader = DataLoader(
             dataset,
             collate_fn=data_collator,
@@ -632,17 +770,25 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
         )
 
         encodings = []
-        for batch in tqdm(dataloader, desc="encoding", mininterval=10, disable=len(sentences) < 128):
+        for batch in tqdm(
+            dataloader, desc="encoding", mininterval=10, disable=len(sentences) < 128
+        ):
             input_ids = batch["input_ids"].to(device)
 
             pad_mask = batch["attention_mask"].to(device)
-            xformers_mask = torch.where(pad_mask == 1, float(0.0), float("-inf")).type(torch.float16)
+            xformers_mask = torch.where(pad_mask == 1, float(0.0), float("-inf")).type(
+                torch.float16
+            )
 
             outputs = self.model(input_ids, xformers_mask)
 
             if self.pooling == "avg":
-                outputs = outputs * pad_mask.unsqueeze(-1).expand(-1, -1, outputs.shape[-1])
-                outputs = outputs.sum(dim=1) / pad_mask.to(device).sum(dim=1).unsqueeze(-1)
+                outputs = outputs * pad_mask.unsqueeze(-1).expand(
+                    -1, -1, outputs.shape[-1]
+                )
+                outputs = outputs.sum(dim=1) / pad_mask.to(device).sum(dim=1).unsqueeze(
+                    -1
+                )
             else:
                 outputs = outputs[:, 0, :]
 

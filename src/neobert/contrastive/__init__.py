@@ -20,9 +20,6 @@ __all__ = [
     "WIKIHOW",
 ]
 
-from .loss import SupConLoss
-from .trainer import trainer
-
 from .datasets import (
     ALLNLI,
     AMAZONQA,
@@ -42,3 +39,5 @@ from .datasets import (
     TRIVIAQA,
     WIKIHOW,
 )
+from .loss import SupConLoss
+from .trainer import trainer

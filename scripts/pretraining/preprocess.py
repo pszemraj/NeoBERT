@@ -1,7 +1,6 @@
 import hydra
+from datasets import concatenate_datasets, load_dataset
 from omegaconf import DictConfig
-
-from datasets import load_dataset, concatenate_datasets
 
 from neobert.tokenizer import get_tokenizer, tokenize
 
@@ -26,7 +25,9 @@ def preprocess(cfg: DictConfig):
         dataset = load_dataset(**cfg.dataset.train)
 
     print("Tokenizing dataset")
-    dataset = tokenize(dataset, tokenizer, column_name=cfg.dataset.column, **cfg.tokenizer)
+    dataset = tokenize(
+        dataset, tokenizer, column_name=cfg.dataset.column, **cfg.tokenizer
+    )
 
     # Save the tokenized dataset to disk
     print("Saving tokenized dataset")

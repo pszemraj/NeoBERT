@@ -8,10 +8,10 @@ __all__ = [
 ]
 
 from .model import (
+    NeoBERT,
+    NeoBERTConfig,
     NeoBERTForMTEB,
     NeoBERTForSequenceClassification,
     NeoBERTLMHead,
-    NeoBERT,
-    NeoBERTConfig,
     NomicBERTForSequenceClassification,
 )

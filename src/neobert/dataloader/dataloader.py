@@ -1,9 +1,9 @@
 import torch
+from datasets import Dataset
 from torch.utils.data import DataLoader
 
 # HuggingFace
 from transformers import PreTrainedTokenizer
-from datasets import Dataset
 
 # Ours
 from ..collator import get_collator
