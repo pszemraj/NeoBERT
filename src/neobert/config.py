@@ -115,6 +115,16 @@ class Config:
     accelerate_config_file: Optional[str] = None
     mixed_precision: str = "bf16"
 
+    # MTEB-specific
+    mteb_task_type: str = "all"  # all, classification, clustering, etc.
+    mteb_batch_size: int = 32
+    mteb_pooling: str = "mean"  # mean, cls
+    mteb_overwrite_results: bool = False
+
+    # Model loading
+    pretrained_checkpoint: str = "latest"
+    use_deepspeed: bool = True
+
     # Misc
     seed: int = 0
     debug: bool = False
@@ -249,6 +259,12 @@ class ConfigLoader:
             "task": config.task,
             "accelerate_config_file": config.accelerate_config_file,
             "mixed_precision": config.mixed_precision,
+            "mteb_task_type": config.mteb_task_type,
+            "mteb_batch_size": config.mteb_batch_size,
+            "mteb_pooling": config.mteb_pooling,
+            "mteb_overwrite_results": config.mteb_overwrite_results,
+            "pretrained_checkpoint": config.pretrained_checkpoint,
+            "use_deepspeed": config.use_deepspeed,
             "seed": config.seed,
             "debug": config.debug,
         }
@@ -357,6 +373,22 @@ def create_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--seed", type=int, help="Global random seed")
     parser.add_argument("--debug", action="store_true", help="Debug mode")
+
+    # MTEB-specific arguments
+    parser.add_argument("--mteb_task_type", type=str, help="MTEB task type")
+    parser.add_argument("--mteb_batch_size", type=int, help="MTEB batch size")
+    parser.add_argument("--mteb_pooling", type=str, help="MTEB pooling method")
+    parser.add_argument(
+        "--mteb_overwrite_results", action="store_true", help="Overwrite MTEB results"
+    )
+
+    # Model loading arguments
+    parser.add_argument(
+        "--pretrained_checkpoint", type=str, help="Pretrained checkpoint"
+    )
+    parser.add_argument(
+        "--use_deepspeed", type=lambda x: x.lower() == "true", help="Use DeepSpeed"
+    )
 
     return parser
 

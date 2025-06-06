@@ -107,6 +107,16 @@ wandb:
 accelerate_config_file: null
 mixed_precision: bf16
 
+# MTEB-specific settings (when task: mteb)
+mteb_task_type: all  # Options: all, classification, clustering, pair_classification, reranking, retrieval, sts
+mteb_batch_size: 32
+mteb_pooling: mean  # Options: mean, cls
+mteb_overwrite_results: false
+
+# Model loading
+pretrained_checkpoint: latest  # Or specific checkpoint number
+use_deepspeed: true
+
 # Global settings
 seed: 42
 debug: false
