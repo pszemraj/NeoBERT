@@ -80,6 +80,65 @@ If you use this model in your research, please cite:
 }
 ```
 
+## Training and Development
+
+This repository includes the complete training and evaluation codebase for NeoBERT, featuring:
+
+### 🔧 **Configuration System**
+- **Hierarchical YAML configs** with command-line overrides
+- **Task-specific configurations** for pretraining, GLUE, contrastive learning, and MTEB evaluation
+- **CPU-friendly test configs** for development and validation
+
+```bash
+# Basic training with config file
+python scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml
+
+# Override specific parameters
+python scripts/pretraining/pretrain.py \
+    --config configs/pretrain_neobert.yaml \
+    --trainer.per_device_train_batch_size 32 \
+    --optimizer.lr 2e-4
+```
+
+### 📁 **Repository Structure**
+- **`configs/`** - YAML configuration files ([README](configs/README.md))
+- **`scripts/`** - Training and evaluation scripts ([README](scripts/README.md))
+- **`jobs/`** - Shell scripts for running experiments ([README](jobs/README.md))
+- **`tests/`** - Comprehensive test suite ([README](tests/README.md))
+- **`src/neobert/`** - Core model and training code
+
+### 🚀 **Quick Start for Training**
+
+1. **Install dependencies:**
+   ```bash
+   pip install -e .
+   ```
+
+2. **Run tests to validate setup:**
+   ```bash
+   python tests/run_tests.py
+   ```
+
+3. **Start with a small test run:**
+   ```bash
+   python scripts/pretraining/pretrain.py --config configs/test_tiny_pretrain.yaml
+   ```
+
+4. **Scale up to full training:**
+   ```bash
+   python scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml
+   ```
+
+### 🧪 **Testing**
+The repository includes a comprehensive test suite that verifies:
+- Configuration system functionality
+- Model architecture and forward passes  
+- Training pipeline integration
+- CPU-only compatibility (no GPU required for tests)
+
+### 📖 **Documentation**
+Each directory contains detailed README files with usage examples, best practices, and troubleshooting guides.
+
 ## Contact
 
 For questions, do not hesitate to reach out and open an issue on here or on our **[GitHub](https://github.com/chandar-lab/NeoBERT)**.

@@ -80,21 +80,24 @@ The test suite uses three tiny model configurations optimized for CPU testing:
 
 ### `test_tiny_pretrain.yaml`
 - **Purpose**: Pretraining pipeline testing
-- **Model**: 64 hidden, 2 layers, 2 heads
-- **Features**: MLM collator, cosine scheduler
+- **Model**: 64 hidden, 2 layers, 2 heads, vocab_size=1000
+- **Features**: MLM collator, cosine scheduler, GELU activation
 - **Dataset**: Small wikibook subset
+- **Optimizations**: No flash attention, no xformers dependencies
 
 ### `test_tiny_glue.yaml`
 - **Purpose**: GLUE evaluation testing
-- **Model**: Same tiny architecture
+- **Model**: Same tiny architecture as pretrain
 - **Features**: Classification head, linear scheduler
-- **Dataset**: CoLA task
+- **Dataset**: CoLA task (minimal subset)
+- **Optimizations**: CPU-only, small batch sizes
 
 ### `test_tiny_contrastive.yaml`
 - **Purpose**: Contrastive training testing
-- **Model**: Same tiny architecture
+- **Model**: Same tiny architecture as pretrain
 - **Features**: Contrastive loss, ALLNLI dataset
 - **Dataset**: ALLNLI subset
+- **Optimizations**: Minimal epochs, no GPU dependencies
 
 ## CPU-Optimized Settings
 
