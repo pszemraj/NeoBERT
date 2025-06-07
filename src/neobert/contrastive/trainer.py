@@ -235,9 +235,11 @@ def trainer(cfg: DictConfig):
         T_max=cfg.scheduler.decay_steps,
         eta_min=cfg.optimizer.hparams.lr * 0.1,
     )
-    _constant_min_lr = (
-        lambda _: 0.1
-    )  # LambdaLR multiplies the optimizer's lr with lr_lambda(epoch)
+
+    def _constant_min_lr(_):
+        """LambdaLR multiplies the optimizer's lr with lr_lambda(epoch)"""
+        return 0.1
+
     scheduler3 = LambdaLR(optimizer, lr_lambda=_constant_min_lr)
     scheduler = SequentialLR(
         optimizer,

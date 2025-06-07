@@ -25,7 +25,6 @@ from transformers import (
     AutoModelForSequenceClassification,
     AutoTokenizer,
     DataCollatorWithPadding,
-    get_scheduler,
 )
 
 from neobert.model import (

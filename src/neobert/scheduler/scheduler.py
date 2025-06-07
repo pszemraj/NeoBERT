@@ -64,7 +64,9 @@ def get_scheduler(
     milestones.append(decay_steps)
 
     # Final constant scheduler at lowest learning rate
-    _constant_min_lr = lambda _: final_ratio
+    def _constant_min_lr(_):
+        return final_ratio
+
     schedulers.append(LambdaLR(optimizer, lr_lambda=_constant_min_lr))
 
     return SequentialLR(optimizer, schedulers, milestones)

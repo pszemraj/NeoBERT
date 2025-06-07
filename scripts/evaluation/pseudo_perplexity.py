@@ -24,8 +24,8 @@ def get_data(dataset):
     # Select 100 samples from each length window (20000-30000, 30000-40000, etc.)
 
     def filter_by_length(length, example):
-        l = len(example["text"])
-        return length <= l < length + 10000
+        text_length = len(example["text"])
+        return length <= text_length < length + 10000
 
     datasets = []
     for length in range(20000, 100000, 10000):

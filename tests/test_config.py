@@ -8,7 +8,12 @@ from pathlib import Path
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent))
 
-from src.neobert.config import Config, ConfigLoader, create_argument_parser, parse_args_to_dict
+from src.neobert.config import (
+    Config,
+    ConfigLoader,
+    create_argument_parser,
+    parse_args_to_dict,
+)
 
 
 def test_config_creation():
@@ -25,7 +30,7 @@ def test_yaml_loading():
     """Test loading config from YAML"""
     print("\nTest 2: Loading config from YAML...")
     config = ConfigLoader.load("configs/pretrain_neobert.yaml")
-    assert config.model.rope == True
+    assert config.model.rope
     assert config.optimizer.name == "adamw"
     assert config.trainer.max_steps == 1000000
     print("✓ YAML config loaded successfully")
@@ -37,7 +42,7 @@ def test_yaml_override():
     overrides = {
         "model": {"hidden_size": 1024},
         "trainer": {"max_steps": 500},
-        "optimizer": {"lr": 1e-3}
+        "optimizer": {"lr": 1e-3},
     }
     config = ConfigLoader.load("configs/pretrain_neobert.yaml", overrides)
     assert config.model.hidden_size == 1024
@@ -52,11 +57,11 @@ def test_save_load():
     config = Config()
     config.model.hidden_size = 512
     config.task = "glue"
-    
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
         ConfigLoader.save(config, f.name)
         loaded_config = ConfigLoader.load(f.name)
-        
+
     assert loaded_config.model.hidden_size == 512
     assert loaded_config.task == "glue"
     print("✓ Save/load roundtrip successful")
@@ -66,23 +71,27 @@ def test_cli_parsing():
     """Test CLI argument parsing"""
     print("\nTest 5: Testing CLI argument parsing...")
     parser = create_argument_parser()
-    
+
     # Simulate command line args
     test_args = [
-        "--config", "configs/pretrain_neobert.yaml",
-        "--model.hidden_size", "256",
-        "--trainer.per_device_train_batch_size", "8",
-        "--optimizer.lr", "5e-5",
-        "--debug"
+        "--config",
+        "configs/pretrain_neobert.yaml",
+        "--model.hidden_size",
+        "256",
+        "--trainer.per_device_train_batch_size",
+        "8",
+        "--optimizer.lr",
+        "5e-5",
+        "--debug",
     ]
-    
+
     args = parser.parse_args(test_args)
     arg_dict = parse_args_to_dict(args)
-    
+
     assert arg_dict["model"]["hidden_size"] == 256
     assert arg_dict["trainer"]["per_device_train_batch_size"] == 8
     assert arg_dict["optimizer"]["lr"] == 5e-5
-    assert arg_dict["debug"] == True
+    assert arg_dict["debug"]
     print("✓ CLI parsing works correctly")
 
 
@@ -91,13 +100,13 @@ def test_nested_merge():
     print("\nTest 6: Testing nested config merging...")
     base = {
         "model": {"hidden_size": 768, "num_layers": 12},
-        "trainer": {"max_steps": 1000}
+        "trainer": {"max_steps": 1000},
     }
     override = {
         "model": {"hidden_size": 1024},  # Override one field
-        "trainer": {"save_steps": 100}   # Add new field
+        "trainer": {"save_steps": 100},  # Add new field
     }
-    
+
     merged = ConfigLoader.merge_configs(base, override)
     assert merged["model"]["hidden_size"] == 1024
     assert merged["model"]["num_layers"] == 12  # Preserved
@@ -108,7 +117,7 @@ def test_nested_merge():
 
 def main():
     print("Running configuration system tests...\n")
-    
+
     try:
         test_config_creation()
         test_yaml_loading()
@@ -116,7 +125,7 @@ def main():
         test_save_load()
         test_cli_parsing()
         test_nested_merge()
-        
+
         print("\n✅ All tests passed!")
         return 0
     except AssertionError as e:

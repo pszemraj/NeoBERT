@@ -183,7 +183,7 @@ def compute_table():
                     model_task_results.append(
                         test_result["scores"]["test"][0].get("main_score")
                     )
-                except:
+                except (KeyError, TypeError, IndexError):
                     continue
 
             if len(model_task_results) > 0:
