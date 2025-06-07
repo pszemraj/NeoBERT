@@ -15,9 +15,6 @@ from datasets import load_from_disk
 # Deepspeed
 from deepspeed.utils import safe_get_full_fp32_param
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
-
-# Hydra (arguments)
-from omegaconf import DictConfig, OmegaConf
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader
@@ -26,6 +23,8 @@ from tqdm import tqdm
 # Hugging Face
 from transformers import DataCollatorWithPadding
 
+# Configuration
+from ..config import Config
 from ..model import NeoBERT, NeoBERTConfig
 from ..tokenizer import get_tokenizer
 from .datasets import *
@@ -85,7 +84,7 @@ class CustomDataCollatorWithPadding(DataCollatorWithPadding):
         return batch
 
 
-def trainer(cfg: DictConfig):
+def trainer(cfg: Config):
     # Check if dropout is non zero
     if cfg.model.dropout_prob <= 0:
         raise ValueError(
@@ -93,12 +92,12 @@ def trainer(cfg: DictConfig):
         )
 
     # Get the last checkpoint id
-    checkpoint_dir = os.path.join(cfg.trainer.dir, "checkpoints")
-    model_checkpoint_dir = os.path.join(cfg.trainer.dir, "model_checkpoints")
+    checkpoint_dir = os.path.join(cfg.trainer.output_dir, "checkpoints")
+    model_checkpoint_dir = os.path.join(cfg.trainer.output_dir, "model_checkpoints")
     os.makedirs(model_checkpoint_dir, exist_ok=True)
     iteration = 0
     if (
-        cfg.trainer.resume
+        cfg.trainer.resume_from_checkpoint
         and os.path.exists(checkpoint_dir)
         and len(os.listdir(checkpoint_dir)) > 0
     ):
@@ -114,54 +113,63 @@ def trainer(cfg: DictConfig):
 
     # Accelerator object
     project_config = ProjectConfiguration(
-        cfg.trainer.dir,
+        cfg.trainer.output_dir,
         automatic_checkpoint_naming=True,
-        total_limit=cfg.trainer.accelerate.max_ckpt,
+        total_limit=2,  # Keep only 2 checkpoints
         iteration=iteration,
     )
     accelerator = Accelerator(
         step_scheduler_with_optimizer=False,  # enable manual control of the scheduler
         mixed_precision=cfg.trainer.mixed_precision,
         gradient_accumulation_steps=cfg.trainer.gradient_accumulation_steps,
-        log_with="wandb",
+        log_with="wandb" if cfg.wandb.mode != "disabled" else None,
         project_config=project_config,
     )
 
     # Initialise the wandb run and pass wandb parameters
-    os.makedirs(cfg.wandb.dir, exist_ok=True)
-    accelerator.init_trackers(
-        project_name=cfg.wandb.project,
-        init_kwargs={
-            "wandb": {
-                "name": cfg.wandb.name,
-                "entity": cfg.wandb.entity,
-                "config": OmegaConf.to_container(cfg)
-                | {"distributed_type": accelerator.distributed_type},
-                "tags": cfg.wandb.tags,
-                "dir": cfg.wandb.dir,
-                "mode": cfg.wandb.mode,
-                "resume": cfg.trainer.resume,
-            }
-        },
-    )
+    if cfg.wandb.mode != "disabled":
+        os.makedirs(cfg.wandb.dir, exist_ok=True)
+        accelerator.init_trackers(
+            project_name=cfg.wandb.project,
+            init_kwargs={
+                "wandb": {
+                    "name": cfg.wandb.name,
+                    "entity": cfg.wandb.entity,
+                    "config": cfg.__dict__,
+                    "tags": cfg.wandb.tags,
+                    "dir": cfg.wandb.dir,
+                    "mode": cfg.wandb.mode,
+                    "resume": cfg.wandb.resume,
+                }
+            },
+        )
 
     # Set the seed
     set_seed(cfg.seed)
 
-    # Enable TF32 on matmul and on cuDNN
-    torch.backends.cuda.matmul.allow_tf32 = cfg.trainer.tf32
-    torch.backends.cudnn.allow_tf32 = cfg.trainer.tf32
+    # Enable TF32 on matmul and on cuDNN (if available)
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     # Local and global counters
     metrics = Metrics()
     accelerator.register_for_checkpointing(metrics)
 
     # Tokenizer
-    tokenizer = get_tokenizer(**cfg.tokenizer)
+    tokenizer = get_tokenizer(
+        name=cfg.tokenizer.name,
+        path=cfg.tokenizer.path,
+        max_length=cfg.tokenizer.max_length,
+        padding=cfg.tokenizer.padding,
+        truncation=cfg.tokenizer.truncation,
+    )
 
     # Dataset
-    dataset = load_from_disk(os.path.join(cfg.datasets.path, "all"))
-    pretraining_dataset = load_from_disk(cfg.datasets.pretraining_path)
+    dataset = load_from_disk(os.path.join(cfg.dataset.path, "all"))
+    pretraining_dataset = load_from_disk(
+        cfg.dataset.path
+    )  # Base dataset for pretraining SimCSE
 
     data_collator = CustomDataCollatorWithPadding(
         tokenizer=tokenizer, return_tensors="pt", **cfg.datacollator

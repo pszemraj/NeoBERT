@@ -2,13 +2,14 @@ import os
 
 import terge
 import torch
-from omegaconf import DictConfig, OmegaConf
 
 from neobert.model import NeoBERTConfig, NeoBERTForSequenceClassification
 
+from ..config import Config
 
-def get_merged_model(cfg: DictConfig):
-    model_pretraining_config = OmegaConf.load(cfg.model.pretrained_config_path)
+
+def get_merged_model(cfg: Config):
+    # Use the config model settings directly
     model_list = []
     for ckpt in cfg.model.checkpoint_list:
         state_dict = torch.load(

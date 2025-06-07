@@ -6,7 +6,8 @@ import numpy as np
 import torch
 from datasets import concatenate_datasets, load_dataset
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
-from omegaconf import OmegaConf
+
+# Removed OmegaConf - this script should be standalone
 from tqdm import tqdm
 from transformers import (
     AutoConfig,

@@ -1,11 +1,15 @@
 import json
 import os
 import shutil
+import sys
+from pathlib import Path
 
-import hydra
+# Add parent directory to path
+sys.path.append(str(Path(__file__).parent.parent.parent))
+
 from datasets import DatasetDict, load_from_disk
-from omegaconf import DictConfig
 
+from neobert.config import load_config_from_args
 from neobert.contrastive import *
 from neobert.tokenizer import get_tokenizer, tokenize
 
@@ -30,8 +34,7 @@ DATASETS = {
 }
 
 
-@hydra.main(version_base=None, config_path="../../conf", config_name="finetuning")
-def pipeline(cfg: DictConfig):
+def pipeline(cfg):
     if cfg.datasets.load_all_from_disk:
         dataset = load_from_disk(os.path.join(cfg.datasets.path, "all"))
 
@@ -82,5 +85,13 @@ def pipeline(cfg: DictConfig):
     return dataset
 
 
+def main():
+    # Load configuration from command line arguments
+    config = load_config_from_args()
+
+    # Run contrastive preprocessing
+    pipeline(config)
+
+
 if __name__ == "__main__":
-    pipeline()
+    main()

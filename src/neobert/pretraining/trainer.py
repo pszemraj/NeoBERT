@@ -1,26 +1,32 @@
 import os
 import re
-import shutil
 
 # PyTorch
 import torch
 from accelerate import Accelerator
-from accelerate.utils import (DistributedDataParallelKwargs, DistributedType,
-                              ProjectConfiguration, set_seed)
+from accelerate.utils import (
+    DistributedDataParallelKwargs,
+    DistributedType,
+    ProjectConfiguration,
+    set_seed,
+)
+
 # Hugging Face
 from datasets import load_from_disk
+
 # Deepspeed
 from deepspeed.utils import safe_get_full_fp32_param
-from omegaconf import DictConfig, OmegaConf
 from torch.nn import CrossEntropyLoss
 from tqdm import tqdm
 from transformers import BatchEncoding
 
+from ..config import Config
 from ..dataloader import get_dataloader
 from ..model import NeoBERTConfig, NeoBERTLMHead
 from ..optimizer import get_optimizer
 from ..scheduler import get_scheduler
 from ..tokenizer import get_tokenizer
+
 # Our metric object and model
 from .metrics import Metrics
 
@@ -43,23 +49,25 @@ def to_target_batch_size(
             stored_batch[key] = (
                 tmp[key][1]
                 if stored_batch[key] is None
-                else torch.cat([tmp[key][1], stored_batch[key]], dim=0)
+                else torch.cat([stored_batch[key], tmp[key][1]], dim=0)
             )
 
-    # If the batch is to small, we fetch stored samples
-    elif batch_size < target_size and stored_batch["input_ids"] is not None:
-        stored_batch_size = stored_batch["input_ids"].shape[0]
-        missing = target_size - batch_size
-
-        # Fetch only necessary samples if storage is larger than required
-        if missing < stored_batch_size:
+    # If the batch is too small, we had some stored_batch
+    elif batch_size < target_size:
+        # We have already enough samples stored
+        if stored_batch["input_ids"].shape[0] >= target_size - batch_size:
             for key in batch.keys():
-                stored_batch[key].to(batch[key].device)
                 tmp[key] = torch.split(
-                    stored_batch[key], [missing, stored_batch_size - missing], dim=0
+                    stored_batch[key],
+                    [
+                        target_size - batch_size,
+                        stored_batch[key].shape[0] - (target_size - batch_size),
+                    ],
+                    dim=0,
                 )
                 batch[key] = torch.cat([batch[key], tmp[key][0]], dim=0)
                 stored_batch[key] = tmp[key][1]
+                # Save on CPU to prevent full GPU memory
                 stored_batch[key].to("cpu", non_blocking=True)
 
         # Concatenate otherwise
@@ -71,14 +79,15 @@ def to_target_batch_size(
     return batch, stored_batch
 
 
-def trainer(cfg: DictConfig):
+def trainer(cfg: Config):
     # Get the last checkpoint id
-    checkpoint_dir = os.path.join(cfg.trainer.dir, "checkpoints")
-    model_checkpoint_dir = os.path.join(cfg.trainer.dir, "model_checkpoints")
+    checkpoint_dir = os.path.join(cfg.trainer.output_dir, "checkpoints")
+    model_checkpoint_dir = os.path.join(cfg.trainer.output_dir, "model_checkpoints")
     os.makedirs(model_checkpoint_dir, exist_ok=True)
     iteration = 0
+
     if (
-        cfg.trainer.resume
+        cfg.trainer.resume_from_checkpoint
         and os.path.exists(checkpoint_dir)
         and len(os.listdir(checkpoint_dir)) > 0
     ):
@@ -94,45 +103,46 @@ def trainer(cfg: DictConfig):
 
     # Accelerator object
     project_config = ProjectConfiguration(
-        cfg.trainer.dir,
+        cfg.trainer.output_dir,
         automatic_checkpoint_naming=True,
-        total_limit=cfg.trainer.accelerate.max_ckpt,
+        total_limit=2,  # Keep only 2 accelerate checkpoints
         iteration=iteration,
     )
     kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(
         step_scheduler_with_optimizer=False,  # enable manual control of the scheduler
-        mixed_precision=cfg.trainer.mixed_precision,
+        mixed_precision=cfg.mixed_precision,
         gradient_accumulation_steps=cfg.trainer.gradient_accumulation_steps,
-        log_with="wandb",
+        log_with="wandb" if cfg.wandb.mode != "disabled" else None,
         project_config=project_config,
         kwargs_handlers=[kwargs],
     )
 
     # Initialise the wandb run and pass wandb parameters
-    os.makedirs(cfg.wandb.dir, exist_ok=True)
-    accelerator.init_trackers(
-        project_name=cfg.wandb.project,
-        init_kwargs={
-            "wandb": {
-                "name": cfg.wandb.name,
-                "entity": cfg.wandb.entity,
-                "config": OmegaConf.to_container(cfg)
-                | {"distributed_type": accelerator.distributed_type},
-                "tags": cfg.wandb.tags,
-                "dir": cfg.wandb.dir,
-                "mode": cfg.wandb.mode,
-                "resume": cfg.wandb.resume,
-            }
-        },
-    )
+    if cfg.wandb.mode != "disabled":
+        os.makedirs(cfg.wandb.dir, exist_ok=True)
+        accelerator.init_trackers(
+            project_name=cfg.wandb.project,
+            init_kwargs={
+                "wandb": {
+                    "name": cfg.wandb.name,
+                    "entity": cfg.wandb.entity,
+                    "config": cfg.__dict__,
+                    "tags": cfg.wandb.tags,
+                    "dir": cfg.wandb.dir,
+                    "mode": cfg.wandb.mode,
+                    "resume": cfg.wandb.resume,
+                }
+            },
+        )
 
     # Set the seed
     set_seed(cfg.seed)
 
-    # Enable TF32 on matmul and on cuDNN
-    torch.backends.cuda.matmul.allow_tf32 = cfg.trainer.tf32
-    torch.backends.cudnn.allow_tf32 = cfg.trainer.tf32
+    # Enable TF32 on matmul and on cuDNN (if available)
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     # Local and global counters
     metrics = Metrics()
@@ -146,24 +156,48 @@ def trainer(cfg: DictConfig):
         dtype_pad_mask = torch.bfloat16
 
     # Tokenizer
-    tokenizer = get_tokenizer(**cfg.tokenizer)
+    tokenizer = get_tokenizer(
+        name=cfg.tokenizer.name,
+        path=cfg.tokenizer.path,
+        max_length=cfg.tokenizer.max_length,
+        padding=cfg.tokenizer.padding,
+        truncation=cfg.tokenizer.truncation,
+    )
 
     # Dataset
-    train_dataset = load_from_disk(cfg.dataset.path_to_disk)
+    train_dataset = load_from_disk(cfg.dataset.path)
 
     # Dataloader
     train_dataloader = get_dataloader(
         train_dataset,
         tokenizer,
         dtype=dtype_pad_mask,
-        **cfg.dataloader.train,
-        **cfg.datacollator,
+        batch_size=cfg.trainer.per_device_train_batch_size,
+        num_workers=cfg.dataset.num_workers,
+        mlm_probability=cfg.datacollator.mlm_probability,
+        pad_to_multiple_of=cfg.datacollator.pad_to_multiple_of,
     )
 
     # Model
-    model = NeoBERTLMHead(
-        NeoBERTConfig(**cfg.model, **cfg.tokenizer, pad_token_id=tokenizer.pad_token_id)
+    model_config = NeoBERTConfig(
+        hidden_size=cfg.model.hidden_size,
+        num_hidden_layers=cfg.model.num_hidden_layers,
+        num_attention_heads=cfg.model.num_attention_heads,
+        intermediate_size=cfg.model.intermediate_size,
+        max_position_embeddings=cfg.model.max_position_embeddings,
+        vocab_size=cfg.model.vocab_size,
+        rope=cfg.model.rope,
+        rms_norm=cfg.model.rms_norm,
+        hidden_act=cfg.model.hidden_act,
+        dropout_prob=cfg.model.dropout_prob,
+        norm_eps=cfg.model.norm_eps,
+        embedding_init_range=cfg.model.embedding_init_range,
+        decoder_init_range=cfg.model.decoder_init_range,
+        classifier_init_range=cfg.model.classifier_init_range,
+        pad_token_id=tokenizer.pad_token_id,
     )
+    model = NeoBERTLMHead(model_config)
+
     accelerator.log(
         {
             "model_parameters": sum(
@@ -177,10 +211,18 @@ def trainer(cfg: DictConfig):
         model,
         accelerator.distributed_type,
         name=cfg.optimizer.name,
-        **cfg.optimizer.hparams,
+        lr=cfg.optimizer.lr,
+        weight_decay=cfg.optimizer.weight_decay,
+        betas=cfg.optimizer.betas,
+        eps=cfg.optimizer.eps,
     )
     scheduler = get_scheduler(
-        optimizer=optimizer, lr=cfg.optimizer.hparams.lr, **cfg.scheduler
+        optimizer=optimizer,
+        lr=cfg.optimizer.lr,
+        name=cfg.scheduler.name,
+        warmup_steps=cfg.scheduler.warmup_steps,
+        total_steps=cfg.trainer.max_steps,
+        num_cycles=cfg.scheduler.num_cycles,
     )
 
     # Prepare with accelerate
@@ -197,7 +239,7 @@ def trainer(cfg: DictConfig):
     # Resume from the latest checkpoint
     skipped_train_dataloader = None
     if (
-        cfg.trainer.resume
+        cfg.trainer.resume_from_checkpoint
         and os.path.exists(checkpoint_dir)
         and len(os.listdir(checkpoint_dir)) > 0
     ):
@@ -213,7 +255,7 @@ def trainer(cfg: DictConfig):
         unit="step",
         initial=metrics["train/steps"],
         total=cfg.trainer.max_steps,
-        disable=(cfg.trainer.disable_tqdm or not accelerator.is_main_process),
+        disable=(not accelerator.is_main_process),
     )
 
     while cfg.trainer.max_steps > metrics["train/steps"]:
@@ -236,13 +278,13 @@ def trainer(cfg: DictConfig):
             i += 1
 
             # Pack or truncate the batch to target batch size (batch size might be variable due to sequence packing).
-            if batch["input_ids"].shape[0] != cfg.dataloader.train.batch_size:
+            if batch["input_ids"].shape[0] != cfg.trainer.per_device_train_batch_size:
                 batch, stored_batch = to_target_batch_size(
-                    batch, stored_batch, cfg.dataloader.train.batch_size
+                    batch, stored_batch, cfg.trainer.per_device_train_batch_size
                 )
 
             # If it is still smaller, stored batches were not enough and we skip to the next iteration to fill the batch
-            if batch["input_ids"].shape[0] < cfg.dataloader.train.batch_size:
+            if batch["input_ids"].shape[0] < cfg.trainer.per_device_train_batch_size:
                 stored_batch = batch
                 continue
 
@@ -256,7 +298,7 @@ def trainer(cfg: DictConfig):
                         batch["input_ids"], batch.get("attention_mask", None)
                     )["logits"]
                     train_loss = train_loss_fn(
-                        logits.view(-1, cfg.tokenizer.vocab_size),
+                        logits.view(-1, cfg.model.vocab_size),
                         batch["labels"].view(-1),
                     )
 
@@ -287,18 +329,13 @@ def trainer(cfg: DictConfig):
                     "logits"
                 ]
                 train_loss = train_loss_fn(
-                    logits.view(-1, cfg.tokenizer.vocab_size), batch["labels"].view(-1)
+                    logits.view(-1, cfg.model.vocab_size), batch["labels"].view(-1)
                 )
 
                 # Compute gradient and apply clipping
                 accelerator.backward(train_loss)
-                if (
-                    cfg.trainer.gradient_clipping is not None
-                    and cfg.trainer.gradient_clipping > 0
-                ):
-                    accelerator.clip_grad_norm_(
-                        model.parameters(), cfg.trainer.gradient_clipping
-                    )
+                if cfg.trainer.gradient_checkpointing:
+                    accelerator.clip_grad_norm_(model.parameters(), 1.0)
 
                 # Log metrics
                 pbar.update(1)
@@ -351,30 +388,11 @@ def trainer(cfg: DictConfig):
                     metrics.log(accelerator)
 
                 # Save the accelerator state from the main process
-                if metrics["train/steps"] % cfg.trainer.accelerate.save_steps == 0:
+                if metrics["train/steps"] % cfg.trainer.save_steps == 0:
                     accelerator.save_state()
 
                 # Save the pytorch model
-                if metrics["train/steps"] % cfg.trainer.model.save_steps == 0:
-                    if cfg.trainer.model.max_ckpt is not None:
-                        # Delete checkpoints if there are too many
-                        files = os.listdir(model_checkpoint_dir)
-                        iterations = [int(f) for f in files if f.isdigit()]
-                        iterations.sort()
-
-                        # Remove files with the smallest iterations until the limit is met
-                        while (
-                            iterations is not None
-                            and len(iterations) >= cfg.trainer.model.max_ckpt
-                        ):
-                            file_to_remove = iterations.pop(0)
-                            shutil.rmtree(
-                                os.path.join(model_checkpoint_dir, str(file_to_remove))
-                            )
-                            print(
-                                f"Deleted old model checkpoint {file_to_remove} due to limit "
-                                f"(max_ckpt = {cfg.trainer.model.max_ckpt})"
-                            )
+                if metrics["train/steps"] % cfg.trainer.save_steps == 0:
                     # Save the checkpoint
                     if accelerator.distributed_type is DistributedType.DEEPSPEED:
                         model.save_checkpoint(
@@ -390,18 +408,16 @@ def trainer(cfg: DictConfig):
                             os.path.join(path, "state_dict.pt"),
                         )
 
-                if metrics["train/steps"] >= cfg.trainer.max_steps:
-                    break
-
-                # Reset the gradient
+                # Zero out the optimizer
                 optimizer.zero_grad()
 
-        # Log metrics
-        metrics["train/epochs"] += 1
+                # Log metrics
+                if metrics["train/steps"] >= cfg.trainer.max_steps:
+                    pbar.close()
+                    return
 
-        # "Remove" the skipped dataloader once exhausted
+        # Update the number of epochs
+        metrics["train/epochs"] += 1
         skipped_train_dataloader = None
 
-    # Make sure that the wandb tracker finishes correctly and close the progress bar
     pbar.close()
-    accelerator.end_training()

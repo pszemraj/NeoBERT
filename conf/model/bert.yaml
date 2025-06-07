@@ -1,8 +1,0 @@
-rope: False
-rms_norm: False
-hidden_act: gelu
-dropout_prob: 0.1
-norm_eps: 1e-08
-embedding_init_range: 0.02
-decoder_init_range: 0.02
-classifier_init_range: 0.02

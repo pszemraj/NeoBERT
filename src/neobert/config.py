@@ -34,6 +34,12 @@ class DatasetConfig:
     max_seq_length: int = 512
     validation_split: Optional[float] = None
 
+    # Contrastive-specific
+    load_all_from_disk: bool = False
+    force_redownload: bool = False
+    pretraining_prob: float = 0.3
+    min_length: int = 512
+
 
 @dataclass
 class TokenizerConfig:
@@ -59,6 +65,7 @@ class SchedulerConfig:
     warmup_steps: int = 10000
     total_steps: Optional[int] = None
     num_cycles: float = 0.5
+    decay_steps: int = 50000  # For contrastive training
 
 
 @dataclass
@@ -75,8 +82,13 @@ class TrainerConfig:
     fp16: bool = False
     bf16: bool = True
     gradient_checkpointing: bool = False
+    gradient_clipping: Optional[float] = None
+    mixed_precision: str = "bf16"
     seed: int = 42
     resume_from_checkpoint: Optional[str] = None
+
+    # For backwards compatibility with old configs
+    disable_tqdm: bool = False
 
 
 @dataclass
@@ -314,6 +326,18 @@ def create_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dataset.max_seq_length", type=int, help="Maximum sequence length"
     )
+    parser.add_argument(
+        "--dataset.load_all_from_disk", action="store_true", help="Load all from disk"
+    )
+    parser.add_argument(
+        "--dataset.force_redownload", action="store_true", help="Force redownload"
+    )
+    parser.add_argument(
+        "--dataset.pretraining_prob", type=float, help="Pretraining probability"
+    )
+    parser.add_argument(
+        "--dataset.min_length", type=int, help="Minimum sequence length"
+    )
 
     # Tokenizer arguments
     parser.add_argument("--tokenizer.name", type=str, help="Tokenizer name")
@@ -327,6 +351,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
     # Scheduler arguments
     parser.add_argument("--scheduler.name", type=str, help="Scheduler name")
     parser.add_argument("--scheduler.warmup_steps", type=int, help="Warmup steps")
+    parser.add_argument("--scheduler.decay_steps", type=int, help="Decay steps")
 
     # Trainer arguments
     parser.add_argument(
@@ -353,6 +378,10 @@ def create_argument_parser() -> argparse.ArgumentParser:
         "--trainer.bf16", type=lambda x: x.lower() == "true", help="Use BF16"
     )
     parser.add_argument("--trainer.seed", type=int, help="Random seed")
+    parser.add_argument(
+        "--trainer.gradient_clipping", type=float, help="Gradient clipping"
+    )
+    parser.add_argument("--trainer.mixed_precision", type=str, help="Mixed precision")
 
     # Data collator arguments
     parser.add_argument(

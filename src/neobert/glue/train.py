@@ -15,7 +15,6 @@ from accelerate.logging import get_logger
 from accelerate.utils import DistributedType, ProjectConfiguration, set_seed
 from datasets import ClassLabel, load_dataset
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
-from omegaconf import DictConfig, OmegaConf
 from torch.nn import CrossEntropyLoss, MSELoss
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
@@ -34,6 +33,7 @@ from neobert.model import (
 )
 from neobert.tokenizer import get_tokenizer
 
+from ..config import Config
 from ..scheduler import get_scheduler
 from .process import process_function
 
@@ -221,10 +221,10 @@ def save_checkpoint(cfg, model, accelerator, completed_steps):
         )
 
 
-def trainer(cfg: DictConfig):
+def trainer(cfg: Config):
     # Accelerator object
     project_config = ProjectConfiguration(
-        cfg.trainer.dir,
+        cfg.trainer.output_dir,
         automatic_checkpoint_naming=False,
     )
     accelerator = Accelerator(
@@ -242,8 +242,7 @@ def trainer(cfg: DictConfig):
             "wandb": {
                 "name": cfg.wandb.name,
                 "entity": cfg.wandb.entity,
-                "config": OmegaConf.to_container(cfg)
-                | {"distributed_type": accelerator.distributed_type},
+                "config": cfg.__dict__,
                 "tags": cfg.wandb.tags,
                 "dir": cfg.wandb.dir,
                 "mode": cfg.wandb.mode,
