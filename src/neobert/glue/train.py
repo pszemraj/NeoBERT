@@ -275,9 +275,18 @@ def trainer(cfg: Config):
             trust_remote_code=True,
         )
     else:
-        model_pretraining_config = OmegaConf.load(cfg.model.pretrained_config_path)
+        # Import our new config system
+        from neobert.config import ConfigLoader
+
+        model_pretraining_config = ConfigLoader.load(cfg.model.pretrained_config_path)
         model_pretraining_config.model.flash_attention = flash_attention
-        tokenizer = get_tokenizer(**model_pretraining_config.tokenizer)
+        tokenizer = get_tokenizer(
+            model_pretraining_config.tokenizer.name,
+            model_pretraining_config.tokenizer.path,
+            model_pretraining_config.tokenizer.max_length,
+            model_pretraining_config.tokenizer.padding,
+            model_pretraining_config.tokenizer.truncation,
+        )
 
     print("Loading metric...")
     # Get the metric function

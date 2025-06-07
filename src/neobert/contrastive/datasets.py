@@ -487,7 +487,7 @@ class STS12(AbsDataset):
         num_proc = len(os.sched_getaffinity(0))
         dataset = load_dataset("mteb/sts12-sts", split="train", num_proc=num_proc)
 
-        dataset.filter(lambda x: x["score"] > 4)
+        dataset = dataset.filter(lambda x: x["score"] > 4)
 
         dataset = dataset.rename_column("sentence1", "query")
         dataset = dataset.rename_column("sentence2", "corpus")
@@ -515,7 +515,7 @@ class STSBENCHMARK(AbsDataset):
             "mteb/stsbenchmark-sts", split="train", num_proc=num_proc
         )
 
-        dataset.filter(lambda x: x["score"] > 4)
+        dataset = dataset.filter(lambda x: x["score"] > 4)
 
         dataset = dataset.rename_column("sentence1", "query")
         dataset = dataset.rename_column("sentence2", "corpus")

@@ -27,7 +27,7 @@ from transformers import DataCollatorWithPadding
 from ..config import Config
 from ..model import NeoBERT, NeoBERTConfig
 from ..tokenizer import get_tokenizer
-from .datasets import *
+from .datasets import get_bsz
 from .loss import SupConLoss
 
 # Our metric object and model

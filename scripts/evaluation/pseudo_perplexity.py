@@ -113,11 +113,27 @@ if __name__ == "__main__":
         if hasattr(model.config, "max_length"):
             model.config.max_length = max(args.max_length, model.config.max_length)
     if "neobert" in args.model_name:
-        model_pretraining_config = OmegaConf.load(args.config_path)
-        model_pretraining_config.max_length = args.max_length
+        # Import our new config system
+        from neobert.config import ConfigLoader
+
+        model_pretraining_config = ConfigLoader.load(args.config_path)
+        model_pretraining_config.model.max_position_embeddings = args.max_length
         model = NeoBERTLMHead(
             NeoBERTConfig(
-                **model_pretraining_config.model, **model_pretraining_config.tokenizer
+                hidden_size=model_pretraining_config.model.hidden_size,
+                num_hidden_layers=model_pretraining_config.model.num_hidden_layers,
+                num_attention_heads=model_pretraining_config.model.num_attention_heads,
+                intermediate_size=model_pretraining_config.model.intermediate_size,
+                dropout=model_pretraining_config.model.dropout_prob,
+                vocab_size=model_pretraining_config.model.vocab_size,
+                max_position_embeddings=model_pretraining_config.model.max_position_embeddings,
+                flash_attention=model_pretraining_config.model.flash_attention,
+                ngpt=model_pretraining_config.model.ngpt,
+                hidden_act=model_pretraining_config.model.hidden_act,
+                rope=model_pretraining_config.model.rope,
+                rms_norm=model_pretraining_config.model.rms_norm,
+                norm_eps=model_pretraining_config.model.norm_eps,
+                pad_token_id=model_pretraining_config.model.pad_token_id,
             )
         )
         model = load_state_dict_from_zero_checkpoint(
@@ -125,7 +141,7 @@ if __name__ == "__main__":
         )
         model.model.freqs_cis = precompute_freqs_cis(
             model.config.hidden_size // model.config.num_attention_heads,
-            model_pretraining_config.max_length,
+            model_pretraining_config.model.max_position_embeddings,
         )
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)

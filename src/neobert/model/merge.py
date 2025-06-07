@@ -18,8 +18,25 @@ def get_merged_model(cfg: Config):
             )
         )
         num_labels = state_dict["classifier.weight"].size(0)
+        # Create model config from our Config object
+        model_config = NeoBERTConfig(
+            hidden_size=cfg.model.hidden_size,
+            num_hidden_layers=cfg.model.num_hidden_layers,
+            num_attention_heads=cfg.model.num_attention_heads,
+            intermediate_size=cfg.model.intermediate_size,
+            dropout=cfg.model.dropout_prob,
+            vocab_size=cfg.model.vocab_size,
+            max_position_embeddings=cfg.model.max_position_embeddings,
+            flash_attention=cfg.model.flash_attention,
+            ngpt=cfg.model.ngpt,
+            hidden_act=cfg.model.hidden_act,
+            rope=cfg.model.rope,
+            rms_norm=cfg.model.rms_norm,
+            norm_eps=cfg.model.norm_eps,
+            pad_token_id=cfg.model.pad_token_id,
+        )
         model = NeoBERTForSequenceClassification(
-            NeoBERTConfig(**model_pretraining_config.model, **cfg.tokenizer),
+            model_config,
             num_labels=num_labels,
             classifier_dropout=cfg.model.classifier_dropout,
             classifier_init_range=cfg.model.classifier_init_range,

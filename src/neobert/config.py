@@ -22,6 +22,10 @@ class ModelConfig:
     embedding_init_range: float = 0.02
     decoder_init_range: float = 0.02
     classifier_init_range: float = 0.02
+    flash_attention: bool = True
+    ngpt: bool = False
+    base_scale: float = 1.0 / (960.0**0.5)
+    pad_token_id: int = 0
 
 
 @dataclass

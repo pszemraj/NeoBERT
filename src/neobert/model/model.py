@@ -21,7 +21,15 @@ from transformers import (
     PreTrainedTokenizerFast,
 )
 from transformers.modeling_outputs import SequenceClassifierOutput
-from xformers.ops import SwiGLU, memory_efficient_attention
+
+try:
+    from xformers.ops import SwiGLU, memory_efficient_attention
+
+    XFORMERS_AVAILABLE = True
+except ImportError:
+    XFORMERS_AVAILABLE = False
+    SwiGLU = None
+    memory_efficient_attention = None
 
 from .rmsnorm import RMSNorm
 from .rotary import apply_rotary_emb, precompute_freqs_cis
@@ -99,6 +107,10 @@ class EncoderBlock(nn.Module):
         # Feedforward network
         match config.hidden_act.lower():
             case "swiglu":
+                if not XFORMERS_AVAILABLE:
+                    raise ImportError(
+                        "SwiGLU requires xformers. Install with: pip install xformers"
+                    )
                 # To keep the number of parameters and the amount of computation constant, we reduce the number of
                 # hidden units by a factor of 2/3 (https://arxiv.org/pdf/2002.05202.pdf) and make it a multiple of 8 to
                 # avoid RuntimeError due to misaligned operand
@@ -158,6 +170,10 @@ class EncoderBlock(nn.Module):
             xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
 
         if self.config.flash_attention:
+            if not XFORMERS_AVAILABLE:
+                raise ImportError(
+                    "Flash attention requires xformers. Install with: pip install xformers"
+                )
             attn = memory_efficient_attention(
                 query=xq, key=xk, value=xv, attn_bias=pad_mask, p=0
             )
@@ -168,7 +184,7 @@ class EncoderBlock(nn.Module):
                 key=xk.transpose(1, 2),
                 value=xv.transpose(1, 2),
                 attn_mask=pad_mask,
-                dropout_p=self.config.dropout_prob if self.training else 0,
+                dropout_p=self.config.dropout if self.training else 0,
             ).transpose(1, 2)
 
         return self.resid_dropout(
@@ -298,6 +314,10 @@ class NormEncoderBlock(nn.Module):
         ) ** 0.5
 
         if self.config.flash_attention:
+            if not XFORMERS_AVAILABLE:
+                raise ImportError(
+                    "Flash attention requires xformers. Install with: pip install xformers"
+                )
             attn = memory_efficient_attention(
                 query=xq, key=xk, value=xv, attn_bias=pad_mask, p=0, scale=softmax_scale
             )
@@ -308,7 +328,7 @@ class NormEncoderBlock(nn.Module):
                 key=xk.transpose(1, 2),
                 value=xv.transpose(1, 2),
                 attn_mask=pad_mask,
-                dropout_p=self.config.dropout_prob if self.training else 0,
+                dropout_p=self.config.dropout if self.training else 0,
                 scale=softmax_scale,
             ).transpose(1, 2)
 
@@ -757,9 +777,7 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
         dataset: Dataset = Dataset.from_dict({"input_texts": sentences})
         dataset.set_transform(partial(_transform_func, self.tokenizer))
 
-        data_collator = data_collator = DataCollatorWithPadding(
-            self.tokenizer, pad_to_multiple_of=8
-        )
+        data_collator = DataCollatorWithPadding(self.tokenizer, pad_to_multiple_of=8)
         dataloader = DataLoader(
             dataset,
             collate_fn=data_collator,
