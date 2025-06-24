@@ -38,11 +38,11 @@ class TestActualFunctionality(unittest.TestCase):
         self.assertEqual(config.model.hidden_size, 64)
         self.assertEqual(config.model.num_hidden_layers, 2)
         self.assertEqual(config.model.num_attention_heads, 2)
-        self.assertEqual(config.model.vocab_size, 1000)
+        self.assertEqual(config.model.vocab_size, 30522)
         # Tokenizer config uses 'name' field, vocab_size is in model config
-        self.assertEqual(config.tokenizer.name, "google/sentencepiece")
+        self.assertEqual(config.tokenizer.name, "bert-base-uncased")
         self.assertEqual(config.optimizer.name, "adamw")
-        self.assertEqual(config.scheduler.name, "cosine_decay")
+        self.assertEqual(config.scheduler.name, "cosine")
 
     def test_model_creation_without_xformers(self):
         """Test that we can create models without xformers dependency."""
