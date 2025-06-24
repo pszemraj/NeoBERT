@@ -39,6 +39,7 @@ class DatasetConfig:
     validation_split: Optional[float] = None
     train_split: Optional[str] = None
     eval_split: Optional[str] = None
+    num_proc: int = 4  # Number of processes for tokenization
 
     # Contrastive-specific
     load_all_from_disk: bool = False

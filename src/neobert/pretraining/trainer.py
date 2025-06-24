@@ -181,6 +181,60 @@ def trainer(cfg: Config):
                 if cfg.dataset.train_split
                 else dataset["train"]
             )
+    
+    # Check if dataset needs tokenization
+    # For streaming datasets, we need to check differently
+    is_streaming = cfg.dataset.streaming
+    needs_tokenization = False
+    
+    if train_dataset:
+        if is_streaming:
+            # For streaming datasets, peek at the first example
+            first_example = next(iter(train_dataset))
+            needs_tokenization = "input_ids" not in first_example
+        else:
+            needs_tokenization = "input_ids" not in train_dataset.column_names
+    
+    if needs_tokenization:
+        accelerator.print("Dataset is not tokenized. Tokenizing now...")
+        from neobert.tokenizer import tokenize
+        
+        # Determine text column
+        text_column = None
+        if is_streaming:
+            # For streaming, check the first example
+            first_example = next(iter(train_dataset))
+            for col in ["text", "sentence", "content"]:
+                if col in first_example:
+                    text_column = col
+                    break
+            if text_column is None:
+                raise ValueError(
+                    f"Could not find text column in dataset. "
+                    f"Available columns: {list(first_example.keys())}"
+                )
+        else:
+            for col in ["text", "sentence", "content"]:
+                if col in train_dataset.column_names:
+                    text_column = col
+                    break
+            if text_column is None:
+                raise ValueError(
+                    f"Could not find text column in dataset. "
+                    f"Available columns: {train_dataset.column_names}"
+                )
+        
+        # Tokenize dataset
+        train_dataset = tokenize(
+            train_dataset,
+            tokenizer,
+            column_name=text_column,
+            max_length=cfg.dataset.max_seq_length,
+            remove_columns=True,
+            truncation=True,
+            num_proc=cfg.dataset.num_proc if not cfg.dataset.streaming else None,
+        )
+        accelerator.print(f"Tokenization complete. Dataset size: {len(train_dataset)}")
 
     # Dataloader
     train_dataloader = get_dataloader(

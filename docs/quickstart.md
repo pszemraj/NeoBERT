@@ -22,7 +22,14 @@ pip install flash-attn --no-build-isolation
 
 ```bash
 # Pretrain a small model for testing
+# The trainer will automatically tokenize raw text datasets
 python scripts/pretraining/pretrain.py --config configs/test_tiny_pretrain.yaml
+
+# What happens automatically:
+# 1. Loads pszemraj/simple_wikipedia_LM dataset (raw text)
+# 2. Detects the 'text' column needs tokenization
+# 3. Tokenizes using bert-base-uncased tokenizer
+# 4. Starts training with MLM objective
 
 # Pretrain with custom settings
 python scripts/pretraining/pretrain.py \
@@ -34,13 +41,19 @@ python scripts/pretraining/pretrain.py \
 ### 2. Using a Custom Tokenizer
 
 ```bash
-# First, tokenize your dataset
+# Option 1: Let the trainer tokenize automatically
+python scripts/pretraining/pretrain.py \
+    --config configs/test_tiny_pretrain.yaml \
+    --tokenizer.name "your-tokenizer-name" \
+    --model.vocab_size 32000  # Match your tokenizer's vocab
+
+# Option 2: Pre-tokenize for faster startup (optional)
 python scripts/pretraining/tokenize_dataset.py \
     --tokenizer "your-tokenizer-name" \
     --dataset "your-dataset" \
     --output "./tokenized_data/custom"
 
-# Then train with the tokenized data
+# Then train with pre-tokenized data
 python scripts/pretraining/pretrain.py \
     --config configs/train_small_custom_tokenizer.yaml
 ```
