@@ -1,115 +1,56 @@
-# NeoBERT Contrastive Training Configuration
-# Configuration for contrastive fine-tuning on various datasets
-
-task: contrastive
+task: "contrastive"
 
 model:
-  # Model architecture (should match pretrained model)
   hidden_size: 768
   num_hidden_layers: 12
   num_attention_heads: 12
   intermediate_size: 3072
-  max_position_embeddings: 512
+  dropout_prob: 0.1  # Important for SimCSE-style training
   vocab_size: 30522
-  
-  # NeoBERT-specific features
-  rope: true
-  rms_norm: true
-  hidden_act: swiglu
-  dropout_prob: 0.1  # Need dropout > 0 for SimCSE
-  norm_eps: 1.0e-05
-  
-  # Initialization ranges
-  embedding_init_range: 0.02
-  decoder_init_range: 0.02
-  classifier_init_range: 0.02
+  max_position_embeddings: 512
+  flash_attention: false
+  ngpt: false
+  hidden_act: "gelu"
 
 dataset:
-  # Contrastive dataset settings
-  name: contrastive
-  path: ./data/contrastive  # Base path for contrastive datasets
-  num_workers: 4
-  max_seq_length: 128
-  
-  # Contrastive-specific settings
-  load_all_from_disk: false
-  force_redownload: false
-  pretraining_prob: 0.3  # Probability of using pretraining data for SimCSE
+  name: "sentence-transformers/all-nli"
+  path: null
+  max_seq_length: 256
 
 tokenizer:
-  name: bert-base-uncased
-  path: null
-  max_length: 128
-  padding: max_length
-  truncation: true
-
-optimizer:
-  name: adamw
-  lr: 5.0e-05  # Lower LR for contrastive fine-tuning
-  weight_decay: 0.01
-  betas: [0.9, 0.999]
-  eps: 1.0e-08
-
-scheduler:
-  name: linear  # Linear decay with warmup
-  warmup_steps: 1000
-  decay_steps: 50000
-  total_steps: null  # Computed automatically
+  name: "bert-base-uncased"
+  vocab_size: 30522
+  max_length: 256
 
 trainer:
-  # Batch sizes
-  per_device_train_batch_size: 32
-  per_device_eval_batch_size: 64
+  output_dir: "./outputs/contrastive"
+  run_name: "neobert_contrastive"
+  num_train_epochs: 1
+  per_device_train_batch_size: 128
+  per_device_eval_batch_size: 256
   gradient_accumulation_steps: 1
-  
-  # Training steps
-  max_steps: 100000
-  save_steps: 5000
-  eval_steps: 5000
+  learning_rate: 5e-5
+  warmup_steps: 100
   logging_steps: 100
-  
-  # Output
-  output_dir: ./output/contrastive
-  overwrite_output_dir: true
-  
-  # Mixed precision
-  fp16: false
-  bf16: true
-  mixed_precision: bf16
-  
-  # Gradient clipping
-  gradient_checkpointing: false
-  gradient_clipping: 1.0
-  
-  # Resume training
-  resume_from_checkpoint: null
-  
-  # Random seed
-  seed: 42
+  eval_steps: 1000
+  save_steps: 1000
+  dataloader_num_workers: 4
+  remove_unused_columns: false
+  report_to: []
 
-datacollator:
-  # No MLM for contrastive training
-  mlm_probability: 0.0
-  pad_to_multiple_of: null
+contrastive:
+  temperature: 0.05
+  pooling: "avg"
+  loss_type: "simcse"
+  hard_negative_weight: 0.0
 
-wandb:
-  project: neo-bert-contrastive
-  entity: null
-  name: null
-  tags: ["contrastive", "fine-tuning"]
-  mode: online
-  log_interval: 100
-  resume: never
-  dir: logs/wandb
+optimizer:
+  name: "adamw"
+  lr: 5e-5
+  weight_decay: 0.01
 
-# Accelerate configuration
-accelerate_config_file: null
-mixed_precision: bf16
-
-# Model loading
-pretrained_checkpoint: latest
-use_deepspeed: true
-
-# Global settings
-seed: 42
-debug: false
+scheduler:
+  name: "linear"
+  warmup_steps: 100
+  total_steps: 10000
+EOF < /dev/null

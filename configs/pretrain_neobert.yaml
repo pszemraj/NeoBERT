@@ -1,105 +1,75 @@
-# NeoBERT Pretraining Configuration
-# This is a reference configuration for pretraining NeoBERT models
-
-task: pretraining
+task: "pretraining"
 
 model:
-  # Model architecture
   hidden_size: 768
   num_hidden_layers: 12
   num_attention_heads: 12
   intermediate_size: 3072
-  max_position_embeddings: 512
+  dropout_prob: 0.1
   vocab_size: 30522
-  
-  # NeoBERT-specific features
-  rope: true  # Rotary Position Embeddings
-  rms_norm: true  # RMSNorm instead of LayerNorm
-  hidden_act: swiglu  # SwiGLU activation
-  dropout_prob: 0.0
-  norm_eps: 1.0e-05
-  
-  # Initialization ranges
-  embedding_init_range: 0.02
-  decoder_init_range: 0.02
-  classifier_init_range: 0.02
+  max_position_embeddings: 512
+  flash_attention: false  # Set to true if you have flash-attn installed
+  ngpt: false
+  hidden_act: "gelu"  # Use "swiglu" if you have xformers
+  rope: true
+  rms_norm: true
 
 dataset:
-  name: refinedweb  # Options: refinedweb, wikibook
-  path: ""  # Path to dataset (if local)
-  num_workers: 16
+  name: "wikipedia"  # Change to your dataset
+  path: null
   streaming: true
-  cache_dir: null
+  num_proc: 16
+  num_workers: 4
   max_seq_length: 512
-  validation_split: 0.01
+  train_split: "train[:1%]"  # Use small subset for testing
+  eval_split: "train[99%:]"
 
 tokenizer:
-  name: bert-base-uncased  # Or path to custom tokenizer
-  path: null
+  name: "bert-base-uncased"
+  vocab_size: 30522
   max_length: 512
-  padding: max_length
-  truncation: true
-
-optimizer:
-  name: adamw  # Options: adam, adamw, soap
-  lr: 1.0e-04
-  weight_decay: 0.01
-  betas: [0.9, 0.999]
-  eps: 1.0e-08
-
-scheduler:
-  name: cosine  # Options: cosine, linear
-  warmup_steps: 10000
-  total_steps: null  # If null, computed from max_steps
-  num_cycles: 0.5
-
-trainer:
-  # Batch sizes
-  per_device_train_batch_size: 16
-  per_device_eval_batch_size: 32
-  gradient_accumulation_steps: 1
-  
-  # Training steps
-  max_steps: 1000000
-  save_steps: 10000
-  eval_steps: 10000
-  logging_steps: 100
-  
-  # Output
-  output_dir: ./output/pretrain
-  overwrite_output_dir: true
-  
-  # Mixed precision
-  fp16: false
-  bf16: true
-  
-  # Memory optimization
-  gradient_checkpointing: false
-  
-  # Resume training
-  resume_from_checkpoint: null
-  
-  # Random seed
-  seed: 42
 
 datacollator:
-  mlm_probability: 0.15  # Masked Language Modeling probability
-  pad_to_multiple_of: null
+  mlm_probability: 0.15
+  pad_to_multiple_of: 8
+
+trainer:
+  output_dir: "./outputs/neobert_pretrain"
+  run_name: "neobert_pretrain"
+  max_steps: 1000000
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 1
+  learning_rate: 1e-4
+  warmup_steps: 10000
+  logging_steps: 100
+  eval_steps: 10000
+  save_steps: 10000
+  dataloader_num_workers: 4
+  remove_unused_columns: false
+  report_to: ["wandb"]  # Remove if you don't want logging
+  fp16: false
+  bf16: true  # Use bf16 on modern GPUs
+  gradient_checkpointing: false
+  resume_from_checkpoint: false
+
+optimizer:
+  name: "adamw"
+  lr: 1e-4
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  eps: 1e-8
+
+scheduler:
+  name: "cosine"
+  warmup_steps: 10000
+  total_steps: 1000000
 
 wandb:
-  project: neo-bert
-  entity: null  # Your WandB entity
-  name: null  # Run name (auto-generated if null)
-  tags: []
-  mode: online  # Options: online, offline, disabled
-  log_interval: 100
-  resume: never
-  dir: logs/wandb
+  project: "neobert-pretraining"
+  mode: "online"
 
-# Accelerate configuration
-accelerate_config_file: null  # Path to accelerate config if using multi-GPU
-mixed_precision: bf16
-
-# Global settings
-seed: 0
-debug: false
+# Additional settings
+seed: 42
+mixed_precision: "bf16"
+EOF < /dev/null
