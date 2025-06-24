@@ -5,25 +5,28 @@ import signal
 import sys
 
 import numpy as np
+
 # PyTorch
 import torch
 from accelerate import Accelerator
 from accelerate.utils import DistributedType, ProjectConfiguration, set_seed
+
 # Hugging Face
 from datasets import load_from_disk
+
 # Deepspeed
 from deepspeed.utils import safe_get_full_fp32_param
 from omegaconf import DictConfig, OmegaConf
 from torch.nn import CrossEntropyLoss
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import (CosineAnnealingLR, LambdaLR, LinearLR,
-                                      SequentialLR)
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import DataCollatorForLanguageModeling
 
 from ..model import NeoBERTConfig, NeoBERTLMHead
 from ..tokenizer import get_tokenizer
+
 # Our metric object and model
 from .metrics import Metrics
 

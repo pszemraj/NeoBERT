@@ -147,8 +147,7 @@ class TestEndToEndIntegration(unittest.TestCase):
 
                 # Choose appropriate model based on task
                 if "glue" in config_name:
-                    from neobert.model import \
-                        NeoBERTHFForSequenceClassification
+                    from neobert.model import NeoBERTHFForSequenceClassification
 
                     model_config.num_labels = config.glue.num_labels
                     model = NeoBERTHFForSequenceClassification(model_config)
@@ -214,12 +213,13 @@ class TestEndToEndIntegration(unittest.TestCase):
 
                 # Test optimizer creation
                 from accelerate.utils import DistributedType
+
                 optimizer = get_optimizer(
-                    model, 
+                    model,
                     DistributedType.NO,  # No distributed for test
                     name=config.optimizer.name,
                     lr=config.optimizer.lr,
-                    weight_decay=config.optimizer.weight_decay
+                    weight_decay=config.optimizer.weight_decay,
                 )
                 self.assertIsNotNone(optimizer)
 
@@ -227,9 +227,13 @@ class TestEndToEndIntegration(unittest.TestCase):
                 scheduler = get_scheduler(
                     optimizer=optimizer,
                     lr=config.optimizer.lr,
-                    decay=config.scheduler.name.replace('_decay', ''),
+                    decay=config.scheduler.name.replace("_decay", ""),
                     warmup_steps=config.scheduler.warmup_steps,
-                    decay_steps=getattr(config.scheduler, 'decay_steps', config.scheduler.total_steps or 1000)
+                    decay_steps=getattr(
+                        config.scheduler,
+                        "decay_steps",
+                        config.scheduler.total_steps or 1000,
+                    ),
                 )
                 self.assertIsNotNone(scheduler)
 
@@ -327,7 +331,7 @@ class TestEndToEndIntegration(unittest.TestCase):
 
         # This should raise an error when creating the config
         with self.assertRaises(ValueError):
-            invalid_config = NeoBERTConfig(
+            NeoBERTConfig(
                 hidden_size=65,  # Not divisible by 12
                 num_attention_heads=12,
                 flash_attention=False,

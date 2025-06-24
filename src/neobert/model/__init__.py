@@ -8,7 +8,12 @@ __all__ = [
     "NeoBERTConfig",
 ]
 
-from .model import (NeoBERT, NeoBERTConfig, NeoBERTForMTEB,
-                    NeoBERTForSequenceClassification,
-                    NeoBERTHFForSequenceClassification, NeoBERTLMHead,
-                    NormNeoBERT)
+from .model import (
+    NeoBERT,
+    NeoBERTConfig,
+    NeoBERTForMTEB,
+    NeoBERTForSequenceClassification,
+    NeoBERTHFForSequenceClassification,
+    NeoBERTLMHead,
+    NormNeoBERT,
+)

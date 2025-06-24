@@ -6,10 +6,15 @@ import numpy as np
 import torch
 from datasets import concatenate_datasets, load_dataset
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
+
 # Removed OmegaConf - this script should be standalone
 from tqdm import tqdm
-from transformers import (AutoConfig, AutoModelForMaskedLM,
-                          AutoModelWithLMHead, AutoTokenizer)
+from transformers import (
+    AutoConfig,
+    AutoModelForMaskedLM,
+    AutoModelWithLMHead,
+    AutoTokenizer,
+)
 from transformers.models.roberta.modeling_roberta import RobertaEmbeddings
 
 from neobert.model import NeoBERTConfig, NeoBERTLMHead

@@ -14,8 +14,12 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from torch.nn.functional import scaled_dot_product_attention
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import (DataCollatorWithPadding, PretrainedConfig,
-                          PreTrainedModel, PreTrainedTokenizerFast)
+from transformers import (
+    DataCollatorWithPadding,
+    PretrainedConfig,
+    PreTrainedModel,
+    PreTrainedTokenizerFast,
+)
 from transformers.modeling_outputs import SequenceClassifierOutput
 
 try:
@@ -403,9 +407,9 @@ class NeoBERT(NeoBERTPreTrainedModel):
     def forward(self, src, pad_mask=None):
         # Expand and repeat: (Batch, Length) -> (Batch, Heads, Length, Length)
         if pad_mask is not None:
-            assert pad_mask.dtype != torch.bool and 1.0 not in pad_mask, (
-                "NeoBERT expects an additive pad_mask"
-            )
+            assert (
+                pad_mask.dtype != torch.bool and 1.0 not in pad_mask
+            ), "NeoBERT expects an additive pad_mask"
             pad_mask = (
                 pad_mask.unsqueeze(1)
                 .unsqueeze(1)
@@ -492,9 +496,9 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
     def forward(self, src, pad_mask=None):
         # Expand and repeat: (Batch, Length) -> (Batch, Heads, Length, Length)
         if pad_mask is not None:
-            assert pad_mask.dtype != torch.bool and 1.0 not in pad_mask, (
-                "NeoBERT expects an additive pad_mask"
-            )
+            assert (
+                pad_mask.dtype != torch.bool and 1.0 not in pad_mask
+            ), "NeoBERT expects an additive pad_mask"
             pad_mask = (
                 pad_mask.unsqueeze(1)
                 .unsqueeze(1)

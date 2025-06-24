@@ -1,6 +1,7 @@
 import torch
 from datasets import Dataset
 from torch.utils.data import DataLoader
+
 # HuggingFace
 from transformers import PreTrainedTokenizer
 
@@ -59,7 +60,7 @@ def get_dataloader(
         batch_size=batch_size,
         shuffle=shuffle,
         pin_memory=pin_memory,
-        persistent_workers=persistent_workers,
+        persistent_workers=persistent_workers if num_workers > 0 else False,
     )
 
     return dataloader

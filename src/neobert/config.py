@@ -127,6 +127,14 @@ class GLUEConfig:
 
 
 @dataclass
+class ContrastiveConfig:
+    temperature: float = 0.05
+    pooling: str = "avg"  # avg, cls, max
+    loss_type: str = "simcse"  # simcse, supcon
+    hard_negative_weight: float = 0.0
+
+
+@dataclass
 class Config:
     model: ModelConfig = field(default_factory=ModelConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
@@ -137,6 +145,7 @@ class Config:
     datacollator: DataCollatorConfig = field(default_factory=DataCollatorConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
     glue: GLUEConfig = field(default_factory=GLUEConfig)
+    contrastive: ContrastiveConfig = field(default_factory=ContrastiveConfig)
 
     # Task-specific
     task: str = "pretraining"  # pretraining, glue, mteb, contrastive
@@ -248,6 +257,12 @@ class ConfigLoader:
                 if hasattr(config.glue, k):
                     setattr(config.glue, k, v)
 
+        # Update contrastive config
+        if "contrastive" in cfg_dict:
+            for k, v in cfg_dict["contrastive"].items():
+                if hasattr(config.contrastive, k):
+                    setattr(config.contrastive, k, v)
+
         # Update top-level config
         for k, v in cfg_dict.items():
             if hasattr(config, k) and k not in [
@@ -260,6 +275,7 @@ class ConfigLoader:
                 "datacollator",
                 "wandb",
                 "glue",
+                "contrastive",
             ]:
                 setattr(config, k, v)
 
@@ -345,7 +361,9 @@ def create_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--model.dropout_prob", type=float, help="Dropout probability")
     parser.add_argument(
-        "--model.flash_attention", type=lambda x: x.lower() == "true", help="Use flash attention"
+        "--model.flash_attention",
+        type=lambda x: x.lower() == "true",
+        help="Use flash attention",
     )
 
     # Dataset arguments

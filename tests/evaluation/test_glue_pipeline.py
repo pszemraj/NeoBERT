@@ -43,8 +43,7 @@ class TestGLUEPipeline(unittest.TestCase):
         """Test GLUE model setup for sequence classification."""
         config = ConfigLoader.load(str(self.test_config_path))
 
-        from neobert.model import (NeoBERTConfig,
-                                   NeoBERTHFForSequenceClassification)
+        from neobert.model import NeoBERTConfig, NeoBERTHFForSequenceClassification
 
         # Create model config
         model_config = NeoBERTConfig(
@@ -124,8 +123,10 @@ class TestGLUEPipeline(unittest.TestCase):
         for task, info in glue_tasks.items():
             with self.subTest(task=task):
                 # Test that we can handle different label numbers
-                from neobert.model import (NeoBERTConfig,
-                                           NeoBERTHFForSequenceClassification)
+                from neobert.model import (
+                    NeoBERTConfig,
+                    NeoBERTHFForSequenceClassification,
+                )
 
                 model_config = NeoBERTConfig(
                     hidden_size=32,
@@ -155,8 +156,7 @@ class TestGLUEPipeline(unittest.TestCase):
 
     def test_loss_computation(self):
         """Test loss computation for classification."""
-        from neobert.model import (NeoBERTConfig,
-                                   NeoBERTHFForSequenceClassification)
+        from neobert.model import NeoBERTConfig, NeoBERTHFForSequenceClassification
 
         model_config = NeoBERTConfig(
             hidden_size=32,
@@ -206,8 +206,7 @@ class TestGLUETaskSpecific(unittest.TestCase):
     def test_cola_specifics(self):
         """Test CoLA task specifics (grammar acceptability)."""
         # CoLA is a single sentence task with binary classification
-        from neobert.model import (NeoBERTConfig,
-                                   NeoBERTHFForSequenceClassification)
+        from neobert.model import NeoBERTConfig, NeoBERTHFForSequenceClassification
 
         config = NeoBERTConfig(
             hidden_size=32,
@@ -235,8 +234,7 @@ class TestGLUETaskSpecific(unittest.TestCase):
     def test_sentence_pair_tasks(self):
         """Test sentence pair tasks (like RTE, MRPC)."""
         # These tasks typically use [CLS] token_type_ids [SEP] setup
-        from neobert.model import (NeoBERTConfig,
-                                   NeoBERTHFForSequenceClassification)
+        from neobert.model import NeoBERTConfig, NeoBERTHFForSequenceClassification
 
         config = NeoBERTConfig(
             hidden_size=32,

@@ -6,25 +6,26 @@ model:
   num_attention_heads: 2
   intermediate_size: 128
   dropout_prob: 0.1
-  vocab_size: 1000
+  vocab_size: 30522
   max_position_embeddings: 128
   flash_attention: false
   ngpt: false
   hidden_act: "GELU"
 
 dataset:
-  name: "wikibook"
+  name: "pszemraj/simple_wikipedia_LM"
   path: null
-  tokenizer_name: "google/sentencepiece"
+  tokenizer_name: "bert-base-uncased"
   streaming: false
   num_proc: 1
+  num_workers: 0
   max_seq_length: 128
   train_split: "train[:100]"  # Very small subset for testing
   eval_split: "validation[:10]"
 
 tokenizer:
-  name: "google/sentencepiece"
-  vocab_size: 1000
+  name: "bert-base-uncased"
+  vocab_size: 30522
   max_length: 128
 
 datacollator:
@@ -53,6 +54,6 @@ optimizer:
   weight_decay: 0.01
 
 scheduler:
-  name: "cosine_decay"
+  name: "cosine"
   warmup_steps: 10
   total_steps: 50

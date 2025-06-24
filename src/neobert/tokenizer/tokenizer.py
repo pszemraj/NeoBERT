@@ -23,7 +23,10 @@ def get_tokenizer(
         trust_remote_code=True,
     )
 
-    if pretrained_model_name_or_path not in ["bert-base-uncased", "google-bert/bert-base-uncased"]:
+    if pretrained_model_name_or_path not in [
+        "bert-base-uncased",
+        "google-bert/bert-base-uncased",
+    ]:
         # Define special tokens to be consistent with RoBERTa
         special_tokens = {
             "bos_token": "<s>",
