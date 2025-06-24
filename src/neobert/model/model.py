@@ -628,7 +628,12 @@ class NeoBERTHFForSequenceClassification(NeoBERTPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ):
-        hidden_representation = self.model.forward(input_ids, attention_mask)
+        # Convert HuggingFace attention mask (1s and 0s) to additive mask (-inf and 0)
+        if attention_mask is not None:
+            additive_mask = torch.where(attention_mask == 0, float("-inf"), float(0.0))
+        else:
+            additive_mask = None
+        hidden_representation = self.model.forward(input_ids, additive_mask)
 
         x = hidden_representation[:, 0, :]
         x = self.dropout(x)

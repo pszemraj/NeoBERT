@@ -58,6 +58,7 @@ class TestGLUEPipeline(unittest.TestCase):
             flash_attention=config.model.flash_attention,
             ngpt=config.model.ngpt,
             num_labels=config.glue.num_labels,
+            hidden_act=config.model.hidden_act,
         )
 
         # Test model creation
@@ -133,6 +134,7 @@ class TestGLUEPipeline(unittest.TestCase):
                     vocab_size=100,
                     num_labels=info["num_labels"],
                     flash_attention=False,
+                    hidden_act="gelu",
                 )
 
                 model = NeoBERTHFForSequenceClassification(model_config)
@@ -163,6 +165,7 @@ class TestGLUEPipeline(unittest.TestCase):
             vocab_size=100,
             num_labels=2,
             flash_attention=False,
+            hidden_act="gelu",
         )
 
         model = NeoBERTHFForSequenceClassification(model_config)
@@ -213,6 +216,7 @@ class TestGLUETaskSpecific(unittest.TestCase):
             vocab_size=100,
             num_labels=2,  # Binary classification
             flash_attention=False,
+            hidden_act="gelu",
         )
 
         model = NeoBERTHFForSequenceClassification(config)
@@ -241,6 +245,7 @@ class TestGLUETaskSpecific(unittest.TestCase):
             vocab_size=100,
             num_labels=2,
             flash_attention=False,
+            hidden_act="gelu",
         )
 
         model = NeoBERTHFForSequenceClassification(config)
