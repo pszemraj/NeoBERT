@@ -29,7 +29,6 @@ from transformers import (
 from neobert.model import (
     NeoBERTConfig,
     NeoBERTForSequenceClassification,
-    NomicBERTForSequenceClassification,
 )
 from neobert.tokenizer import get_tokenizer
 
@@ -188,7 +187,7 @@ def get_best_checkpoint_path(base_dir, task, num_checkpoints_to_merge=1):
 
 
 def save_checkpoint(cfg, model, accelerator, completed_steps):
-    model_checkpoint_dir = os.path.join(cfg.trainer.dir, "model_checkpoints")
+    model_checkpoint_dir = os.path.join(cfg.trainer.output_dir, "model_checkpoints")
 
     # Delete checkpoints with the lesser evaluation accuracy if there are too many
     if (
@@ -259,15 +258,15 @@ def trainer(cfg: Config):
 
     # Handle the repository creation
     if accelerator.is_main_process:
-        if os.path.isdir(cfg.trainer.dir):
-            for file in os.listdir(cfg.trainer.dir):
-                if os.path.isfile(os.path.join(cfg.trainer.dir, str(file))):
-                    os.remove(os.path.join(cfg.trainer.dir, str(file)))
-        os.makedirs(cfg.trainer.dir, exist_ok=True)
+        if os.path.isdir(cfg.trainer.output_dir):
+            for file in os.listdir(cfg.trainer.output_dir):
+                if os.path.isfile(os.path.join(cfg.trainer.output_dir, str(file))):
+                    os.remove(os.path.join(cfg.trainer.output_dir, str(file)))
+        os.makedirs(cfg.trainer.output_dir, exist_ok=True)
     accelerator.wait_for_everyone()
 
-    flash_attention = cfg.flash_attention if "flash_attention" in cfg.keys() else True
-    if cfg.model.from_hub:
+    flash_attention = getattr(cfg, "flash_attention", True)
+    if hasattr(cfg.model, "from_hub") and cfg.model.from_hub:
         tokenizer = AutoTokenizer.from_pretrained(
             cfg.model.name,
             use_fast=True,
@@ -278,14 +277,15 @@ def trainer(cfg: Config):
         # Import our new config system
         from neobert.config import ConfigLoader
 
-        model_pretraining_config = ConfigLoader.load(cfg.model.pretrained_config_path)
+        pretrained_config_path = getattr(cfg.model, "pretrained_config_path", "configs/test_tiny_pretrain.yaml")
+        model_pretraining_config = ConfigLoader.load(pretrained_config_path)
         model_pretraining_config.model.flash_attention = flash_attention
         tokenizer = get_tokenizer(
-            model_pretraining_config.tokenizer.name,
-            model_pretraining_config.tokenizer.path,
-            model_pretraining_config.tokenizer.max_length,
-            model_pretraining_config.tokenizer.padding,
-            model_pretraining_config.tokenizer.truncation,
+            name=model_pretraining_config.tokenizer.name,
+            path=getattr(model_pretraining_config.tokenizer, "path", None),
+            max_length=model_pretraining_config.tokenizer.max_length,
+            padding=getattr(model_pretraining_config.tokenizer, "padding", True),
+            truncation=getattr(model_pretraining_config.tokenizer, "truncation", True),
         )
 
     print("Loading metric...")
@@ -423,7 +423,7 @@ def trainer(cfg: Config):
         )
 
     # Model
-    if cfg.model.from_hub:
+    if hasattr(cfg.model, "from_hub") and cfg.model.from_hub:
         config = AutoConfig.from_pretrained(
             cfg.model.name,
             num_labels=num_labels,
@@ -431,23 +431,24 @@ def trainer(cfg: Config):
             revision="main",
             trust_remote_code=True,
         )
-        if "nomic" in cfg.model.name:
-            base_model = AutoModelForMaskedLM.from_pretrained(
-                cfg.model.name,
-                from_tf=False,
-                config=config,
-                revision="main",
-                trust_remote_code=True,
-                ignore_mismatched_sizes=False,
-            )
-            model = NomicBERTForSequenceClassification(
-                config,
-                base_model.bert,
-                num_labels=num_labels,
-                classifier_dropout=cfg.model.classifier_dropout,
-                classifier_init_range=cfg.model.classifier_init_range,
-            )
-        else:
+        # if "nomic" in cfg.model.name:
+        #     base_model = AutoModelForMaskedLM.from_pretrained(
+        #         cfg.model.name,
+        #         from_tf=False,
+        #         config=config,
+        #         revision="main",
+        #         trust_remote_code=True,
+        #         ignore_mismatched_sizes=False,
+        #     )
+        #     model = NomicBERTForSequenceClassification(
+        #         config,
+        #         base_model.bert,
+        #         num_labels=num_labels,
+        #         classifier_dropout=cfg.model.classifier_dropout,
+        #         classifier_init_range=cfg.model.classifier_init_range,
+        #     )
+        # else:
+        if True:
             model = AutoModelForSequenceClassification.from_pretrained(
                 cfg.model.name,
                 from_tf=False,
@@ -462,11 +463,11 @@ def trainer(cfg: Config):
                 **model_pretraining_config.model, **model_pretraining_config.tokenizer
             ),
             num_labels=num_labels,
-            classifier_dropout=cfg.model.classifier_dropout,
-            classifier_init_range=cfg.model.classifier_init_range,
+            classifier_dropout=getattr(cfg.model, "classifier_dropout", 0.1),
+            classifier_init_range=getattr(cfg.model, "classifier_init_range", 0.02),
         )
 
-    if cfg.model.transfer_from_task:
+    if hasattr(cfg.model, "transfer_from_task") and cfg.model.transfer_from_task:
         task_to_transfer_from = TASK_TO_TRANSFER_FROM.get(cfg.task, None)
         if not task_to_transfer_from:
             raise ValueError(f"Task to transfer from for {cfg.task} is not set.")
@@ -489,22 +490,24 @@ def trainer(cfg: Config):
             raise ValueError("Unable to retrieve checkpoint to transfer from.")
 
     else:
+        pretrained_checkpoint_dir = getattr(cfg.model, "pretrained_checkpoint_dir", "./test_outputs")
         cfg.model.pretrained_checkpoint_dir = os.path.join(
-            cfg.model.pretrained_checkpoint_dir, "model_checkpoints"
+            pretrained_checkpoint_dir, "model_checkpoints"
         )
 
-    if not cfg.model.from_hub:
+    pretrained_checkpoint = getattr(cfg.model, "pretrained_checkpoint", None)
+    if not (hasattr(cfg.model, "from_hub") and cfg.model.from_hub) and pretrained_checkpoint is not None:
         try:
             model = load_state_dict_from_zero_checkpoint(
                 model,
                 cfg.model.pretrained_checkpoint_dir,
-                tag=str(cfg.model.pretrained_checkpoint),
+                tag=str(pretrained_checkpoint),
             )
         except FileNotFoundError:
             state_dict = torch.load(
                 os.path.join(
                     cfg.model.pretrained_checkpoint_dir,
-                    str(cfg.model.pretrained_checkpoint),
+                    str(pretrained_checkpoint),
                     "state_dict.pt",
                 )
             )
@@ -791,14 +794,14 @@ def trainer(cfg: Config):
 
                 with open(
                     os.path.join(
-                        cfg.trainer.dir, f"all_results_step_{completed_steps}.json"
+                        cfg.trainer.output_dir, f"all_results_step_{completed_steps}.json"
                     ),
                     "w",
                 ) as f:
                     print(
                         "dumping in",
                         os.path.join(
-                            cfg.trainer.dir, f"all_results_step_{completed_steps}.json"
+                            cfg.trainer.output_dir, f"all_results_step_{completed_steps}.json"
                         ),
                     )
                     json.dump(all_results, f)
@@ -843,5 +846,5 @@ def trainer(cfg: Config):
     if cfg.task == "mnli":
         all_results = {f"eval_{k}": v for k, v in results.items()}
 
-    with open(os.path.join(cfg.trainer.dir, "all_results.json"), "w") as f:
+    with open(os.path.join(cfg.trainer.output_dir, "all_results.json"), "w") as f:
         json.dump(all_results, f)

@@ -78,7 +78,7 @@ python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 # Test model creation
 python -c "
 from neobert.model import NeoBERT, NeoBERTConfig
-config = NeoBERTConfig(hidden_size=256, num_hidden_layers=2, num_attention_heads=4)
+config = NeoBERTConfig(hidden_size=256, num_hidden_layers=2, num_attention_heads=4, hidden_act='gelu')
 model = NeoBERT(config)
 print(f'Model created with {sum(p.numel() for p in model.parameters())} parameters')
 "

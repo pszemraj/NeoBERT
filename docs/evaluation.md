@@ -4,6 +4,17 @@ This guide covers evaluating NeoBERT models on various benchmarks.
 
 ## GLUE Benchmark
 
+### Prerequisites
+
+GLUE evaluation requires a pretrained NeoBERT model. First train a model:
+
+```bash
+# Train a small model for testing
+python scripts/pretraining/pretrain.py \
+    --config configs/test_tiny_pretrain.yaml \
+    --trainer.max_steps 100
+```
+
 ### Running Single Task
 
 ```bash

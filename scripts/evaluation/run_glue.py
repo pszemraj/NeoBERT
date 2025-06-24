@@ -22,7 +22,8 @@ def main():
     args, remaining = parser.parse_known_args()
     
     # Load base config
-    config = ConfigLoader.load(args.config, remaining)
+    overrides = ConfigLoader.parse_overrides(remaining) if remaining else {}
+    config = ConfigLoader.load(args.config, overrides)
     
     # Override specific fields if provided
     if args.task_name:

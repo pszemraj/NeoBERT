@@ -74,6 +74,8 @@ class SchedulerConfig:
     total_steps: Optional[int] = None
     num_cycles: float = 0.5
     decay_steps: int = 50000  # For contrastive training
+    warmup_percent: Optional[float] = None
+    decay_percent: Optional[float] = None
 
 
 @dataclass
@@ -100,6 +102,11 @@ class TrainerConfig:
     dataloader_num_workers: int = 0
     use_cpu: bool = False
     report_to: List[str] = field(default_factory=list)
+    tf32: bool = True
+    max_ckpt: int = 3
+    mixed_precision: str = "no"
+    train_batch_size: int = 16
+    eval_batch_size: int = 32
 
 
 @dataclass
