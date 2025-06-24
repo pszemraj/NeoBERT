@@ -5,7 +5,8 @@
 NeoBERT is a **next-generation encoder** model for English text representation, pre-trained from scratch on the RefinedWeb dataset. NeoBERT integrates state-of-the-art advancements in architecture, modern data, and optimized pre-training methodologies. It is designed for seamless adoption: it serves as a plug-and-play replacement for existing base models, relies on an **optimal depth-to-width ratio**, and leverages an extended context length of **4,096 tokens**. Despite its compact 250M parameter footprint, it is the most efficient model of its kind and achieves **state-of-the-art results** on the massive MTEB benchmark, outperforming BERT large, RoBERTa large, NomicBERT, and ModernBERT under identical fine-tuning conditions. 
 
 - Paper: [paper](https://arxiv.org/abs/2502.19587)
-- Model: [huggingface](https://huggingface.co/chandar-lab/NeoBERT).
+- Model: [huggingface](https://huggingface.co/chandar-lab/NeoBERT)
+- Documentation: [docs/](docs/README.md)
 
 ## Get started
 
@@ -41,6 +42,17 @@ outputs = model(**inputs)
 embedding = outputs.last_hidden_state[:, 0, :]
 print(embedding.shape)
 ```
+
+## Documentation
+
+For detailed guides and documentation, see the [docs/](docs/) directory:
+
+- [Quick Start Guide](docs/quickstart.md)
+- [Installation](docs/installation.md)
+- [Training Guide](docs/training.md)
+- [Custom Tokenizers](docs/custom_tokenizers.md)
+- [Evaluation Guide](docs/evaluation.md)
+- [Architecture Details](docs/architecture.md)
 
 ## Features
 | **Feature**       | **NeoBERT**                             |
