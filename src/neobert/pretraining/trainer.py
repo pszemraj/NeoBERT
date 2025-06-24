@@ -150,11 +150,9 @@ def trainer(cfg: Config):
 
     # Tokenizer
     tokenizer = get_tokenizer(
-        name=cfg.tokenizer.name,
-        path=cfg.tokenizer.path,
+        pretrained_model_name_or_path=cfg.tokenizer.name,
         max_length=cfg.tokenizer.max_length,
-        padding=cfg.tokenizer.padding,
-        truncation=cfg.tokenizer.truncation,
+        vocab_size=cfg.tokenizer.vocab_size or cfg.model.vocab_size,
     )
 
     # Dataset
@@ -181,6 +179,12 @@ def trainer(cfg: Config):
     )
 
     # Model
+    # Debug print
+    if cfg.debug:
+        print(f"Model vocab_size: {cfg.model.vocab_size}")
+        print(f"Tokenizer vocab_size: {tokenizer.vocab_size}")
+        print(f"Tokenizer pad_token_id: {tokenizer.pad_token_id}")
+    
     model_config = NeoBERTConfig(
         hidden_size=cfg.model.hidden_size,
         num_hidden_layers=cfg.model.num_hidden_layers,
@@ -221,10 +225,10 @@ def trainer(cfg: Config):
     scheduler = get_scheduler(
         optimizer=optimizer,
         lr=cfg.optimizer.lr,
-        name=cfg.scheduler.name,
+        decay=cfg.scheduler.name,
         warmup_steps=cfg.scheduler.warmup_steps,
-        total_steps=cfg.trainer.max_steps,
-        num_cycles=cfg.scheduler.num_cycles,
+        decay_steps=cfg.trainer.max_steps - cfg.scheduler.warmup_steps,  # Remaining steps after warmup
+        constant_steps=0,  # No constant phase for simplicity
     )
 
     # Prepare with accelerate
