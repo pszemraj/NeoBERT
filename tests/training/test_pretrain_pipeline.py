@@ -40,8 +40,8 @@ class TestPretrainPipeline(unittest.TestCase):
         # Check key pretraining-specific settings
         self.assertEqual(config.model.hidden_size, 64)
         self.assertEqual(config.trainer.num_train_epochs, 1)
-        self.assertEqual(config.collator.type, "mlm")
-        self.assertEqual(config.collator.mlm_probability, 0.15)
+        # datacollator doesn't have a 'type' field, it's implicitly MLM for pretraining
+        self.assertEqual(config.datacollator.mlm_probability, 0.15)
 
     def test_tiny_dataset_creation(self):
         """Test creating a tiny dataset for testing."""
@@ -152,8 +152,8 @@ class TestPretrainPipeline(unittest.TestCase):
         """Test MLM data collator configuration."""
         config = ConfigLoader.load(str(self.test_config_path))
 
-        self.assertEqual(config.collator.type, "mlm")
-        self.assertEqual(config.collator.mlm_probability, 0.15)
+        # datacollator doesn't have a 'type' field, it's implicitly MLM for pretraining
+        self.assertEqual(config.datacollator.mlm_probability, 0.15)
 
     def test_training_arguments_config(self):
         """Test HuggingFace training arguments configuration."""

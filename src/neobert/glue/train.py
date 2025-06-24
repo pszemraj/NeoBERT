@@ -18,19 +18,12 @@ from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
 from torch.nn import CrossEntropyLoss, MSELoss
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from transformers import (
-    AutoConfig,
-    AutoModelForMaskedLM,
-    AutoModelForSequenceClassification,
-    AutoTokenizer,
-    DataCollatorWithPadding,
-)
+from transformers import (AutoConfig, AutoModelForMaskedLM,
+                          AutoModelForSequenceClassification, AutoTokenizer,
+                          DataCollatorWithPadding)
 
-from neobert.model import (
-    NeoBERTConfig,
-    NeoBERTForSequenceClassification,
-    NomicBERTForSequenceClassification,
-)
+from neobert.model import (NeoBERTConfig, NeoBERTForSequenceClassification,
+                           NomicBERTForSequenceClassification)
 from neobert.tokenizer import get_tokenizer
 
 from ..config import Config

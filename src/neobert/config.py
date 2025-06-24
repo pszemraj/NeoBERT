@@ -37,6 +37,8 @@ class DatasetConfig:
     cache_dir: Optional[str] = None
     max_seq_length: int = 512
     validation_split: Optional[float] = None
+    train_split: Optional[str] = None
+    eval_split: Optional[str] = None
 
     # Contrastive-specific
     load_all_from_disk: bool = False
@@ -52,6 +54,7 @@ class TokenizerConfig:
     max_length: int = 512
     padding: str = "max_length"
     truncation: bool = True
+    vocab_size: Optional[int] = None  # For compatibility with tests
 
 
 @dataclass
@@ -93,6 +96,9 @@ class TrainerConfig:
 
     # For backwards compatibility with old configs
     disable_tqdm: bool = False
+    dataloader_num_workers: int = 0
+    use_cpu: bool = False
+    report_to: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -114,6 +120,13 @@ class WandbConfig:
 
 
 @dataclass
+class GLUEConfig:
+    task_name: str = "cola"
+    num_labels: int = 2
+    max_seq_length: int = 512
+
+
+@dataclass
 class Config:
     model: ModelConfig = field(default_factory=ModelConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
@@ -123,6 +136,7 @@ class Config:
     trainer: TrainerConfig = field(default_factory=TrainerConfig)
     datacollator: DataCollatorConfig = field(default_factory=DataCollatorConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
+    glue: GLUEConfig = field(default_factory=GLUEConfig)
 
     # Task-specific
     task: str = "pretraining"  # pretraining, glue, mteb, contrastive
@@ -225,6 +239,12 @@ class ConfigLoader:
                 if hasattr(config.wandb, k):
                     setattr(config.wandb, k, v)
 
+        # Update glue config
+        if "glue" in cfg_dict:
+            for k, v in cfg_dict["glue"].items():
+                if hasattr(config.glue, k):
+                    setattr(config.glue, k, v)
+
         # Update top-level config
         for k, v in cfg_dict.items():
             if hasattr(config, k) and k not in [
@@ -236,6 +256,7 @@ class ConfigLoader:
                 "trainer",
                 "datacollator",
                 "wandb",
+                "glue",
             ]:
                 setattr(config, k, v)
 

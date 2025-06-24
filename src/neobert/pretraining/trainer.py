@@ -4,16 +4,10 @@ import re
 # PyTorch
 import torch
 from accelerate import Accelerator
-from accelerate.utils import (
-    DistributedDataParallelKwargs,
-    DistributedType,
-    ProjectConfiguration,
-    set_seed,
-)
-
+from accelerate.utils import (DistributedDataParallelKwargs, DistributedType,
+                              ProjectConfiguration, set_seed)
 # Hugging Face
-from datasets import load_from_disk
-
+from datasets import load_dataset, load_from_disk
 # Deepspeed
 from deepspeed.utils import safe_get_full_fp32_param
 from torch.nn import CrossEntropyLoss
@@ -26,7 +20,6 @@ from ..model import NeoBERTConfig, NeoBERTLMHead
 from ..optimizer import get_optimizer
 from ..scheduler import get_scheduler
 from ..tokenizer import get_tokenizer
-
 # Our metric object and model
 from .metrics import Metrics
 
@@ -165,7 +158,16 @@ def trainer(cfg: Config):
     )
 
     # Dataset
-    train_dataset = load_from_disk(cfg.dataset.path)
+    if cfg.dataset.path:
+        train_dataset = load_from_disk(cfg.dataset.path)
+    else:
+        # Parse split if it contains slice notation (e.g., "train[:1000]")
+        if cfg.dataset.train_split and "[" in cfg.dataset.train_split:
+            dataset = load_dataset(cfg.dataset.name, split=cfg.dataset.train_split, streaming=cfg.dataset.streaming)
+            train_dataset = dataset
+        else:
+            dataset = load_dataset(cfg.dataset.name, streaming=cfg.dataset.streaming)
+            train_dataset = dataset[cfg.dataset.train_split] if cfg.dataset.train_split else dataset["train"]
 
     # Dataloader
     train_dataloader = get_dataloader(

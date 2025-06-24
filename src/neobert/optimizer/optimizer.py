@@ -2,7 +2,7 @@ import torch
 from accelerate.utils import DistributedType
 from torch.optim import Adam, AdamW
 
-from .soap.soap import SOAP
+# from .soap.soap import SOAP  # TODO: Add SOAP optimizer implementation
 
 
 def get_optimizer(
@@ -21,12 +21,12 @@ def get_optimizer(
             return AdamW(model.parameters(), **kwargs)
         case "Adam":
             return Adam(model.parameters(), **kwargs)
-        case "SOAP":
-            assert distributed_type is not DistributedType.DEEPSPEED, (
-                "SOAP does not support DeepSpeed"
-            )
-            return SOAP(model.parameters(), **kwargs)
+        # case "SOAP":
+        #     assert distributed_type is not DistributedType.DEEPSPEED, (
+        #         "SOAP does not support DeepSpeed"
+        #     )
+        #     return SOAP(model.parameters(), **kwargs)
         case _:
             raise ValueError(
-                "Unrecognized optimizer name. Options are: Adam, AdamW, SOAP."
+                "Unrecognized optimizer name. Options are: Adam, AdamW."  # SOAP not yet implemented
             )
