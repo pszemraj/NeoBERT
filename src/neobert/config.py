@@ -222,8 +222,8 @@ class ConfigLoader:
         if "optimizer" in cfg_dict:
             for k, v in cfg_dict["optimizer"].items():
                 if hasattr(config.optimizer, k):
-                    # Convert string lr to float if needed
-                    if k == "lr" and isinstance(v, str):
+                    # Convert string lr/eps to float if needed
+                    if k in ["lr", "eps"] and isinstance(v, str):
                         v = float(v)
                     setattr(config.optimizer, k, v)
 

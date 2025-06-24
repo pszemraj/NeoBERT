@@ -23,10 +23,14 @@ def get_tokenizer(
         trust_remote_code=True,
     )
 
-    if pretrained_model_name_or_path not in [
+    # List of tokenizers that already have the correct special tokens
+    tokenizers_with_special_tokens = [
         "bert-base-uncased",
         "google-bert/bert-base-uncased",
-    ]:
+        "BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp",
+    ]
+    
+    if pretrained_model_name_or_path not in tokenizers_with_special_tokens:
         # Define special tokens to be consistent with RoBERTa
         special_tokens = {
             "bos_token": "<s>",

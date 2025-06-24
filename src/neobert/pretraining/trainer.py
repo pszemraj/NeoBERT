@@ -216,6 +216,7 @@ def trainer(cfg: Config):
         decoder_init_range=cfg.model.decoder_init_range,
         classifier_init_range=cfg.model.classifier_init_range,
         pad_token_id=tokenizer.pad_token_id,
+        flash_attention=cfg.model.flash_attention,
     )
     model = NeoBERTLMHead(model_config)
 
