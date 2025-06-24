@@ -16,10 +16,11 @@ def get_optimizer(
     Returns:
         torch.optim.Optimizer: Initialized optimizer.
     """
-    match kwargs.pop("name"):
-        case "AdamW":
+    optimizer_name = kwargs.pop("name").lower()
+    match optimizer_name:
+        case "adamw":
             return AdamW(model.parameters(), **kwargs)
-        case "Adam":
+        case "adam":
             return Adam(model.parameters(), **kwargs)
         # case "SOAP":
         #     assert distributed_type is not DistributedType.DEEPSPEED, (

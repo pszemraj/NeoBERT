@@ -56,11 +56,12 @@ class TestEndToEndIntegration(unittest.TestCase):
                 num_hidden_layers=config.model.num_hidden_layers,
                 num_attention_heads=config.model.num_attention_heads,
                 intermediate_size=config.model.intermediate_size,
-                dropout=config.model.dropout,
+                dropout=config.model.dropout_prob,
                 vocab_size=config.model.vocab_size,
-                max_length=config.model.max_length,
+                max_length=config.model.max_position_embeddings,
                 flash_attention=config.model.flash_attention,
                 ngpt=config.model.ngpt,
+                hidden_act=config.model.hidden_act,
             )
 
             model = NeoBERTLMHead(model_config)
@@ -86,6 +87,7 @@ class TestEndToEndIntegration(unittest.TestCase):
             "num_attention_heads": 2,
             "vocab_size": 100,
             "flash_attention": False,
+            "hidden_act": "gelu",
         }
 
         from neobert.model import NeoBERT, NeoBERTConfig, NormNeoBERT
@@ -135,11 +137,12 @@ class TestEndToEndIntegration(unittest.TestCase):
                     num_hidden_layers=config.model.num_hidden_layers,
                     num_attention_heads=config.model.num_attention_heads,
                     intermediate_size=config.model.intermediate_size,
-                    dropout=config.model.dropout,
+                    dropout=config.model.dropout_prob,
                     vocab_size=config.model.vocab_size,
-                    max_length=config.model.max_length,
+                    max_length=config.model.max_position_embeddings,
                     flash_attention=config.model.flash_attention,
                     ngpt=config.model.ngpt,
+                    hidden_act=config.model.hidden_act,
                 )
 
                 # Choose appropriate model based on task
@@ -194,6 +197,7 @@ class TestEndToEndIntegration(unittest.TestCase):
             num_attention_heads=2,
             vocab_size=50,
             flash_attention=False,
+            hidden_act="gelu",
         )
         model = NeoBERT(model_config)
 
@@ -209,14 +213,23 @@ class TestEndToEndIntegration(unittest.TestCase):
                 config = ConfigLoader.load(str(self.config_dir / config_file))
 
                 # Test optimizer creation
+                from accelerate.utils import DistributedType
                 optimizer = get_optimizer(
-                    config.optimizer.name, model.parameters(), config.optimizer
+                    model, 
+                    DistributedType.NO,  # No distributed for test
+                    name=config.optimizer.name,
+                    lr=config.optimizer.lr,
+                    weight_decay=config.optimizer.weight_decay
                 )
                 self.assertIsNotNone(optimizer)
 
                 # Test scheduler creation
                 scheduler = get_scheduler(
-                    config.scheduler.name, optimizer, config.scheduler
+                    optimizer=optimizer,
+                    lr=config.optimizer.lr,
+                    decay=config.scheduler.name.replace('_decay', ''),
+                    warmup_steps=config.scheduler.warmup_steps,
+                    decay_steps=getattr(config.scheduler, 'decay_steps', config.scheduler.total_steps or 1000)
                 )
                 self.assertIsNotNone(scheduler)
 
@@ -235,6 +248,7 @@ class TestEndToEndIntegration(unittest.TestCase):
             vocab_size=config.model.vocab_size,
             num_attention_heads=config.model.num_attention_heads,
             flash_attention=False,
+            hidden_act="gelu",
         )
         model = NeoBERT(model_config)
 
@@ -276,7 +290,7 @@ class TestEndToEndIntegration(unittest.TestCase):
             # Basic override
             ["--model.hidden_size", "128"],
             # Multiple overrides
-            ["--model.hidden_size", "64", "--trainer.learning_rate", "1e-3"],
+            ["--model.hidden_size", "64", "--optimizer.lr", "1e-3"],
             # Nested overrides
             ["--trainer.per_device_train_batch_size", "1"],
             # Boolean overrides
@@ -311,17 +325,13 @@ class TestEndToEndIntegration(unittest.TestCase):
         # Test invalid model config (hidden_size not divisible by num_heads)
         from neobert.model import NeoBERTConfig
 
-        invalid_config = NeoBERTConfig(
-            hidden_size=65,  # Not divisible by 12
-            num_attention_heads=12,
-            flash_attention=False,
-        )
-
-        # This should raise an error when creating the model
+        # This should raise an error when creating the config
         with self.assertRaises(ValueError):
-            from neobert.model import NeoBERT
-
-            NeoBERT(invalid_config)
+            invalid_config = NeoBERTConfig(
+                hidden_size=65,  # Not divisible by 12
+                num_attention_heads=12,
+                flash_attention=False,
+            )
 
 
 if __name__ == "__main__":

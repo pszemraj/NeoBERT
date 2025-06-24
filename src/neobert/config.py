@@ -344,6 +344,9 @@ def create_argument_parser() -> argparse.ArgumentParser:
         "--model.hidden_act", type=str, help="Hidden activation function"
     )
     parser.add_argument("--model.dropout_prob", type=float, help="Dropout probability")
+    parser.add_argument(
+        "--model.flash_attention", type=lambda x: x.lower() == "true", help="Use flash attention"
+    )
 
     # Dataset arguments
     parser.add_argument("--dataset.name", type=str, help="Dataset name")
