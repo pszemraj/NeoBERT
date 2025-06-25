@@ -36,14 +36,16 @@ Flash Attention significantly speeds up training and reduces memory usage:
 pip install flash-attn --no-build-isolation
 ```
 
-### XFormers (For SwiGLU Activation)
+### XFormers (Recommended for SwiGLU)
 
-Required if you want to use SwiGLU activation:
+Provides optimized SwiGLU activation (default in NeoBERT):
 
 ```bash
-# Specific version required for compatibility
-pip install xformers==0.0.22
+# Compatible version
+pip install xformers==0.0.28.post3
 ```
+
+Note: NeoBERT will use a native PyTorch fallback if xformers is not available, but performance will be reduced.
 
 ### DeepSpeed (For Large-Scale Training)
 
@@ -75,12 +77,19 @@ python tests/run_tests.py --test-dir config
 # Check if GPU is available
 python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 
-# Test model creation
+# Test model creation (requires xformers for SwiGLU)
 python -c "
 from neobert.model import NeoBERT, NeoBERTConfig
-config = NeoBERTConfig(hidden_size=256, num_hidden_layers=2, num_attention_heads=4, hidden_act='gelu')
-model = NeoBERT(config)
-print(f'Model created with {sum(p.numel() for p in model.parameters())} parameters')
+try:
+    # Default config uses SwiGLU activation (requires xformers)
+    config = NeoBERTConfig(hidden_size=256, num_hidden_layers=2, num_attention_heads=4)
+    model = NeoBERT(config)
+    print(f'Model created with SwiGLU: {sum(p.numel() for p in model.parameters())} parameters')
+except ImportError:
+    # Fallback to GELU if xformers not available
+    config = NeoBERTConfig(hidden_size=256, num_hidden_layers=2, num_attention_heads=4, hidden_act='gelu')
+    model = NeoBERT(config)
+    print(f'Model created with GELU (xformers not available): {sum(p.numel() for p in model.parameters())} parameters')
 "
 ```
 

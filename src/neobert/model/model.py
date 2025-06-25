@@ -26,10 +26,23 @@ try:
     from xformers.ops import SwiGLU, memory_efficient_attention
 
     XFORMERS_AVAILABLE = True
-except ImportError:
+except (ImportError, RuntimeError) as e:
+    # xformers might be installed but have version conflicts
     XFORMERS_AVAILABLE = False
+    XFORMERS_ERROR = str(e)
     SwiGLU = None
     memory_efficient_attention = None
+    
+    # Native PyTorch SwiGLU implementation as fallback
+    class SwiGLU(nn.Module):
+        def __init__(self, in_features, hidden_features=None, out_features=None, bias=True):
+            super().__init__()
+            self.w1 = nn.Linear(in_features, hidden_features, bias=bias)
+            self.w2 = nn.Linear(in_features, hidden_features, bias=bias)
+            self.w3 = nn.Linear(hidden_features, out_features, bias=bias)
+            
+        def forward(self, x):
+            return self.w3(nn.functional.silu(self.w1(x)) * self.w2(x))
 
 from .rmsnorm import RMSNorm
 from .rotary import apply_rotary_emb, precompute_freqs_cis
@@ -108,8 +121,11 @@ class EncoderBlock(nn.Module):
         match config.hidden_act.lower():
             case "swiglu":
                 if not XFORMERS_AVAILABLE:
-                    raise ImportError(
-                        "SwiGLU requires xformers. Install with: pip install xformers"
+                    import warnings
+                    warnings.warn(
+                        f"xformers not available, using native PyTorch SwiGLU implementation. "
+                        f"For better performance, install xformers: pip install xformers. "
+                        f"Error was: {XFORMERS_ERROR if 'XFORMERS_ERROR' in globals() else 'Import failed'}"
                     )
                 # To keep the number of parameters and the amount of computation constant, we reduce the number of
                 # hidden units by a factor of 2/3 (https://arxiv.org/pdf/2002.05202.pdf) and make it a multiple of 8 to

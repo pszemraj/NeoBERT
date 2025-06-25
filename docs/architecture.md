@@ -201,10 +201,15 @@ model:
 
 ```yaml
 model:
-  hidden_act: "swiglu"  # Recommended (requires xformers)
-  # hidden_act: "gelu"  # Fallback for CPU
+  hidden_act: "swiglu"  # Default - best performance
+  # hidden_act: "gelu"  # Alternative - no dependencies
   # hidden_act: "relu"  # Fastest but lower quality
 ```
+
+**SwiGLU Requirements:**
+- Install xformers for optimal performance: `pip install xformers==0.0.28.post3`
+- Falls back to native PyTorch implementation if xformers unavailable
+- ~5-10% performance improvement over GELU
 
 ### Attention Variants
 

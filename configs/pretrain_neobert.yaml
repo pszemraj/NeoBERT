@@ -8,9 +8,9 @@ model:
   dropout_prob: 0.1
   vocab_size: 30522
   max_position_embeddings: 512
-  flash_attention: false  # Set to true if you have flash-attn installed
+  flash_attention: true  # Now available with flash-attn 2.7.3
   ngpt: false
-  hidden_act: "gelu"  # Use "swiglu" if you have xformers
+  hidden_act: "swiglu"  # Default activation (requires xformers)
   rope: true
   rms_norm: true
 
