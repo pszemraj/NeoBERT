@@ -1,10 +1,10 @@
 import os
-from datasets import Features, Sequence, Value, Dataset
-from transformers import AutoTokenizer, PreTrainedTokenizer
-from tokenizers.processors import TemplateProcessing
+from functools import partial
 from typing import Tuple
 
-from functools import partial
+from datasets import Dataset, Features, Sequence, Value
+from tokenizers.processors import TemplateProcessing
+from transformers import AutoTokenizer, PreTrainedTokenizer
 
 
 def get_tokenizer(
@@ -23,7 +23,14 @@ def get_tokenizer(
         trust_remote_code=True,
     )
 
-    if pretrained_model_name_or_path != "google-bert/bert-base-uncased":
+    # List of tokenizers that already have the correct special tokens
+    tokenizers_with_special_tokens = [
+        "bert-base-uncased",
+        "google-bert/bert-base-uncased",
+        "BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp",
+    ]
+    
+    if pretrained_model_name_or_path not in tokenizers_with_special_tokens:
         # Define special tokens to be consistent with RoBERTa
         special_tokens = {
             "bos_token": "<s>",
@@ -40,7 +47,13 @@ def get_tokenizer(
         # Update the processor to add <eos> and <bos> tokens
         tokenizer._tokenizer.post_processor = TemplateProcessing(
             single=tokenizer.bos_token + " $A " + tokenizer.eos_token,
-            pair=tokenizer.bos_token + " $A " + tokenizer.sep_token + " " + tokenizer.bos_token + " $B " + tokenizer.eos_token,
+            pair=tokenizer.bos_token
+            + " $A "
+            + tokenizer.sep_token
+            + " "
+            + tokenizer.bos_token
+            + " $B "
+            + tokenizer.eos_token,
             special_tokens=[
                 (tokenizer.eos_token, tokenizer.eos_token_id),
                 (tokenizer.bos_token, tokenizer.bos_token_id),
@@ -76,8 +89,12 @@ def multi_column_mapping(x, tokenizer, column_name, max_length, truncation):
                 )
                 for item in x[col]
             ]
-            output[f"input_ids_{col}"] = [tokenized["input_ids"] for tokenized in tokenized_list]
-            output[f"attention_mask_{col}"] = [tokenized["attention_mask"] for tokenized in tokenized_list]
+            output[f"input_ids_{col}"] = [
+                tokenized["input_ids"] for tokenized in tokenized_list
+            ]
+            output[f"attention_mask_{col}"] = [
+                tokenized["attention_mask"] for tokenized in tokenized_list
+            ]
         else:
             tokenized = tokenizer(
                 x[col],
@@ -109,8 +126,19 @@ def tokenize(
 
     # Single column tokenization
     if isinstance(column_name, str):
-        features = Features({"input_ids": Sequence(Value("int32")), "attention_mask": Sequence(Value("bool"))})
-        mapping = partial(single_column_mapping, tokenizer=tokenizer, column_name=column_name, max_length=max_length, truncation=truncation)
+        features = Features(
+            {
+                "input_ids": Sequence(Value("int32")),
+                "attention_mask": Sequence(Value("bool")),
+            }
+        )
+        mapping = partial(
+            single_column_mapping,
+            tokenizer=tokenizer,
+            column_name=column_name,
+            max_length=max_length,
+            truncation=truncation,
+        )
 
     # Multi column tokenization
     else:
@@ -124,7 +152,13 @@ def tokenize(
                 feat[f"attention_mask_{col}"] = Sequence(Value("bool"))
         features = Features(feat)
 
-        mapping = partial(multi_column_mapping, tokenizer=tokenizer, column_name=column_name, max_length=max_length, truncation=truncation)
+        mapping = partial(
+            multi_column_mapping,
+            tokenizer=tokenizer,
+            column_name=column_name,
+            max_length=max_length,
+            truncation=truncation,
+        )
 
     # Tokenize the dataset
     dataset = dataset.map(

@@ -1,4 +1,0 @@
-hidden_size: 1008
-num_hidden_layers: 16
-num_attention_heads: 12
-intermediate_size: 4032

@@ -1,6 +1,0 @@
-name: refinedweb
-column: content
-path_to_disk: tokenized_datasets/falcon-refinedweb_google_1024
-train:
-  path: tiiuae/falcon-refinedweb
-  split: train

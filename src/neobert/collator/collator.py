@@ -1,12 +1,14 @@
-import torch
-
 from typing import Any, Optional, Tuple
+
+import torch
 from transformers import DataCollatorForLanguageModeling, DefaultDataCollator
 
 
 # Adapted from https://github.com/huggingface/transformers/blob/125de4164364420854d7fe537a9bd2fdaf7369d4/src/transformers/data/data_collator.py#L828
 class CustomCollatorForMLM(DataCollatorForLanguageModeling):
-    def torch_mask_tokens(self, inputs: Any, special_tokens_mask: Optional[Any] = None) -> Tuple[Any, Any]:
+    def torch_mask_tokens(
+        self, inputs: Any, special_tokens_mask: Optional[Any] = None
+    ) -> Tuple[Any, Any]:
         """
         Prepare masked tokens inputs/labels for masked language modeling: 100% MASK.
         """
@@ -15,7 +17,12 @@ class CustomCollatorForMLM(DataCollatorForLanguageModeling):
         # We sample a few tokens in each sequence for MLM training (with probability `self.mlm_probability`)
         probability_matrix = torch.full(labels.shape, self.mlm_probability)
         if special_tokens_mask is None:
-            special_tokens_mask = [self.tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True) for val in labels.tolist()]
+            special_tokens_mask = [
+                self.tokenizer.get_special_tokens_mask(
+                    val, already_has_special_tokens=True
+                )
+                for val in labels.tolist()
+            ]
             special_tokens_mask = torch.tensor(special_tokens_mask, dtype=torch.bool)
         else:
             special_tokens_mask = special_tokens_mask.bool()
@@ -25,7 +32,9 @@ class CustomCollatorForMLM(DataCollatorForLanguageModeling):
         labels[~masked_indices] = -100  # We only compute loss on masked tokens
 
         # 100% of the time, we replace masked input tokens with tokenizer.mask_token ([MASK])
-        inputs[masked_indices] = self.tokenizer.convert_tokens_to_ids(self.tokenizer.mask_token)
+        inputs[masked_indices] = self.tokenizer.convert_tokens_to_ids(
+            self.tokenizer.mask_token
+        )
 
         return inputs, labels
 
@@ -60,10 +69,16 @@ class DataCollatorWithPacking(DefaultDataCollator):
 
             # Truncate sequence and add to packed sequences
             if current_length >= self.max_length:
-                packed_sequences.append({"input_ids": current_sequence[: self.max_length]})
+                packed_sequences.append(
+                    {"input_ids": current_sequence[: self.max_length]}
+                )
 
             # Keep truncated end of sequence for the next packing
-            current_sequence = current_sequence[self.max_length :] if current_length > self.max_length + 1 else []
+            current_sequence = (
+                current_sequence[self.max_length :]
+                if current_length > self.max_length + 1
+                else []
+            )
 
         return self.default_data_collator(packed_sequences, return_tensors)
 
@@ -113,7 +128,9 @@ def get_collator(
 
         def collate_fn(batch):
             batch = mlm_collator(batch)
-            batch["attention_mask"] = torch.where(batch["attention_mask"] == 1, float(0.0), float("-inf")).type(dtype)
+            batch["attention_mask"] = torch.where(
+                batch["attention_mask"] == 1, float(0.0), float("-inf")
+            ).type(dtype)
             return batch
 
     return collate_fn

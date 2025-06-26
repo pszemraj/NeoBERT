@@ -1,7 +1,0 @@
-train:
-  num_workers: 4
-  batch_size: 64
-  shuffle: True
-  pin_memory: True
-  persistent_workers: False
-  pack_sequences: False

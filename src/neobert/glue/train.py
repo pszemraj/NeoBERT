@@ -1,43 +1,40 @@
-""" Finetuning a NeoBERT model for sequence classification on GLUE or Super GLUE."""
+"""Finetuning a NeoBERT model for sequence classification on GLUE or Super GLUE."""
 
-import shutil
 import json
 import math
 import os
 import random
-
-import numpy as np
-
-import evaluate
-import torch
-from torch.nn import CrossEntropyLoss, MSELoss
-from accelerate import Accelerator
-from accelerate.logging import get_logger
-from accelerate.utils import set_seed, ProjectConfiguration, DistributedType
-from datasets import load_dataset, ClassLabel
-from torch.utils.data import DataLoader
-from tqdm.auto import tqdm
+import shutil
 from functools import partial
 
-from omegaconf import OmegaConf, DictConfig
-
-from transformers import (
-    DataCollatorWithPadding,
-    get_cosine_schedule_with_warmup,
-    get_scheduler,
-    AutoTokenizer,
-    AutoConfig,
-    AutoModelForSequenceClassification,
-    AutoModelForMaskedLM,
-)
+import evaluate
+import numpy as np
+import torch
+from accelerate import Accelerator
+from accelerate.logging import get_logger
+from accelerate.utils import DistributedType, ProjectConfiguration, set_seed
+from datasets import ClassLabel, load_dataset
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
+from torch.nn import CrossEntropyLoss, MSELoss
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
+from transformers import (
+    AutoConfig,
+    AutoModelForMaskedLM,
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
+    DataCollatorWithPadding,
+)
 
-from neobert.model import NeoBERTForSequenceClassification, NeoBERTConfig, NomicBERTForSequenceClassification
+from neobert.model import (
+    NeoBERTConfig,
+    NeoBERTForSequenceClassification,
+)
 from neobert.tokenizer import get_tokenizer
-from .process import process_function
-from ..dataloader import get_dataloader
-from ..scheduler import get_scheduler
 
+from ..config import Config
+from ..scheduler import get_scheduler
+from .process import process_function
 
 logger = get_logger(__name__)
 
@@ -84,7 +81,9 @@ def get_evaluation(
         progress_bar.update(1)
         with torch.no_grad():
             if flash_attention:
-                pad_mask = torch.where(batch["attention_mask"] == 1, float(0.0), float("-inf")).type(dtype_pad_mask)
+                pad_mask = torch.where(
+                    batch["attention_mask"] == 1, float(0.0), float("-inf")
+                ).type(dtype_pad_mask)
             else:
                 pad_mask = batch["attention_mask"].type(dtype_pad_mask)
             logits = model(batch["input_ids"], pad_mask)["logits"]
@@ -96,12 +95,18 @@ def get_evaluation(
 
         if compute_metric:
             if accelerator is not None:
-                batch_predictions, references = accelerator.gather((batch_predictions, batch["labels"]))
+                batch_predictions, references = accelerator.gather(
+                    (batch_predictions, batch["labels"])
+                )
                 # If we are in a multiprocess environment, the last batch has duplicates
                 if accelerator.num_processes > 1:
                     if step == len(dataloader) - 1:
-                        batch_predictions = batch_predictions[: len(dataloader.dataset) - samples_seen]
-                        references = references[: len(dataloader.dataset) - samples_seen]
+                        batch_predictions = batch_predictions[
+                            : len(dataloader.dataset) - samples_seen
+                        ]
+                        references = references[
+                            : len(dataloader.dataset) - samples_seen
+                        ]
                     else:
                         samples_seen += references.shape[0]
             else:
@@ -134,7 +139,11 @@ def get_best_checkpoint_path(base_dir, task, num_checkpoints_to_merge=1):
     for root, _, files in os.walk(base_dir):
         if task in root:
             # Filter out the JSON files following the naming convention
-            json_files = [f for f in files if f.startswith("all_results_step_") and f.endswith(".json")]
+            json_files = [
+                f
+                for f in files
+                if f.startswith("all_results_step_") and f.endswith(".json")
+            ]
 
             for json_file in json_files:
                 json_path = os.path.join(root, json_file)
@@ -154,8 +163,13 @@ def get_best_checkpoint_path(base_dir, task, num_checkpoints_to_merge=1):
                         # Construct the corresponding checkpoint folder path
                         checkpoint_folder = os.path.join(root, "model_checkpoints")
                         checkpoint = step_number
-                        if os.path.exists(os.path.join(checkpoint_folder, str(checkpoint))):
-                            best_checkpoint_path, best_checkpoint = checkpoint_folder, checkpoint
+                        if os.path.exists(
+                            os.path.join(checkpoint_folder, str(checkpoint))
+                        ):
+                            best_checkpoint_path, best_checkpoint = (
+                                checkpoint_folder,
+                                checkpoint,
+                            )
 
     checkpoint_list = [best_checkpoint]
     if num_checkpoints_to_merge > 1:
@@ -163,16 +177,24 @@ def get_best_checkpoint_path(base_dir, task, num_checkpoints_to_merge=1):
         ckpts = [int(ckpt) for ckpt in ckpts if int(ckpt) <= int(best_checkpoint)]
         ckpts.sort()
 
-        checkpoint_list = ckpts if len(ckpts) < num_checkpoints_to_merge else ckpts[-num_checkpoints_to_merge:]
+        checkpoint_list = (
+            ckpts
+            if len(ckpts) < num_checkpoints_to_merge
+            else ckpts[-num_checkpoints_to_merge:]
+        )
 
     return best_checkpoint_path, checkpoint_list
 
 
 def save_checkpoint(cfg, model, accelerator, completed_steps):
-    model_checkpoint_dir = os.path.join(cfg.trainer.dir, "model_checkpoints")
+    model_checkpoint_dir = os.path.join(cfg.trainer.output_dir, "model_checkpoints")
 
     # Delete checkpoints with the lesser evaluation accuracy if there are too many
-    if cfg.trainer.max_ckpt is not None and cfg.trainer.max_ckpt > 0 and os.path.isdir(model_checkpoint_dir):
+    if (
+        cfg.trainer.max_ckpt is not None
+        and cfg.trainer.max_ckpt > 0
+        and os.path.isdir(model_checkpoint_dir)
+    ):
         files = os.listdir(model_checkpoint_dir)
         iterations = [f for f in files if f.isdigit()]
         iterations.sort()
@@ -181,7 +203,10 @@ def save_checkpoint(cfg, model, accelerator, completed_steps):
         while iterations is not None and len(iterations) >= cfg.trainer.max_ckpt:
             file_to_remove = iterations.pop(0)
             shutil.rmtree(os.path.join(model_checkpoint_dir, str(file_to_remove)))
-            print(f"Deleted old model checkpoint {file_to_remove} due to limit " f"(max_ckpt = {cfg.trainer.max_ckpt})")
+            print(
+                f"Deleted old model checkpoint {file_to_remove} due to limit "
+                f"(max_ckpt = {cfg.trainer.max_ckpt})"
+            )
 
     # Save the checkpoint
     if accelerator.distributed_type is DistributedType.DEEPSPEED:
@@ -195,15 +220,17 @@ def save_checkpoint(cfg, model, accelerator, completed_steps):
         )
 
 
-def trainer(cfg: DictConfig):
+def trainer(cfg: Config):
     # Accelerator object
     project_config = ProjectConfiguration(
-        cfg.trainer.dir,
+        cfg.trainer.output_dir,
         automatic_checkpoint_naming=False,
     )
     accelerator = Accelerator(
         log_with="wandb",
-        mixed_precision="no" if cfg.trainer.mixed_precision == "fp32" else cfg.trainer.mixed_precision,
+        mixed_precision="no"
+        if cfg.trainer.mixed_precision == "fp32"
+        else cfg.trainer.mixed_precision,
         project_config=project_config,
     )
 
@@ -214,7 +241,7 @@ def trainer(cfg: DictConfig):
             "wandb": {
                 "name": cfg.wandb.name,
                 "entity": cfg.wandb.entity,
-                "config": OmegaConf.to_container(cfg) | {"distributed_type": accelerator.distributed_type},
+                "config": cfg.__dict__,
                 "tags": cfg.wandb.tags,
                 "dir": cfg.wandb.dir,
                 "mode": cfg.wandb.mode,
@@ -231,15 +258,15 @@ def trainer(cfg: DictConfig):
 
     # Handle the repository creation
     if accelerator.is_main_process:
-        if os.path.isdir(cfg.trainer.dir):
-            for file in os.listdir(cfg.trainer.dir):
-                if os.path.isfile(os.path.join(cfg.trainer.dir, str(file))):
-                    os.remove(os.path.join(cfg.trainer.dir, str(file)))
-        os.makedirs(cfg.trainer.dir, exist_ok=True)
+        if os.path.isdir(cfg.trainer.output_dir):
+            for file in os.listdir(cfg.trainer.output_dir):
+                if os.path.isfile(os.path.join(cfg.trainer.output_dir, str(file))):
+                    os.remove(os.path.join(cfg.trainer.output_dir, str(file)))
+        os.makedirs(cfg.trainer.output_dir, exist_ok=True)
     accelerator.wait_for_everyone()
 
-    flash_attention = cfg.flash_attention if "flash_attention" in cfg.keys() else True
-    if cfg.model.from_hub:
+    flash_attention = getattr(cfg, "flash_attention", True)
+    if hasattr(cfg.model, "from_hub") and cfg.model.from_hub:
         tokenizer = AutoTokenizer.from_pretrained(
             cfg.model.name,
             use_fast=True,
@@ -247,9 +274,19 @@ def trainer(cfg: DictConfig):
             trust_remote_code=True,
         )
     else:
-        model_pretraining_config = OmegaConf.load(cfg.model.pretrained_config_path)
+        # Import our new config system
+        from neobert.config import ConfigLoader
+
+        pretrained_config_path = getattr(cfg.model, "pretrained_config_path", "configs/test_tiny_pretrain.yaml")
+        model_pretraining_config = ConfigLoader.load(pretrained_config_path)
         model_pretraining_config.model.flash_attention = flash_attention
-        tokenizer = get_tokenizer(**model_pretraining_config.tokenizer)
+        tokenizer = get_tokenizer(
+            name=model_pretraining_config.tokenizer.name,
+            path=getattr(model_pretraining_config.tokenizer, "path", None),
+            max_length=model_pretraining_config.tokenizer.max_length,
+            padding=getattr(model_pretraining_config.tokenizer, "padding", True),
+            truncation=getattr(model_pretraining_config.tokenizer, "truncation", True),
+        )
 
     print("Loading metric...")
     # Get the metric function
@@ -264,7 +301,9 @@ def trainer(cfg: DictConfig):
 
     # Load additional metric for the mismatched validation set of mnli
     if cfg.task == "mnli":
-        mm_metric = evaluate.load(cfg.meta_task, "mnli_mismatched", experiment_id=cfg.id)
+        mm_metric = evaluate.load(
+            cfg.meta_task, "mnli_mismatched", experiment_id=cfg.id
+        )
 
     # def compute_metrics(p: EvalPrediction):
     #     preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
@@ -283,15 +322,26 @@ def trainer(cfg: DictConfig):
         raw_datasets = load_dataset("sentence-transformers/all-nli", name="pair-class")
 
         def collapse_classes(examples):
-            examples["label"] = [1 if label == 2 else label for label in examples["label"]]
+            examples["label"] = [
+                1 if label == 2 else label for label in examples["label"]
+            ]
             return examples
 
-        raw_datasets.map(collapse_classes, batched=True, desc="Collapsing classes into entailment and not entailment.")
+        raw_datasets.map(
+            collapse_classes,
+            batched=True,
+            desc="Collapsing classes into entailment and not entailment.",
+        )
 
     elif cfg.meta_task == "glue":
         raw_datasets = load_dataset("glue", cfg.task)
     else:
-        raw_datasets = load_dataset("json", data_dir=os.path.join(os.environ["HF_DATASETS_CACHE"], "super_glue", cfg.task))
+        raw_datasets = load_dataset(
+            "json",
+            data_dir=os.path.join(
+                os.environ["HF_DATASETS_CACHE"], "super_glue", cfg.task
+            ),
+        )
 
     # Split between train and validation for datasets that don't have it natively
     if cfg.task in ("axb", "axg"):
@@ -311,10 +361,16 @@ def trainer(cfg: DictConfig):
 
     is_regression = cfg.task == "stsb"
     if not is_regression:
-        processed_datasets = processed_datasets.cast_column("labels", ClassLabel(names=processed_datasets["train"].unique("labels")))
+        processed_datasets = processed_datasets.cast_column(
+            "labels", ClassLabel(names=processed_datasets["train"].unique("labels"))
+        )
 
     train_dataset = processed_datasets["train"]
-    eval_dataset = processed_datasets["validation_matched" if cfg.task == "mnli" else ("dev" if cfg.task == "allnli" else "validation")]
+    eval_dataset = processed_datasets[
+        "validation_matched"
+        if cfg.task == "mnli"
+        else ("dev" if cfg.task == "allnli" else "validation")
+    ]
 
     if cfg.task == "mnli":
         mm_eval_dataset = processed_datasets["validation_mismatched"]
@@ -345,16 +401,29 @@ def trainer(cfg: DictConfig):
 
     def collate_fn(batch):
         batch = data_collator(batch)
-        batch["attention_mask"] = torch.where(batch["attention_mask"] == 1, float(0.0), float("-inf")).type(dtype_pad_mask)
+        batch["attention_mask"] = torch.where(
+            batch["attention_mask"] == 1, float(0.0), float("-inf")
+        ).type(dtype_pad_mask)
         return batch
 
-    train_dataloader = DataLoader(train_dataset, shuffle=True, collate_fn=collate_fn, batch_size=cfg.trainer.train_batch_size)
-    eval_dataloader = DataLoader(eval_dataset, collate_fn=collate_fn, batch_size=cfg.trainer.eval_batch_size)
+    train_dataloader = DataLoader(
+        train_dataset,
+        shuffle=True,
+        collate_fn=collate_fn,
+        batch_size=cfg.trainer.train_batch_size,
+    )
+    eval_dataloader = DataLoader(
+        eval_dataset, collate_fn=collate_fn, batch_size=cfg.trainer.eval_batch_size
+    )
     if cfg.task == "mnli":
-        mm_eval_dataloader = DataLoader(mm_eval_dataset, collate_fn=collate_fn, batch_size=cfg.trainer.eval_batch_size)
+        mm_eval_dataloader = DataLoader(
+            mm_eval_dataset,
+            collate_fn=collate_fn,
+            batch_size=cfg.trainer.eval_batch_size,
+        )
 
     # Model
-    if cfg.model.from_hub:
+    if hasattr(cfg.model, "from_hub") and cfg.model.from_hub:
         config = AutoConfig.from_pretrained(
             cfg.model.name,
             num_labels=num_labels,
@@ -362,23 +431,24 @@ def trainer(cfg: DictConfig):
             revision="main",
             trust_remote_code=True,
         )
-        if "nomic" in cfg.model.name:
-            base_model = AutoModelForMaskedLM.from_pretrained(
-                cfg.model.name,
-                from_tf=False,
-                config=config,
-                revision="main",
-                trust_remote_code=True,
-                ignore_mismatched_sizes=False,
-            )
-            model = NomicBERTForSequenceClassification(
-                config,
-                base_model.bert,
-                num_labels=num_labels,
-                classifier_dropout=cfg.model.classifier_dropout,
-                classifier_init_range=cfg.model.classifier_init_range,
-            )
-        else:
+        # if "nomic" in cfg.model.name:
+        #     base_model = AutoModelForMaskedLM.from_pretrained(
+        #         cfg.model.name,
+        #         from_tf=False,
+        #         config=config,
+        #         revision="main",
+        #         trust_remote_code=True,
+        #         ignore_mismatched_sizes=False,
+        #     )
+        #     model = NomicBERTForSequenceClassification(
+        #         config,
+        #         base_model.bert,
+        #         num_labels=num_labels,
+        #         classifier_dropout=cfg.model.classifier_dropout,
+        #         classifier_init_range=cfg.model.classifier_init_range,
+        #     )
+        # else:
+        if True:
             model = AutoModelForSequenceClassification.from_pretrained(
                 cfg.model.name,
                 from_tf=False,
@@ -389,35 +459,57 @@ def trainer(cfg: DictConfig):
             )
     else:
         model = NeoBERTForSequenceClassification(
-            NeoBERTConfig(**model_pretraining_config.model, **model_pretraining_config.tokenizer),
+            NeoBERTConfig(
+                **model_pretraining_config.model, **model_pretraining_config.tokenizer
+            ),
             num_labels=num_labels,
-            classifier_dropout=cfg.model.classifier_dropout,
-            classifier_init_range=cfg.model.classifier_init_range,
+            classifier_dropout=getattr(cfg.model, "classifier_dropout", 0.1),
+            classifier_init_range=getattr(cfg.model, "classifier_init_range", 0.02),
         )
 
-    if cfg.model.transfer_from_task:
+    if hasattr(cfg.model, "transfer_from_task") and cfg.model.transfer_from_task:
         task_to_transfer_from = TASK_TO_TRANSFER_FROM.get(cfg.task, None)
         if not task_to_transfer_from:
             raise ValueError(f"Task to transfer from for {cfg.task} is not set.")
         cfg.model.pretrained_checkpoint_dir, checkpoint_list = get_best_checkpoint_path(
-            os.path.join(cfg.model.pretrained_checkpoint_dir, "glue", str(cfg.model.pretrained_checkpoint)), task_to_transfer_from
+            os.path.join(
+                cfg.model.pretrained_checkpoint_dir,
+                "glue",
+                str(cfg.model.pretrained_checkpoint),
+            ),
+            task_to_transfer_from,
         )
         cfg.model.pretrained_checkpoint = checkpoint_list[-1]
-        logger.info(f"Transfering from: {cfg.model.pretrained_checkpoint_dir}, {cfg.model.pretrained_checkpoint}")
-        if not cfg.model.pretrained_checkpoint_dir or not cfg.model.pretrained_checkpoint:
+        logger.info(
+            f"Transfering from: {cfg.model.pretrained_checkpoint_dir}, {cfg.model.pretrained_checkpoint}"
+        )
+        if (
+            not cfg.model.pretrained_checkpoint_dir
+            or not cfg.model.pretrained_checkpoint
+        ):
             raise ValueError("Unable to retrieve checkpoint to transfer from.")
 
     else:
-        cfg.model.pretrained_checkpoint_dir = os.path.join(cfg.model.pretrained_checkpoint_dir, "model_checkpoints")
+        pretrained_checkpoint_dir = getattr(cfg.model, "pretrained_checkpoint_dir", "./test_outputs")
+        cfg.model.pretrained_checkpoint_dir = os.path.join(
+            pretrained_checkpoint_dir, "model_checkpoints"
+        )
 
-    if not cfg.model.from_hub:
+    pretrained_checkpoint = getattr(cfg.model, "pretrained_checkpoint", None)
+    if not (hasattr(cfg.model, "from_hub") and cfg.model.from_hub) and pretrained_checkpoint is not None:
         try:
             model = load_state_dict_from_zero_checkpoint(
-                model, cfg.model.pretrained_checkpoint_dir, tag=str(cfg.model.pretrained_checkpoint)
+                model,
+                cfg.model.pretrained_checkpoint_dir,
+                tag=str(pretrained_checkpoint),
             )
         except FileNotFoundError:
             state_dict = torch.load(
-                os.path.join(cfg.model.pretrained_checkpoint_dir, str(cfg.model.pretrained_checkpoint), "state_dict.pt")
+                os.path.join(
+                    cfg.model.pretrained_checkpoint_dir,
+                    str(pretrained_checkpoint),
+                    "state_dict.pt",
+                )
             )
             state_dict = {k: v for k, v in state_dict.items() if "classifier" not in k}
             model.load_state_dict(state_dict, strict=False)
@@ -427,11 +519,19 @@ def trainer(cfg: DictConfig):
     no_decay = ["bias", "LayerNorm.weight"]
     optimizer_grouped_parameters = [
         {
-            "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+            "params": [
+                p
+                for n, p in model.named_parameters()
+                if not any(nd in n for nd in no_decay)
+            ],
             "weight_decay": cfg.optimizer.hparams.weight_decay,
         },
         {
-            "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
+            "params": [
+                p
+                for n, p in model.named_parameters()
+                if any(nd in n for nd in no_decay)
+            ],
             "weight_decay": 0.0,
         },
     ]
@@ -439,42 +539,68 @@ def trainer(cfg: DictConfig):
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / cfg.trainer.gradient_accumulation_steps)
+    num_update_steps_per_epoch = math.ceil(
+        len(train_dataloader) / cfg.trainer.gradient_accumulation_steps
+    )
     if cfg.trainer.max_steps is None:
-        cfg.trainer.max_steps = cfg.trainer.num_train_epochs * num_update_steps_per_epoch
+        cfg.trainer.max_steps = (
+            cfg.trainer.num_train_epochs * num_update_steps_per_epoch
+        )
         overrode_max_train_steps = True
 
     if cfg.scheduler.warmup_percent is not None:
         if cfg.scheduler.warmup_steps is not None:
-            UserWarning("Overrinding number of warmup steps based on warmup percentage.")
-        cfg.scheduler.warmup_steps = math.ceil(cfg.trainer.max_steps / 100 * cfg.scheduler.warmup_percent)
+            UserWarning(
+                "Overrinding number of warmup steps based on warmup percentage."
+            )
+        cfg.scheduler.warmup_steps = math.ceil(
+            cfg.trainer.max_steps / 100 * cfg.scheduler.warmup_percent
+        )
     if cfg.scheduler.decay_percent is not None:
         if cfg.scheduler.decay_steps is not None:
             UserWarning("Overrinding number of decay steps based on decay percentage.")
-        cfg.scheduler.decay_steps = math.ceil(cfg.trainer.max_steps / 100 * cfg.scheduler.decay_percent)
+        cfg.scheduler.decay_steps = math.ceil(
+            cfg.trainer.max_steps / 100 * cfg.scheduler.decay_percent
+        )
 
-    scheduler = get_scheduler(optimizer=optimizer, lr=cfg.optimizer.hparams.lr, **cfg.scheduler)
+    scheduler = get_scheduler(
+        optimizer=optimizer, lr=cfg.optimizer.hparams.lr, **cfg.scheduler
+    )
 
     # Prepare everything with our `accelerator`.
-    model, optimizer, train_dataloader, eval_dataloader, scheduler = accelerator.prepare(
-        model, optimizer, train_dataloader, eval_dataloader, scheduler
+    model, optimizer, train_dataloader, eval_dataloader, scheduler = (
+        accelerator.prepare(
+            model, optimizer, train_dataloader, eval_dataloader, scheduler
+        )
     )
 
     if cfg.task == "mnli":
         mm_eval_dataloader = accelerator.prepare(mm_eval_dataloader)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / cfg.trainer.gradient_accumulation_steps)
+    num_update_steps_per_epoch = math.ceil(
+        len(train_dataloader) / cfg.trainer.gradient_accumulation_steps
+    )
     if overrode_max_train_steps:
-        cfg.trainer.max_steps = cfg.trainer.num_train_epochs * num_update_steps_per_epoch
+        cfg.trainer.max_steps = (
+            cfg.trainer.num_train_epochs * num_update_steps_per_epoch
+        )
     # Afterwards we recalculate our number of training epochs
-    cfg.trainer.num_train_epochs = math.ceil(cfg.trainer.max_steps / num_update_steps_per_epoch)
+    cfg.trainer.num_train_epochs = math.ceil(
+        cfg.trainer.max_steps / num_update_steps_per_epoch
+    )
 
     # Overwrite the number of steps performed between evaluation based on the dataset size.
-    cfg.trainer.eval_steps = min(cfg.trainer.eval_steps, len(train_dataset) // cfg.trainer.train_batch_size)
+    cfg.trainer.eval_steps = min(
+        cfg.trainer.eval_steps, len(train_dataset) // cfg.trainer.train_batch_size
+    )
 
     # To keep the last n checkpoints before the best model and do k cycles before early stopping, we save the last k+n models
-    if cfg.trainer.max_ckpt is not None and cfg.trainer.max_ckpt > 0 and cfg.trainer.early_stopping > 0:
+    if (
+        cfg.trainer.max_ckpt is not None
+        and cfg.trainer.max_ckpt > 0
+        and cfg.trainer.early_stopping > 0
+    ):
         cfg.trainer.max_ckpt += cfg.trainer.early_stopping
 
     # Get loss function
@@ -484,27 +610,42 @@ def trainer(cfg: DictConfig):
         loss_fct = MSELoss()
 
     # Train!
-    total_batch_size = cfg.trainer.train_batch_size * accelerator.num_processes * cfg.trainer.gradient_accumulation_steps
+    total_batch_size = (
+        cfg.trainer.train_batch_size
+        * accelerator.num_processes
+        * cfg.trainer.gradient_accumulation_steps
+    )
 
     logger.info("***** Running training *****")
     logger.info(f"  Task = {cfg.task}")
     logger.info(f"  Num train examples = {len(train_dataset)}")
     logger.info(f"  Num eval examples = {len(eval_dataset)}")
     logger.info(f"  Num epochs = {cfg.trainer.num_train_epochs}")
-    logger.info(f"  Instantaneous batch size per device = {cfg.trainer.train_batch_size}")
-    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
+    logger.info(
+        f"  Instantaneous batch size per device = {cfg.trainer.train_batch_size}"
+    )
+    logger.info(
+        f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}"
+    )
     logger.info(f"  Learning rate = {cfg.optimizer.hparams.lr}")
-    logger.info(f"  Gradient accumulation steps = {cfg.trainer.gradient_accumulation_steps}")
+    logger.info(
+        f"  Gradient accumulation steps = {cfg.trainer.gradient_accumulation_steps}"
+    )
     logger.info(f"  Total optimization steps = {cfg.trainer.max_steps}")
     logger.info(f"  Evaluation steps = {cfg.trainer.eval_steps}")
     logger.info(f"  Early stopping cycles = {cfg.trainer.early_stopping}")
     # Only show the progress bar once on each machine.
-    progress_bar = tqdm(range(cfg.trainer.max_steps), disable=not accelerator.is_local_main_process)
+    progress_bar = tqdm(
+        range(cfg.trainer.max_steps), disable=not accelerator.is_local_main_process
+    )
     completed_steps = 0
     starting_epoch = 0
     # Potentially load in the weights and states from a previous save
     if cfg.trainer.resume_from_checkpoint:
-        if cfg.trainer.resume_from_checkpoint is not None or cfg.trainer.resume_from_checkpoint != "":
+        if (
+            cfg.trainer.resume_from_checkpoint is not None
+            or cfg.trainer.resume_from_checkpoint != ""
+        ):
             accelerator.print(f"Resumed from checkpoint: {cfg.trainer.checkpoint_dir}")
             accelerator.load_state(cfg.trainer.checkpoint_dir)
             path = os.path.basename(cfg.trainer.checkpoint_dir)
@@ -512,7 +653,9 @@ def trainer(cfg: DictConfig):
             # Get the most recent checkpoint
             dirs = [f.name for f in os.scandir(os.getcwd()) if f.is_dir()]
             dirs.sort(key=os.path.getctime)
-            path = dirs[-1]  # Sorts folders by date modified, most recent checkpoint is the last
+            path = dirs[
+                -1
+            ]  # Sorts folders by date modified, most recent checkpoint is the last
         # Extract `epoch_{i}` or `step_{i}`
         training_difference = os.path.splitext(path)[0]
 
@@ -522,7 +665,10 @@ def trainer(cfg: DictConfig):
             completed_steps = starting_epoch * num_update_steps_per_epoch
         else:
             # need to multiply `gradient_accumulation_steps` to reflect real steps
-            resume_step = int(training_difference.replace("step_", "")) * cfg.trainer.gradient_accumulation_steps
+            resume_step = (
+                int(training_difference.replace("step_", ""))
+                * cfg.trainer.gradient_accumulation_steps
+            )
             starting_epoch = resume_step // len(train_dataloader)
             resume_step -= starting_epoch * len(train_dataloader)
             completed_steps = resume_step // cfg.gradient_accumulation_step
@@ -540,7 +686,6 @@ def trainer(cfg: DictConfig):
 
     for epoch in range(starting_epoch, cfg.trainer.num_train_epochs):
         for batch in train_dataloader:
-
             logits = model(batch["input_ids"], batch["attention_mask"])["logits"]
 
             if not is_regression:
@@ -552,7 +697,11 @@ def trainer(cfg: DictConfig):
                     loss = loss_fct(logits, batch["labels"])
 
             # Compute train accuracy
-            predictions = logits.argmax(dim=-1) if not is_regression else (logits.squeeze() if logits.size() != torch.Size([1]) else logits)
+            predictions = (
+                logits.argmax(dim=-1)
+                if not is_regression
+                else (logits.squeeze() if logits.size() != torch.Size([1]) else logits)
+            )
             predictions, references = accelerator.gather((predictions, batch["labels"]))
 
             # print(logits, loss)
@@ -573,10 +722,19 @@ def trainer(cfg: DictConfig):
             total_loss += loss.item()
 
             # Run evaluation
-            if completed_steps % min(cfg.trainer.eval_steps, len(train_dataloader) * cfg.trainer.train_batch_size // 10) == 0:
+            if (
+                completed_steps
+                % min(
+                    cfg.trainer.eval_steps,
+                    len(train_dataloader) * cfg.trainer.train_batch_size // 10,
+                )
+                == 0
+            ):
                 train_metric = metric.compute()
                 if len(train_metric) > 1:
-                    train_metric["combined_score"] = np.mean(list(train_metric.values())).item()
+                    train_metric["combined_score"] = np.mean(
+                        list(train_metric.values())
+                    ).item()
 
                 model.eval()
                 eval_metric = get_evaluation(
@@ -592,7 +750,9 @@ def trainer(cfg: DictConfig):
 
                 logger.info(f"step {completed_steps} eval metric: {eval_metric}")
                 logger.info(f"step {completed_steps} train metric: {train_metric}")
-                logger.info(f"step {completed_steps} train loss: {total_loss / completed_steps}")
+                logger.info(
+                    f"step {completed_steps} train loss: {total_loss / completed_steps}"
+                )
 
                 if cfg.task == "mnli":
                     # Evaluation on matched MNLI
@@ -612,7 +772,9 @@ def trainer(cfg: DictConfig):
                     results["accuracy_mm"] = mm_eval_metric["accuracy"]
 
                     res_mm = results["accuracy_mm"]
-                    logger.info(f"step {completed_steps} eval metric mismatched: {res_mm}")
+                    logger.info(
+                        f"step {completed_steps} eval metric mismatched: {res_mm}"
+                    )
 
                 accelerator.log(
                     {
@@ -630,8 +792,18 @@ def trainer(cfg: DictConfig):
                 if cfg.task == "mnli":
                     all_results = {f"eval_{k}": v for k, v in results.items()}
 
-                with open(os.path.join(cfg.trainer.dir, f"all_results_step_{completed_steps}.json"), "w") as f:
-                    print("dumping in", os.path.join(cfg.trainer.dir, f"all_results_step_{completed_steps}.json"))
+                with open(
+                    os.path.join(
+                        cfg.trainer.output_dir, f"all_results_step_{completed_steps}.json"
+                    ),
+                    "w",
+                ) as f:
+                    print(
+                        "dumping in",
+                        os.path.join(
+                            cfg.trainer.output_dir, f"all_results_step_{completed_steps}.json"
+                        ),
+                    )
                     json.dump(all_results, f)
 
                 curr_accuracy = list(eval_metric.values())[0]
@@ -644,7 +816,10 @@ def trainer(cfg: DictConfig):
                 else:
                     early_stopping_counter += 1
 
-                if cfg.trainer.early_stopping > 0 and early_stopping_counter >= cfg.trainer.early_stopping:
+                if (
+                    cfg.trainer.early_stopping > 0
+                    and early_stopping_counter >= cfg.trainer.early_stopping
+                ):
                     print(
                         f"Evaluation accuracy has not improved in {cfg.trainer.early_stopping} cycles of {cfg.trainer.eval_steps} evaluation steps, stopping the training."
                     )
@@ -671,5 +846,5 @@ def trainer(cfg: DictConfig):
     if cfg.task == "mnli":
         all_results = {f"eval_{k}": v for k, v in results.items()}
 
-    with open(os.path.join(cfg.trainer.dir, "all_results.json"), "w") as f:
+    with open(os.path.join(cfg.trainer.output_dir, "all_results.json"), "w") as f:
         json.dump(all_results, f)

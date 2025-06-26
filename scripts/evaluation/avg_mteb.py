@@ -1,8 +1,8 @@
+import argparse
 import json
 import os
 
 import mteb
-import argparse
 
 ### GLOBAL VARIABLES ###
 
@@ -144,7 +144,7 @@ def compute_table():
         for path in paths:
             i = path.find(checkpoint) + len(checkpoint)
             j = path.find("no_model_name_available")
-            model_name = f"{args.model_name}_{checkpoint}_{path[i + 1 : j - 1] if j != -1 else path[i + 1:]}"
+            model_name = f"{args.model_name}_{checkpoint}_{path[i + 1 : j - 1] if j != -1 else path[i + 1 :]}"
 
             all_results.setdefault(model_name, {})
 
@@ -153,9 +153,14 @@ def compute_table():
                     print(f"Skipping non-json {file_name}")
                     continue
                 else:
-                    with open(os.path.join(path, file_name), "r", encoding="utf-8") as f:
+                    with open(
+                        os.path.join(path, file_name), "r", encoding="utf-8"
+                    ) as f:
                         results = json.load(f)
-                        all_results[model_name] = {**all_results[model_name], **{file_name.replace(".json", ""): results}}
+                        all_results[model_name] = {
+                            **all_results[model_name],
+                            **{file_name.replace(".json", ""): results},
+                        }
 
     avg_results = {}
 
@@ -165,16 +170,26 @@ def compute_table():
         for task_type, task_list, _ in TASK_LIST_NAMES:
             model_task_results = []
             for task in task_list:
-                mteb_task = mteb.get_tasks(tasks=[task.replace("CQADupstackRetrieval", "CQADupstackTexRetrieval")])
-                assert len(mteb_task) == 1, f"Found {len(mteb_task)} for {task}. Expected 1."
+                mteb_task = mteb.get_tasks(
+                    tasks=[
+                        task.replace("CQADupstackRetrieval", "CQADupstackTexRetrieval")
+                    ]
+                )
+                assert (
+                    len(mteb_task) == 1
+                ), f"Found {len(mteb_task)} for {task}. Expected 1."
                 test_result = all_results.get(model, {}).get(task, {})
                 try:
-                    model_task_results.append(test_result["scores"]["test"][0].get("main_score"))
-                except:
+                    model_task_results.append(
+                        test_result["scores"]["test"][0].get("main_score")
+                    )
+                except (KeyError, TypeError, IndexError):
                     continue
 
             if len(model_task_results) > 0:
-                avg_results[model][task_type] = round(100 * (sum(model_task_results) / len(model_task_results)), 2)
+                avg_results[model][task_type] = round(
+                    100 * (sum(model_task_results) / len(model_task_results)), 2
+                )
             else:
                 avg_results[model][task_type] = 0
 

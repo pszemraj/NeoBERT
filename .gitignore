@@ -3,7 +3,15 @@ wandb/
 notebooks/
 huggingface/
 tokenized_datasets/
+tokenized_data/
 mergekit
+outputs/
+training_log*.txt
+*.pt
+*.bin
+*.safetensors
+*.pkl
+*.arrow
 
 nohup*
 

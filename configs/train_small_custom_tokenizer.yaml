@@ -1,0 +1,74 @@
+task: "pretraining"
+
+model:
+  hidden_size: 256
+  num_hidden_layers: 4
+  num_attention_heads: 8
+  intermediate_size: 1024
+  dropout_prob: 0.1
+  vocab_size: 31999  # Match the custom tokenizer
+  max_position_embeddings: 512
+  flash_attention: false
+  ngpt: false
+  hidden_act: "gelu"  # Use GELU to avoid xformers issues
+  rope: true
+  rms_norm: true
+
+dataset:
+  name: "pszemraj/simple_wikipedia_LM"
+  path: "./tokenized_data/custom_tokenizer_test"
+  streaming: false
+  num_proc: 4
+  num_workers: 0  # Avoid pickling issues
+  max_seq_length: 512
+  train_split: "train[:5000]"  # Small subset for testing
+  eval_split: "validation[:500]"
+
+tokenizer:
+  name: "BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp"
+  vocab_size: 31999
+  max_length: 512
+
+datacollator:
+  mlm_probability: 0.15
+  pad_to_multiple_of: 8
+
+trainer:
+  output_dir: "./outputs/custom_tokenizer_test"
+  run_name: "neobert_custom_tokenizer_200steps"
+  max_steps: 200
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 2
+  learning_rate: 5e-4
+  warmup_steps: 20
+  logging_steps: 10
+  eval_steps: 100
+  save_steps: 100
+  dataloader_num_workers: 0
+  remove_unused_columns: false
+  report_to: []
+  fp16: false
+  bf16: true  # Use bf16 on modern GPU
+  gradient_checkpointing: false
+  resume_from_checkpoint: false
+
+optimizer:
+  name: "adamw"
+  lr: 5e-4
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  eps: 1e-8
+
+scheduler:
+  name: "cosine"
+  warmup_steps: 20
+  total_steps: 200
+
+wandb:
+  mode: "disabled"
+
+# Additional settings
+seed: 42
+mixed_precision: "bf16"
+debug: true

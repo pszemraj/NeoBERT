@@ -1,13 +1,35 @@
-import os
 import json
+import os
 import shutil
-import hydra
-from omegaconf import DictConfig
+import sys
+from pathlib import Path
+
+# Add parent directory to path
+sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from datasets import DatasetDict, load_from_disk
 
+from neobert.config import load_config_from_args
+from neobert.contrastive.datasets import (
+    ALLNLI,
+    AMAZONQA,
+    CONCURRENTQA,
+    FEVER,
+    GITHUBISSUE,
+    GOOAQ,
+    MSMARCO,
+    PAQ,
+    PUBMEDQA,
+    QQP,
+    SENTENCECOMP,
+    STACKEXCHANGE,
+    STACKOVERFLOW,
+    STS12,
+    STSBENCHMARK,
+    TRIVIAQA,
+    WIKIHOW,
+)
 from neobert.tokenizer import get_tokenizer, tokenize
-from neobert.contrastive import *
 
 DATASETS = {
     "ALLNLI": ALLNLI,
@@ -30,8 +52,7 @@ DATASETS = {
 }
 
 
-@hydra.main(version_base=None, config_path="../../conf", config_name="finetuning")
-def pipeline(cfg: DictConfig):
+def pipeline(cfg):
     if cfg.datasets.load_all_from_disk:
         dataset = load_from_disk(os.path.join(cfg.datasets.path, "all"))
 
@@ -42,29 +63,53 @@ def pipeline(cfg: DictConfig):
         # Load and tokenize subdatasets if necessary
         dataset_dict = {}
         for name in DATASETS.keys():
-            if os.path.isdir(os.path.join(cfg.datasets.path, "all", name)) and not cfg.datasets.force_redownload:
+            if (
+                os.path.isdir(os.path.join(cfg.datasets.path, "all", name))
+                and not cfg.datasets.force_redownload
+            ):
                 print(f"Loading tokenized {name} from disk...")
-                subdataset = DATASETS[name].from_disk(os.path.join(cfg.datasets.path, "all", name)).dataset
+                subdataset = (
+                    DATASETS[name]
+                    .from_disk(os.path.join(cfg.datasets.path, "all", name))
+                    .dataset
+                )
             else:
                 if os.path.isdir(os.path.join(cfg.datasets.path, "all", name)):
                     shutil.rmtree(os.path.join(cfg.datasets.path, "all", name))
                 print(f"Loading {name} from huggingface and preprocessing...")
                 subdataset = DATASETS[name]().dataset
                 print(f"Tokenizing {name}...")
-                subdataset = tokenize(subdataset, tokenizer, column_name=subdataset.column_names, **cfg.tokenizer)
+                subdataset = tokenize(
+                    subdataset,
+                    tokenizer,
+                    column_name=subdataset.column_names,
+                    **cfg.tokenizer,
+                )
                 subdataset.save_to_disk(os.path.join(cfg.datasets.path, "all", name))
 
             dataset_dict[name] = subdataset
 
         # Aggregate datasets
         dataset = DatasetDict(dataset_dict)
-        print(f"Global dataset is ready ! It contains subdatasets {list(DATASETS.keys())}.")
+        print(
+            f"Global dataset is ready ! It contains subdatasets {list(DATASETS.keys())}."
+        )
 
-        with open(os.path.join(cfg.datasets.path, "all", "dataset_dict.json"), mode="w") as f:
+        with open(
+            os.path.join(cfg.datasets.path, "all", "dataset_dict.json"), mode="w"
+        ) as f:
             json.dump({"splits": list(dataset.keys())}, f)
 
     return dataset
 
 
+def main():
+    # Load configuration from command line arguments
+    config = load_config_from_args()
+
+    # Run contrastive preprocessing
+    pipeline(config)
+
+
 if __name__ == "__main__":
-    pipeline()
+    main()

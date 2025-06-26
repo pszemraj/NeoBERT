@@ -2,24 +2,20 @@
 # From https://github.com/pytorch/pytorch/issues/97899
 # From https://github.com/facebookresearch/llama/blob/main/llama/model.py
 
-import numpy as np
-
-import torch
-from torch.utils.data import DataLoader
-
 from functools import partial
-from typing import List, Dict, Any
+from typing import Any, Dict, List
 
+import mteb
+import numpy as np
+import torch
 from datasets import Dataset
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 from transformers import (
     DataCollatorWithPadding,
     PreTrainedModel,
     PreTrainedTokenizerFast,
 )
-
-from tqdm import tqdm
-
-import mteb
 
 DEFAULT_PROMPTS = {
     "STS": "Retrieve semantically similar text.",
@@ -34,7 +30,6 @@ DEFAULT_PROMPTS = {
 
 
 class PreTrainedModelForMTEB(PreTrainedModel):
-
     def __init__(
         self,
         model: PreTrainedModel,
@@ -62,21 +57,37 @@ class PreTrainedModelForMTEB(PreTrainedModel):
             else:
                 meta = mteb.get_task(prompt_name).metadata
                 instruction = DEFAULT_PROMPTS.get(meta.type, "")
-            queries = [instruction + self.tokenizer.sep_token + " " + self.tokenizer.bos_token + sentence for sentence in queries]
+            queries = [
+                instruction
+                + self.tokenizer.sep_token
+                + " "
+                + self.tokenizer.bos_token
+                + sentence
+                for sentence in queries
+            ]
 
         return self.encode(
             queries,
             **kwargs,
         )
 
-    def encode_corpus(self, corpus: List[Dict[str, str]], prompt_name: str = None, **kwargs):
+    def encode_corpus(
+        self, corpus: List[Dict[str, str]], prompt_name: str = None, **kwargs
+    ):
         if isinstance(corpus, dict):
             sentences = [
-                (corpus["title"][i] + " " + corpus["text"][i]).strip() if "title" in corpus else corpus["text"][i].strip()
+                (corpus["title"][i] + " " + corpus["text"][i]).strip()
+                if "title" in corpus
+                else corpus["text"][i].strip()
                 for i in range(len(corpus["text"]))
             ]
         elif isinstance(corpus[0], dict):
-            sentences = [(doc["title"] + " " + doc["text"]).strip() if "title" in doc else doc["text"].strip() for doc in corpus]
+            sentences = [
+                (doc["title"] + " " + doc["text"]).strip()
+                if "title" in doc
+                else doc["text"].strip()
+                for doc in corpus
+            ]
         else:
             sentences = corpus
 
@@ -86,7 +97,14 @@ class PreTrainedModelForMTEB(PreTrainedModel):
             else:
                 meta = mteb.get_task(prompt_name).metadata
                 instruction = DEFAULT_PROMPTS.get(meta.type, "")
-            sentences = [instruction + self.tokenizer.sep_token + " " + self.tokenizer.bos_token + sentence for sentence in sentences]
+            sentences = [
+                instruction
+                + self.tokenizer.sep_token
+                + " "
+                + self.tokenizer.bos_token
+                + sentence
+                for sentence in sentences
+            ]
 
         return self.encode(
             sentences,
@@ -94,7 +112,9 @@ class PreTrainedModelForMTEB(PreTrainedModel):
         )
 
     @torch.no_grad()
-    def encode(self, sentences: list[str], prompt_name: str = None, **kwargs: Any) -> torch.Tensor:
+    def encode(
+        self, sentences: list[str], prompt_name: str = None, **kwargs: Any
+    ) -> torch.Tensor:
         """Encodes the given sentences using the encoder.
 
         Args:
@@ -132,15 +152,21 @@ class PreTrainedModelForMTEB(PreTrainedModel):
         )
 
         encodings = []
-        for batch in tqdm(dataloader, desc="encoding", mininterval=10, disable=len(sentences) < 128):
+        for batch in tqdm(
+            dataloader, desc="encoding", mininterval=10, disable=len(sentences) < 128
+        ):
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
 
             outputs = self.model(input_ids, attention_mask).last_hidden_state
 
             if self.pooling == "avg":
-                outputs = outputs * attention_mask.unsqueeze(-1).expand(-1, -1, outputs.shape[-1])
-                outputs = outputs.sum(dim=1) / attention_mask.to(device).sum(dim=1).unsqueeze(-1)
+                outputs = outputs * attention_mask.unsqueeze(-1).expand(
+                    -1, -1, outputs.shape[-1]
+                )
+                outputs = outputs.sum(dim=1) / attention_mask.to(device).sum(
+                    dim=1
+                ).unsqueeze(-1)
             else:
                 outputs = outputs[:, 0, :]
 

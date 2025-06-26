@@ -1,6 +1,6 @@
-import torch
-
 from typing import Tuple
+
+import torch
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
