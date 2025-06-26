@@ -33,7 +33,7 @@ Flash Attention significantly speeds up training and reduces memory usage:
 
 ```bash
 # Install flash-attn (requires CUDA)
-pip install flash-attn --no-build-isolation
+pip install flash-attn==2.7.3 --no-build-isolation
 ```
 
 ### XFormers (Recommended for SwiGLU)

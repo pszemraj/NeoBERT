@@ -251,7 +251,7 @@ config.flash_attention = True
 
 Requirements:
 - GPU with compute capability >= 7.0
-- flash-attn package installed
+- flash-attn package installed (tested with v2.7.3)
 
 ### 2. Gradient Checkpointing
 
