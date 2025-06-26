@@ -1,32 +1,54 @@
 import os
-import hydra
+import sys
+from pathlib import Path
 
-from omegaconf import DictConfig
+# Add parent directory to path
+sys.path.append(str(Path(__file__).parent.parent.parent))
 
-from datasets import load_dataset, load_from_disk
-from neobert.tokenizer import get_tokenizer, tokenize
+from datasets import load_from_disk
+
+from neobert.config import load_config_from_args
 
 
-@hydra.main(version_base=None, config_path="../../conf", config_name="pretraining")
-def longer_seq(cfg: DictConfig):
+def longer_seq(cfg):
     # Get the number of cpu cores available to the process
     num_proc = len(os.sched_getaffinity(0))
 
-    # tokenizer = get_tokenizer(**cfg.tokenizer)
-    # dataset = load_dataset(**cfg.dataset.train)
+    dataset = load_from_disk(cfg.dataset.path)
 
-    # dataset = tokenize(dataset, tokenizer, column_name=cfg.dataset.column, **cfg.tokenizer)
-    # dataset.save_to_disk(cfg.dataset.path_to_disk, max_shard_size="1GB")
-    dataset = load_from_disk(cfg.dataset.path_to_disk)
-    
-    dataset = dataset.filter(lambda example: len(example["input_ids"]) >= cfg.dataset.min_length, num_proc=num_proc)
-    print(len(dataset))
-    dataset.save_to_disk(cfg.dataset.path_to_disk + f"+{cfg.dataset.min_length}", max_shard_size="1GB", num_proc=num_proc)
-    
-    dataset = dataset.filter(lambda example: len(example["input_ids"]) >= 2 * cfg.dataset.min_length, num_proc=num_proc)
-    print(len(dataset))
-    dataset.save_to_disk(cfg.dataset.path_to_disk + f"+{2 * cfg.dataset.min_length}", max_shard_size="1GB", num_proc=num_proc)
+    # Default min_length if not specified
+    min_length = getattr(cfg.dataset, "min_length", 512)
+
+    dataset = dataset.filter(
+        lambda example: len(example["input_ids"]) >= min_length,
+        num_proc=num_proc,
+    )
+    print(f"Dataset with min_length {min_length}: {len(dataset)} samples")
+    dataset.save_to_disk(
+        cfg.dataset.path + f"+{min_length}",
+        max_shard_size="1GB",
+        num_proc=num_proc,
+    )
+
+    dataset = dataset.filter(
+        lambda example: len(example["input_ids"]) >= 2 * min_length,
+        num_proc=num_proc,
+    )
+    print(f"Dataset with min_length {2 * min_length}: {len(dataset)} samples")
+    dataset.save_to_disk(
+        cfg.dataset.path + f"+{2 * min_length}",
+        max_shard_size="1GB",
+        num_proc=num_proc,
+    )
+
+
+def main():
+    # Load configuration from command line arguments
+    config = load_config_from_args()
+
+    # Run sequence length filtering
+    longer_seq(config)
 
 
 if __name__ == "__main__":
-    longer_seq()
+    main()

@@ -1,5 +1,5 @@
 import torch
-from torch.optim.lr_scheduler import LambdaLR, LinearLR, CosineAnnealingLR, SequentialLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
 
 
 def get_scheduler(
@@ -28,17 +28,22 @@ def get_scheduler(
     """
 
     if decay.lower() not in ["cosine", "linear"]:
-        raise ValueError(f"Decay {decay} is not a valid type. Options are cosine and linear.")
+        raise ValueError(
+            f"Decay {decay} is not a valid type. Options are cosine and linear."
+        )
 
-    assert (constant_steps == 0 and warmup_steps < decay_steps) or (
-        warmup_steps < constant_steps and constant_steps < decay_steps
+    assert (
+        (constant_steps == 0 and warmup_steps < decay_steps)
+        or (warmup_steps < constant_steps and constant_steps < decay_steps)
     ), "warmup_steps, constant_steps and decay_steps are milestones parameters, not total number of steps for each scheduler."
 
     schedulers = []
     milestones = []
 
     # Warmup scheduler
-    schedulers.append(LinearLR(optimizer, start_factor=1e-4, end_factor=1.0, total_iters=warmup_steps))
+    schedulers.append(
+        LinearLR(optimizer, start_factor=1e-4, end_factor=1.0, total_iters=warmup_steps)
+    )
     milestones.append(warmup_steps)
 
     # Optional constant scheduler at peak learning rate
@@ -50,13 +55,17 @@ def get_scheduler(
     schedulers.append(
         CosineAnnealingLR(optimizer, T_max=decay_steps, eta_min=lr * final_ratio)
         if decay == "cosine"
-        else LinearLR(optimizer, start_factor=1.0, end_factor=final_ratio, total_iters=decay_steps)
+        else LinearLR(
+            optimizer, start_factor=1.0, end_factor=final_ratio, total_iters=decay_steps
+        )
     )
 
     milestones.append(decay_steps)
 
     # Final constant scheduler at lowest learning rate
-    _constant_min_lr = lambda _: final_ratio
+    def _constant_min_lr(_):
+        return final_ratio
+
     schedulers.append(LambdaLR(optimizer, lr_lambda=_constant_min_lr))
 
     return SequentialLR(optimizer, schedulers, milestones)

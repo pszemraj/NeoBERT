@@ -1,0 +1,56 @@
+task: "contrastive"
+
+model:
+  hidden_size: 768
+  num_hidden_layers: 12
+  num_attention_heads: 12
+  intermediate_size: 3072
+  dropout_prob: 0.1  # Important for SimCSE-style training
+  vocab_size: 30522
+  max_position_embeddings: 512
+  flash_attention: false
+  ngpt: false
+  hidden_act: "gelu"
+
+dataset:
+  name: "sentence-transformers/all-nli"
+  path: null
+  max_seq_length: 256
+
+tokenizer:
+  name: "bert-base-uncased"
+  vocab_size: 30522
+  max_length: 256
+
+trainer:
+  output_dir: "./outputs/contrastive"
+  run_name: "neobert_contrastive"
+  num_train_epochs: 1
+  per_device_train_batch_size: 128
+  per_device_eval_batch_size: 256
+  gradient_accumulation_steps: 1
+  learning_rate: 5e-5
+  warmup_steps: 100
+  logging_steps: 100
+  eval_steps: 1000
+  save_steps: 1000
+  dataloader_num_workers: 4
+  remove_unused_columns: false
+  report_to: []
+
+contrastive:
+  temperature: 0.05
+  pooling: "avg"
+  loss_type: "simcse"
+  hard_negative_weight: 0.0
+
+optimizer:
+  name: "adamw"
+  lr: 5e-5
+  weight_decay: 0.01
+
+scheduler:
+  name: "linear"
+  warmup_steps: 100
+  total_steps: 10000
+EOF < /dev/null

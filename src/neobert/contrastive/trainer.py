@@ -1,23 +1,13 @@
 import os
-import shutil
 import re
-import sys
+import shutil
 import signal
-import numpy
-from tqdm import tqdm
+import sys
 
-# Hydra (arguments)
-import hydra
-from omegaconf import OmegaConf, DictConfig
+import numpy
 
 # PyTorch
 import torch
-from torch.optim import AdamW
-from torch.utils.data import DataLoader
-from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR, LambdaLR
-
-# Hugging Face
-from transformers import DataCollatorWithPadding
 from accelerate import Accelerator
 from accelerate.utils import DistributedType, ProjectConfiguration, set_seed
 from datasets import load_from_disk
@@ -25,35 +15,66 @@ from datasets import load_from_disk
 # Deepspeed
 from deepspeed.utils import safe_get_full_fp32_param
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+# Hugging Face
+from transformers import DataCollatorWithPadding
+
+# Configuration
+from ..config import Config
+from ..model import NeoBERT, NeoBERTConfig
+from ..tokenizer import get_tokenizer
+from .datasets import get_bsz
+from .loss import SupConLoss
 
 # Our metric object and model
 from .metrics import Metrics
-from .loss import SupConLoss
-from .datasets import *
-from ..model import NeoBERT, NeoBERTConfig
-from ..tokenizer import get_tokenizer
 
 
 class CustomDataCollatorWithPadding(DataCollatorWithPadding):
     def __call__(self, features):
-        features_queries = [{"input_ids": f["input_ids_query"], "attention_mask": f["attention_mask_query"]} for f in features]
-        features_corpus = [{"input_ids": f["input_ids_corpus"], "attention_mask": f["attention_mask_corpus"]} for f in features]
+        features_queries = [
+            {
+                "input_ids": f["input_ids_query"],
+                "attention_mask": f["attention_mask_query"],
+            }
+            for f in features
+        ]
+        features_corpus = [
+            {
+                "input_ids": f["input_ids_corpus"],
+                "attention_mask": f["attention_mask_corpus"],
+            }
+            for f in features
+        ]
 
         batch_queries = super().__call__(features_queries)
         batch_corpus = super().__call__(features_corpus)
 
-        batch = {f"{k}_queries": v for k, v in batch_queries.items()} | {f"{k}_corpus": v for k, v in batch_corpus.items()}
+        batch = {f"{k}_queries": v for k, v in batch_queries.items()} | {
+            f"{k}_corpus": v for k, v in batch_corpus.items()
+        }
 
         if "input_ids_negative" in features[0].keys():
             if isinstance(features[0]["input_ids_negative"][0], list):
                 features_negatives = [
-                    {"input_ids": f["input_ids_negative"][i], "attention_mask": f["attention_mask_negative"][i]}
+                    {
+                        "input_ids": f["input_ids_negative"][i],
+                        "attention_mask": f["attention_mask_negative"][i],
+                    }
                     for f in features
                     for i in range(len(f["input_ids_negative"]))
                 ]
             else:
                 features_negatives = [
-                    {"input_ids": f["input_ids_negative"], "attention_mask": f["attention_mask_negative"]} for f in features
+                    {
+                        "input_ids": f["input_ids_negative"],
+                        "attention_mask": f["attention_mask_negative"],
+                    }
+                    for f in features
                 ]
 
             batch_negatives = super().__call__(features_negatives)
@@ -63,83 +84,118 @@ class CustomDataCollatorWithPadding(DataCollatorWithPadding):
         return batch
 
 
-def trainer(cfg: DictConfig):
+def trainer(cfg: Config):
     # Check if dropout is non zero
     if cfg.model.dropout_prob <= 0:
-        raise ValueError("Dropout needs to be positive in order to perform steps of SimCSE.")
+        raise ValueError(
+            "Dropout needs to be positive in order to perform steps of SimCSE."
+        )
 
     # Get the last checkpoint id
-    checkpoint_dir = os.path.join(cfg.trainer.dir, "checkpoints")
-    model_checkpoint_dir = os.path.join(cfg.trainer.dir, "model_checkpoints")
+    checkpoint_dir = os.path.join(cfg.trainer.output_dir, "checkpoints")
+    model_checkpoint_dir = os.path.join(cfg.trainer.output_dir, "model_checkpoints")
     os.makedirs(model_checkpoint_dir, exist_ok=True)
     iteration = 0
-    if cfg.trainer.resume and os.path.exists(checkpoint_dir) and len(os.listdir(checkpoint_dir)) > 0:
+    if (
+        cfg.trainer.resume_from_checkpoint
+        and os.path.exists(checkpoint_dir)
+        and len(os.listdir(checkpoint_dir)) > 0
+    ):
         # This regular expression was taken from accelerator.load_state()
         folders = os.listdir(checkpoint_dir)
-        iteration = max(int(re.findall(r"[\/]?([0-9]+)(?=[^\/]*$)", folder)[0]) for folder in folders) + 1
+        iteration = (
+            max(
+                int(re.findall(r"[\/]?([0-9]+)(?=[^\/]*$)", folder)[0])
+                for folder in folders
+            )
+            + 1
+        )
 
     # Accelerator object
     project_config = ProjectConfiguration(
-        cfg.trainer.dir,
+        cfg.trainer.output_dir,
         automatic_checkpoint_naming=True,
-        total_limit=cfg.trainer.accelerate.max_ckpt,
+        total_limit=2,  # Keep only 2 checkpoints
         iteration=iteration,
     )
     accelerator = Accelerator(
         step_scheduler_with_optimizer=False,  # enable manual control of the scheduler
         mixed_precision=cfg.trainer.mixed_precision,
         gradient_accumulation_steps=cfg.trainer.gradient_accumulation_steps,
-        log_with="wandb",
+        log_with="wandb" if cfg.wandb.mode != "disabled" else None,
         project_config=project_config,
     )
 
     # Initialise the wandb run and pass wandb parameters
-    os.makedirs(cfg.wandb.dir, exist_ok=True)
-    accelerator.init_trackers(
-        project_name=cfg.wandb.project,
-        init_kwargs={
-            "wandb": {
-                "name": cfg.wandb.name,
-                "entity": cfg.wandb.entity,
-                "config": OmegaConf.to_container(cfg) | {"distributed_type": accelerator.distributed_type},
-                "tags": cfg.wandb.tags,
-                "dir": cfg.wandb.dir,
-                "mode": cfg.wandb.mode,
-                "resume": cfg.trainer.resume,
-            }
-        },
-    )
+    if cfg.wandb.mode != "disabled":
+        os.makedirs(cfg.wandb.dir, exist_ok=True)
+        accelerator.init_trackers(
+            project_name=cfg.wandb.project,
+            init_kwargs={
+                "wandb": {
+                    "name": cfg.wandb.name,
+                    "entity": cfg.wandb.entity,
+                    "config": cfg.__dict__,
+                    "tags": cfg.wandb.tags,
+                    "dir": cfg.wandb.dir,
+                    "mode": cfg.wandb.mode,
+                    "resume": cfg.wandb.resume,
+                }
+            },
+        )
 
     # Set the seed
     set_seed(cfg.seed)
 
-    # Enable TF32 on matmul and on cuDNN
-    torch.backends.cuda.matmul.allow_tf32 = cfg.trainer.tf32
-    torch.backends.cudnn.allow_tf32 = cfg.trainer.tf32
+    # Enable TF32 on matmul and on cuDNN (if available)
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     # Local and global counters
     metrics = Metrics()
     accelerator.register_for_checkpointing(metrics)
 
     # Tokenizer
-    tokenizer = get_tokenizer(**cfg.tokenizer)
+    tokenizer = get_tokenizer(
+        name=cfg.tokenizer.name,
+        path=cfg.tokenizer.path,
+        max_length=cfg.tokenizer.max_length,
+        padding=cfg.tokenizer.padding,
+        truncation=cfg.tokenizer.truncation,
+    )
 
     # Dataset
-    dataset = load_from_disk(os.path.join(cfg.datasets.path, "all"))
-    pretraining_dataset = load_from_disk(cfg.datasets.pretraining_path)
+    dataset = load_from_disk(os.path.join(cfg.dataset.path, "all"))
+    pretraining_dataset = load_from_disk(
+        cfg.dataset.path
+    )  # Base dataset for pretraining SimCSE
 
-    data_collator = CustomDataCollatorWithPadding(tokenizer=tokenizer, return_tensors="pt", **cfg.datacollator)
+    data_collator = CustomDataCollatorWithPadding(
+        tokenizer=tokenizer, return_tensors="pt", **cfg.datacollator
+    )
     dataloaders = {
-        key: DataLoader(dataset[key], collate_fn=data_collator, batch_size=get_bsz(key, cfg.dataloader.target_bsz), **cfg.dataloader.train)
+        key: DataLoader(
+            dataset[key],
+            collate_fn=data_collator,
+            batch_size=get_bsz(key, cfg.dataloader.target_bsz),
+            **cfg.dataloader.train,
+        )
         for key in dataset.keys()
     } | {
         "pretraining": DataLoader(
-            pretraining_dataset, collate_fn=data_collator, batch_size=cfg.dataloader.target_bsz, **cfg.dataloader.train
+            pretraining_dataset,
+            collate_fn=data_collator,
+            batch_size=cfg.dataloader.target_bsz,
+            **cfg.dataloader.train,
         )
     }
 
     total = sum(x**cfg.datasets.alpha for x in dataset.num_rows.values())
-    sample_probs = {key: num_rows**cfg.datasets.alpha / total for key, num_rows in dataset.num_rows.items()}
+    sample_probs = {
+        key: num_rows**cfg.datasets.alpha / total
+        for key, num_rows in dataset.num_rows.items()
+    }
 
     # Model
     model = NeoBERT(config=NeoBERTConfig(**cfg.model, **cfg.tokenizer))
@@ -157,22 +213,47 @@ def trainer(cfg: DictConfig):
 
     # Load weights
     if cfg.model.deepspeed:
-        model = load_state_dict_from_zero_checkpoint(model, cfg.model.ckpt_dir, tag=str(tag))
+        model = load_state_dict_from_zero_checkpoint(
+            model, cfg.model.ckpt_dir, tag=str(tag)
+        )
     else:
         raise NotImplementedError
 
     # Log the number of parameters
-    accelerator.log({"model_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad)})
+    accelerator.log(
+        {
+            "model_parameters": sum(
+                p.numel() for p in model.parameters() if p.requires_grad
+            )
+        }
+    )
 
     # Optimizer
     optimizer = AdamW(model.parameters(), **cfg.optimizer.hparams)
 
     # Scheduler
-    scheduler1 = LinearLR(optimizer, start_factor=1e-4, end_factor=1.0, total_iters=cfg.scheduler.warmup_steps)
-    scheduler2 = CosineAnnealingLR(optimizer, T_max=cfg.scheduler.decay_steps, eta_min=cfg.optimizer.hparams.lr * 0.1)
-    _constant_min_lr = lambda _: 0.1  # LambdaLR multiplies the optimizer's lr with lr_lambda(epoch)
+    scheduler1 = LinearLR(
+        optimizer,
+        start_factor=1e-4,
+        end_factor=1.0,
+        total_iters=cfg.scheduler.warmup_steps,
+    )
+    scheduler2 = CosineAnnealingLR(
+        optimizer,
+        T_max=cfg.scheduler.decay_steps,
+        eta_min=cfg.optimizer.hparams.lr * 0.1,
+    )
+
+    def _constant_min_lr(_):
+        """LambdaLR multiplies the optimizer's lr with lr_lambda(epoch)"""
+        return 0.1
+
     scheduler3 = LambdaLR(optimizer, lr_lambda=_constant_min_lr)
-    scheduler = SequentialLR(optimizer, [scheduler1, scheduler2, scheduler3], [cfg.scheduler.warmup_steps, cfg.scheduler.decay_steps])
+    scheduler = SequentialLR(
+        optimizer,
+        [scheduler1, scheduler2, scheduler3],
+        [cfg.scheduler.warmup_steps, cfg.scheduler.decay_steps],
+    )
 
     # Accelerate
     keys = list(dataset.keys())
@@ -200,7 +281,9 @@ def trainer(cfg: DictConfig):
 
     # Signal handler that save the accelerate state
     def handler(signum, frame):
-        print(f"Signal {signum} received on rank {accelerator.process_index}, checkpointing...")
+        print(
+            f"Signal {signum} received on rank {accelerator.process_index}, checkpointing..."
+        )
         accelerator.save_state()
         accelerator.wait_for_everyone()
         print(f"Done on rank {accelerator.process_index}")
@@ -231,15 +314,23 @@ def trainer(cfg: DictConfig):
         # Choose from one of the finetuning datasets
         if coin_flip > cfg.datasets.pretraining_prob:
             # Randomly select which task to draw a batch from
-            task_name = numpy.random.choice(list(sample_probs.keys()), p=list(sample_probs.values()))
+            task_name = numpy.random.choice(
+                list(sample_probs.keys()), p=list(sample_probs.values())
+            )
             dataloader = dataloaders[task_name]
             batch = next(iter(dataloader))
 
             # Convert Hugging Face multiplicative mask to xformers additive mask
-            pad_mask_queries = torch.where(batch["attention_mask_queries"] == 1, float(0.0), float("-inf")).type(dtype_pad_mask)
-            pad_mask_corpus = torch.where(batch["attention_mask_corpus"] == 1, float(0.0), float("-inf")).type(dtype_pad_mask)
+            pad_mask_queries = torch.where(
+                batch["attention_mask_queries"] == 1, float(0.0), float("-inf")
+            ).type(dtype_pad_mask)
+            pad_mask_corpus = torch.where(
+                batch["attention_mask_corpus"] == 1, float(0.0), float("-inf")
+            ).type(dtype_pad_mask)
             if "input_ids_negative" in batch.keys():
-                pad_mask_negatives = torch.where(batch["attention_mask_negative"] == 1, float(0.0), float("-inf")).type(dtype_pad_mask)
+                pad_mask_negatives = torch.where(
+                    batch["attention_mask_negative"] == 1, float(0.0), float("-inf")
+                ).type(dtype_pad_mask)
 
             # Update specific number of batches
             metrics[f"train/{task_name}_batches"] += 1
@@ -253,11 +344,13 @@ def trainer(cfg: DictConfig):
             batch["input_ids_corpus"] = batch["input_ids"]
 
             # Convert Hugging Face multiplicative mask to xformers additive mask
-            pad_mask_queries = torch.where(batch["attention_mask"] == 1, float(0.0), float("-inf")).type(dtype_pad_mask)
+            pad_mask_queries = torch.where(
+                batch["attention_mask"] == 1, float(0.0), float("-inf")
+            ).type(dtype_pad_mask)
             pad_mask_corpus = pad_mask_queries
 
             # Update specific number of batches
-            metrics[f"train/pretraining_batches"] += 1
+            metrics["train/pretraining_batches"] += 1
 
         # Update global number of batches
         metrics["train/batches"] += 1
@@ -274,23 +367,27 @@ def trainer(cfg: DictConfig):
                     negatives = model(batch["input_ids_negative"], pad_mask_negatives)
 
                 # Pool representations
-                pooled_queries = (queries * batch["attention_mask_queries"].unsqueeze(-1)).sum(dim=1) / batch["attention_mask_queries"].sum(
-                    dim=1, keepdim=True
-                )
-                pooled_corpus = (corpus * batch["attention_mask_corpus"].unsqueeze(-1)).sum(dim=1) / batch["attention_mask_corpus"].sum(
-                    dim=1, keepdim=True
-                )
+                pooled_queries = (
+                    queries * batch["attention_mask_queries"].unsqueeze(-1)
+                ).sum(dim=1) / batch["attention_mask_queries"].sum(dim=1, keepdim=True)
+                pooled_corpus = (
+                    corpus * batch["attention_mask_corpus"].unsqueeze(-1)
+                ).sum(dim=1) / batch["attention_mask_corpus"].sum(dim=1, keepdim=True)
 
                 # Pool each negative's representation
                 if "input_ids_negative" in batch.keys():
-                    pooled_negatives = (negatives * batch["attention_mask_negative"].unsqueeze(-1)).sum(dim=1) / batch[
-                        "attention_mask_negative"
-                    ].sum(dim=1, keepdim=True)
+                    pooled_negatives = (
+                        negatives * batch["attention_mask_negative"].unsqueeze(-1)
+                    ).sum(dim=1) / batch["attention_mask_negative"].sum(
+                        dim=1, keepdim=True
+                    )
                 else:
                     pooled_negatives = None
 
                 # Loss
-                train_loss = train_loss_fn(pooled_queries, pooled_corpus, pooled_negatives)
+                train_loss = train_loss_fn(
+                    pooled_queries, pooled_corpus, pooled_negatives
+                )
 
                 # Compute gradient
                 accelerator.backward(train_loss)
@@ -307,18 +404,18 @@ def trainer(cfg: DictConfig):
                 negatives = model(batch["input_ids_negative"], pad_mask_negatives)
 
             # Pool representations
-            pooled_queries = (queries * batch["attention_mask_queries"].unsqueeze(-1)).sum(dim=1) / batch["attention_mask_queries"].sum(
-                dim=1, keepdim=True
-            )
-            pooled_corpus = (corpus * batch["attention_mask_corpus"].unsqueeze(-1)).sum(dim=1) / batch["attention_mask_corpus"].sum(
-                dim=1, keepdim=True
-            )
+            pooled_queries = (
+                queries * batch["attention_mask_queries"].unsqueeze(-1)
+            ).sum(dim=1) / batch["attention_mask_queries"].sum(dim=1, keepdim=True)
+            pooled_corpus = (corpus * batch["attention_mask_corpus"].unsqueeze(-1)).sum(
+                dim=1
+            ) / batch["attention_mask_corpus"].sum(dim=1, keepdim=True)
 
             # Pool each negative's representation
             if "input_ids_negative" in batch.keys():
-                pooled_negatives = (negatives * batch["attention_mask_negative"].unsqueeze(-1)).sum(dim=1) / batch[
-                    "attention_mask_negative"
-                ].sum(dim=1, keepdim=True)
+                pooled_negatives = (
+                    negatives * batch["attention_mask_negative"].unsqueeze(-1)
+                ).sum(dim=1) / batch["attention_mask_negative"].sum(dim=1, keepdim=True)
             else:
                 pooled_negatives = None
 
@@ -327,8 +424,13 @@ def trainer(cfg: DictConfig):
 
             # Compute gradient and apply clipping
             accelerator.backward(train_loss)
-            if cfg.trainer.gradient_clipping is not None and cfg.trainer.gradient_clipping > 0:
-                accelerator.clip_grad_norm_(model.parameters(), cfg.trainer.gradient_clipping)
+            if (
+                cfg.trainer.gradient_clipping is not None
+                and cfg.trainer.gradient_clipping > 0
+            ):
+                accelerator.clip_grad_norm_(
+                    model.parameters(), cfg.trainer.gradient_clipping
+                )
 
             # Update the parameters
             optimizer.step()
@@ -345,12 +447,22 @@ def trainer(cfg: DictConfig):
                 if accelerator.distributed_type is DistributedType.DEEPSPEED:
                     metrics["train/grad_norm"] = model.get_global_grad_norm()  # .item()
                     metrics["train/weight_norm"] = (
-                        sum([safe_get_full_fp32_param(p).norm(2) ** 2 for p in model.parameters()]) ** 0.5
+                        sum(
+                            [
+                                safe_get_full_fp32_param(p).norm(2) ** 2
+                                for p in model.parameters()
+                            ]
+                        )
+                        ** 0.5
                     ).item()
                 # DDP
                 else:
-                    metrics["train/grad_norm"] = (sum([p.grad.norm(2) ** 2 for p in model.parameters()]) ** 0.5).item()
-                    metrics["train/weight_norm"] = (sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5).item()
+                    metrics["train/grad_norm"] = (
+                        sum([p.grad.norm(2) ** 2 for p in model.parameters()]) ** 0.5
+                    ).item()
+                    metrics["train/weight_norm"] = (
+                        sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5
+                    ).item()
 
                 metrics["train/learning_rate"] = optimizer.param_groups[0]["lr"]
                 metrics.log(accelerator)
@@ -368,15 +480,27 @@ def trainer(cfg: DictConfig):
                     iterations.sort()
 
                     # Remove files with the smallest iterations until the limit is met
-                    while iterations is not None and len(iterations) >= cfg.trainer.model.max_ckpt:
+                    while (
+                        iterations is not None
+                        and len(iterations) >= cfg.trainer.model.max_ckpt
+                    ):
                         file_to_remove = iterations.pop(0)
-                        shutil.rmtree(os.path.join(model_checkpoint_dir, str(file_to_remove)))
-                        print(f"Deleted old model checkpoint {file_to_remove} due to limit " f"(max_ckpt = {cfg.trainer.model.max_ckpt})")
+                        shutil.rmtree(
+                            os.path.join(model_checkpoint_dir, str(file_to_remove))
+                        )
+                        print(
+                            f"Deleted old model checkpoint {file_to_remove} due to limit "
+                            f"(max_ckpt = {cfg.trainer.model.max_ckpt})"
+                        )
                 # Save the checkpoint
                 if accelerator.distributed_type is DistributedType.DEEPSPEED:
-                    model.save_checkpoint(model_checkpoint_dir, tag=metrics["train/steps"])
+                    model.save_checkpoint(
+                        model_checkpoint_dir, tag=metrics["train/steps"]
+                    )
                 else:
-                    path = os.path.join(model_checkpoint_dir, str(metrics["train/steps"]))
+                    path = os.path.join(
+                        model_checkpoint_dir, str(metrics["train/steps"])
+                    )
                     os.makedirs(path, exist_ok=True)
                     torch.save(
                         model.state_dict(),

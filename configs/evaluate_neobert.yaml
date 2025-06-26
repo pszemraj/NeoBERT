@@ -1,0 +1,55 @@
+task: "glue"
+
+model:
+  name_or_path: "bert-base-uncased"  # Or path to your trained model
+  hidden_size: 768
+  num_hidden_layers: 12
+  num_attention_heads: 12
+  intermediate_size: 3072
+  dropout_prob: 0.1
+  vocab_size: 30522
+  max_position_embeddings: 512
+  flash_attention: false
+  ngpt: false
+  hidden_act: "gelu"
+
+dataset:
+  name: "glue"
+  max_seq_length: 128
+
+tokenizer:
+  name: "bert-base-uncased"
+  vocab_size: 30522
+  max_length: 128
+
+trainer:
+  output_dir: "./glue_outputs"
+  run_name: "neobert_glue_eval"
+  num_train_epochs: 3
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 1
+  learning_rate: 2e-5
+  warmup_ratio: 0.1
+  logging_steps: 100
+  eval_steps: 500
+  save_steps: 500
+  dataloader_num_workers: 4
+  metric_for_best_model: "eval_matthews_correlation"  # For CoLA
+  greater_is_better: true
+  load_best_model_at_end: true
+  report_to: []
+
+glue:
+  task_name: "cola"
+  num_labels: 2
+  max_seq_length: 128
+
+optimizer:
+  name: "adamw"
+  lr: 2e-5
+  weight_decay: 0.01
+
+scheduler:
+  name: "linear"
+  warmup_ratio: 0.1

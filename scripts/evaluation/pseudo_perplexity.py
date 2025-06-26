@@ -1,18 +1,23 @@
 import os
-import torch
-import numpy as np
-from tqdm import tqdm
 from argparse import ArgumentParser
-
-from transformers import AutoModelWithLMHead, AutoTokenizer, AutoConfig, AutoModelForMaskedLM
-from transformers.models.roberta.modeling_roberta import RobertaEmbeddings
-from datasets import load_dataset, concatenate_datasets
-
-from neobert.model import NeoBERTLMHead, NeoBERTConfig
-from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
-from omegaconf import OmegaConf
-
 from functools import partial
+
+import numpy as np
+import torch
+from datasets import concatenate_datasets, load_dataset
+from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
+
+# Removed OmegaConf - this script should be standalone
+from tqdm import tqdm
+from transformers import (
+    AutoConfig,
+    AutoModelForMaskedLM,
+    AutoModelWithLMHead,
+    AutoTokenizer,
+)
+from transformers.models.roberta.modeling_roberta import RobertaEmbeddings
+
+from neobert.model import NeoBERTConfig, NeoBERTLMHead
 
 
 def get_data(dataset):
@@ -20,8 +25,8 @@ def get_data(dataset):
     # Select 100 samples from each length window (20000-30000, 30000-40000, etc.)
 
     def filter_by_length(length, example):
-        l = len(example["text"])
-        return length <= l < length + 10000
+        text_length = len(example["text"])
+        return length <= text_length < length + 10000
 
     datasets = []
     for length in range(20000, 100000, 10000):
@@ -58,7 +63,6 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
 
 
 if __name__ == "__main__":
-
     parser = ArgumentParser()
     # Model
     # parser.add_argument("--source", type=str, help="")
@@ -66,7 +70,9 @@ if __name__ == "__main__":
     parser.add_argument("--from_hub", action="store_true", help="")
     parser.add_argument("--config_path", type=str, help="", required=False)
     parser.add_argument("--checkpoint_path", type=str, help="", required=False)
-    parser.add_argument("--checkpoint", type=str, default="final", help="", required=False)
+    parser.add_argument(
+        "--checkpoint", type=str, default="final", help="", required=False
+    )
     parser.add_argument("--batch_size", type=int, default=1, help="")
     parser.add_argument("--device", type=str, default="cuda", help="")
     parser.add_argument("--compile", action="store_true", help="")
@@ -84,25 +90,58 @@ if __name__ == "__main__":
     # Get model and tokenizer
     if args.from_hub:
         config = AutoConfig.from_pretrained(args.model_name, trust_remote_code=True)
-        config.max_position_embeddings = max(args.max_length, config.max_position_embeddings)
+        config.max_position_embeddings = max(
+            args.max_length, config.max_position_embeddings
+        )
         if "roberta" in args.model_name.lower():
-            model = AutoModelWithLMHead.from_pretrained(args.model_name, trust_remote_code=True)
+            model = AutoModelWithLMHead.from_pretrained(
+                args.model_name, trust_remote_code=True
+            )
             model.roberta.embeddings = RobertaEmbeddings(config)
         elif "modern" in args.model_name.lower():
-            model = AutoModelForMaskedLM.from_pretrained(args.model_name, trust_remote_code=True)
+            model = AutoModelForMaskedLM.from_pretrained(
+                args.model_name, trust_remote_code=True
+            )
         else:
-            model = AutoModelWithLMHead.from_pretrained(args.model_name, trust_remote_code=True)
+            model = AutoModelWithLMHead.from_pretrained(
+                args.model_name, trust_remote_code=True
+            )
         if hasattr(model.config, "max_position_embeddings"):
-            model.config.max_position_embeddings = max(args.max_length, model.config.max_position_embeddings)
+            model.config.max_position_embeddings = max(
+                args.max_length, model.config.max_position_embeddings
+            )
         if hasattr(model.config, "max_length"):
             model.config.max_length = max(args.max_length, model.config.max_length)
     if "neobert" in args.model_name:
-        model_pretraining_config = OmegaConf.load(args.config_path)
-        model_pretraining_config.max_length = args.max_length
-        model = NeoBERTLMHead(NeoBERTConfig(**model_pretraining_config.model, **model_pretraining_config.tokenizer))
-        model = load_state_dict_from_zero_checkpoint(model, args.checkpoint_path, tag=args.checkpoint)
+        # Import our new config system
+        from neobert.config import ConfigLoader
+
+        model_pretraining_config = ConfigLoader.load(args.config_path)
+        model_pretraining_config.model.max_position_embeddings = args.max_length
+        model = NeoBERTLMHead(
+            NeoBERTConfig(
+                hidden_size=model_pretraining_config.model.hidden_size,
+                num_hidden_layers=model_pretraining_config.model.num_hidden_layers,
+                num_attention_heads=model_pretraining_config.model.num_attention_heads,
+                intermediate_size=model_pretraining_config.model.intermediate_size,
+                dropout=model_pretraining_config.model.dropout_prob,
+                vocab_size=model_pretraining_config.model.vocab_size,
+                max_position_embeddings=model_pretraining_config.model.max_position_embeddings,
+                flash_attention=model_pretraining_config.model.flash_attention,
+                ngpt=model_pretraining_config.model.ngpt,
+                hidden_act=model_pretraining_config.model.hidden_act,
+                rope=model_pretraining_config.model.rope,
+                rms_norm=model_pretraining_config.model.rms_norm,
+                norm_eps=model_pretraining_config.model.norm_eps,
+                pad_token_id=model_pretraining_config.model.pad_token_id,
+            )
+        )
+        model = load_state_dict_from_zero_checkpoint(
+            model, args.checkpoint_path, tag=args.checkpoint
+        )
         model.model.freqs_cis = precompute_freqs_cis(
-            model.config.hidden_size // model.config.num_attention_heads, model_pretraining_config.max_length
+            model.config.hidden_size // model.config.num_attention_heads,
+            model_pretraining_config.model.max_position_embeddings,
         )
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
@@ -113,7 +152,9 @@ if __name__ == "__main__":
     # Prepare the dataset
     dataset = load_dataset("wikipedia", "20220301.en")["train"]
     dataset = dataset.remove_columns(["url", "title"])
-    dataset = dataset.filter(lambda x: (len(x["text"]) < 20000 and len(x["text"]) > 500)).select(range(args.n_sentences))
+    dataset = dataset.filter(
+        lambda x: (len(x["text"]) < 20000 and len(x["text"]) > 500)
+    ).select(range(args.n_sentences))
     dataset = get_data(dataset)
     dataset = dataset.shuffle(seed=42)
     dataset = dataset.shard(8, args.dataset_shard)
@@ -121,22 +162,36 @@ if __name__ == "__main__":
     # Generator that, for each sentence, tokenize, mask each position, and batch
     def batch_tokenize_mask(dataset, tokenizer, batch_size):
         for x, id in zip(dataset["text"], dataset["id"]):
-            tokenized_input = tokenizer(x, padding=False, truncation=True, max_length=args.max_length, return_tensors="pt")
+            tokenized_input = tokenizer(
+                x,
+                padding=False,
+                truncation=True,
+                max_length=args.max_length,
+                return_tensors="pt",
+            )
             x = tokenized_input["input_ids"]
             seq_length = x.shape[1]
             x = x.repeat(seq_length, 1)
             y = torch.where(torch.eye(seq_length, dtype=torch.bool), x, -100)
-            x = torch.where(torch.eye(seq_length, dtype=torch.bool), tokenizer.mask_token_id, x)
-            for _x, _y in zip(torch.split(x, batch_size, 0), torch.split(y, batch_size, 0)):
+            x = torch.where(
+                torch.eye(seq_length, dtype=torch.bool), tokenizer.mask_token_id, x
+            )
+            for _x, _y in zip(
+                torch.split(x, batch_size, 0), torch.split(y, batch_size, 0)
+            ):
                 yield (id, _x, _y)
 
     dataloader = batch_tokenize_mask(dataset, tokenizer, args.batch_size)
     pbar = tqdm(total=len(dataset))
 
     # Save the pseudo-perplexities into a csv
-    output_path = os.path.join(args.output_path, args.model_name.replace("/", "_"), args.checkpoint)
+    output_path = os.path.join(
+        args.output_path, args.model_name.replace("/", "_"), args.checkpoint
+    )
     os.makedirs(output_path, exist_ok=True)
-    output_file = os.path.join(output_path, f"{args.data_name}_ppl_{str(args.dataset_shard)}.csv")
+    output_file = os.path.join(
+        output_path, f"{args.data_name}_ppl_{str(args.dataset_shard)}.csv"
+    )
     if not os.path.exists(output_file):
         with open(output_file, "a") as file:
             file.write("name,pseudo-perplexity,per-residue-cross-entropy...\n")
@@ -149,7 +204,10 @@ if __name__ == "__main__":
             _ = next(iter(dataloader))
 
     # Compute pseudo-perplexity
-    with torch.no_grad(), torch.autocast(device_type=args.device, dtype=torch.float16, enabled=args.fp16):
+    with (
+        torch.no_grad(),
+        torch.autocast(device_type=args.device, dtype=torch.float16, enabled=args.fp16),
+    ):
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
@@ -168,7 +226,9 @@ if __name__ == "__main__":
 
                 with open(output_file, "a") as file:
                     for k, v in losses.items():
-                        file.write(f"{k},{np.exp(np.mean(v))},{','.join(map(str, v))}\n")
+                        file.write(
+                            f"{k},{np.exp(np.mean(v))},{','.join(map(str, v))}\n"
+                        )
 
                 losses = dict()
                 losses[id] = loss

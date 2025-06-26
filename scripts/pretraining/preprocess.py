@@ -1,15 +1,24 @@
-import hydra
-from omegaconf import DictConfig
+import sys
+from pathlib import Path
 
-from datasets import load_dataset, concatenate_datasets
+# Add parent directory to path
+sys.path.append(str(Path(__file__).parent.parent.parent))
 
+from datasets import concatenate_datasets, load_dataset
+
+from neobert.config import load_config_from_args
 from neobert.tokenizer import get_tokenizer, tokenize
 
 
-@hydra.main(version_base=None, config_path="../../conf", config_name="pretraining")
-def preprocess(cfg: DictConfig):
+def preprocess(cfg):
     # Tokenizer
-    tokenizer = get_tokenizer(**cfg.tokenizer)
+    tokenizer = get_tokenizer(
+        name=cfg.tokenizer.name,
+        path=cfg.tokenizer.path,
+        max_length=cfg.tokenizer.max_length,
+        padding=cfg.tokenizer.padding,
+        truncation=cfg.tokenizer.truncation,
+    )
     print(tokenizer)
 
     # Load and tokenize the dataset
@@ -23,15 +32,30 @@ def preprocess(cfg: DictConfig):
         dataset = concatenate_datasets([bookcorpus, wiki])
         dataset = dataset.shuffle(seed=0)
     else:
-        dataset = load_dataset(**cfg.dataset.train)
+        dataset = load_dataset(cfg.dataset.name, split="train")
 
     print("Tokenizing dataset")
-    dataset = tokenize(dataset, tokenizer, column_name=cfg.dataset.column, **cfg.tokenizer)
+    dataset = tokenize(
+        dataset,
+        tokenizer,
+        column_name="text",  # Default column name
+        max_length=cfg.tokenizer.max_length,
+        padding=cfg.tokenizer.padding,
+        truncation=cfg.tokenizer.truncation,
+    )
 
     # Save the tokenized dataset to disk
     print("Saving tokenized dataset")
-    dataset.save_to_disk(cfg.dataset.path_to_disk, max_shard_size="1GB")
+    dataset.save_to_disk(cfg.dataset.path, max_shard_size="1GB")
+
+
+def main():
+    # Load configuration from command line arguments
+    config = load_config_from_args()
+
+    # Run preprocessing
+    preprocess(config)
 
 
 if __name__ == "__main__":
-    preprocess()
+    main()

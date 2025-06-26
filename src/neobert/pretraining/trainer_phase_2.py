@@ -1,35 +1,34 @@
 import os
-import shutil
 import re
-import sys
+import shutil
 import signal
-from tqdm import tqdm
-
-from omegaconf import OmegaConf, DictConfig
+import sys
 
 import numpy as np
 
 # PyTorch
 import torch
-from torch.optim import AdamW
-from torch.nn import CrossEntropyLoss
-from torch.utils.data import DataLoader
-from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR, LambdaLR
+from accelerate import Accelerator
+from accelerate.utils import DistributedType, ProjectConfiguration, set_seed
 
 # Hugging Face
 from datasets import load_from_disk
-from transformers import AutoTokenizer, DataCollatorForLanguageModeling
-from accelerate import Accelerator
-from accelerate.utils import DistributedType, ProjectConfiguration, set_seed
-from tokenizers.processors import TemplateProcessing
 
 # Deepspeed
 from deepspeed.utils import safe_get_full_fp32_param
+from omegaconf import DictConfig, OmegaConf
+from torch.nn import CrossEntropyLoss
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from transformers import DataCollatorForLanguageModeling
+
+from ..model import NeoBERTConfig, NeoBERTLMHead
+from ..tokenizer import get_tokenizer
 
 # Our metric object and model
 from .metrics import Metrics
-from ..model import NeoBERTLMHead, NeoBERTConfig
-from ..tokenizer import get_tokenizer
 
 
 def trainer(cfg: DictConfig):
@@ -38,10 +37,20 @@ def trainer(cfg: DictConfig):
     model_checkpoint_dir = os.path.join(cfg.trainer.dir, "model_checkpoints")
     os.makedirs(model_checkpoint_dir, exist_ok=True)
     iteration = 0
-    if cfg.trainer.resume and os.path.exists(checkpoint_dir) and len(os.listdir(checkpoint_dir)) > 0:
+    if (
+        cfg.trainer.resume
+        and os.path.exists(checkpoint_dir)
+        and len(os.listdir(checkpoint_dir)) > 0
+    ):
         # This regular expression was taken from accelerator.load_state()
         folders = os.listdir(checkpoint_dir)
-        iteration = max(int(re.findall(r"[\/]?([0-9]+)(?=[^\/]*$)", folder)[0]) for folder in folders) + 1
+        iteration = (
+            max(
+                int(re.findall(r"[\/]?([0-9]+)(?=[^\/]*$)", folder)[0])
+                for folder in folders
+            )
+            + 1
+        )
 
     # Accelerator object
     project_config = ProjectConfiguration(
@@ -66,7 +75,8 @@ def trainer(cfg: DictConfig):
             "wandb": {
                 "name": cfg.wandb.name,
                 "entity": cfg.wandb.entity,
-                "config": OmegaConf.to_container(cfg) | {"distributed_type": accelerator.distributed_type},
+                "config": OmegaConf.to_container(cfg)
+                | {"distributed_type": accelerator.distributed_type},
                 "tags": cfg.wandb.tags,
                 "dir": cfg.wandb.dir,
                 "mode": cfg.wandb.mode,
@@ -90,34 +100,69 @@ def trainer(cfg: DictConfig):
 
     # Dataset
     train_dataset = load_from_disk(cfg.dataset.path_to_disk)
-    train_dataset_p = load_from_disk(cfg.dataset.path_to_disk + f"+{cfg.dataset.min_length}")
-    train_dataset_pp = load_from_disk(cfg.dataset.path_to_disk + f"+{2 * cfg.dataset.min_length}")
+    train_dataset_p = load_from_disk(
+        cfg.dataset.path_to_disk + f"+{cfg.dataset.min_length}"
+    )
+    train_dataset_pp = load_from_disk(
+        cfg.dataset.path_to_disk + f"+{2 * cfg.dataset.min_length}"
+    )
 
-    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, return_tensors="pt", **cfg.datacollator)
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer, return_tensors="pt", **cfg.datacollator
+    )
     dataloaders = [
         DataLoader(dataset, collate_fn=data_collator, **cfg.dataloader.train)
         for dataset in [train_dataset, train_dataset_p, train_dataset_pp]
     ]
 
     # Model
-    model = NeoBERTLMHead(NeoBERTConfig(**cfg.model, **cfg.tokenizer, pad_token_id=tokenizer.pad_token_id))
+    model = NeoBERTLMHead(
+        NeoBERTConfig(**cfg.model, **cfg.tokenizer, pad_token_id=tokenizer.pad_token_id)
+    )
 
     # Log the number of parameters
-    accelerator.log({"model_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad)})
+    accelerator.log(
+        {
+            "model_parameters": sum(
+                p.numel() for p in model.parameters() if p.requires_grad
+            )
+        }
+    )
 
     # Optimizer
     optimizer = AdamW(model.parameters(), **cfg.optimizer.hparams)
 
     # Scheduler
-    scheduler1 = LinearLR(optimizer, start_factor=1e-4, end_factor=1.0, total_iters=cfg.scheduler.warmup_steps)
+    scheduler1 = LinearLR(
+        optimizer,
+        start_factor=1e-4,
+        end_factor=1.0,
+        total_iters=cfg.scheduler.warmup_steps,
+    )
     if cfg.scheduler.decay == "cosine":
-        scheduler2 = CosineAnnealingLR(optimizer, T_max=cfg.scheduler.decay_steps, eta_min=cfg.optimizer.hparams.lr * 0.1)
+        scheduler2 = CosineAnnealingLR(
+            optimizer,
+            T_max=cfg.scheduler.decay_steps,
+            eta_min=cfg.optimizer.hparams.lr * 0.1,
+        )
     else:
-        scheduler2 = LinearLR(optimizer, start_factor=1.0, end_factor=0.1, total_iters=cfg.scheduler.decay_steps)
+        scheduler2 = LinearLR(
+            optimizer,
+            start_factor=1.0,
+            end_factor=0.1,
+            total_iters=cfg.scheduler.decay_steps,
+        )
 
-    _constant_min_lr = lambda _: 0.1  # LambdaLR multiplies the optimizer's lr with lr_lambda(epoch)
+    def _constant_min_lr(_):
+        """LambdaLR multiplies the optimizer's lr with lr_lambda(epoch)"""
+        return 0.1
+
     scheduler3 = LambdaLR(optimizer, lr_lambda=_constant_min_lr)
-    scheduler = SequentialLR(optimizer, [scheduler1, scheduler2, scheduler3], [cfg.scheduler.warmup_steps, cfg.scheduler.decay_steps])
+    scheduler = SequentialLR(
+        optimizer,
+        [scheduler1, scheduler2, scheduler3],
+        [cfg.scheduler.warmup_steps, cfg.scheduler.decay_steps],
+    )
 
     # Accelerate
     model, optimizer, scheduler, *dataloaders = accelerator.prepare(
@@ -132,15 +177,23 @@ def trainer(cfg: DictConfig):
 
     # Resume from the latest checkpoint
     skipped_dataloaders = [None, None, None]
-    if cfg.trainer.resume and os.path.exists(checkpoint_dir) and len(os.listdir(checkpoint_dir)) > 0:
+    if (
+        cfg.trainer.resume
+        and os.path.exists(checkpoint_dir)
+        and len(os.listdir(checkpoint_dir)) > 0
+    ):
         accelerator.load_state()
         for i, dataloader in enumerate(dataloaders):
             dataloader.set_epoch(metrics["train/epochs"])
-            skipped_dataloaders[i] = accelerator.skip_first_batches(dataloader, metrics[f"train/batches_{i}"] % len(dataloader))
+            skipped_dataloaders[i] = accelerator.skip_first_batches(
+                dataloader, metrics[f"train/batches_{i}"] % len(dataloader)
+            )
 
     # Signal handler that save the accelerate state
     def handler(signum, frame):
-        print(f"Signal {signum} received on rank {accelerator.process_index}, checkpointing...")
+        print(
+            f"Signal {signum} received on rank {accelerator.process_index}, checkpointing..."
+        )
         accelerator.save_state()
         accelerator.wait_for_everyone()
         print(f"Done on rank {accelerator.process_index}")
@@ -166,7 +219,10 @@ def trainer(cfg: DictConfig):
         dtype_pad_mask = torch.float32
 
     iterators = [iter(dataloader) for dataloader in dataloaders]
-    skipped_iterators = [iter(skipped_dataloader) if skipped_dataloader is not None else None for skipped_dataloader in skipped_dataloaders]
+    skipped_iterators = [
+        iter(skipped_dataloader) if skipped_dataloader is not None else None
+        for skipped_dataloader in skipped_dataloaders
+    ]
     while cfg.trainer.max_steps > metrics["train/steps"]:
         # Sample which dataloader to use
         i = np.random.choice(range(len(iterators)), p=[0.2, 0.4, 0.4])
@@ -177,7 +233,11 @@ def trainer(cfg: DictConfig):
 
         # Retrieve batch and "remove" skipped_iterator when exhausted
         try:
-            batch = next(iterators[i]) if skipped_iterators[i] is None else next(skipped_iterators[i])
+            batch = (
+                next(iterators[i])
+                if skipped_iterators[i] is None
+                else next(skipped_iterators[i])
+            )
         except StopIteration:
             iterators[i] = iter(dataloaders[i])
             skipped_iterators[i] = None
@@ -185,7 +245,9 @@ def trainer(cfg: DictConfig):
             batch = next(iterators[i])
 
         # Convert Hugging Face multiplicative mask to xformers additive mask
-        pad_mask = torch.where(batch["attention_mask"] == 1, float(0.0), float("-inf")).type(dtype_pad_mask)
+        pad_mask = torch.where(
+            batch["attention_mask"] == 1, float(0.0), float("-inf")
+        ).type(dtype_pad_mask)
 
         # Under the no_sync context manager, PyTorch will skip synchronizing the gradients when .backward() is
         # called, and the first call to .backward() outside this context manager will trigger the synchronization.
@@ -194,7 +256,9 @@ def trainer(cfg: DictConfig):
             with accelerator.no_sync(model):
                 # Forward pass
                 logits = model(batch["input_ids"], pad_mask)["logits"]
-                train_loss = train_loss_fn(logits.view(-1, cfg.tokenizer.vocab_size), batch["labels"].view(-1))
+                train_loss = train_loss_fn(
+                    logits.view(-1, cfg.tokenizer.vocab_size), batch["labels"].view(-1)
+                )
 
                 # Compute gradient
                 accelerator.backward(train_loss)
@@ -202,19 +266,32 @@ def trainer(cfg: DictConfig):
                 # Log metrics
                 metrics["train/local_samples"] += batch["input_ids"].shape[0]
                 metrics["train/local_tokens"] += (pad_mask == 0).sum().item()
-                metrics["train/local_num_pred"] += (batch["labels"] != -100).sum().item()
-                metrics["train/local_sum_loss"] += train_loss.item() * (batch["labels"] != -100).sum().item()
-                metrics["train/local_num_correct"] += (logits.argmax(dim=-1) == batch["labels"]).sum().item()
+                metrics["train/local_num_pred"] += (
+                    (batch["labels"] != -100).sum().item()
+                )
+                metrics["train/local_sum_loss"] += (
+                    train_loss.item() * (batch["labels"] != -100).sum().item()
+                )
+                metrics["train/local_num_correct"] += (
+                    (logits.argmax(dim=-1) == batch["labels"]).sum().item()
+                )
 
         else:
             # Forward pass
             logits = model(batch["input_ids"], pad_mask)["logits"]
-            train_loss = train_loss_fn(logits.view(-1, cfg.tokenizer.vocab_size), batch["labels"].view(-1))
+            train_loss = train_loss_fn(
+                logits.view(-1, cfg.tokenizer.vocab_size), batch["labels"].view(-1)
+            )
 
             # Compute gradient and apply clipping
             accelerator.backward(train_loss)
-            if cfg.trainer.gradient_clipping is not None and cfg.trainer.gradient_clipping > 0:
-                accelerator.clip_grad_norm_(model.parameters(), cfg.trainer.gradient_clipping)
+            if (
+                cfg.trainer.gradient_clipping is not None
+                and cfg.trainer.gradient_clipping > 0
+            ):
+                accelerator.clip_grad_norm_(
+                    model.parameters(), cfg.trainer.gradient_clipping
+                )
 
             # Update the parameters and the scheduler
             optimizer.step()
@@ -227,20 +304,34 @@ def trainer(cfg: DictConfig):
             metrics["train/local_samples"] += batch["input_ids"].shape[0]
             metrics["train/local_tokens"] += (pad_mask == 0).sum().item()
             metrics["train/local_num_pred"] += (batch["labels"] != -100).sum().item()
-            metrics["train/local_sum_loss"] += train_loss.item() * (batch["labels"] != -100).sum().item()
-            metrics["train/local_num_correct"] += (logits.argmax(dim=-1) == batch["labels"]).sum().item()
+            metrics["train/local_sum_loss"] += (
+                train_loss.item() * (batch["labels"] != -100).sum().item()
+            )
+            metrics["train/local_num_correct"] += (
+                (logits.argmax(dim=-1) == batch["labels"]).sum().item()
+            )
 
             if metrics["train/steps"] % cfg.wandb.log_interval == 0:
                 # https://deepspeed.readthedocs.io/en/latest/zero3.html#deepspeed.utils.safe_get_full_grad
                 if accelerator.distributed_type is DistributedType.DEEPSPEED:
                     metrics["train/grad_norm"] = model.get_global_grad_norm()
                     metrics["train/weight_norm"] = (
-                        sum([safe_get_full_fp32_param(p).norm(2) ** 2 for p in model.parameters()]) ** 0.5
+                        sum(
+                            [
+                                safe_get_full_fp32_param(p).norm(2) ** 2
+                                for p in model.parameters()
+                            ]
+                        )
+                        ** 0.5
                     ).item()
                 # DDP
                 else:
-                    metrics["train/grad_norm"] = (sum([p.grad.norm(2) ** 2 for p in model.parameters()]) ** 0.5).item()
-                    metrics["train/weight_norm"] = (sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5).item()
+                    metrics["train/grad_norm"] = (
+                        sum([p.grad.norm(2) ** 2 for p in model.parameters()]) ** 0.5
+                    ).item()
+                    metrics["train/weight_norm"] = (
+                        sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5
+                    ).item()
 
                 metrics["train/learning_rate"] = optimizer.param_groups[0]["lr"]
                 metrics.log(accelerator)
@@ -258,15 +349,27 @@ def trainer(cfg: DictConfig):
                     iterations.sort()
 
                     # Remove files with the smallest iterations until the limit is met
-                    while iterations is not None and len(iterations) >= cfg.trainer.model.max_ckpt:
+                    while (
+                        iterations is not None
+                        and len(iterations) >= cfg.trainer.model.max_ckpt
+                    ):
                         file_to_remove = iterations.pop(0)
-                        shutil.rmtree(os.path.join(model_checkpoint_dir, str(file_to_remove)))
-                        print(f"Deleted old model checkpoint {file_to_remove} due to limit " f"(max_ckpt = {cfg.trainer.model.max_ckpt})")
+                        shutil.rmtree(
+                            os.path.join(model_checkpoint_dir, str(file_to_remove))
+                        )
+                        print(
+                            f"Deleted old model checkpoint {file_to_remove} due to limit "
+                            f"(max_ckpt = {cfg.trainer.model.max_ckpt})"
+                        )
                 # Save the checkpoint
                 if accelerator.distributed_type is DistributedType.DEEPSPEED:
-                    model.save_checkpoint(model_checkpoint_dir, tag=metrics["train/steps"])
+                    model.save_checkpoint(
+                        model_checkpoint_dir, tag=metrics["train/steps"]
+                    )
                 else:
-                    path = os.path.join(model_checkpoint_dir, str(metrics["train/steps"]))
+                    path = os.path.join(
+                        model_checkpoint_dir, str(metrics["train/steps"])
+                    )
                     os.makedirs(path, exist_ok=True)
                     torch.save(
                         model.state_dict(),
