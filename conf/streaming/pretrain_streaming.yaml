@@ -1,0 +1,88 @@
+# Configuration for pretraining with streaming datasets
+
+# Model configuration
+model:
+  vocab_size: 30522  # Will be overridden by tokenizer
+  hidden_size: 768
+  num_hidden_layers: 12
+  num_attention_heads: 12
+  intermediate_size: 3072
+  hidden_act: "swiglu"
+  hidden_dropout_prob: 0.1
+  attention_probs_dropout_prob: 0.1
+  max_position_embeddings: 512
+  layer_norm_eps: 1e-6
+  rope: true
+  rope_theta: 10000.0
+  flash_attention: true
+
+# Tokenizer configuration
+tokenizer:
+  tokenizer_name_or_path: "bert-base-uncased"
+
+# Dataset configuration
+dataset:
+  # Option 1: Stream from HuggingFace Hub
+  name: "allenai/c4"
+  config: "en"
+  column: "text"
+  streaming: true
+  
+  # Option 2: Use pre-tokenized dataset (comment out above and uncomment below)
+  # tokenized_path: "path/to/tokenized/dataset"
+  # streaming: true  # Set based on how dataset was tokenized
+
+# Data collator configuration
+datacollator:
+  mlm_probability: 0.15
+  pad_to_multiple_of: 8
+  mask_all: false
+  pack_sequences: false
+  max_length: 512
+
+# Dataloader configuration
+dataloader:
+  train:
+    per_device_batch_size: 8
+    num_workers: 4
+
+# Optimizer configuration
+optimizer:
+  name: "adamw"
+  hparams:
+    lr: 5e-5
+    betas: [0.9, 0.999]
+    eps: 1e-8
+    weight_decay: 0.01
+
+# Scheduler configuration
+scheduler:
+  warmup_steps: 10000
+  total_steps: 1000000
+  final_lr_ratio: 0.1
+
+# Trainer configuration
+trainer:
+  max_steps: 1000000
+  gradient_accumulation_steps: 4
+  mixed_precision: "bf16"
+  dir: "outputs/streaming_pretrain"
+  save_total_limit: 5
+  save_steps: 10000
+  logging_steps: 100
+  eval_steps: 10000
+  resume: false
+  disable_tqdm: false
+  
+  # Accelerate configuration
+  accelerate:
+    max_ckpt: 5
+
+# Weights & Biases configuration
+wandb:
+  project: "neobert-streaming"
+  dir: "logs/wandb"
+  enabled: true
+
+# Random seed
+seed: 42

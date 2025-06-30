@@ -18,8 +18,12 @@ from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
 from torch.nn import CrossEntropyLoss, MSELoss
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from transformers import (AutoConfig, AutoModelForSequenceClassification, AutoTokenizer,
-                          DataCollatorWithPadding)
+from transformers import (
+    AutoConfig,
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
+    DataCollatorWithPadding,
+)
 
 from neobert.model import NeoBERTConfig, NeoBERTForSequenceClassification
 from neobert.tokenizer import get_tokenizer
@@ -269,7 +273,9 @@ def trainer(cfg: Config):
         # Import our new config system
         from neobert.config import ConfigLoader
 
-        pretrained_config_path = getattr(cfg.model, "pretrained_config_path", "configs/test_tiny_pretrain.yaml")
+        pretrained_config_path = getattr(
+            cfg.model, "pretrained_config_path", "configs/test_tiny_pretrain.yaml"
+        )
         model_pretraining_config = ConfigLoader.load(pretrained_config_path)
         model_pretraining_config.model.flash_attention = flash_attention
         tokenizer = get_tokenizer(
@@ -480,13 +486,18 @@ def trainer(cfg: Config):
             raise ValueError("Unable to retrieve checkpoint to transfer from.")
 
     else:
-        pretrained_checkpoint_dir = getattr(cfg.model, "pretrained_checkpoint_dir", "./test_outputs")
+        pretrained_checkpoint_dir = getattr(
+            cfg.model, "pretrained_checkpoint_dir", "./test_outputs"
+        )
         cfg.model.pretrained_checkpoint_dir = os.path.join(
             pretrained_checkpoint_dir, "model_checkpoints"
         )
 
     pretrained_checkpoint = getattr(cfg.model, "pretrained_checkpoint", None)
-    if not (hasattr(cfg.model, "from_hub") and cfg.model.from_hub) and pretrained_checkpoint is not None:
+    if (
+        not (hasattr(cfg.model, "from_hub") and cfg.model.from_hub)
+        and pretrained_checkpoint is not None
+    ):
         try:
             model = load_state_dict_from_zero_checkpoint(
                 model,
@@ -784,14 +795,16 @@ def trainer(cfg: Config):
 
                 with open(
                     os.path.join(
-                        cfg.trainer.output_dir, f"all_results_step_{completed_steps}.json"
+                        cfg.trainer.output_dir,
+                        f"all_results_step_{completed_steps}.json",
                     ),
                     "w",
                 ) as f:
                     print(
                         "dumping in",
                         os.path.join(
-                            cfg.trainer.output_dir, f"all_results_step_{completed_steps}.json"
+                            cfg.trainer.output_dir,
+                            f"all_results_step_{completed_steps}.json",
                         ),
                     )
                     json.dump(all_results, f)

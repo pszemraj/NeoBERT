@@ -40,6 +40,7 @@ class DatasetConfig:
     train_split: Optional[str] = None
     eval_split: Optional[str] = None
     num_proc: int = 4  # Number of processes for tokenization
+    shuffle_buffer_size: int = 10000  # Buffer size for streaming dataset shuffling
 
     # Contrastive-specific
     load_all_from_disk: bool = False
@@ -428,7 +429,9 @@ def create_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--trainer.eval_steps", type=int, help="Evaluate every N steps")
     parser.add_argument("--trainer.output_dir", type=str, help="Output directory")
     parser.add_argument(
-        "--trainer.bf16", type=lambda x: x.lower() == "true", help="Use BF16 (default: True)"
+        "--trainer.bf16",
+        type=lambda x: x.lower() == "true",
+        help="Use BF16 (default: True)",
     )
     parser.add_argument("--trainer.seed", type=int, help="Random seed")
     parser.add_argument(

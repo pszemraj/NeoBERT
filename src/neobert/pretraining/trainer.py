@@ -4,10 +4,16 @@ import re
 # PyTorch
 import torch
 from accelerate import Accelerator
-from accelerate.utils import (DistributedDataParallelKwargs, DistributedType,
-                              ProjectConfiguration, set_seed)
+from accelerate.utils import (
+    DistributedDataParallelKwargs,
+    DistributedType,
+    ProjectConfiguration,
+    set_seed,
+)
+
 # Hugging Face
 from datasets import load_dataset, load_from_disk
+
 # Deepspeed
 from deepspeed.utils import safe_get_full_fp32_param
 from torch.nn import CrossEntropyLoss
@@ -20,6 +26,7 @@ from ..model import NeoBERTConfig, NeoBERTLMHead
 from ..optimizer import get_optimizer
 from ..scheduler import get_scheduler
 from ..tokenizer import get_tokenizer
+
 # Our metric object and model
 from .metrics import Metrics
 
@@ -173,12 +180,12 @@ def trainer(cfg: Config):
                 if cfg.dataset.train_split
                 else dataset["train"]
             )
-    
+
     # Check if dataset needs tokenization
     # For streaming datasets, we need to check differently
     is_streaming = cfg.dataset.streaming
     needs_tokenization = False
-    
+
     if train_dataset:
         if is_streaming:
             # For streaming datasets, peek at the first example
@@ -186,7 +193,7 @@ def trainer(cfg: Config):
             needs_tokenization = "input_ids" not in first_example
         else:
             needs_tokenization = "input_ids" not in train_dataset.column_names
-    
+
     if needs_tokenization:
         accelerator.print("Dataset is not tokenized. Tokenizing now...")
         from neobert.tokenizer import tokenize
@@ -215,7 +222,7 @@ def trainer(cfg: Config):
                     f"Could not find text column in dataset. "
                     f"Available columns: {train_dataset.column_names}"
                 )
-        
+
         # Tokenize dataset
         train_dataset = tokenize(
             train_dataset,
@@ -228,8 +235,21 @@ def trainer(cfg: Config):
         )
         if cfg.dataset.streaming:
             accelerator.print("Tokenization setup complete for streaming dataset.")
+            # Add shuffle buffer for streaming datasets
+            if (
+                hasattr(cfg.dataset, "shuffle_buffer_size")
+                and cfg.dataset.shuffle_buffer_size > 0
+            ):
+                train_dataset = train_dataset.shuffle(
+                    buffer_size=cfg.dataset.shuffle_buffer_size, seed=cfg.trainer.seed
+                )
+                accelerator.print(
+                    f"Added shuffle buffer with size {cfg.dataset.shuffle_buffer_size}"
+                )
         else:
-            accelerator.print(f"Tokenization complete. Dataset size: {len(train_dataset)}")
+            accelerator.print(
+                f"Tokenization complete. Dataset size: {len(train_dataset)}"
+            )
 
     # Dataloader
     train_dataloader = get_dataloader(
@@ -492,5 +512,12 @@ def trainer(cfg: Config):
         # Update the number of epochs
         metrics["train/epochs"] += 1
         skipped_train_dataloader = None
+
+        # For streaming datasets, update the epoch to ensure different shuffling
+        if cfg.dataset.streaming and hasattr(train_dataset, "set_epoch"):
+            train_dataset.set_epoch(metrics["train/epochs"])
+            accelerator.print(
+                f"Set streaming dataset epoch to {metrics['train/epochs']}"
+            )
 
     pbar.close()

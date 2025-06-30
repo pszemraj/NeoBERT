@@ -14,8 +14,12 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from torch.nn.functional import scaled_dot_product_attention
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import (DataCollatorWithPadding, PretrainedConfig,
-                          PreTrainedModel, PreTrainedTokenizerFast)
+from transformers import (
+    DataCollatorWithPadding,
+    PretrainedConfig,
+    PreTrainedModel,
+    PreTrainedTokenizerFast,
+)
 from transformers.modeling_outputs import SequenceClassifierOutput
 
 try:
@@ -27,17 +31,20 @@ except (ImportError, RuntimeError) as e:
     XFORMERS_AVAILABLE = False
     XFORMERS_ERROR = str(e)
     memory_efficient_attention = None
-    
+
     # Native PyTorch SwiGLU implementation as fallback
     class SwiGLU(nn.Module):
-        def __init__(self, in_features, hidden_features=None, out_features=None, bias=True):
+        def __init__(
+            self, in_features, hidden_features=None, out_features=None, bias=True
+        ):
             super().__init__()
             self.w1 = nn.Linear(in_features, hidden_features, bias=bias)
             self.w2 = nn.Linear(in_features, hidden_features, bias=bias)
             self.w3 = nn.Linear(hidden_features, out_features, bias=bias)
-            
+
         def forward(self, x):
             return self.w3(nn.functional.silu(self.w1(x)) * self.w2(x))
+
 
 from .rmsnorm import RMSNorm
 from .rotary import apply_rotary_emb, precompute_freqs_cis
@@ -117,6 +124,7 @@ class EncoderBlock(nn.Module):
             case "swiglu":
                 if not XFORMERS_AVAILABLE:
                     import warnings
+
                     warnings.warn(
                         f"xformers not available, using native PyTorch SwiGLU implementation. "
                         f"For better performance, install xformers: pip install xformers. "

@@ -29,7 +29,7 @@ def get_tokenizer(
         "google-bert/bert-base-uncased",
         "BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp",
     ]
-    
+
     if pretrained_model_name_or_path not in tokenizers_with_special_tokens:
         # Define special tokens to be consistent with RoBERTa
         special_tokens = {
@@ -70,7 +70,6 @@ def single_column_mapping(x, tokenizer, column_name, max_length, truncation):
         truncation=truncation,
         max_length=max_length,
         padding=False,  # no padding saves time and memory
-        return_token_type_ids=False,
     )
 
 
@@ -119,17 +118,28 @@ def tokenize(
     **kwargs,
 ):
     # Check if this is a streaming dataset (IterableDataset)
-    is_streaming = hasattr(dataset, '_iter') or 'IterableDataset' in str(type(dataset))
-    
+    is_streaming = hasattr(dataset, "_iter") or "IterableDataset" in str(type(dataset))
+
     # Get the number of cpu cores available to the process
     # Override with kwargs if provided (e.g., from trainer)
-    if 'num_proc' in kwargs:
-        num_proc = kwargs.pop('num_proc')
+    if "num_proc" in kwargs:
+        num_proc = kwargs.pop("num_proc")
     else:
         num_proc = None if is_streaming else len(os.sched_getaffinity(0))
 
     # Remove all columns except for the `input_ids` and `attention_mask`
-    columns_to_remove = dataset.column_names if remove_columns else None
+    if remove_columns:
+        if is_streaming:
+            # For streaming datasets, we need to specify columns explicitly
+            # We'll remove the text column(s) we're tokenizing
+            if isinstance(column_name, str):
+                columns_to_remove = [column_name]
+            else:
+                columns_to_remove = list(column_name)
+        else:
+            columns_to_remove = dataset.column_names
+    else:
+        columns_to_remove = None
 
     # Single column tokenization
     if isinstance(column_name, str):
@@ -173,12 +183,12 @@ def tokenize(
         "batched": True,
         "remove_columns": columns_to_remove,
     }
-    
+
     # Only add num_proc and features for non-streaming datasets
     if not is_streaming:
         map_kwargs["num_proc"] = num_proc
         map_kwargs["features"] = features
-    
+
     dataset = dataset.map(**map_kwargs)
 
     return dataset

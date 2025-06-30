@@ -17,7 +17,10 @@ from neobert.tokenizer import tokenize
 def main():
     parser = argparse.ArgumentParser(description="Tokenize dataset for pretraining")
     parser.add_argument(
-        "--dataset", type=str, default="pszemraj/simple_wikipedia_LM", help="Dataset name"
+        "--dataset",
+        type=str,
+        default="pszemraj/simple_wikipedia_LM",
+        help="Dataset name",
     )
     parser.add_argument(
         "--tokenizer",
@@ -25,14 +28,18 @@ def main():
         default="BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp",
         help="Tokenizer name",
     )
-    parser.add_argument("--max_length", type=int, default=512, help="Max sequence length")
+    parser.add_argument(
+        "--max_length", type=int, default=512, help="Max sequence length"
+    )
     parser.add_argument(
         "--output", type=str, default="./tokenized_data", help="Output directory"
     )
     parser.add_argument(
         "--train_samples", type=int, default=5000, help="Number of training samples"
     )
-    parser.add_argument("--text_column", type=str, default="text", help="Name of text column")
+    parser.add_argument(
+        "--text_column", type=str, default="text", help="Name of text column"
+    )
 
     args = parser.parse_args()
 
