@@ -2,11 +2,6 @@
 """Run GLUE evaluation."""
 
 import argparse
-import sys
-from pathlib import Path
-
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from neobert.config import ConfigLoader
 from neobert.glue import trainer

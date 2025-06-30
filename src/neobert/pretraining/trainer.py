@@ -198,41 +198,83 @@ def trainer(cfg: Config):
         accelerator.print("Dataset is not tokenized. Tokenizing now...")
         from neobert.tokenizer import tokenize
 
-        # Determine text column
-        text_column = None
-        if is_streaming:
-            # For streaming, check the first example
-            first_example = next(iter(train_dataset))
-            for col in ["text", "sentence", "content"]:
-                if col in first_example:
-                    text_column = col
-                    break
-            if text_column is None:
-                raise ValueError(
-                    f"Could not find text column in dataset. "
-                    f"Available columns: {list(first_example.keys())}"
-                )
+        # For non-streaming datasets, check if pre-tokenization is requested
+        if not is_streaming and cfg.dataset.pre_tokenize:
+            import subprocess
+            from pathlib import Path
+            
+            # Create output directory
+            if cfg.dataset.pre_tokenize_output:
+                output_dir = cfg.dataset.pre_tokenize_output
+            else:
+                output_dir = f"tokenized_data/{cfg.dataset.name.replace('/', '_')}"
+            
+            Path(output_dir).mkdir(parents=True, exist_ok=True)
+            
+            # Run tokenization script
+            accelerator.print(f"Pre-tokenizing dataset to: {output_dir}")
+            
+            # Get absolute path to script
+            script_path = Path(__file__).parent.parent.parent / "scripts" / "pretraining" / "tokenize_dataset.py"
+            
+            cmd = [
+                "python", str(script_path),
+                "--dataset", cfg.dataset.name,
+                "--tokenizer", cfg.tokenizer.path or cfg.tokenizer.name,
+                "--output", output_dir,
+                "--max-length", str(cfg.dataset.max_seq_length),
+            ]
+            
+            if cfg.dataset.train_split:
+                cmd.extend(["--split", cfg.dataset.train_split])
+            
+            if cfg.dataset.num_proc:
+                cmd.extend(["--num-proc", str(cfg.dataset.num_proc)])
+            
+            # Run the tokenization
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(f"Tokenization failed: {result.stderr}")
+            
+            accelerator.print(f"Pre-tokenization complete. Loading from: {output_dir}")
+            # Load the pre-tokenized dataset
+            train_dataset = load_from_disk(output_dir)
         else:
-            for col in ["text", "sentence", "content"]:
-                if col in train_dataset.column_names:
-                    text_column = col
-                    break
-            if text_column is None:
-                raise ValueError(
-                    f"Could not find text column in dataset. "
-                    f"Available columns: {train_dataset.column_names}"
-                )
+            # Determine text column
+            text_column = None
+            if is_streaming:
+                # For streaming, check the first example
+                first_example = next(iter(train_dataset))
+                for col in ["text", "sentence", "content"]:
+                    if col in first_example:
+                        text_column = col
+                        break
+                if text_column is None:
+                    raise ValueError(
+                        f"Could not find text column in dataset. "
+                        f"Available columns: {list(first_example.keys())}"
+                    )
+            else:
+                for col in ["text", "sentence", "content"]:
+                    if col in train_dataset.column_names:
+                        text_column = col
+                        break
+                if text_column is None:
+                    raise ValueError(
+                        f"Could not find text column in dataset. "
+                        f"Available columns: {train_dataset.column_names}"
+                    )
 
-        # Tokenize dataset
-        train_dataset = tokenize(
-            train_dataset,
-            tokenizer,
-            column_name=text_column,
-            max_length=cfg.dataset.max_seq_length,
-            remove_columns=True,
-            truncation=True,
-            num_proc=cfg.dataset.num_proc if not cfg.dataset.streaming else None,
-        )
+            # Tokenize dataset
+            train_dataset = tokenize(
+                train_dataset,
+                tokenizer,
+                column_name=text_column,
+                max_length=cfg.dataset.max_seq_length,
+                remove_columns=True,
+                truncation=True,
+                num_proc=cfg.dataset.num_proc if not cfg.dataset.streaming else None,
+            )
         if cfg.dataset.streaming:
             accelerator.print("Tokenization setup complete for streaming dataset.")
             # Add shuffle buffer for streaming datasets
@@ -289,13 +331,9 @@ def trainer(cfg: Config):
     )
     model = NeoBERTLMHead(model_config)
 
-    accelerator.log(
-        {
-            "model_parameters": sum(
-                p.numel() for p in model.parameters() if p.requires_grad
-            )
-        }
-    )
+    # Log model parameters to console instead of wandb
+    model_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    accelerator.print(f"Model parameters: {model_params:,}")
 
     # Optimizer and Scheduler
     optimizer = get_optimizer(

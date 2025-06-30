@@ -130,12 +130,18 @@ def tokenize(
     # Remove all columns except for the `input_ids` and `attention_mask`
     if remove_columns:
         if is_streaming:
-            # For streaming datasets, we need to specify columns explicitly
-            # We'll remove the text column(s) we're tokenizing
-            if isinstance(column_name, str):
-                columns_to_remove = [column_name]
-            else:
-                columns_to_remove = list(column_name)
+            # For streaming datasets, we need to get column names from first example
+            try:
+                first_example = next(iter(dataset))
+                all_columns = list(first_example.keys())
+                # Remove all columns except the ones we're creating
+                columns_to_remove = [col for col in all_columns if col not in ['input_ids', 'attention_mask', 'token_type_ids']]
+            except:
+                # Fallback to just removing the text column(s) we're tokenizing
+                if isinstance(column_name, str):
+                    columns_to_remove = [column_name]
+                else:
+                    columns_to_remove = list(column_name)
         else:
             columns_to_remove = dataset.column_names
     else:

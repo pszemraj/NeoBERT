@@ -4,11 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 from pathlib import Path
-
-# Add parent directory to path
-sys.path.append(str(Path(__file__).parent.parent.parent))
 
 import torch
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint

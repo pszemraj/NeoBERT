@@ -41,6 +41,8 @@ class DatasetConfig:
     eval_split: Optional[str] = None
     num_proc: int = 4  # Number of processes for tokenization
     shuffle_buffer_size: int = 10000  # Buffer size for streaming dataset shuffling
+    pre_tokenize: bool = False  # Whether to pre-tokenize non-streaming datasets
+    pre_tokenize_output: Optional[str] = None  # Where to save pre-tokenized datasets
 
     # Contrastive-specific
     load_all_from_disk: bool = False

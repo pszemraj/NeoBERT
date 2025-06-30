@@ -38,3 +38,7 @@ keywords = []
 
 [project.optional-dependencies]
 dev = ["black", "pytest", "pytest-cov", "pytest-clarity", "xeger"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["neobert*"]

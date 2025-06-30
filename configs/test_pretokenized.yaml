@@ -1,0 +1,77 @@
+dataset:
+  path: "/home/pszemraj/workspace/projects/better-encoder/NeoBERT/tokenized_data/simple_wiki"  # Pre-tokenized local dataset
+  streaming: false
+  num_workers: 0
+  max_seq_length: 512
+
+model:
+  path: "google-bert/bert-base-uncased"
+  vocab_size: 30522
+  hidden_size: 512
+  num_hidden_layers: 8
+  num_attention_heads: 8
+  intermediate_size: 2048
+  max_position_embeddings: 512
+  dropout_prob: 0.1
+  use_flash_attention: false
+  flash_attention: false
+  rope: true
+  rms_norm: true
+  hidden_act: "swiglu"
+
+tokenizer:
+  path: "google-bert/bert-base-uncased"
+  max_length: 512
+  padding: "max_length"
+  truncation: true
+
+trainer:
+  max_steps: 200
+  per_device_train_batch_size: 16
+  gradient_accumulation_steps: 1
+  save_steps: 100
+  logging_steps: 10
+  warmup_steps: 20
+  learning_rate: 5.0e-5
+  weight_decay: 0.01
+  adam_epsilon: 1.0e-8
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  max_grad_norm: 1.0
+  bf16: true
+  mixed_precision: "bf16"
+  gradient_checkpointing: false
+  seed: 42
+  output_dir: "./outputs/pretokenized_test"
+  overwrite_output_dir: true
+  report_to: ["wandb"]
+  debug: false
+
+dataloader:
+  batch_size: 16
+  shuffle: true
+  num_workers: 0
+  pin_memory: true
+  drop_last: true
+
+datacollator:
+  mlm_probability: 0.15
+  pad_to_multiple_of: 8
+
+optimizer:
+  name: "adamw"
+  lr: 5.0e-5
+  weight_decay: 0.01
+  eps: 1.0e-8
+  betas: [0.9, 0.999]
+
+scheduler:
+  scheduler_type: "cosine"
+  warmup_steps: 20
+
+wandb:
+  enabled: true
+  project: "neobert-streaming-test"
+  name: "pretokenized-simple-wiki-200steps"
+  log_model: false
+  log_interval: 10

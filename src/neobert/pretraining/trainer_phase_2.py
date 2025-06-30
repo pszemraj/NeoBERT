@@ -121,13 +121,9 @@ def trainer(cfg):
     )
 
     # Log the number of parameters
-    accelerator.log(
-        {
-            "model_parameters": sum(
-                p.numel() for p in model.parameters() if p.requires_grad
-            )
-        }
-    )
+    # Log model parameters to console instead of wandb
+    model_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    accelerator.print(f"Model parameters: {model_params:,}")
 
     # Optimizer
     optimizer = AdamW(model.parameters(), **cfg.optimizer.hparams)

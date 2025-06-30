@@ -5,10 +5,6 @@ Test SmolLM2 streaming dataset pretraining for 200 steps.
 
 import os
 
-# Add to path
-import sys
-from pathlib import Path
-
 import torch
 from accelerate import Accelerator
 from accelerate.utils import ProjectConfiguration, set_seed
@@ -17,12 +13,10 @@ from torch.optim import AdamW
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
-sys.path.append(str(Path(__file__).parent))
-
-from src.neobert.collator import get_collator
-from src.neobert.data import PretrainingDataModule
-from src.neobert.model import NeoBERTConfig, NeoBERTLMHead
-from src.neobert.scheduler import get_scheduler
+from neobert.collator import get_collator
+from neobert.data import PretrainingDataModule
+from neobert.model import NeoBERTConfig, NeoBERTLMHead
+from neobert.scheduler import get_scheduler
 
 
 def test_smollm2_pretraining():
