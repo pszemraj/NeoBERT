@@ -48,7 +48,6 @@ trainer:
   dataloader_num_workers: 4
   remove_unused_columns: false
   report_to: ["wandb"]  # Remove if you don't want logging
-  fp16: false
   bf16: true  # Use bf16 on modern GPUs
   gradient_checkpointing: false
   resume_from_checkpoint: false

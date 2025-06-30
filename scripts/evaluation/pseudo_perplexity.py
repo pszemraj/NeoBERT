@@ -6,15 +6,10 @@ import numpy as np
 import torch
 from datasets import concatenate_datasets, load_dataset
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
-
 # Removed OmegaConf - this script should be standalone
 from tqdm import tqdm
-from transformers import (
-    AutoConfig,
-    AutoModelForMaskedLM,
-    AutoModelWithLMHead,
-    AutoTokenizer,
-)
+from transformers import (AutoConfig, AutoModelForMaskedLM,
+                          AutoModelWithLMHead, AutoTokenizer)
 from transformers.models.roberta.modeling_roberta import RobertaEmbeddings
 
 from neobert.model import NeoBERTConfig, NeoBERTLMHead
@@ -76,7 +71,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=1, help="")
     parser.add_argument("--device", type=str, default="cuda", help="")
     parser.add_argument("--compile", action="store_true", help="")
-    parser.add_argument("--fp16", action="store_true", help="")
+    parser.add_argument("--bf16", action="store_true", help="Use bfloat16 precision")
     parser.add_argument("--max_length", type=int, default=4096, help="")
     # Dataset
     parser.add_argument("--data_name", type=str, help="")
@@ -206,7 +201,7 @@ if __name__ == "__main__":
     # Compute pseudo-perplexity
     with (
         torch.no_grad(),
-        torch.autocast(device_type=args.device, dtype=torch.float16, enabled=args.fp16),
+        torch.autocast(device_type=args.device, dtype=torch.bfloat16, enabled=args.bf16),
     ):
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True

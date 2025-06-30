@@ -48,7 +48,6 @@ trainer:
   dataloader_num_workers: 0
   remove_unused_columns: false
   report_to: []
-  fp16: false
   bf16: true  # Use bf16 on modern GPU
   gradient_checkpointing: false
   resume_from_checkpoint: false

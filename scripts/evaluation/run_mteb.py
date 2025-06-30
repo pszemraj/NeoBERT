@@ -222,7 +222,7 @@ def evaluate_mteb(cfg):
         logger.info(f"Running task: {task}")
         eval_splits = ["dev"] if task == "MSMARCO" else ["test"]
         evaluation = MTEB(tasks=[task], task_langs=["en"])
-        with torch.autocast(device_type=device, dtype=torch.float16):
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
             evaluation.run(
                 model,
                 output_folder=output_folder,

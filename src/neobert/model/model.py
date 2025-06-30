@@ -14,12 +14,8 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from torch.nn.functional import scaled_dot_product_attention
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import (
-    DataCollatorWithPadding,
-    PretrainedConfig,
-    PreTrainedModel,
-    PreTrainedTokenizerFast,
-)
+from transformers import (DataCollatorWithPadding, PretrainedConfig,
+                          PreTrainedModel, PreTrainedTokenizerFast)
 from transformers.modeling_outputs import SequenceClassifierOutput
 
 try:
@@ -30,7 +26,6 @@ except (ImportError, RuntimeError) as e:
     # xformers might be installed but have version conflicts
     XFORMERS_AVAILABLE = False
     XFORMERS_ERROR = str(e)
-    SwiGLU = None
     memory_efficient_attention = None
     
     # Native PyTorch SwiGLU implementation as fallback
@@ -816,7 +811,7 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
 
             pad_mask = batch["attention_mask"].to(device)
             xformers_mask = torch.where(pad_mask == 1, float(0.0), float("-inf")).type(
-                torch.float16
+                torch.bfloat16
             )
 
             outputs = self.model(input_ids, xformers_mask)
