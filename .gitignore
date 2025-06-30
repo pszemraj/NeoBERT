@@ -223,6 +223,7 @@ jobs/wandb
 
 # Model outputs and checkpoints
 output/
+outputs/
 checkpoints/
 **/checkpoints/
 **/model_checkpoints/
@@ -231,6 +232,7 @@ results/
 
 # Cache directories
 .cache/
+.ruff_cache/
 *_cache/
 streaming_cache/
 dataset_cache/
@@ -241,6 +243,7 @@ tmp/
 temp/
 .tmp/
 *.tmp
+/tmp/
 
 # Lock files
 *.lock
@@ -248,4 +251,19 @@ temp/
 # Dataset downloads
 downloads/
 data_downloads/
+
+# Claude-specific
+.claude/
+
+# Test outputs
+test_outputs/
+**/test_outputs/
+
+# Tokenized datasets
+tokenized_data/
+tokenized_datasets/
+
+# Wandb logs
+logs/wandb/
+wandb/
 

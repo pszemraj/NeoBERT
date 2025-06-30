@@ -133,7 +133,7 @@ python scripts/pretraining/pretrain.py \
 
 3. **Start with a small test run:**
    ```bash
-   python scripts/pretraining/pretrain.py --config configs/test_tiny_pretrain.yaml
+   python scripts/pretraining/pretrain.py --config tests/configs/pretraining/test_tiny_pretrain.yaml
    ```
 
 4. **Scale up to full training:**

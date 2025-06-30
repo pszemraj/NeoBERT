@@ -12,12 +12,12 @@ class TestModelConfigOnly(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        self.config_dir = Path(__file__).parent.parent / "configs"
+        self.config_dir = Path(__file__).parent / "configs"
 
     def test_model_config_validation(self):
         """Test model config validation without importing model classes."""
         # Load config
-        config_path = self.config_dir / "test_tiny_pretrain.yaml"
+        config_path = self.config_dir / "pretraining" / "test_tiny_pretrain.yaml"
         config = ConfigLoader.load(str(config_path))
 
         # Test NeoBERTConfig-like validation manually
@@ -50,9 +50,9 @@ class TestModelConfigOnly(unittest.TestCase):
     def test_all_model_configs_valid(self):
         """Test that all model configs meet basic requirements."""
         test_configs = [
-            "test_tiny_pretrain.yaml",
-            "test_tiny_glue.yaml",
-            "test_tiny_contrastive.yaml",
+            "pretraining/test_tiny_pretrain.yaml",
+            "evaluation/test_tiny_glue.yaml",
+            "contrastive/test_tiny_contrastive.yaml",
         ]
 
         for config_name in test_configs:
@@ -76,7 +76,7 @@ class TestModelConfigOnly(unittest.TestCase):
 
     def test_model_parameter_counts(self):
         """Test rough model parameter counts for tiny models."""
-        config_path = self.config_dir / "test_tiny_pretrain.yaml"
+        config_path = self.config_dir / "pretraining" / "test_tiny_pretrain.yaml"
         config = ConfigLoader.load(str(config_path))
 
         # Estimate parameters for our tiny model

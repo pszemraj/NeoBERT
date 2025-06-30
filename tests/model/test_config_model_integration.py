@@ -14,11 +14,11 @@ class TestConfigModelIntegration(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        self.config_dir = Path(__file__).parent.parent.parent / "configs"
+        self.config_dir = Path(__file__).parent.parent / "configs"
 
     def test_config_to_model_config_conversion(self):
         """Test that config can be converted to model config."""
-        config_path = self.config_dir / "test_tiny_pretrain.yaml"
+        config_path = self.config_dir / "pretraining" / "test_tiny_pretrain.yaml"
         config = ConfigLoader.load(str(config_path))
 
         # Test that we can extract model parameters
@@ -63,9 +63,9 @@ class TestConfigModelIntegration(unittest.TestCase):
     def test_all_test_configs_are_valid(self):
         """Test that all test configs have valid model parameters."""
         test_configs = [
-            "test_tiny_pretrain.yaml",
-            "test_tiny_glue.yaml",
-            "test_tiny_contrastive.yaml",
+            "pretraining/test_tiny_pretrain.yaml",
+            "evaluation/test_tiny_glue.yaml",
+            "contrastive/test_tiny_contrastive.yaml",
         ]
 
         for config_name in test_configs:
@@ -119,7 +119,7 @@ class TestConfigModelIntegration(unittest.TestCase):
 
     def test_optimizer_scheduler_config_validity(self):
         """Test optimizer and scheduler configs are valid."""
-        config_path = self.config_dir / "test_tiny_pretrain.yaml"
+        config_path = self.config_dir / "pretraining" / "test_tiny_pretrain.yaml"
         config = ConfigLoader.load(str(config_path))
 
         # Optimizer checks
@@ -150,9 +150,15 @@ class TestConfigModelIntegration(unittest.TestCase):
     def test_trainer_config_cpu_compatibility(self):
         """Test trainer configs are suitable for CPU-only testing."""
         configs = [
-            ConfigLoader.load(str(self.config_dir / "test_tiny_pretrain.yaml")),
-            ConfigLoader.load(str(self.config_dir / "test_tiny_glue.yaml")),
-            ConfigLoader.load(str(self.config_dir / "test_tiny_contrastive.yaml")),
+            ConfigLoader.load(
+                str(self.config_dir / "pretraining" / "test_tiny_pretrain.yaml")
+            ),
+            ConfigLoader.load(
+                str(self.config_dir / "evaluation" / "test_tiny_glue.yaml")
+            ),
+            ConfigLoader.load(
+                str(self.config_dir / "contrastive" / "test_tiny_contrastive.yaml")
+            ),
         ]
 
         for config in configs:

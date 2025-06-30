@@ -16,7 +16,7 @@ class TestEndToEndIntegration(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        self.config_dir = Path(__file__).parent.parent.parent / "configs"
+        self.config_dir = Path(__file__).parent.parent / "configs"
         self.temp_dir = tempfile.mkdtemp()
 
     def tearDown(self):
@@ -28,7 +28,7 @@ class TestEndToEndIntegration(unittest.TestCase):
     def test_config_to_model_pipeline(self):
         """Test full pipeline from config loading to model creation."""
         # Test pretrain config
-        config_path = self.config_dir / "test_tiny_pretrain.yaml"
+        config_path = self.config_dir / "pretraining" / "test_tiny_pretrain.yaml"
 
         # Simulate command line args
         test_args = [
@@ -284,7 +284,7 @@ class TestEndToEndIntegration(unittest.TestCase):
 
     def test_config_override_system_robustness(self):
         """Test that config override system handles edge cases."""
-        config_path = self.config_dir / "test_tiny_pretrain.yaml"
+        config_path = self.config_dir / "pretraining" / "test_tiny_pretrain.yaml"
 
         # Test various override patterns
         test_cases = [

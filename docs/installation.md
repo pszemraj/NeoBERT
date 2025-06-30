@@ -84,7 +84,7 @@ python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 
 # Test model creation (requires xformers for SwiGLU)
 python -c "
-from neobert.model import NeoBERT, NeoBERTConfig
+from neobert.model.model import NeoBERT, NeoBERTConfig
 try:
     # Default config uses SwiGLU activation (requires xformers)
     config = NeoBERTConfig(hidden_size=256, num_hidden_layers=2, num_attention_heads=4)

@@ -1,77 +1,57 @@
-dataset:
-  path: "/home/pszemraj/workspace/projects/better-encoder/NeoBERT/tokenized_data/simple_wiki"  # Pre-tokenized local dataset
-  streaming: false
-  num_workers: 0
-  max_seq_length: 512
+# Pre-tokenized dataset test configuration
+task: pretraining
 
 model:
-  path: "google-bert/bert-base-uncased"
-  vocab_size: 30522
-  hidden_size: 512
-  num_hidden_layers: 8
-  num_attention_heads: 8
-  intermediate_size: 2048
+  hidden_size: 128
+  num_hidden_layers: 2
+  num_attention_heads: 2
+  intermediate_size: 256
   max_position_embeddings: 512
-  dropout_prob: 0.1
-  use_flash_attention: false
-  flash_attention: false
+  vocab_size: 30522  # BERT's vocab size
   rope: true
   rms_norm: true
   hidden_act: "swiglu"
+  dropout_prob: 0.1
+  flash_attention: true
+
+dataset:
+  name: "pszemraj/simple_wikipedia_LM"
+  streaming: false
+  max_seq_length: 128
+  num_workers: 0
+  pre_tokenize: false  # This dataset is already tokenized
 
 tokenizer:
-  path: "google-bert/bert-base-uncased"
-  max_length: 512
-  padding: "max_length"
-  truncation: true
-
-trainer:
-  max_steps: 200
-  per_device_train_batch_size: 16
-  gradient_accumulation_steps: 1
-  save_steps: 100
-  logging_steps: 10
-  warmup_steps: 20
-  learning_rate: 5.0e-5
-  weight_decay: 0.01
-  adam_epsilon: 1.0e-8
-  adam_beta1: 0.9
-  adam_beta2: 0.999
-  max_grad_norm: 1.0
-  bf16: true
-  mixed_precision: "bf16"
-  gradient_checkpointing: false
-  seed: 42
-  output_dir: "./outputs/pretokenized_test"
-  overwrite_output_dir: true
-  report_to: ["wandb"]
-  debug: false
-
-dataloader:
-  batch_size: 16
-  shuffle: true
-  num_workers: 0
-  pin_memory: true
-  drop_last: true
-
-datacollator:
-  mlm_probability: 0.15
-  pad_to_multiple_of: 8
+  name: "bert-base-uncased"
 
 optimizer:
   name: "adamw"
-  lr: 5.0e-5
+  lr: 1e-4
   weight_decay: 0.01
-  eps: 1.0e-8
-  betas: [0.9, 0.999]
 
 scheduler:
-  scheduler_type: "cosine"
-  warmup_steps: 20
+  name: "cosine"
+  warmup_steps: 10
+
+trainer:
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 1
+  max_steps: 200
+  save_steps: 200
+  eval_steps: 200
+  logging_steps: 10
+  output_dir: "./outputs/pretokenized_test"
+  bf16: true
+  mixed_precision: "bf16"
+  seed: 42
+
+datacollator:
+  mlm_probability: 0.2
+  pad_to_multiple_of: 8
 
 wandb:
-  enabled: true
-  project: "neobert-streaming-test"
-  name: "pretokenized-simple-wiki-200steps"
-  log_model: false
+  project: "neobert-test"
+  name: "pretokenized-200steps-test"
+  mode: "online"
   log_interval: 10

@@ -43,9 +43,9 @@ def test_metrics_log_with_step():
 
     # Verify step parameter was passed
     assert "step" in call_args.kwargs, "Step parameter not passed to accelerator.log"
-    assert call_args.kwargs["step"] == 10, (
-        f"Expected step=10, got step={call_args.kwargs['step']}"
-    )
+    assert (
+        call_args.kwargs["step"] == 10
+    ), f"Expected step=10, got step={call_args.kwargs['step']}"
 
     # Verify metrics were logged
     logged_metrics = call_args.args[0]

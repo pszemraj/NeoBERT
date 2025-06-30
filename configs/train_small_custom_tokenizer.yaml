@@ -3,14 +3,14 @@ task: "pretraining"
 model:
   hidden_size: 256
   num_hidden_layers: 4
-  num_attention_heads: 8
+  num_attention_heads: 4  # Changed from 8 to make head_dim=64 for flash attention compatibility
   intermediate_size: 1024
   dropout_prob: 0.1
   vocab_size: 31999  # Match the custom tokenizer
   max_position_embeddings: 512
-  flash_attention: false
+  flash_attention: true
   ngpt: false
-  hidden_act: "gelu"  # Use GELU to avoid xformers issues
+  hidden_act: "swiglu"  # Now compatible with flash attention (head_dim=64)
   rope: true
   rms_norm: true
 

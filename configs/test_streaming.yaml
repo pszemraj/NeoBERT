@@ -1,84 +1,57 @@
-# Test configuration for streaming datasets (CPU-friendly)
+# Streaming dataset test configuration
+task: pretraining
 
-# Model configuration (tiny model for testing)
 model:
-  vocab_size: 30522
   hidden_size: 128
   num_hidden_layers: 2
   num_attention_heads: 2
-  intermediate_size: 512
-  hidden_act: "gelu"  # Use GELU for CPU testing
-  hidden_dropout_prob: 0.1
-  attention_probs_dropout_prob: 0.1
-  max_position_embeddings: 128
-  layer_norm_eps: 1e-6
+  intermediate_size: 256
+  max_position_embeddings: 512
+  vocab_size: 30522  # BERT's vocab size
   rope: true
-  rope_theta: 10000.0
-  flash_attention: false  # Disable for CPU
+  rms_norm: true
+  hidden_act: "swiglu"
+  dropout_prob: 0.1
+  flash_attention: true
 
-# Tokenizer configuration
-tokenizer:
-  tokenizer_name_or_path: "bert-base-uncased"
-
-# Dataset configuration
 dataset:
-  # Small dataset for testing
-  name: "wikitext"
-  config: "wikitext-2-raw-v1"
-  column: "text"
+  name: "EleutherAI/SmolLM2-1.7B-stage-4-100B"
   streaming: true
+  max_seq_length: 128
+  num_workers: 0
+  shuffle_buffer_size: 1000
 
-# Data collator configuration
-datacollator:
-  mlm_probability: 0.15
-  pad_to_multiple_of: 8
-  mask_all: false
-  pack_sequences: false
-  max_length: 128
+tokenizer:
+  name: "bert-base-uncased"
 
-# Dataloader configuration
-dataloader:
-  train:
-    per_device_batch_size: 4
-    num_workers: 0  # Set to 0 for debugging
-
-# Optimizer configuration
 optimizer:
   name: "adamw"
-  hparams:
-    lr: 1e-4
-    betas: [0.9, 0.999]
-    eps: 1e-8
-    weight_decay: 0.01
+  lr: 1e-4
+  weight_decay: 0.01
 
-# Scheduler configuration
 scheduler:
-  warmup_steps: 100
-  total_steps: 1000
-  final_lr_ratio: 0.1
+  name: "cosine"
+  warmup_steps: 10
 
-# Trainer configuration
 trainer:
-  max_steps: 100  # Small number for testing
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 2
   gradient_accumulation_steps: 1
-  mixed_precision: "no"  # No mixed precision for CPU
-  dir: "outputs/test_streaming"
-  save_total_limit: 2
-  save_steps: 50
+  max_steps: 200
+  save_steps: 200
+  eval_steps: 200
   logging_steps: 10
-  eval_steps: 50
-  resume: false
-  disable_tqdm: false
-  
-  # Accelerate configuration
-  accelerate:
-    max_ckpt: 2
+  output_dir: "./outputs/streaming_test"
+  bf16: true
+  mixed_precision: "bf16"
+  seed: 42
 
-# Weights & Biases configuration
+datacollator:
+  mlm_probability: 0.2
+  pad_to_multiple_of: 8
+
 wandb:
   project: "neobert-test"
-  dir: "logs/wandb"
-  enabled: false  # Disable for testing
-
-# Random seed
-seed: 42
+  name: "streaming-200steps-test"
+  mode: "online"
+  log_interval: 10

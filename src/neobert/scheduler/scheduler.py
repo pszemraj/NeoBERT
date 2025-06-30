@@ -32,11 +32,10 @@ def get_scheduler(
             f"Decay {decay} is not a valid type. Options are cosine and linear."
         )
 
-    assert (constant_steps == 0 and warmup_steps < decay_steps) or (
-        warmup_steps < constant_steps and constant_steps < decay_steps
-    ), (
-        "warmup_steps, constant_steps and decay_steps are milestones parameters, not total number of steps for each scheduler."
-    )
+    assert (
+        (constant_steps == 0 and warmup_steps < decay_steps)
+        or (warmup_steps < constant_steps and constant_steps < decay_steps)
+    ), "warmup_steps, constant_steps and decay_steps are milestones parameters, not total number of steps for each scheduler."
 
     schedulers = []
     milestones = []

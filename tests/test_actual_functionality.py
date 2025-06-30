@@ -15,7 +15,7 @@ class TestActualFunctionality(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        self.config_dir = Path(__file__).parent.parent / "configs"
+        self.config_dir = Path(__file__).parent / "configs"
         self.temp_dir = tempfile.mkdtemp()
 
     def tearDown(self):
@@ -26,7 +26,7 @@ class TestActualFunctionality(unittest.TestCase):
 
     def test_config_system_works(self):
         """Test that config system actually loads and parses correctly."""
-        config_path = self.config_dir / "test_tiny_pretrain.yaml"
+        config_path = self.config_dir / "pretraining" / "test_tiny_pretrain.yaml"
         config = ConfigLoader.load(str(config_path))
 
         # Verify all critical fields are present and correct
@@ -43,7 +43,7 @@ class TestActualFunctionality(unittest.TestCase):
     def test_model_creation_without_xformers(self):
         """Test that we can create models without xformers dependency."""
         # Load config
-        config_path = self.config_dir / "test_tiny_pretrain.yaml"
+        config_path = self.config_dir / "pretraining" / "test_tiny_pretrain.yaml"
         config = ConfigLoader.load(str(config_path))
 
         # Create model config without xformers-dependent features
@@ -135,7 +135,7 @@ class TestActualFunctionality(unittest.TestCase):
 
         # Test merging with base config
         base_config_dict = ConfigLoader.load_yaml(
-            str(self.config_dir / "test_tiny_pretrain.yaml")
+            str(self.config_dir / "pretraining" / "test_tiny_pretrain.yaml")
         )
         merged = ConfigLoader.merge_configs(base_config_dict, override_dict)
 
@@ -150,7 +150,7 @@ class TestActualFunctionality(unittest.TestCase):
 
     def test_optimizer_creation_functionality(self):
         """Test that we can actually create optimizers from config."""
-        config_path = self.config_dir / "test_tiny_pretrain.yaml"
+        config_path = self.config_dir / "pretraining" / "test_tiny_pretrain.yaml"
         config = ConfigLoader.load(str(config_path))
 
         # Create a simple model to optimize
@@ -193,7 +193,7 @@ class TestActualFunctionality(unittest.TestCase):
 
     def test_scheduler_functionality(self):
         """Test that scheduler configs can create working schedulers."""
-        config_path = self.config_dir / "test_tiny_pretrain.yaml"
+        config_path = self.config_dir / "pretraining" / "test_tiny_pretrain.yaml"
         config = ConfigLoader.load(str(config_path))
 
         # Create dummy model and optimizer
@@ -234,9 +234,9 @@ class TestActualFunctionality(unittest.TestCase):
     def test_all_configs_are_valid(self):
         """Test that all test configs are actually valid and can be loaded."""
         test_configs = [
-            "test_tiny_pretrain.yaml",
-            "test_tiny_glue.yaml",
-            "test_tiny_contrastive.yaml",
+            "pretraining/test_tiny_pretrain.yaml",
+            "evaluation/test_tiny_glue.yaml",
+            "contrastive/test_tiny_contrastive.yaml",
         ]
 
         for config_name in test_configs:

@@ -274,7 +274,9 @@ def trainer(cfg: Config):
         from neobert.config import ConfigLoader
 
         pretrained_config_path = getattr(
-            cfg.model, "pretrained_config_path", "configs/test_tiny_pretrain.yaml"
+            cfg.model,
+            "pretrained_config_path",
+            "tests/configs/pretraining/test_tiny_pretrain.yaml",
         )
         model_pretraining_config = ConfigLoader.load(pretrained_config_path)
         model_pretraining_config.model.flash_attention = flash_attention

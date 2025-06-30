@@ -16,8 +16,9 @@ class TestContrastivePipeline(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures."""
         self.test_config_path = (
-            Path(__file__).parent.parent.parent
+            Path(__file__).parent.parent
             / "configs"
+            / "contrastive"
             / "test_tiny_contrastive.yaml"
         )
         self.temp_dir = tempfile.mkdtemp()

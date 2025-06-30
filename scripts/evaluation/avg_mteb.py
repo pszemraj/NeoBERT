@@ -175,9 +175,9 @@ def compute_table():
                         task.replace("CQADupstackRetrieval", "CQADupstackTexRetrieval")
                     ]
                 )
-                assert len(mteb_task) == 1, (
-                    f"Found {len(mteb_task)} for {task}. Expected 1."
-                )
+                assert (
+                    len(mteb_task) == 1
+                ), f"Found {len(mteb_task)} for {task}. Expected 1."
                 test_result = all_results.get(model, {}).get(task, {})
                 try:
                     model_task_results.append(

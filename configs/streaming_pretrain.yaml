@@ -18,6 +18,7 @@ model:
   use_flash_attention: true  # Set to false if GPU doesn't support it
   flash_attention: true
   rope: true  # RoPE embeddings
+  hidden_act: "swiglu"
   rms_norm: true  # RMSNorm instead of LayerNorm
 
 tokenizer:

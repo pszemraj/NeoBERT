@@ -18,7 +18,10 @@ class TestPretrainPipeline(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures."""
         self.test_config_path = (
-            Path(__file__).parent.parent.parent / "configs" / "test_tiny_pretrain.yaml"
+            Path(__file__).parent.parent
+            / "configs"
+            / "pretraining"
+            / "test_tiny_pretrain.yaml"
         )
         self.temp_dir = tempfile.mkdtemp()
 
@@ -220,7 +223,10 @@ class TestPretrainComponents(unittest.TestCase):
     def test_optimizer_creation(self):
         """Test optimizer creation from config."""
         config = ConfigLoader.load(
-            Path(__file__).parent.parent.parent / "configs" / "test_tiny_pretrain.yaml"
+            Path(__file__).parent.parent
+            / "configs"
+            / "pretraining"
+            / "test_tiny_pretrain.yaml"
         )
 
         from neobert.model import NeoBERT, NeoBERTConfig
@@ -254,7 +260,10 @@ class TestPretrainComponents(unittest.TestCase):
     def test_scheduler_creation(self):
         """Test scheduler creation from config."""
         config = ConfigLoader.load(
-            Path(__file__).parent.parent.parent / "configs" / "test_tiny_pretrain.yaml"
+            Path(__file__).parent.parent
+            / "configs"
+            / "pretraining"
+            / "test_tiny_pretrain.yaml"
         )
 
         from neobert.model import NeoBERT, NeoBERTConfig

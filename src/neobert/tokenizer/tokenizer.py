@@ -140,7 +140,7 @@ def tokenize(
                     for col in all_columns
                     if col not in ["input_ids", "attention_mask", "token_type_ids"]
                 ]
-            except:
+            except Exception:
                 # Fallback to just removing the text column(s) we're tokenizing
                 if isinstance(column_name, str):
                     columns_to_remove = [column_name]
@@ -153,12 +153,18 @@ def tokenize(
 
     # Single column tokenization
     if isinstance(column_name, str):
-        features = Features(
-            {
-                "input_ids": Sequence(Value("int32")),
-                "attention_mask": Sequence(Value("bool")),
-            }
-        )
+        # Check if tokenizer returns token_type_ids
+        test_output = tokenizer("test", truncation=True, max_length=10)
+        has_token_type_ids = "token_type_ids" in test_output
+
+        feature_dict = {
+            "input_ids": Sequence(Value("int32")),
+            "attention_mask": Sequence(Value("bool")),
+        }
+        if has_token_type_ids:
+            feature_dict["token_type_ids"] = Sequence(Value("int32"))
+
+        features = Features(feature_dict)
         mapping = partial(
             single_column_mapping,
             tokenizer=tokenizer,

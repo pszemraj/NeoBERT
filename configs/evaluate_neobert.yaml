@@ -9,9 +9,9 @@ model:
   dropout_prob: 0.1
   vocab_size: 30522
   max_position_embeddings: 512
-  flash_attention: false
+  flash_attention: true
   ngpt: false
-  hidden_act: "gelu"
+  hidden_act: "swiglu"
 
 dataset:
   name: "glue"
@@ -52,4 +52,8 @@ optimizer:
 
 scheduler:
   name: "linear"
+
+datacollator:
+  mlm_probability: 0.15
+  pad_to_multiple_of: 8
   warmup_ratio: 0.1

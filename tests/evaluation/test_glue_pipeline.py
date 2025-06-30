@@ -16,7 +16,10 @@ class TestGLUEPipeline(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures."""
         self.test_config_path = (
-            Path(__file__).parent.parent.parent / "configs" / "test_tiny_glue.yaml"
+            Path(__file__).parent.parent
+            / "configs"
+            / "evaluation"
+            / "test_tiny_glue.yaml"
         )
         self.temp_dir = tempfile.mkdtemp()
 
