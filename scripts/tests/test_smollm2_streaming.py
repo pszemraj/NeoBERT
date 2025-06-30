@@ -4,6 +4,7 @@ Test SmolLM2 streaming dataset pretraining for 200 steps.
 """
 
 import os
+
 # Add to path
 import sys
 from pathlib import Path

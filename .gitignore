@@ -249,5 +249,3 @@ temp/
 downloads/
 data_downloads/
 
-# Hydra outputs
-multirun/

@@ -8,8 +8,12 @@ from pathlib import Path
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent))
 
-from src.neobert.config import (Config, ConfigLoader, create_argument_parser,
-                                parse_args_to_dict)
+from src.neobert.config import (
+    Config,
+    ConfigLoader,
+    create_argument_parser,
+    parse_args_to_dict,
+)
 
 
 def test_config_creation():

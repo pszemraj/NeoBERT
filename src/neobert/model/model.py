@@ -14,8 +14,12 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from torch.nn.functional import scaled_dot_product_attention
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import (DataCollatorWithPadding, PretrainedConfig,
-                          PreTrainedModel, PreTrainedTokenizerFast)
+from transformers import (
+    DataCollatorWithPadding,
+    PretrainedConfig,
+    PreTrainedModel,
+    PreTrainedTokenizerFast,
+)
 from transformers.modeling_outputs import SequenceClassifierOutput
 
 try:
