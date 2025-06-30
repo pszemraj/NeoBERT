@@ -99,6 +99,7 @@ python tests/run_tests.py --test-dir training
 
 ### Data Configuration
 - `dataset.name`: HuggingFace dataset name or path to local data
+- `dataset.streaming`: Enable streaming for large datasets (memory efficient)
 - `tokenizer.name`: Tokenizer identifier
 - `dataset.max_seq_length`: Maximum sequence length
 

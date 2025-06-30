@@ -367,7 +367,8 @@ print(f"Score: {mean_score:.3f} ± {std_score:.3f}")
 # Batch evaluation
 --trainer.per_device_eval_batch_size 128 \
 --trainer.dataloader_num_workers 4 \
---trainer.fp16 true
+--trainer.bf16 true \
+--trainer.mixed_precision "bf16"
 ```
 
 ## Troubleshooting
@@ -390,7 +391,7 @@ torch.cuda.empty_cache()
 ```bash
 # Enable faster inference
 --model.use_cache true \
---trainer.fp16 true \
+--trainer.bf16 true \
 --trainer.dataloader_pin_memory true
 ```
 

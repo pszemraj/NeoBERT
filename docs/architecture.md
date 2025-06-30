@@ -224,11 +224,13 @@ model:
 
 ### Memory Usage
 
-| Model Size | Parameters | Memory (FP32) | Memory (FP16) |
+| Model Size | Parameters | Memory (FP32) | Memory (BF16) |
 |------------|-----------|---------------|---------------|
 | Small      | 110M      | 440MB         | 220MB         |
 | Base       | 220M      | 880MB         | 440MB         |
 | Large      | 440M      | 1.76GB        | 880MB         |
+
+**Note**: BF16 (bfloat16) is recommended for all modern GPUs (NVIDIA Ampere/RTX 30xx and newer). BF16 provides better numerical stability than FP16 while maintaining the same memory efficiency.
 
 ### Compute Requirements
 
