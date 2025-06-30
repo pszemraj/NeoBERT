@@ -18,7 +18,6 @@ Welcome to the NeoBERT documentation. This directory contains guides and referen
 - [Testing](testing.md) - Running the test suite
 
 ### Development
-- [Refactor Status](refactor_status.md) - Status of the Hydra to YAML refactoring
 - [Contributing](contributing.md) - Guidelines for contributing to NeoBERT
 
 ### Reference

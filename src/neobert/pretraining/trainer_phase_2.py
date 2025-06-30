@@ -5,33 +5,31 @@ import signal
 import sys
 
 import numpy as np
-
 # PyTorch
 import torch
 from accelerate import Accelerator
 from accelerate.utils import DistributedType, ProjectConfiguration, set_seed
-
 # Hugging Face
 from datasets import load_from_disk
-
 # Deepspeed
 from deepspeed.utils import safe_get_full_fp32_param
-from omegaconf import DictConfig, OmegaConf
 from torch.nn import CrossEntropyLoss
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
+from torch.optim.lr_scheduler import (CosineAnnealingLR, LambdaLR, LinearLR,
+                                      SequentialLR)
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import DataCollatorForLanguageModeling
+from dataclasses import asdict
 
+from ..config import Config
 from ..model import NeoBERTConfig, NeoBERTLMHead
 from ..tokenizer import get_tokenizer
-
 # Our metric object and model
 from .metrics import Metrics
 
 
-def trainer(cfg: DictConfig):
+def trainer(cfg):
     # Get the last checkpoint id
     checkpoint_dir = os.path.join(cfg.trainer.dir, "checkpoints")
     model_checkpoint_dir = os.path.join(cfg.trainer.dir, "model_checkpoints")
@@ -75,7 +73,7 @@ def trainer(cfg: DictConfig):
             "wandb": {
                 "name": cfg.wandb.name,
                 "entity": cfg.wandb.entity,
-                "config": OmegaConf.to_container(cfg)
+                "config": asdict(cfg)
                 | {"distributed_type": accelerator.distributed_type},
                 "tags": cfg.wandb.tags,
                 "dir": cfg.wandb.dir,
