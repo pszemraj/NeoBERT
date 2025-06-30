@@ -51,8 +51,10 @@ class Metrics(defaultdict):
                 / metrics_agg["train/local_num_pred"]
             )
 
-        # Log the metrics
-        accelerator.log(metrics_log)
+        # Log the metrics with the current step
+        # Extract the step value to pass separately to accelerator.log
+        current_step = self.get("train/steps", 0)
+        accelerator.log(metrics_log, step=current_step)
 
         # Reset the local counters
         for k in metrics_agg.keys():
