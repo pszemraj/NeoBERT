@@ -8,9 +8,6 @@ from pathlib import Path
 
 import torch
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
-
 from neobert.config import ConfigLoader, load_config_from_args
 
 

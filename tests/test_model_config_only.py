@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
 """Test model config creation without importing the full model."""
 
-import sys
 import unittest
 from pathlib import Path
-
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from neobert.config import ConfigLoader
 

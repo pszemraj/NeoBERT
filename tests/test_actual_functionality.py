@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """Test actual functionality of the refactored NeoBERT system."""
 
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 import torch
-
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from neobert.config import ConfigLoader
 

@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """Test contrastive training pipeline functionality."""
 
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 import torch
-
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from neobert.config import ConfigLoader
 

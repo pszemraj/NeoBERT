@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 """Test NeoBERT model forward passes and functionality."""
 
-import sys
 import unittest
 from pathlib import Path
 
 import torch
-
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from neobert.model import (
     NeoBERT,

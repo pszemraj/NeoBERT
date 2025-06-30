@@ -5,10 +5,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-# Add src to path
-sys.path.append(str(Path(__file__).parent.parent))
-
-from src.neobert.config import (
+from neobert.config import (
     Config,
     ConfigLoader,
     create_argument_parser,
