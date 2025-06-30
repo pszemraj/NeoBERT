@@ -10,14 +10,10 @@ import torch
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
-from neobert.model import (
-    NeoBERT,
-    NeoBERTConfig,
-    NeoBERTForSequenceClassification,
-    NeoBERTHFForSequenceClassification,
-    NeoBERTLMHead,
-    NormNeoBERT,
-)
+from neobert.model import (NeoBERT, NeoBERTConfig,
+                           NeoBERTForSequenceClassification,
+                           NeoBERTHFForSequenceClassification, NeoBERTLMHead,
+                           NormNeoBERT)
 
 
 class TestModelForward(unittest.TestCase):
