@@ -202,40 +202,50 @@ def trainer(cfg: Config):
         if not is_streaming and cfg.dataset.pre_tokenize:
             import subprocess
             from pathlib import Path
-            
+
             # Create output directory
             if cfg.dataset.pre_tokenize_output:
                 output_dir = cfg.dataset.pre_tokenize_output
             else:
                 output_dir = f"tokenized_data/{cfg.dataset.name.replace('/', '_')}"
-            
+
             Path(output_dir).mkdir(parents=True, exist_ok=True)
-            
+
             # Run tokenization script
             accelerator.print(f"Pre-tokenizing dataset to: {output_dir}")
-            
+
             # Get absolute path to script
-            script_path = Path(__file__).parent.parent.parent / "scripts" / "pretraining" / "tokenize_dataset.py"
-            
+            script_path = (
+                Path(__file__).parent.parent.parent
+                / "scripts"
+                / "pretraining"
+                / "tokenize_dataset.py"
+            )
+
             cmd = [
-                "python", str(script_path),
-                "--dataset", cfg.dataset.name,
-                "--tokenizer", cfg.tokenizer.path or cfg.tokenizer.name,
-                "--output", output_dir,
-                "--max-length", str(cfg.dataset.max_seq_length),
+                "python",
+                str(script_path),
+                "--dataset",
+                cfg.dataset.name,
+                "--tokenizer",
+                cfg.tokenizer.path or cfg.tokenizer.name,
+                "--output",
+                output_dir,
+                "--max-length",
+                str(cfg.dataset.max_seq_length),
             ]
-            
+
             if cfg.dataset.train_split:
                 cmd.extend(["--split", cfg.dataset.train_split])
-            
+
             if cfg.dataset.num_proc:
                 cmd.extend(["--num-proc", str(cfg.dataset.num_proc)])
-            
+
             # Run the tokenization
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0:
                 raise RuntimeError(f"Tokenization failed: {result.stderr}")
-            
+
             accelerator.print(f"Pre-tokenization complete. Loading from: {output_dir}")
             # Load the pre-tokenized dataset
             train_dataset = load_from_disk(output_dir)

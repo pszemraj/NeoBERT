@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-from pathlib import Path
 
 import torch
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint

@@ -135,7 +135,11 @@ def tokenize(
                 first_example = next(iter(dataset))
                 all_columns = list(first_example.keys())
                 # Remove all columns except the ones we're creating
-                columns_to_remove = [col for col in all_columns if col not in ['input_ids', 'attention_mask', 'token_type_ids']]
+                columns_to_remove = [
+                    col
+                    for col in all_columns
+                    if col not in ["input_ids", "attention_mask", "token_type_ids"]
+                ]
             except:
                 # Fallback to just removing the text column(s) we're tokenizing
                 if isinstance(column_name, str):

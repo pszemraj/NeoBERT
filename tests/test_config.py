@@ -3,7 +3,6 @@
 
 import sys
 import tempfile
-from pathlib import Path
 
 from neobert.config import (
     Config,

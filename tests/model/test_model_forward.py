@@ -2,7 +2,6 @@
 """Test NeoBERT model forward passes and functionality."""
 
 import unittest
-from pathlib import Path
 
 import torch
 
