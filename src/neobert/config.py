@@ -89,7 +89,6 @@ class TrainerConfig:
     logging_steps: int = 100
     output_dir: str = "./output"
     overwrite_output_dir: bool = True
-    fp16: bool = False
     bf16: bool = True
     gradient_checkpointing: bool = False
     gradient_clipping: Optional[float] = None
@@ -429,10 +428,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--trainer.eval_steps", type=int, help="Evaluate every N steps")
     parser.add_argument("--trainer.output_dir", type=str, help="Output directory")
     parser.add_argument(
-        "--trainer.fp16", type=lambda x: x.lower() == "true", help="Use FP16"
-    )
-    parser.add_argument(
-        "--trainer.bf16", type=lambda x: x.lower() == "true", help="Use BF16"
+        "--trainer.bf16", type=lambda x: x.lower() == "true", help="Use BF16 (default: True)"
     )
     parser.add_argument("--trainer.seed", type=int, help="Random seed")
     parser.add_argument(

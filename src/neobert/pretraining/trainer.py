@@ -4,16 +4,10 @@ import re
 # PyTorch
 import torch
 from accelerate import Accelerator
-from accelerate.utils import (
-    DistributedDataParallelKwargs,
-    DistributedType,
-    ProjectConfiguration,
-    set_seed,
-)
-
+from accelerate.utils import (DistributedDataParallelKwargs, DistributedType,
+                              ProjectConfiguration, set_seed)
 # Hugging Face
 from datasets import load_dataset, load_from_disk
-
 # Deepspeed
 from deepspeed.utils import safe_get_full_fp32_param
 from torch.nn import CrossEntropyLoss
@@ -26,7 +20,6 @@ from ..model import NeoBERTConfig, NeoBERTLMHead
 from ..optimizer import get_optimizer
 from ..scheduler import get_scheduler
 from ..tokenizer import get_tokenizer
-
 # Our metric object and model
 from .metrics import Metrics
 
@@ -150,9 +143,8 @@ def trainer(cfg: Config):
 
     # Get the dtype for the pad_mask
     dtype_pad_mask = torch.float32
-    if accelerator.mixed_precision == "fp16":
-        dtype_pad_mask = torch.float16
-    elif accelerator.mixed_precision == "bf16":
+    # Always use bf16 for mixed precision
+    if accelerator.mixed_precision == "bf16":
         dtype_pad_mask = torch.bfloat16
 
     # Tokenizer
@@ -198,7 +190,7 @@ def trainer(cfg: Config):
     if needs_tokenization:
         accelerator.print("Dataset is not tokenized. Tokenizing now...")
         from neobert.tokenizer import tokenize
-        
+
         # Determine text column
         text_column = None
         if is_streaming:
@@ -234,7 +226,10 @@ def trainer(cfg: Config):
             truncation=True,
             num_proc=cfg.dataset.num_proc if not cfg.dataset.streaming else None,
         )
-        accelerator.print(f"Tokenization complete. Dataset size: {len(train_dataset)}")
+        if cfg.dataset.streaming:
+            accelerator.print("Tokenization setup complete for streaming dataset.")
+        else:
+            accelerator.print(f"Tokenization complete. Dataset size: {len(train_dataset)}")
 
     # Dataloader
     train_dataloader = get_dataloader(

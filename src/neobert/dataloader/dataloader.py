@@ -1,7 +1,6 @@
 import torch
 from datasets import Dataset
 from torch.utils.data import DataLoader
-
 # HuggingFace
 from transformers import PreTrainedTokenizer
 
@@ -53,14 +52,23 @@ def get_dataloader(
         pack_sequences=pack_sequences,
     )
 
-    dataloader = DataLoader(
-        dataset,
-        collate_fn=collate_fn,
-        num_workers=num_workers,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        pin_memory=pin_memory,
-        persistent_workers=persistent_workers if num_workers > 0 else False,
-    )
+    # Check if this is a streaming dataset
+    is_streaming = hasattr(dataset, '_iter') or 'IterableDataset' in str(type(dataset))
+    
+    # Streaming datasets can't use shuffle in DataLoader
+    dataloader_kwargs = {
+        "dataset": dataset,
+        "collate_fn": collate_fn,
+        "num_workers": num_workers,
+        "batch_size": batch_size,
+        "pin_memory": pin_memory,
+        "persistent_workers": persistent_workers if num_workers > 0 else False,
+    }
+    
+    # Only add shuffle for non-streaming datasets
+    if not is_streaming:
+        dataloader_kwargs["shuffle"] = shuffle
+    
+    dataloader = DataLoader(**dataloader_kwargs)
 
     return dataloader

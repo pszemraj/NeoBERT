@@ -118,8 +118,15 @@ def tokenize(
     truncation: bool = True,
     **kwargs,
 ):
+    # Check if this is a streaming dataset (IterableDataset)
+    is_streaming = hasattr(dataset, '_iter') or 'IterableDataset' in str(type(dataset))
+    
     # Get the number of cpu cores available to the process
-    num_proc = len(os.sched_getaffinity(0))
+    # Override with kwargs if provided (e.g., from trainer)
+    if 'num_proc' in kwargs:
+        num_proc = kwargs.pop('num_proc')
+    else:
+        num_proc = None if is_streaming else len(os.sched_getaffinity(0))
 
     # Remove all columns except for the `input_ids` and `attention_mask`
     columns_to_remove = dataset.column_names if remove_columns else None
@@ -161,12 +168,17 @@ def tokenize(
         )
 
     # Tokenize the dataset
-    dataset = dataset.map(
-        mapping,
-        batched=True,
-        num_proc=num_proc,
-        remove_columns=columns_to_remove,
-        features=features,
-    )
+    map_kwargs = {
+        "function": mapping,
+        "batched": True,
+        "remove_columns": columns_to_remove,
+    }
+    
+    # Only add num_proc and features for non-streaming datasets
+    if not is_streaming:
+        map_kwargs["num_proc"] = num_proc
+        map_kwargs["features"] = features
+    
+    dataset = dataset.map(**map_kwargs)
 
     return dataset
