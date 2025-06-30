@@ -220,3 +220,34 @@ logs/
 # Tracker
 src/wandb
 jobs/wandb
+
+# Model outputs and checkpoints
+output/
+checkpoints/
+**/checkpoints/
+**/model_checkpoints/
+model_outputs/
+results/
+
+# Cache directories
+.cache/
+*_cache/
+streaming_cache/
+dataset_cache/
+huggingface_cache/
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+*.tmp
+
+# Lock files
+*.lock
+
+# Dataset downloads
+downloads/
+data_downloads/
+
+# Hydra outputs
+multirun/
