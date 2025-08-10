@@ -57,4 +57,3 @@ scheduler:
 datacollator:
   mlm_probability: 0.15
   pad_to_multiple_of: 8
-EOF < /dev/null

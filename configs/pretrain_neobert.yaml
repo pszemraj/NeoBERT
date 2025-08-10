@@ -71,4 +71,3 @@ wandb:
 # Additional settings
 seed: 42
 mixed_precision: "bf16"
-EOF < /dev/null
