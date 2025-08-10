@@ -5,9 +5,9 @@ model:
   num_hidden_layers: 28  # Full NeoBERT size (250M params)
   num_attention_heads: 12
   intermediate_size: 3072
-  dropout_prob: 0.1
+  dropout_prob: 0.05
   vocab_size: 31999  # BEE-spoke-data tokenizer vocab size
-  max_position_embeddings: 1024  # Context length as requested
+  max_position_embeddings: 4096
   flash_attention: true
   ngpt: false
   hidden_act: "swiglu"  # Requires xformers
@@ -17,7 +17,7 @@ model:
 dataset:
   name: "EleutherAI/SmolLM2-1.7B-stage-4-100B"
   streaming: true  # Stream this large dataset
-  num_proc: 16
+  num_proc: 8
   num_workers: 4
   max_seq_length: 1024
   train_split: "train"
@@ -29,7 +29,7 @@ tokenizer:
   max_length: 1024
 
 datacollator:
-  mlm_probability: 0.15
+  mlm_probability: 0.2
   pad_to_multiple_of: 8
 
 trainer:
@@ -41,7 +41,7 @@ trainer:
   gradient_accumulation_steps: 4  # Increased to maintain effective batch size
   learning_rate: 1e-4
   warmup_steps: 5000
-  logging_steps: 100
+  logging_steps: 25
   eval_steps: 5000
   save_steps: 10000
   dataloader_num_workers: 4
@@ -55,7 +55,7 @@ optimizer:
   name: "adamw"
   lr: 1e-4
   weight_decay: 0.01
-  betas: [0.9, 0.999]
+  betas: [0.9, 0.98]
   eps: 1e-8
 
 scheduler:
@@ -64,10 +64,10 @@ scheduler:
   total_steps: 100000
 
 wandb:
-  project: "neobert-smollm2"
+  project: "neobert-testing"
   name: "smollm2-32k-tokenizer-100k"
   mode: "online"
 
 # Additional settings
-seed: 42
+seed: 69
 mixed_precision: "bf16"
