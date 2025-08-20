@@ -4,11 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
-from pathlib import Path
-
-# Add parent directory to path
-sys.path.append(str(Path(__file__).parent.parent.parent))
 
 import torch
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
@@ -222,7 +217,7 @@ def evaluate_mteb(cfg):
         logger.info(f"Running task: {task}")
         eval_splits = ["dev"] if task == "MSMARCO" else ["test"]
         evaluation = MTEB(tasks=[task], task_langs=["en"])
-        with torch.autocast(device_type=device, dtype=torch.float16):
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
             evaluation.run(
                 model,
                 output_folder=output_folder,
@@ -233,21 +228,27 @@ def evaluate_mteb(cfg):
 
 def main():
     import argparse
-    
+
     parser = argparse.ArgumentParser(description="Run MTEB evaluation")
     parser.add_argument("--config", type=str, required=True, help="Path to config file")
-    parser.add_argument("--model_name_or_path", type=str, required=True, help="Model path")
-    parser.add_argument("--task_types", type=str, default="all", help="Task types to evaluate")
-    parser.add_argument("--output_folder", type=str, default="results", help="Output folder")
-    
+    parser.add_argument(
+        "--model_name_or_path", type=str, required=True, help="Model path"
+    )
+    parser.add_argument(
+        "--task_types", type=str, default="all", help="Task types to evaluate"
+    )
+    parser.add_argument(
+        "--output_folder", type=str, default="results", help="Output folder"
+    )
+
     args, remaining = parser.parse_known_args()
-    
+
     # Load configuration
     config = ConfigLoader.load(args.config, remaining)
     config.model_name_or_path = args.model_name_or_path
     config.task_types = args.task_types.split(",") if args.task_types != "all" else None
     config.output_folder = args.output_folder
-    
+
     # Run MTEB evaluation
     evaluate_mteb(config)
 

@@ -490,6 +490,6 @@ def set_seed(seed=42):
 
 ## Next Steps
 
-- Review [Contributing Guidelines](contributing.md)
-- Check [CI/CD Setup](ci_cd.md)
-- Learn about [Performance Testing](performance.md)
+- Review the [Configuration Guide](configuration.md) for advanced settings
+- See the [Training Guide](training.md) for model training
+- Check the [Architecture Documentation](architecture.md) for technical details

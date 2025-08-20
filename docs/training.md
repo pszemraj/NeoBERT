@@ -125,6 +125,31 @@ Supported formats:
 - JSON lines (.jsonl) with "text" field
 - HuggingFace datasets
 - Pre-tokenized datasets (arrow format)
+- Streaming datasets from HuggingFace Hub
+
+### Streaming Datasets
+
+For large datasets that don't fit in memory, use streaming mode:
+
+```yaml
+dataset:
+  name: "common-pile/comma_v0.1_training_dataset"
+  streaming: true
+  shuffle_buffer_size: 10000  # Buffer size for shuffling
+  num_workers: 0  # Must be 0 for streaming datasets
+```
+
+Benefits of streaming:
+- No need to download entire dataset
+- Tokenization happens on-the-fly
+- Memory efficient for large datasets
+- Automatic shuffling with buffer
+
+Example command:
+```bash
+python scripts/pretraining/pretrain.py \
+    --config configs/streaming_pretrain.yaml
+```
 
 ## Fine-Tuning
 
@@ -201,7 +226,8 @@ trainer.train()
 
 3. **Mixed Precision**:
 ```bash
---trainer.fp16 true  # or bf16 for newer GPUs
+--trainer.bf16 true  # Uses bfloat16 (recommended for modern GPUs)
+--trainer.mixed_precision "bf16"
 ```
 
 4. **DeepSpeed ZeRO**:

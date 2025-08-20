@@ -1,6 +1,6 @@
 # NeoBERT Configuration System
 
-This repository has been refactored to use a simpler, more intuitive configuration system that replaces Hydra with a combination of YAML files and command-line arguments.
+NeoBERT uses a simple, intuitive configuration system based on YAML files and command-line arguments.
 
 ## Configuration Overview
 
@@ -63,11 +63,11 @@ The main configuration classes:
 - `DataCollatorConfig` - Data collation (MLM)
 - `WandbConfig` - Weights & Biases logging
 
-## Migration from Hydra
+## Implementation Details
 
-Key differences from the old Hydra system:
-1. No more `@hydra.main` decorators
-2. Single hierarchical YAML instead of many small files
+The configuration system provides:
+1. Type-safe dataclass configurations
+2. Single hierarchical YAML files for each task
 3. Simple argparse-based CLI overrides
 4. Direct access to configuration as dataclass attributes
 

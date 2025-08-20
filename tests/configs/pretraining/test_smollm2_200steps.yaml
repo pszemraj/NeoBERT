@@ -1,0 +1,92 @@
+# Test configuration for SmolLM2 streaming with 200 steps
+defaults:
+  - _self_
+  - dataset: smollm2
+  - tokenizer: google
+  - model: 
+    - neobert
+  - optimizer: adamw
+  - scheduler: cosine_decay
+  - trainer: mlm
+  - dataloader: base
+  - datacollator: mlm_20
+
+# Use SmolLM2 dataset configuration
+# Dataset config is loaded from conf/dataset/smollm2.yaml
+
+# Model configuration (small model for testing)
+model:
+  hidden_size: 512
+  num_hidden_layers: 8
+  num_attention_heads: 8
+  intermediate_size: 2048
+  hidden_act: "swiglu"
+  flash_attention: true
+  max_position_embeddings: 2048  # SmolLM2 uses longer sequences
+
+# Training configuration
+trainer:
+  max_steps: 200
+  gradient_accumulation_steps: 4
+  mixed_precision: "bf16"
+  dir: "outputs/smollm2_test"
+  save_steps: 50
+  logging_steps: 10
+  disable_tqdm: false
+  eval_steps: 500
+  tf32: true
+  resume: false
+  
+  # Accelerate configuration
+  accelerate:
+    save_steps: 100
+    max_ckpt: 2
+  
+  # Model save configuration
+  model:
+    save_steps: 100
+    max_ckpt: 2
+
+# Dataloader configuration
+dataloader:
+  train:
+    batch_size: 4  # Small batch size for testing
+    num_workers: 2
+    shuffle: true
+    pin_memory: true
+
+# Collator configuration
+datacollator:
+  mlm_probability: 0.15
+  pad_to_multiple_of: 8
+  mask_all: false
+  pack_sequences: false
+  max_length: 2048  # Match model max length
+
+# Optimizer configuration
+optimizer:
+  hparams:
+    lr: 5e-5
+    betas: [0.9, 0.999]
+    eps: 1e-8
+    weight_decay: 0.01
+
+# Scheduler configuration
+scheduler:
+  warmup_steps: 20
+  total_steps: 200
+  final_lr_ratio: 0.1
+
+# Wandb configuration
+wandb:
+  resume: never
+  name: "smollm2-streaming-test"
+  project: "neo-bert"
+  entity: null
+  tags: ["streaming", "smollm2", "test"]
+  dir: "logs/wandb"
+  mode: disabled
+  log_interval: 10
+
+# Random seed
+seed: 42

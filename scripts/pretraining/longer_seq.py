@@ -1,9 +1,4 @@
 import os
-import sys
-from pathlib import Path
-
-# Add parent directory to path
-sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from datasets import load_from_disk
 

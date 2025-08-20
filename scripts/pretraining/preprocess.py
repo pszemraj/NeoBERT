@@ -1,9 +1,3 @@
-import sys
-from pathlib import Path
-
-# Add parent directory to path
-sys.path.append(str(Path(__file__).parent.parent.parent))
-
 from datasets import concatenate_datasets, load_dataset
 
 from neobert.config import load_config_from_args

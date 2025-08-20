@@ -12,7 +12,7 @@ model:
   ngpt: false
   hidden_act: "gelu"
   from_hub: false
-  pretrained_config_path: "configs/test_tiny_pretrain.yaml"
+  pretrained_config_path: "tests/configs/pretraining/test_tiny_pretrain.yaml"
   classifier_dropout: 0.1
   classifier_init_range: 0.02
   transfer_from_task: false

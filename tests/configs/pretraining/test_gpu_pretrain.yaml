@@ -43,7 +43,6 @@ trainer:
   dataloader_num_workers: 4
   remove_unused_columns: false
   report_to: []
-  fp16: false
   bf16: true  # Use bf16 on modern GPU
 
 optimizer:

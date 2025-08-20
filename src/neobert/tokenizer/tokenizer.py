@@ -29,7 +29,7 @@ def get_tokenizer(
         "google-bert/bert-base-uncased",
         "BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp",
     ]
-    
+
     if pretrained_model_name_or_path not in tokenizers_with_special_tokens:
         # Define special tokens to be consistent with RoBERTa
         special_tokens = {
@@ -70,7 +70,6 @@ def single_column_mapping(x, tokenizer, column_name, max_length, truncation):
         truncation=truncation,
         max_length=max_length,
         padding=False,  # no padding saves time and memory
-        return_token_type_ids=False,
     )
 
 
@@ -118,20 +117,54 @@ def tokenize(
     truncation: bool = True,
     **kwargs,
 ):
+    # Check if this is a streaming dataset (IterableDataset)
+    is_streaming = hasattr(dataset, "_iter") or "IterableDataset" in str(type(dataset))
+
     # Get the number of cpu cores available to the process
-    num_proc = len(os.sched_getaffinity(0))
+    # Override with kwargs if provided (e.g., from trainer)
+    if "num_proc" in kwargs:
+        num_proc = kwargs.pop("num_proc")
+    else:
+        num_proc = None if is_streaming else len(os.sched_getaffinity(0))
 
     # Remove all columns except for the `input_ids` and `attention_mask`
-    columns_to_remove = dataset.column_names if remove_columns else None
+    if remove_columns:
+        if is_streaming:
+            # For streaming datasets, we need to get column names from first example
+            try:
+                first_example = next(iter(dataset))
+                all_columns = list(first_example.keys())
+                # Remove all columns except the ones we're creating
+                columns_to_remove = [
+                    col
+                    for col in all_columns
+                    if col not in ["input_ids", "attention_mask", "token_type_ids"]
+                ]
+            except Exception:
+                # Fallback to just removing the text column(s) we're tokenizing
+                if isinstance(column_name, str):
+                    columns_to_remove = [column_name]
+                else:
+                    columns_to_remove = list(column_name)
+        else:
+            columns_to_remove = dataset.column_names
+    else:
+        columns_to_remove = None
 
     # Single column tokenization
     if isinstance(column_name, str):
-        features = Features(
-            {
-                "input_ids": Sequence(Value("int32")),
-                "attention_mask": Sequence(Value("bool")),
-            }
-        )
+        # Check if tokenizer returns token_type_ids
+        test_output = tokenizer("test", truncation=True, max_length=10)
+        has_token_type_ids = "token_type_ids" in test_output
+
+        feature_dict = {
+            "input_ids": Sequence(Value("int32")),
+            "attention_mask": Sequence(Value("bool")),
+        }
+        if has_token_type_ids:
+            feature_dict["token_type_ids"] = Sequence(Value("int32"))
+
+        features = Features(feature_dict)
         mapping = partial(
             single_column_mapping,
             tokenizer=tokenizer,
@@ -161,12 +194,17 @@ def tokenize(
         )
 
     # Tokenize the dataset
-    dataset = dataset.map(
-        mapping,
-        batched=True,
-        num_proc=num_proc,
-        remove_columns=columns_to_remove,
-        features=features,
-    )
+    map_kwargs = {
+        "function": mapping,
+        "batched": True,
+        "remove_columns": columns_to_remove,
+    }
+
+    # Only add num_proc and features for non-streaming datasets
+    if not is_streaming:
+        map_kwargs["num_proc"] = num_proc
+        map_kwargs["features"] = features
+
+    dataset = dataset.map(**map_kwargs)
 
     return dataset

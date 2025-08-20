@@ -1,10 +1,10 @@
 # NeoBERT Test Suite
 
-**IMPORTANT NOTE**: This test suite ensures **NO FEATURE REGRESSION** during the Hydra-to-config refactor. All existing functionality is preserved while only the configuration system has been updated.
+This comprehensive test suite validates all NeoBERT functionality, ensuring robust behavior across configuration, model, training, and evaluation components.
 
 ## Overview
 
-This test suite verifies both the new configuration system and the refactored NeoBERT codebase functionality. The tests are designed to run on CPU-only machines using tiny model configurations.
+The test suite verifies the configuration system and all NeoBERT functionality. Tests are designed to run on CPU-only machines using tiny model configurations.
 
 ## Test Structure
 
@@ -25,7 +25,7 @@ tests/
 - ✅ CLI override system with dot notation
 - ✅ Nested configuration merging
 - ✅ All task-specific configs (pretraining, GLUE, contrastive)
-- ✅ Backward compatibility validation
+- ✅ Type-safe dataclass validation
 
 ### 2. Model Functionality (`model/`)
 - ✅ Config-to-model parameter conversion
@@ -138,6 +138,4 @@ During test development, critical bugs were identified and fixed:
 - Tests are designed for continuous integration
 - All dependencies are gracefully handled with skipTest()
 - Test configs maintain model architecture consistency
-- Full backward compatibility with existing functionality
-
-**No features were removed or regressed during the Hydra refactor - only the configuration system was updated while preserving all existing capabilities.**
+- Full test coverage for all major components

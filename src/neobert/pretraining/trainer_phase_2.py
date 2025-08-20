@@ -3,6 +3,7 @@ import re
 import shutil
 import signal
 import sys
+from dataclasses import asdict
 
 import numpy as np
 
@@ -16,7 +17,6 @@ from datasets import load_from_disk
 
 # Deepspeed
 from deepspeed.utils import safe_get_full_fp32_param
-from omegaconf import DictConfig, OmegaConf
 from torch.nn import CrossEntropyLoss
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
@@ -31,7 +31,7 @@ from ..tokenizer import get_tokenizer
 from .metrics import Metrics
 
 
-def trainer(cfg: DictConfig):
+def trainer(cfg):
     # Get the last checkpoint id
     checkpoint_dir = os.path.join(cfg.trainer.dir, "checkpoints")
     model_checkpoint_dir = os.path.join(cfg.trainer.dir, "model_checkpoints")
@@ -75,7 +75,7 @@ def trainer(cfg: DictConfig):
             "wandb": {
                 "name": cfg.wandb.name,
                 "entity": cfg.wandb.entity,
-                "config": OmegaConf.to_container(cfg)
+                "config": asdict(cfg)
                 | {"distributed_type": accelerator.distributed_type},
                 "tags": cfg.wandb.tags,
                 "dir": cfg.wandb.dir,
@@ -121,13 +121,9 @@ def trainer(cfg: DictConfig):
     )
 
     # Log the number of parameters
-    accelerator.log(
-        {
-            "model_parameters": sum(
-                p.numel() for p in model.parameters() if p.requires_grad
-            )
-        }
-    )
+    # Log model parameters to console instead of wandb
+    model_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    accelerator.print(f"Model parameters: {model_params:,}")
 
     # Optimizer
     optimizer = AdamW(model.parameters(), **cfg.optimizer.hparams)
@@ -211,9 +207,7 @@ def trainer(cfg: DictConfig):
         disable=(cfg.trainer.disable_tqdm or not accelerator.is_main_process),
     )
 
-    if cfg.trainer.mixed_precision == "fp16":
-        dtype_pad_mask = torch.float16
-    elif cfg.trainer.mixed_precision == "bf16":
+    if cfg.trainer.mixed_precision == "bf16":
         dtype_pad_mask = torch.bfloat16
     else:
         dtype_pad_mask = torch.float32

@@ -5,6 +5,11 @@
 - Python 3.8+
 - PyTorch 2.0+
 - CUDA 11.8+ (for GPU training)
+- GPU with BF16 support (NVIDIA Ampere architecture or newer):
+  - RTX 30xx series (3060, 3070, 3080, 3090)
+  - RTX 40xx series (4060, 4070, 4080, 4090)
+  - A100, A6000, H100
+  - Or any GPU with compute capability ≥ 8.0
 
 ## Basic Installation
 
@@ -79,7 +84,7 @@ python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 
 # Test model creation (requires xformers for SwiGLU)
 python -c "
-from neobert.model import NeoBERT, NeoBERTConfig
+from neobert.model.model import NeoBERT, NeoBERTConfig
 try:
     # Default config uses SwiGLU activation (requires xformers)
     config = NeoBERTConfig(hidden_size=256, num_hidden_layers=2, num_attention_heads=4)

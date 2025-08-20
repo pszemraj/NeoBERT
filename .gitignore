@@ -6,6 +6,7 @@ tokenized_datasets/
 tokenized_data/
 mergekit
 outputs/
+output/
 training_log*.txt
 *.pt
 *.bin
@@ -14,6 +15,43 @@ training_log*.txt
 *.arrow
 
 nohup*
+
+# Checkpoint directories
+checkpoints/
+**/checkpoints/
+**/model_checkpoints/
+
+# Cache directories
+.cache/
+**/.cache/
+*_cache/
+
+# Streaming dataset cache
+streaming_cache/
+dataset_cache/
+
+# Temporary directories created during training
+tmp/
+temp/
+.tmp/
+
+# Model outputs (in case they appear in other locations)
+model_outputs/
+results/
+
+# Lock files
+*.lock
+
+# Dataset download directories
+downloads/
+data_downloads/
+
+# Hydra outputs (if not using outputs/)
+multirun/
+
+# Additional log patterns
+*.log
+!**/README.md
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -182,3 +220,50 @@ logs/
 # Tracker
 src/wandb
 jobs/wandb
+
+# Model outputs and checkpoints
+output/
+outputs/
+checkpoints/
+**/checkpoints/
+**/model_checkpoints/
+model_outputs/
+results/
+
+# Cache directories
+.cache/
+.ruff_cache/
+*_cache/
+streaming_cache/
+dataset_cache/
+huggingface_cache/
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+*.tmp
+/tmp/
+
+# Lock files
+*.lock
+
+# Dataset downloads
+downloads/
+data_downloads/
+
+# Claude-specific
+.claude/
+
+# Test outputs
+test_outputs/
+**/test_outputs/
+
+# Tokenized datasets
+tokenized_data/
+tokenized_datasets/
+
+# Wandb logs
+logs/wandb/
+wandb/
+
