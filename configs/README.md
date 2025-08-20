@@ -1,20 +1,29 @@
 # Configuration Files
 
-This directory contains YAML configuration files for the NeoBERT training and evaluation pipeline. The configuration system uses hierarchical YAML files with support for command-line overrides.
+This directory contains production YAML configuration files for the NeoBERT training and evaluation pipeline. Test configurations are located in `tests/configs/`.
 
-## Configuration Files
+## Production Configurations
 
-### Main Configurations
+### Pretraining
+- **`pretrain_neobert.yaml`** - Standard pretraining configuration (768 hidden, 12 layers)
+- **`pretrain_streaming.yaml`** - Streaming dataset configuration for large-scale training
+- **`pretrain_gpu_small.yaml`** - Small model config for GPU testing with SwiGLU activation
+- **`pretrain_smollm2_custom_tokenizer.yaml`** - Full 250M model on SmolLM2 with 32k tokenizer, 1024 context
 
-- **`pretrain_neobert.yaml`** - Complete pretraining configuration for full-scale NeoBERT training
-- **`contrastive_neobert.yaml`** - Configuration for contrastive learning/fine-tuning
-- **`evaluate_neobert.yaml`** - Configuration for model evaluation (GLUE, MTEB, etc.)
+### Fine-tuning & Evaluation
+- **`evaluate_neobert.yaml`** - GLUE evaluation configuration
+- **`contrastive_neobert.yaml`** - Contrastive learning configuration (SimCSE-style)
 
-### Test Configurations
+### Custom Tokenizer
+- **`train_small_custom_tokenizer.yaml`** - Example config for using custom tokenizers
+- **`pretrain_smollm2_custom_tokenizer.yaml`** - Production config with BEE-spoke 32k tokenizer
 
-- **`test_tiny_pretrain.yaml`** - Minimal pretraining config for CPU testing with tiny models
-- **`test_tiny_glue.yaml`** - Minimal GLUE evaluation config for CPU testing
-- **`test_tiny_contrastive.yaml`** - Minimal contrastive training config for CPU testing
+## Test Configurations
+
+Test configurations with tiny models are in `tests/configs/`:
+- `tests/configs/pretraining/test_tiny_pretrain.yaml` - Tiny model for CPU testing
+- `tests/configs/evaluation/test_tiny_glue.yaml` - Tiny model for GLUE testing
+- `tests/configs/contrastive/test_tiny_contrastive.yaml` - Tiny model for contrastive learning
 
 ## Configuration Structure
 

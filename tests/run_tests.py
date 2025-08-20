@@ -6,9 +6,6 @@ import sys
 import unittest
 from pathlib import Path
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
 
 def discover_and_run_tests(test_dir=None, pattern="test_*.py", verbosity=2):
     """Discover and run tests."""

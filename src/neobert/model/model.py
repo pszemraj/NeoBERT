@@ -30,19 +30,21 @@ except (ImportError, RuntimeError) as e:
     # xformers might be installed but have version conflicts
     XFORMERS_AVAILABLE = False
     XFORMERS_ERROR = str(e)
-    SwiGLU = None
     memory_efficient_attention = None
-    
+
     # Native PyTorch SwiGLU implementation as fallback
     class SwiGLU(nn.Module):
-        def __init__(self, in_features, hidden_features=None, out_features=None, bias=True):
+        def __init__(
+            self, in_features, hidden_features=None, out_features=None, bias=True
+        ):
             super().__init__()
             self.w1 = nn.Linear(in_features, hidden_features, bias=bias)
             self.w2 = nn.Linear(in_features, hidden_features, bias=bias)
             self.w3 = nn.Linear(hidden_features, out_features, bias=bias)
-            
+
         def forward(self, x):
             return self.w3(nn.functional.silu(self.w1(x)) * self.w2(x))
+
 
 from .rmsnorm import RMSNorm
 from .rotary import apply_rotary_emb, precompute_freqs_cis
@@ -122,6 +124,7 @@ class EncoderBlock(nn.Module):
             case "swiglu":
                 if not XFORMERS_AVAILABLE:
                     import warnings
+
                     warnings.warn(
                         f"xformers not available, using native PyTorch SwiGLU implementation. "
                         f"For better performance, install xformers: pip install xformers. "
@@ -423,9 +426,9 @@ class NeoBERT(NeoBERTPreTrainedModel):
     def forward(self, src, pad_mask=None):
         # Expand and repeat: (Batch, Length) -> (Batch, Heads, Length, Length)
         if pad_mask is not None:
-            assert (
-                pad_mask.dtype != torch.bool and 1.0 not in pad_mask
-            ), "NeoBERT expects an additive pad_mask"
+            assert pad_mask.dtype != torch.bool and 1.0 not in pad_mask, (
+                "NeoBERT expects an additive pad_mask"
+            )
             pad_mask = (
                 pad_mask.unsqueeze(1)
                 .unsqueeze(1)
@@ -512,9 +515,9 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
     def forward(self, src, pad_mask=None):
         # Expand and repeat: (Batch, Length) -> (Batch, Heads, Length, Length)
         if pad_mask is not None:
-            assert (
-                pad_mask.dtype != torch.bool and 1.0 not in pad_mask
-            ), "NeoBERT expects an additive pad_mask"
+            assert pad_mask.dtype != torch.bool and 1.0 not in pad_mask, (
+                "NeoBERT expects an additive pad_mask"
+            )
             pad_mask = (
                 pad_mask.unsqueeze(1)
                 .unsqueeze(1)
@@ -816,7 +819,7 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
 
             pad_mask = batch["attention_mask"].to(device)
             xformers_mask = torch.where(pad_mask == 1, float(0.0), float("-inf")).type(
-                torch.float16
+                torch.bfloat16
             )
 
             outputs = self.model(input_ids, xformers_mask)

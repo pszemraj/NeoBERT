@@ -23,7 +23,7 @@ pip install flash-attn --no-build-isolation
 ```bash
 # Pretrain a small model for testing
 # The trainer will automatically tokenize raw text datasets
-python scripts/pretraining/pretrain.py --config configs/test_tiny_pretrain.yaml
+python scripts/pretraining/pretrain.py --config tests/configs/pretraining/test_tiny_pretrain.yaml
 
 # What happens automatically:
 # 1. Loads pszemraj/simple_wikipedia_LM dataset (raw text)
@@ -43,7 +43,7 @@ python scripts/pretraining/pretrain.py \
 ```bash
 # Option 1: Let the trainer tokenize automatically
 python scripts/pretraining/pretrain.py \
-    --config configs/test_tiny_pretrain.yaml \
+    --config tests/configs/pretraining/test_tiny_pretrain.yaml \
     --tokenizer.name "your-tokenizer-name" \
     --model.vocab_size 32000  # Match your tokenizer's vocab
 
@@ -99,6 +99,7 @@ python tests/run_tests.py --test-dir training
 
 ### Data Configuration
 - `dataset.name`: HuggingFace dataset name or path to local data
+- `dataset.streaming`: Enable streaming for large datasets (memory efficient)
 - `tokenizer.name`: Tokenizer identifier
 - `dataset.max_seq_length`: Maximum sequence length
 

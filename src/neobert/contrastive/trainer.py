@@ -220,13 +220,9 @@ def trainer(cfg: Config):
         raise NotImplementedError
 
     # Log the number of parameters
-    accelerator.log(
-        {
-            "model_parameters": sum(
-                p.numel() for p in model.parameters() if p.requires_grad
-            )
-        }
-    )
+    # Log model parameters to console instead of wandb
+    model_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    accelerator.print(f"Model parameters: {model_params:,}")
 
     # Optimizer
     optimizer = AdamW(model.parameters(), **cfg.optimizer.hparams)
@@ -301,9 +297,7 @@ def trainer(cfg: Config):
         disable=(cfg.trainer.disable_tqdm or not accelerator.is_main_process),
     )
 
-    if cfg.trainer.mixed_precision == "fp16":
-        dtype_pad_mask = torch.float16
-    elif cfg.trainer.mixed_precision == "bf16":
+    if cfg.trainer.mixed_precision == "bf16":
         dtype_pad_mask = torch.bfloat16
     else:
         dtype_pad_mask = torch.float32

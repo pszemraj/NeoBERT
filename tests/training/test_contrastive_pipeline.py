@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """Test contrastive training pipeline functionality."""
 
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 import torch
-
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from neobert.config import ConfigLoader
 
@@ -20,8 +16,9 @@ class TestContrastivePipeline(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures."""
         self.test_config_path = (
-            Path(__file__).parent.parent.parent
+            Path(__file__).parent.parent
             / "configs"
+            / "contrastive"
             / "test_tiny_contrastive.yaml"
         )
         self.temp_dir = tempfile.mkdtemp()

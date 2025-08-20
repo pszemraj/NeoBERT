@@ -48,7 +48,6 @@ trainer:
   dataloader_num_workers: 4
   remove_unused_columns: false
   report_to: []
-  fp16: false
   bf16: true
   gradient_checkpointing: false
   resume_from_checkpoint: false

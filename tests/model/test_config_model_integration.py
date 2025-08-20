@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 """Test model and config integration without heavy dependencies."""
 
-import sys
 import unittest
 from pathlib import Path
 
 import torch
-
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from neobert.config import ConfigLoader
 
@@ -18,11 +14,11 @@ class TestConfigModelIntegration(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        self.config_dir = Path(__file__).parent.parent.parent / "configs"
+        self.config_dir = Path(__file__).parent.parent / "configs"
 
     def test_config_to_model_config_conversion(self):
         """Test that config can be converted to model config."""
-        config_path = self.config_dir / "test_tiny_pretrain.yaml"
+        config_path = self.config_dir / "pretraining" / "test_tiny_pretrain.yaml"
         config = ConfigLoader.load(str(config_path))
 
         # Test that we can extract model parameters
@@ -41,7 +37,7 @@ class TestConfigModelIntegration(unittest.TestCase):
         self.assertEqual(model_params["num_attention_heads"], 2)
         self.assertEqual(model_params["intermediate_size"], 128)
         self.assertEqual(model_params["dropout_prob"], 0.1)
-        self.assertEqual(model_params["vocab_size"], 1000)
+        self.assertEqual(model_params["vocab_size"], 30522)  # BERT vocab size
 
         # Test that hidden_size is divisible by num_attention_heads
         self.assertEqual(
@@ -67,9 +63,9 @@ class TestConfigModelIntegration(unittest.TestCase):
     def test_all_test_configs_are_valid(self):
         """Test that all test configs have valid model parameters."""
         test_configs = [
-            "test_tiny_pretrain.yaml",
-            "test_tiny_glue.yaml",
-            "test_tiny_contrastive.yaml",
+            "pretraining/test_tiny_pretrain.yaml",
+            "evaluation/test_tiny_glue.yaml",
+            "contrastive/test_tiny_contrastive.yaml",
         ]
 
         for config_name in test_configs:
@@ -96,11 +92,11 @@ class TestConfigModelIntegration(unittest.TestCase):
     def test_config_compatibility_across_tasks(self):
         """Test that configs are compatible across different tasks."""
         pretrain_config = ConfigLoader.load(
-            str(self.config_dir / "test_tiny_pretrain.yaml")
+            str(self.config_dir / "pretraining" / "test_tiny_pretrain.yaml")
         )
-        glue_config = ConfigLoader.load(str(self.config_dir / "test_tiny_glue.yaml"))
+        glue_config = ConfigLoader.load(str(self.config_dir / "evaluation" / "test_tiny_glue.yaml"))
         contrastive_config = ConfigLoader.load(
-            str(self.config_dir / "test_tiny_contrastive.yaml")
+            str(self.config_dir / "contrastive" / "test_tiny_contrastive.yaml")
         )
 
         # Model architectures should be compatible (same dimensions)
@@ -123,7 +119,7 @@ class TestConfigModelIntegration(unittest.TestCase):
 
     def test_optimizer_scheduler_config_validity(self):
         """Test optimizer and scheduler configs are valid."""
-        config_path = self.config_dir / "test_tiny_pretrain.yaml"
+        config_path = self.config_dir / "pretraining" / "test_tiny_pretrain.yaml"
         config = ConfigLoader.load(str(config_path))
 
         # Optimizer checks
@@ -154,9 +150,15 @@ class TestConfigModelIntegration(unittest.TestCase):
     def test_trainer_config_cpu_compatibility(self):
         """Test trainer configs are suitable for CPU-only testing."""
         configs = [
-            ConfigLoader.load(str(self.config_dir / "test_tiny_pretrain.yaml")),
-            ConfigLoader.load(str(self.config_dir / "test_tiny_glue.yaml")),
-            ConfigLoader.load(str(self.config_dir / "test_tiny_contrastive.yaml")),
+            ConfigLoader.load(
+                str(self.config_dir / "pretraining" / "test_tiny_pretrain.yaml")
+            ),
+            ConfigLoader.load(
+                str(self.config_dir / "evaluation" / "test_tiny_glue.yaml")
+            ),
+            ConfigLoader.load(
+                str(self.config_dir / "contrastive" / "test_tiny_contrastive.yaml")
+            ),
         ]
 
         for config in configs:

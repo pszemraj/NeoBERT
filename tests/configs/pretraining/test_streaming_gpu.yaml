@@ -1,0 +1,84 @@
+# Test configuration for streaming datasets on GPU
+
+# Model configuration (small model for testing)
+model:
+  vocab_size: 30522
+  hidden_size: 256
+  num_hidden_layers: 4
+  num_attention_heads: 4
+  intermediate_size: 1024
+  hidden_act: "swiglu"  # Test SwiGLU on GPU
+  hidden_dropout_prob: 0.1
+  attention_probs_dropout_prob: 0.1
+  max_position_embeddings: 512
+  layer_norm_eps: 1e-6
+  rope: true
+  rope_theta: 10000.0
+  flash_attention: true  # Enable flash attention for GPU
+
+# Tokenizer configuration
+tokenizer:
+  tokenizer_name_or_path: "bert-base-uncased"
+
+# Dataset configuration
+dataset:
+  # Small dataset for testing
+  name: "wikitext"
+  config: "wikitext-2-raw-v1"
+  column: "text"
+  streaming: true
+
+# Data collator configuration
+datacollator:
+  mlm_probability: 0.15
+  pad_to_multiple_of: 8
+  mask_all: false
+  pack_sequences: false
+  max_length: 512
+
+# Dataloader configuration
+dataloader:
+  train:
+    per_device_batch_size: 16
+    num_workers: 2
+
+# Optimizer configuration
+optimizer:
+  name: "adamw"
+  hparams:
+    lr: 1e-4
+    betas: [0.9, 0.999]
+    eps: 1e-8
+    weight_decay: 0.01
+
+# Scheduler configuration
+scheduler:
+  warmup_steps: 100
+  total_steps: 1000
+  final_lr_ratio: 0.1
+
+# Trainer configuration
+trainer:
+  max_steps: 100
+  gradient_accumulation_steps: 1
+  mixed_precision: "bf16"  # Use bf16 on RTX 4070
+  dir: "outputs/test_streaming_gpu"
+  save_total_limit: 2
+  save_steps: 50
+  logging_steps: 10
+  eval_steps: 50
+  resume: false
+  disable_tqdm: false
+  
+  # Accelerate configuration
+  accelerate:
+    max_ckpt: 2
+
+# Weights & Biases configuration
+wandb:
+  project: "neobert-test"
+  dir: "logs/wandb"
+  enabled: false
+
+# Random seed
+seed: 42

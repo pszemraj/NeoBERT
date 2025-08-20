@@ -13,13 +13,19 @@ NeoBERT is a **next-generation encoder** model for English text representation, 
 Ensure you have the following dependencies installed:
 
 ```bash
-pip install transformers torch xformers==0.0.28.post3
+pip install transformers torch  # Core dependencies
+# For GPU optimization (build from source for latest GPUs):
+# pip install flash-attn --no-build-isolation
+# pip install -v --no-build-isolation git+https://github.com/facebookresearch/xformers.git@main
 ```
 
 If you would like to use sequence packing (un-padding), you will need to also install flash-attention:
 
 ```bash
-pip install transformers torch xformers==0.0.28.post3 flash_attn
+pip install transformers torch  # Core dependencies
+# For GPU optimization (build from source for latest GPUs):
+# pip install flash-attn --no-build-isolation
+# pip install -v --no-build-isolation git+https://github.com/facebookresearch/xformers.git@main flash_attn
 ```
 
 ## How to use
@@ -133,7 +139,7 @@ python scripts/pretraining/pretrain.py \
 
 3. **Start with a small test run:**
    ```bash
-   python scripts/pretraining/pretrain.py --config configs/test_tiny_pretrain.yaml
+   python scripts/pretraining/pretrain.py --config tests/configs/pretraining/test_tiny_pretrain.yaml
    ```
 
 4. **Scale up to full training:**

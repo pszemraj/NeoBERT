@@ -45,10 +45,11 @@ python scripts/pretraining/pretrain.py \
 
 **Key Features:**
 - Supports both masked language modeling and next sentence prediction
-- Automatic mixed precision training (fp16/bf16)
+- Automatic mixed precision training with BF16 (recommended for modern GPUs: RTX 30xx+, A100, H100)
 - Gradient checkpointing for memory efficiency
 - Integration with Weights & Biases for experiment tracking
 - Multi-GPU training with Accelerate
+- Streaming dataset support for memory-efficient training on large datasets
 
 #### `pretraining/preprocess.py`
 Preprocesses raw text data for pretraining.

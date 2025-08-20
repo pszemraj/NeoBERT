@@ -7,9 +7,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
-
 from neobert.config import (
     Config,
     ConfigLoader,
@@ -28,7 +25,7 @@ class TestConfigSystem(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        self.test_config_dir = Path(__file__).parent.parent.parent / "configs"
+        self.test_config_dir = Path(__file__).parent.parent / "configs"
 
     def test_default_config_creation(self):
         """Test creating default config objects."""
@@ -49,7 +46,7 @@ class TestConfigSystem(unittest.TestCase):
 
     def test_config_from_yaml(self):
         """Test loading config from YAML file."""
-        config_path = self.test_config_dir / "test_tiny_pretrain.yaml"
+        config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"
         self.assertTrue(config_path.exists(), f"Test config not found: {config_path}")
 
         config = ConfigLoader.load(str(config_path))
@@ -63,7 +60,7 @@ class TestConfigSystem(unittest.TestCase):
 
     def test_cli_override_system(self):
         """Test CLI override functionality."""
-        config_path = self.test_config_dir / "test_tiny_pretrain.yaml"
+        config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"
 
         # Simulate command line args
         test_args = [
@@ -157,9 +154,9 @@ optimizer:
     def test_all_test_configs_load(self):
         """Test that all test configuration files load without errors."""
         test_configs = [
-            "test_tiny_pretrain.yaml",
-            "test_tiny_glue.yaml",
-            "test_tiny_contrastive.yaml",
+            "pretraining/test_tiny_pretrain.yaml",
+            "evaluation/test_tiny_glue.yaml",
+            "contrastive/test_tiny_contrastive.yaml",
         ]
 
         for config_name in test_configs:
@@ -195,7 +192,7 @@ optimizer:
 
     def test_glue_config_specifics(self):
         """Test GLUE-specific configuration."""
-        config_path = self.test_config_dir / "test_tiny_glue.yaml"
+        config_path = self.test_config_dir / "evaluation" / "test_tiny_glue.yaml"
         config = ConfigLoader.load(str(config_path))
 
         # GLUE config should be part of the main config, not separate
@@ -204,7 +201,9 @@ optimizer:
 
     def test_contrastive_config_specifics(self):
         """Test contrastive-specific configuration."""
-        config_path = self.test_config_dir / "test_tiny_contrastive.yaml"
+        config_path = (
+            self.test_config_dir / "contrastive" / "test_tiny_contrastive.yaml"
+        )
         config = ConfigLoader.load(str(config_path))
 
         # Contrastive config should be part of the main config

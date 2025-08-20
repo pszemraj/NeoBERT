@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """Test GLUE evaluation pipeline functionality."""
 
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 import torch
-
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from neobert.config import ConfigLoader
 
@@ -20,7 +16,10 @@ class TestGLUEPipeline(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures."""
         self.test_config_path = (
-            Path(__file__).parent.parent.parent / "configs" / "test_tiny_glue.yaml"
+            Path(__file__).parent.parent
+            / "configs"
+            / "evaluation"
+            / "test_tiny_glue.yaml"
         )
         self.temp_dir = tempfile.mkdtemp()
 
@@ -197,7 +196,7 @@ class TestGLUEPipeline(unittest.TestCase):
         self.assertEqual(config.optimizer.name, "adamw")
 
         # Should have appropriate scheduler for fine-tuning
-        self.assertEqual(config.scheduler.name, "linear_decay")
+        self.assertEqual(config.scheduler.name, "linear")
 
 
 class TestGLUETaskSpecific(unittest.TestCase):

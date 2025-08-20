@@ -8,9 +8,6 @@ from pathlib import Path
 
 import torch
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
-
 from neobert.config import ConfigLoader, load_config_from_args
 
 
@@ -19,7 +16,7 @@ class TestEndToEndIntegration(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        self.config_dir = Path(__file__).parent.parent.parent / "configs"
+        self.config_dir = Path(__file__).parent.parent / "configs"
         self.temp_dir = tempfile.mkdtemp()
 
     def tearDown(self):
@@ -31,7 +28,7 @@ class TestEndToEndIntegration(unittest.TestCase):
     def test_config_to_model_pipeline(self):
         """Test full pipeline from config loading to model creation."""
         # Test pretrain config
-        config_path = self.config_dir / "test_tiny_pretrain.yaml"
+        config_path = self.config_dir / "pretraining" / "test_tiny_pretrain.yaml"
 
         # Simulate command line args
         test_args = [
@@ -118,9 +115,9 @@ class TestEndToEndIntegration(unittest.TestCase):
     def test_all_task_configs_compatibility(self):
         """Test that all task configs are compatible with the system."""
         task_configs = [
-            "test_tiny_pretrain.yaml",
-            "test_tiny_glue.yaml",
-            "test_tiny_contrastive.yaml",
+            "pretraining/test_tiny_pretrain.yaml",
+            "evaluation/test_tiny_glue.yaml",
+            "contrastive/test_tiny_contrastive.yaml",
         ]
 
         for config_name in task_configs:
@@ -202,9 +199,9 @@ class TestEndToEndIntegration(unittest.TestCase):
 
         # Test different optimizer/scheduler combinations
         test_cases = [
-            ("test_tiny_pretrain.yaml", "adamw", "cosine_decay"),
-            ("test_tiny_glue.yaml", "adamw", "linear_decay"),
-            ("test_tiny_contrastive.yaml", "adamw", "cosine_decay"),
+            ("pretraining/test_tiny_pretrain.yaml", "adamw", "cosine"),
+            ("evaluation/test_tiny_glue.yaml", "adamw", "linear"),
+            ("contrastive/test_tiny_contrastive.yaml", "adamw", "linear"),
         ]
 
         for config_file, expected_opt, expected_sched in test_cases:
@@ -239,7 +236,7 @@ class TestEndToEndIntegration(unittest.TestCase):
 
     def test_tokenizer_model_compatibility(self):
         """Test tokenizer and model vocab_size compatibility."""
-        config = ConfigLoader.load(str(self.config_dir / "test_tiny_pretrain.yaml"))
+        config = ConfigLoader.load(str(self.config_dir / "pretraining/test_tiny_pretrain.yaml"))
 
         # Model and tokenizer should have matching vocab sizes
         self.assertEqual(config.model.vocab_size, config.tokenizer.vocab_size)
@@ -269,9 +266,9 @@ class TestEndToEndIntegration(unittest.TestCase):
         """Test that training arguments are compatible across tasks."""
         configs = []
         for config_file in [
-            "test_tiny_pretrain.yaml",
-            "test_tiny_glue.yaml",
-            "test_tiny_contrastive.yaml",
+            "pretraining/test_tiny_pretrain.yaml",
+            "evaluation/test_tiny_glue.yaml",
+            "contrastive/test_tiny_contrastive.yaml",
         ]:
             config = ConfigLoader.load(str(self.config_dir / config_file))
             configs.append(config)
@@ -287,7 +284,7 @@ class TestEndToEndIntegration(unittest.TestCase):
 
     def test_config_override_system_robustness(self):
         """Test that config override system handles edge cases."""
-        config_path = self.config_dir / "test_tiny_pretrain.yaml"
+        config_path = self.config_dir / "pretraining" / "test_tiny_pretrain.yaml"
 
         # Test various override patterns
         test_cases = [
