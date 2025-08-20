@@ -37,7 +37,7 @@ class TestConfigModelIntegration(unittest.TestCase):
         self.assertEqual(model_params["num_attention_heads"], 2)
         self.assertEqual(model_params["intermediate_size"], 128)
         self.assertEqual(model_params["dropout_prob"], 0.1)
-        self.assertEqual(model_params["vocab_size"], 1000)
+        self.assertEqual(model_params["vocab_size"], 30522)  # BERT vocab size
 
         # Test that hidden_size is divisible by num_attention_heads
         self.assertEqual(
@@ -92,11 +92,11 @@ class TestConfigModelIntegration(unittest.TestCase):
     def test_config_compatibility_across_tasks(self):
         """Test that configs are compatible across different tasks."""
         pretrain_config = ConfigLoader.load(
-            str(self.config_dir / "test_tiny_pretrain.yaml")
+            str(self.config_dir / "pretraining" / "test_tiny_pretrain.yaml")
         )
-        glue_config = ConfigLoader.load(str(self.config_dir / "test_tiny_glue.yaml"))
+        glue_config = ConfigLoader.load(str(self.config_dir / "evaluation" / "test_tiny_glue.yaml"))
         contrastive_config = ConfigLoader.load(
-            str(self.config_dir / "test_tiny_contrastive.yaml")
+            str(self.config_dir / "contrastive" / "test_tiny_contrastive.yaml")
         )
 
         # Model architectures should be compatible (same dimensions)

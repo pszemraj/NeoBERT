@@ -196,7 +196,7 @@ class TestGLUEPipeline(unittest.TestCase):
         self.assertEqual(config.optimizer.name, "adamw")
 
         # Should have appropriate scheduler for fine-tuning
-        self.assertEqual(config.scheduler.name, "linear_decay")
+        self.assertEqual(config.scheduler.name, "linear")
 
 
 class TestGLUETaskSpecific(unittest.TestCase):
