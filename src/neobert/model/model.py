@@ -426,9 +426,9 @@ class NeoBERT(NeoBERTPreTrainedModel):
     def forward(self, src, pad_mask=None):
         # Expand and repeat: (Batch, Length) -> (Batch, Heads, Length, Length)
         if pad_mask is not None:
-            assert (
-                pad_mask.dtype != torch.bool and 1.0 not in pad_mask
-            ), "NeoBERT expects an additive pad_mask"
+            assert pad_mask.dtype != torch.bool and 1.0 not in pad_mask, (
+                "NeoBERT expects an additive pad_mask"
+            )
             pad_mask = (
                 pad_mask.unsqueeze(1)
                 .unsqueeze(1)
@@ -515,9 +515,9 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
     def forward(self, src, pad_mask=None):
         # Expand and repeat: (Batch, Length) -> (Batch, Heads, Length, Length)
         if pad_mask is not None:
-            assert (
-                pad_mask.dtype != torch.bool and 1.0 not in pad_mask
-            ), "NeoBERT expects an additive pad_mask"
+            assert pad_mask.dtype != torch.bool and 1.0 not in pad_mask, (
+                "NeoBERT expects an additive pad_mask"
+            )
             pad_mask = (
                 pad_mask.unsqueeze(1)
                 .unsqueeze(1)
