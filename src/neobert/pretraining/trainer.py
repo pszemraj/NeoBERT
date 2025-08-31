@@ -16,6 +16,7 @@ from datasets import load_dataset, load_from_disk
 
 # Deepspeed
 from deepspeed.utils import safe_get_full_fp32_param
+from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
 from torch.nn import CrossEntropyLoss
 from tqdm import tqdm
 from transformers import BatchEncoding
@@ -344,6 +345,80 @@ def trainer(cfg: Config):
     # Log model parameters to console instead of wandb
     model_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     accelerator.print(f"Model parameters: {model_params:,}")
+
+    # Optionally initialize from a previous checkpoint (warm start)
+    try:
+        pretrained_dir = getattr(cfg.model, "pretrained_checkpoint_dir", None)
+        pretrained_ckpt = getattr(cfg.model, "pretrained_checkpoint", None)
+        # Allow fallback to top-level cfg.pretrained_checkpoint if model field not provided
+        if pretrained_ckpt is None:
+            pretrained_ckpt = getattr(cfg, "pretrained_checkpoint", None)
+
+        if pretrained_dir and pretrained_ckpt is not None:
+            # If a run root is provided, point to its model_checkpoints subdir
+            model_ckpt_root = (
+                os.path.join(pretrained_dir, "model_checkpoints")
+                if os.path.isdir(os.path.join(pretrained_dir, "model_checkpoints"))
+                else pretrained_dir
+            )
+
+            # Resolve the checkpoint tag if 'latest'
+            ckpt_tag = str(pretrained_ckpt)
+            if str(pretrained_ckpt).lower() == "latest":
+                candidates = [
+                    d
+                    for d in os.listdir(model_ckpt_root)
+                    if os.path.isdir(os.path.join(model_ckpt_root, d))
+                ]
+                if not candidates:
+                    raise FileNotFoundError(
+                        f"No checkpoints found in {model_ckpt_root}"
+                    )
+                tagged = []
+                for name in candidates:
+                    import re as _re
+
+                    nums = _re.findall(r"\d+", name)
+                    if nums:
+                        tagged.append((int(nums[-1]), name))
+                if not tagged:
+                    raise FileNotFoundError(
+                        f"No numeric checkpoint tags found in {model_ckpt_root}"
+                    )
+                latest_step, latest_name = max(tagged, key=lambda x: x[0])
+                ckpt_tag = str(latest_step)
+
+            loaded = False
+            # Try DeepSpeed zero checkpoint first
+            try:
+                load_state_dict_from_zero_checkpoint(
+                    model, model_ckpt_root, tag=str(ckpt_tag)
+                )
+                accelerator.print(
+                    f"Initialized model from DeepSpeed checkpoint: {model_ckpt_root} (tag={ckpt_tag})"
+                )
+                loaded = True
+            except Exception:
+                # Fall back to plain torch state_dict
+                state_dict_path = os.path.join(
+                    model_ckpt_root, str(ckpt_tag), "state_dict.pt"
+                )
+                if os.path.exists(state_dict_path):
+                    state_dict = torch.load(state_dict_path, map_location="cpu")
+                    model.load_state_dict(state_dict, strict=False)
+                    accelerator.print(
+                        f"Initialized model from state_dict: {state_dict_path}"
+                    )
+                    loaded = True
+
+            if not loaded:
+                accelerator.print(
+                    f"Warning: could not locate checkpoint in {model_ckpt_root} with tag {ckpt_tag}. Proceeding with random init."
+                )
+    except Exception as e:
+        accelerator.print(
+            f"Warning: failed to initialize from pretrained checkpoint due to: {e}. Proceeding with random init."
+        )
 
     # Optimizer and Scheduler
     optimizer = get_optimizer(

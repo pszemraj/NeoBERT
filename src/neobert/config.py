@@ -26,6 +26,9 @@ class ModelConfig:
     ngpt: bool = False
     base_scale: float = 1.0 / (960.0**0.5)
     pad_token_id: int = 0
+    # Optional: initialize model weights from a previous run
+    pretrained_checkpoint_dir: Optional[str] = None  # Path to a run's model_checkpoints dir or its parent
+    pretrained_checkpoint: Optional[Union[int, str]] = None  # Step number or "latest"
 
 
 @dataclass
