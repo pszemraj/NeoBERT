@@ -27,10 +27,15 @@ python scripts/evaluation/run_glue.py \
 ### Running All GLUE Tasks
 
 ```bash
-# Automated script for all tasks
+# Run all 9 GLUE tasks automatically
+bash scripts/run_all_glue.sh outputs/pretrained_model wandb-project-name
+
+# Or with defaults (uses checkpoint-100000 and neobert-evals project)
+bash scripts/run_all_glue.sh
+
+# Run individual tasks
 python scripts/evaluation/run_glue.py \
-    --config configs/evaluate_neobert.yaml \
-    --task_name all \
+    --config configs/eval/glue_cola.yaml \
     --model_name_or_path outputs/pretrained_model
 ```
 
