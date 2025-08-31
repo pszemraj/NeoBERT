@@ -14,6 +14,7 @@ dependencies = [
     "xformers",
     "transformers",
     "datasets",
+    "hf-transfer",
     "wandb",
     "numpy",
     "scikit-learn",
