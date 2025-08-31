@@ -268,3 +268,4 @@ logs/wandb/
 wandb/
 
 eval_results_100k/
+glue_outputs/
