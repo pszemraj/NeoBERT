@@ -24,10 +24,15 @@ configs/
 - **`pretrain_neobert100m_smollm2data.yaml`** - 100M model on SmolLM2 dataset
 
 ### Fine-tuning & Evaluation (`configs/eval/`)
-- **`evaluate_neobert.yaml`** - Legacy GLUE evaluation configuration
-- **`glue_cola_v2.yaml`** - CoLA with epoch-based evaluation (recommended)
-- **`glue_sst2_v2.yaml`** - SST-2 with epoch-based evaluation (recommended)
-- **`glue_mrpc_v2.yaml`** - MRPC with epoch-based evaluation (recommended)
+- **`glue_cola.yaml`** - CoLA evaluation with epoch-based strategy
+- **`glue_sst2.yaml`** - SST-2 sentiment analysis
+- **`glue_mrpc.yaml`** - MRPC paraphrase detection
+- **`glue_stsb.yaml`** - STS-B semantic similarity (regression)
+- **`glue_qqp.yaml`** - QQP question pair similarity
+- **`glue_mnli.yaml`** - MNLI natural language inference
+- **`glue_qnli.yaml`** - QNLI question answering NLI
+- **`glue_rte.yaml`** - RTE textual entailment
+- **`glue_wnli.yaml`** - WNLI coreference resolution
 
 ### Contrastive Learning (`configs/contrastive/`)
 - **`contrastive_neobert.yaml`** - Contrastive learning configuration (SimCSE-style)
@@ -175,16 +180,15 @@ wandb:
 ## Configuration Tips
 
 1. **Start Small**: Use test configs to validate your setup before full training
-2. **Use v2 Configs**: For evaluation, prefer the v2 configs with epoch-based evaluation
-3. **Override Defaults Carefully**: Use `null` to override dataclass defaults when needed
-4. **Use Overrides**: Command-line overrides are great for experimentation
-5. **Version Control**: Keep configurations in git to track experiments
-6. **Documentation**: Add comments to your custom configs for clarity
-7. **Validation**: Always check configs with validation before long training runs
+2. **Override Defaults Carefully**: Use `null` to override dataclass defaults when needed
+3. **Use Overrides**: Command-line overrides are great for experimentation
+4. **Version Control**: Keep configurations in git to track experiments
+5. **Documentation**: Add comments to your custom configs for clarity
+6. **Validation**: Always check configs with validation before long training runs
 
 ### Epoch-based vs Step-based Evaluation
 
-The v2 evaluation configs support epoch-based evaluation similar to HuggingFace Transformers:
+The evaluation configs support epoch-based evaluation similar to HuggingFace Transformers:
 
 ```yaml
 trainer:

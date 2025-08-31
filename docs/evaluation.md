@@ -18,15 +18,9 @@ python scripts/pretraining/pretrain.py \
 ### Running Single Task
 
 ```bash
-# Recommended: Use v2 configs with epoch-based evaluation
+# Run GLUE evaluation with epoch-based strategy
 python scripts/evaluation/run_glue.py \
-    --config configs/eval/glue_cola_v2.yaml \
-    --model_name_or_path outputs/pretrained_model
-
-# Legacy: Step-based evaluation
-python scripts/evaluation/run_glue.py \
-    --config configs/eval/evaluate_neobert.yaml \
-    --task_name cola \
+    --config configs/eval/glue_cola.yaml \
     --model_name_or_path outputs/pretrained_model
 ```
 
@@ -56,15 +50,13 @@ python scripts/evaluation/run_glue.py \
 
 ### Configuration for GLUE
 
-#### Recommended: v2 Configuration (Epoch-based)
-
 ```yaml
 task: glue
 
 glue:
   task_name: cola
   num_labels: 2  # Automatically set based on task
-  max_seq_length: 128
+  max_seq_length: 512
   
 trainer:
   num_train_epochs: 3
@@ -79,24 +71,7 @@ scheduler:
   name: linear
   warmup_steps: null  # IMPORTANT: Override dataclass default
   decay_steps: null   # IMPORTANT: Override dataclass default
-  warmup_ratio: 0.05  # 5% of total steps for warmup
-```
-
-#### Legacy: Step-based Configuration
-
-```yaml
-glue:
-  task_name: cola
-  num_labels: 2
-  max_seq_length: 128
-  
-trainer:
-  num_train_epochs: 3
-  per_device_eval_batch_size: 32
-  eval_steps: 500  # Evaluate every 500 steps
-  save_steps: 500  # Save every 500 steps
-  metric_for_best_model: eval_matthews_correlation
-  greater_is_better: true
+  warmup_percent: 5  # 5% of total steps for warmup
 ```
 
 ### Evaluation Strategies
@@ -120,18 +95,16 @@ Control when checkpoints are saved:
 
 **CoLA (Corpus of Linguistic Acceptability)**:
 ```bash
-# Using v2 config with epoch-based evaluation
 python scripts/evaluation/run_glue.py \
-    --config configs/eval/glue_cola_v2.yaml \
+    --config configs/eval/glue_cola.yaml \
     --optimizer.lr 5e-5 \
     --trainer.num_train_epochs 3
 ```
 
 **MNLI (Multi-Genre NLI)**:
 ```bash
-# Using v2 config pattern
 python scripts/evaluation/run_glue.py \
-    --config configs/eval/glue_mnli_v2.yaml \
+    --config configs/eval/glue_mnli.yaml \
     --glue.max_seq_length 128 \
     --trainer.train_batch_size 32 \
     --optimizer.lr 3e-5
@@ -484,15 +457,21 @@ def safe_metric_computation(preds, labels):
 
 ## Configuration Files
 
-Recommended evaluation configurations are in `configs/eval/`:
+Evaluation configurations are in `configs/eval/`:
 
-- **`glue_cola_v2.yaml`** - CoLA with epoch-based evaluation
-- **`glue_sst2_v2.yaml`** - SST-2 with epoch-based evaluation  
-- **`glue_mrpc_v2.yaml`** - MRPC with epoch-based evaluation
+- **`glue_cola.yaml`** - CoLA evaluation
+- **`glue_sst2.yaml`** - SST-2 sentiment analysis
+- **`glue_mrpc.yaml`** - MRPC paraphrase detection
+- **`glue_stsb.yaml`** - STS-B semantic similarity (regression)
+- **`glue_qqp.yaml`** - QQP question pair similarity
+- **`glue_mnli.yaml`** - MNLI natural language inference
+- **`glue_qnli.yaml`** - QNLI question answering NLI
+- **`glue_rte.yaml`** - RTE textual entailment
+- **`glue_wnli.yaml`** - WNLI coreference resolution
 
-These v2 configs follow the same patterns as HuggingFace Transformers:
-- Evaluate at the end of each epoch
-- Use warmup ratio instead of fixed steps
+These configs follow HuggingFace Transformers patterns:
+- Evaluate at the end of each epoch (`eval_strategy: "epoch"`)
+- Use warmup percentage instead of fixed steps
 - Support gradient accumulation for larger effective batch sizes
 
 ## Next Steps

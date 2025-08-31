@@ -8,8 +8,8 @@ model:
   classifier_dropout: 0.1
   classifier_init_range: 0.02
 trainer:
-  output_dir: ./glue_outputs/sst2
-  run_name: neobert_100k_sst2
+  output_dir: ./glue_outputs/wnli
+  run_name: neobert_100k_wnli
   train_batch_size: 32
   eval_batch_size: 32
   gradient_accumulation_steps: 4
@@ -22,7 +22,7 @@ trainer:
   mixed_precision: bf16
   tf32: true
 glue:
-  task_name: sst2
+  task_name: wnli
   num_labels: 2
   max_seq_length: 512
 optimizer:
@@ -40,11 +40,11 @@ scheduler:
   decay_steps: null
 wandb:
   project: neobert-evals
-  name: glue-sst2-100k
+  name: glue-wnli-100k
   entity: null
   tags:
   - glue
-  - sst2
+  - wnli
   - 100k_checkpoint
   - epoch_eval
   dir: logs/wandb
