@@ -18,25 +18,23 @@ python scripts/pretraining/pretrain.py \
 ### Running Single Task
 
 ```bash
-# Run GLUE evaluation with epoch-based strategy
+# Run GLUE evaluation (uses model path from config)
+python scripts/evaluation/run_glue.py --config configs/eval/glue_cola.yaml
+
+# Or override the model path from command line
 python scripts/evaluation/run_glue.py \
     --config configs/eval/glue_cola.yaml \
-    --model_name_or_path outputs/pretrained_model
+    --model_name_or_path outputs/different_model
 ```
 
 ### Running All GLUE Tasks
 
 ```bash
-# Run all 9 GLUE tasks automatically
-bash scripts/run_all_glue.sh outputs/pretrained_model wandb-project-name
-
-# Or with defaults (uses checkpoint-100000 and neobert-evals project)
+# Run all 9 GLUE tasks (uses model paths from configs)
 bash scripts/run_all_glue.sh
 
-# Run individual tasks
-python scripts/evaluation/run_glue.py \
-    --config configs/eval/glue_cola.yaml \
-    --model_name_or_path outputs/pretrained_model
+# Or override model path for all tasks
+bash scripts/run_all_glue.sh outputs/different_model
 ```
 
 ### GLUE Task Details

@@ -1,10 +1,12 @@
 #!/bin/bash
 # Run all GLUE evaluations for NeoBERT
-# Usage: bash scripts/run_all_glue.sh [model_path] [wandb_project]
+# Usage: bash scripts/run_all_glue.sh [optional_model_path_override]
+# 
+# By default uses the model paths specified in each config file.
+# Pass a model path as first argument to override all configs.
 
-# Set defaults
-MODEL_PATH="${1:-outputs/smollm2_custom_tokenizer/model_checkpoints/checkpoint-100000}"
-WANDB_PROJECT="${2:-neobert-evals}"
+# Optional model path override
+MODEL_PATH_OVERRIDE="$1"
 
 # Colors for output
 RED='\033[0;31m'
@@ -13,8 +15,9 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 echo -e "${YELLOW}Starting GLUE evaluation suite${NC}"
-echo "Model: $MODEL_PATH"
-echo "W&B Project: $WANDB_PROJECT"
+if [ -n "$MODEL_PATH_OVERRIDE" ]; then
+    echo "Model override: $MODEL_PATH_OVERRIDE"
+fi
 echo "---"
 
 # All GLUE tasks
@@ -28,11 +31,16 @@ FAILED=()
 for task in "${TASKS[@]}"; do
     echo -e "${YELLOW}Running $task...${NC}"
     
+    # Build command
+    CMD="python scripts/evaluation/run_glue.py --config configs/eval/glue_${task}.yaml"
+    
+    # Add model override if provided
+    if [ -n "$MODEL_PATH_OVERRIDE" ]; then
+        CMD="$CMD --model_name_or_path $MODEL_PATH_OVERRIDE"
+    fi
+    
     # Run the evaluation
-    python scripts/evaluation/run_glue.py \
-        --config configs/eval/glue_${task}.yaml \
-        --model_name_or_path "$MODEL_PATH" \
-        2>&1 | tee logs/glue_${task}.log
+    $CMD 2>&1 | tee logs/glue_${task}.log
     
     # Check if successful
     if [ ${PIPESTATUS[0]} -eq 0 ]; then
