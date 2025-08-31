@@ -615,6 +615,10 @@ def trainer(cfg: Config):
     if 'name' in scheduler_params:
         scheduler_params['decay'] = scheduler_params.pop('name')
     
+    # Debug logging
+    logger.info(f"Scheduler params before calling get_scheduler: {scheduler_params}")
+    logger.info(f"warmup_steps: {scheduler_params.get('warmup_steps')}, decay_steps: {scheduler_params.get('decay_steps')}")
+    
     scheduler = get_scheduler(
         optimizer=optimizer, lr=lr, **scheduler_params
     )
@@ -642,10 +646,23 @@ def trainer(cfg: Config):
         cfg.trainer.max_steps / num_update_steps_per_epoch
     )
 
-    # Overwrite the number of steps performed between evaluation based on the dataset size.
-    cfg.trainer.eval_steps = min(
-        cfg.trainer.eval_steps, len(train_dataset) // cfg.trainer.train_batch_size
-    )
+    # Handle evaluation strategy - support both 'epoch' and 'steps'
+    eval_strategy = getattr(cfg.trainer, 'eval_strategy', 'steps')
+    if eval_strategy == 'epoch':
+        # Evaluate at the end of each epoch
+        cfg.trainer.eval_steps = num_update_steps_per_epoch
+        logger.info(f"Using epoch-based evaluation: will evaluate every {cfg.trainer.eval_steps} steps (1 epoch)")
+    elif eval_strategy == 'steps':
+        # Use the provided eval_steps or default to min of provided and epoch size
+        if hasattr(cfg.trainer, 'eval_steps'):
+            cfg.trainer.eval_steps = min(
+                cfg.trainer.eval_steps, len(train_dataset) // cfg.trainer.train_batch_size
+            )
+        else:
+            cfg.trainer.eval_steps = min(500, num_update_steps_per_epoch)
+            logger.info(f"No eval_steps provided, defaulting to {cfg.trainer.eval_steps}")
+    else:
+        raise ValueError(f"Invalid eval_strategy: {eval_strategy}. Must be 'epoch' or 'steps'")
 
     # To keep the last n checkpoints before the best model and do k cycles before early stopping, we save the last k+n models
     early_stopping = getattr(cfg.trainer, 'early_stopping', 0)
@@ -877,8 +894,24 @@ def trainer(cfg: Config):
                     )
                     early_stop = True
 
-                # Save model checkpoint
-                if max_ckpt != 0:
+                # Save model checkpoint based on save_strategy
+                save_strategy = getattr(cfg.trainer, 'save_strategy', 'steps')
+                should_save = False
+                
+                if save_strategy == 'epoch' and completed_steps % num_update_steps_per_epoch == 0:
+                    should_save = True
+                elif save_strategy == 'steps' and hasattr(cfg.trainer, 'save_steps'):
+                    if completed_steps % cfg.trainer.save_steps == 0:
+                        should_save = True
+                elif save_strategy == 'best':
+                    # Save only if this is the best model so far
+                    if curr_accuracy > prev_accuracy:
+                        should_save = True
+                elif save_strategy != 'no':
+                    # Default to saving at eval steps if strategy is not 'no'
+                    should_save = True
+                
+                if should_save and max_ckpt != 0:
                     save_checkpoint(cfg, model, accelerator, completed_steps)
 
                 model.train()

@@ -1,0 +1,61 @@
+task: "glue"
+seed: 80085
+
+# Model configuration - pointing to 100k checkpoint
+model:
+  pretrained_config_path: "configs/pretrain/pretrain_neobert100m_smollm2data.yaml"
+  pretrained_checkpoint_dir: "outputs/smollm2_custom_tokenizer"
+  pretrained_checkpoint: 100000
+  from_hub: false
+  classifier_dropout: 0.1
+  classifier_init_range: 0.02
+
+# Training configuration matching transformers setup
+trainer:
+  output_dir: "./glue_outputs/cola_v2"
+  run_name: "neobert_100k_cola_v2"
+  train_batch_size: 32  # Match transformers
+  eval_batch_size: 32
+  gradient_accumulation_steps: 4  # Match transformers
+  num_train_epochs: 3
+  
+  # Evaluation and saving strategies
+  eval_strategy: "epoch"  # Evaluate at end of each epoch
+  save_strategy: "epoch"  # Save at end of each epoch
+  
+  logging_steps: 10  # Match transformers
+  max_ckpt: 3  # Keep best 3 checkpoints
+  early_stopping: 0  # Disable early stopping for full 3 epochs
+  mixed_precision: "bf16"
+  tf32: true
+
+# GLUE task configuration
+glue:
+  task_name: "cola"
+  num_labels: 2
+  max_seq_length: 512  # Match transformers
+
+# Optimizer - matching transformers
+optimizer:
+  lr: 5e-5  # Match transformers (5e-5)
+  weight_decay: 0.01  # Match transformers
+  betas: [0.9, 0.999]
+  eps: 1e-8
+
+# Scheduler
+scheduler:
+  name: "linear"
+  warmup_percent: 5  # 0.05 * 100 = 5% warmup (match transformers warmup_ratio)
+  decay_percent: null  # Linear decay to end
+  warmup_steps: null  # Will be calculated from warmup_percent
+  decay_steps: null  # Will be set to total steps
+
+# W&B configuration
+wandb:
+  project: "neobert-evals"
+  name: "glue-cola-100k-v2"
+  entity: null
+  tags: ["glue", "cola", "100k_checkpoint", "epoch_eval"]
+  dir: "logs/wandb"
+  mode: "online"
+  resume: false

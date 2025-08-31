@@ -1,0 +1,57 @@
+task: "glue"
+seed: 80085
+
+# Model configuration - pointing to 100k checkpoint
+model:
+  pretrained_config_path: "configs/pretrain/pretrain_neobert100m_smollm2data.yaml"
+  pretrained_checkpoint_dir: "outputs/smollm2_custom_tokenizer"
+  pretrained_checkpoint: 100000
+  from_hub: false
+  classifier_dropout: 0.1
+  classifier_init_range: 0.02
+
+# Training configuration matching transformers setup
+trainer:
+  output_dir: "./glue_outputs/sst2_transformers_style"
+  run_name: "neobert_100k_sst2"
+  train_batch_size: 32  # Match transformers
+  eval_batch_size: 32
+  gradient_accumulation_steps: 4  # Match transformers
+  num_train_epochs: 3
+  eval_steps: 4209  # Evaluate every epoch (4209 steps per epoch with batch_size=16, will scale)
+  logging_steps: 10  # Match transformers
+  save_steps: 4209  # Save at each epoch
+  max_ckpt: 3  # Keep best 3 checkpoints
+  early_stopping: 3  # Stop if no improvement for 3 evaluations
+  mixed_precision: "bf16"
+  tf32: true
+  max_eval_samples: 872  # Use full validation set (smaller than 1000)
+
+# GLUE task configuration
+glue:
+  task_name: "sst2"
+  num_labels: 2
+  max_seq_length: 512  # Match transformers
+
+# Optimizer - matching transformers
+optimizer:
+  lr: 5e-5  # Match transformers
+  weight_decay: 0.01  # Match transformers
+  betas: [0.9, 0.999]
+  eps: 1e-8
+
+# Scheduler
+scheduler:
+  name: "linear"
+  warmup_percent: 5  # 0.05 * 100 = 5% warmup (match transformers warmup_ratio)
+  decay_percent: null  # Linear decay to end
+
+# W&B configuration
+wandb:
+  project: "neobert-evals"
+  name: "glue-sst2-100k-transformers-style"
+  entity: null
+  tags: ["glue", "sst2", "100k_checkpoint", "transformers_params"]
+  dir: "logs/wandb"
+  mode: "online"
+  resume: false
