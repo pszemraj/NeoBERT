@@ -271,17 +271,24 @@ def trainer(cfg: Config):
         os.makedirs(cfg.trainer.output_dir, exist_ok=True)
     accelerator.wait_for_everyone()
 
-    # Disable flash attention for GLUE due to xformers alignment issues with variable length sequences
-    # TODO: Fix mask alignment in model to support flash attention with non-aligned sequences
-    flash_attention = False  # Always disable for GLUE until mask alignment is fixed
-    
+    # Override flash attention setting for GLUE - always use eager attention
+    # Flash attention has memory alignment issues with variable-length sequences in GLUE tasks
+    # xformers requires sequences to be aligned to multiples of 8, which is incompatible
+    # with GLUE's dynamic batching and variable sequence lengths
+    if hasattr(cfg.model, "flash_attention") and cfg.model.flash_attention:
+        logger.warning(
+            "Flash attention is not supported for GLUE evaluation due to memory alignment issues "
+            "with variable-length sequences. Using eager attention instead."
+        )
+    flash_attention = False  # Always use eager attention for GLUE
+
     # Check from_hub in raw model dict for GLUE tasks
     from_hub = False
     if cfg._raw_model_dict:
         from_hub = cfg._raw_model_dict.get("from_hub", False)
     elif hasattr(cfg.model, "from_hub"):
         from_hub = cfg.model.from_hub
-    
+
     if from_hub:
         tokenizer = AutoTokenizer.from_pretrained(
             cfg.model.name,
@@ -482,7 +489,7 @@ def trainer(cfg: Config):
             if hasattr(model_pretraining_config.model, "__dict__")
             else {}
         )
-        
+
         # Map dropout_prob to dropout and remove classifier_init_range from model config
         if "dropout_prob" in model_config_dict:
             model_config_dict["dropout"] = model_config_dict.pop("dropout_prob")
@@ -524,19 +531,23 @@ def trainer(cfg: Config):
 
     else:
         # Get checkpoint info from raw model dict for GLUE
-        logger.info(f"Looking for pretrained checkpoint info...")
-        logger.info(f"Has _raw_model_dict: {hasattr(cfg, '_raw_model_dict') and cfg._raw_model_dict is not None}")
-        
+        logger.info("Looking for pretrained checkpoint info...")
+        logger.info(
+            f"Has _raw_model_dict: {hasattr(cfg, '_raw_model_dict') and cfg._raw_model_dict is not None}"
+        )
+
         if cfg._raw_model_dict:
             logger.info(f"Raw model dict keys: {list(cfg._raw_model_dict.keys())}")
             pretrained_checkpoint_dir = cfg._raw_model_dict.get(
                 "pretrained_checkpoint_dir", None
             )
-            pretrained_checkpoint = cfg._raw_model_dict.get("pretrained_checkpoint", None)
-            
+            pretrained_checkpoint = cfg._raw_model_dict.get(
+                "pretrained_checkpoint", None
+            )
+
             logger.info(f"Pretrained checkpoint dir: {pretrained_checkpoint_dir}")
             logger.info(f"Pretrained checkpoint: {pretrained_checkpoint}")
-            
+
             if not pretrained_checkpoint_dir or not pretrained_checkpoint:
                 raise ValueError(
                     "GLUE evaluation requires pretrained weights! "
@@ -544,31 +555,36 @@ def trainer(cfg: Config):
                     "in the model section of your config, or set 'allow_random_weights: true' "
                     "if you really want to use random initialization (NOT RECOMMENDED)."
                 )
-            
+
             # Allow override with explicit flag
             if cfg._raw_model_dict.get("allow_random_weights", False):
-                logger.warning("⚠️ WARNING: Running GLUE with RANDOM WEIGHTS as allow_random_weights=true")
+                logger.warning(
+                    "⚠️ WARNING: Running GLUE with RANDOM WEIGHTS as allow_random_weights=true"
+                )
                 pretrained_checkpoint = None
             else:
                 cfg.model.pretrained_checkpoint_dir = os.path.join(
                     pretrained_checkpoint_dir, "model_checkpoints"
                 )
-                logger.info(f"Set checkpoint dir to: {cfg.model.pretrained_checkpoint_dir}")
+                logger.info(
+                    f"Set checkpoint dir to: {cfg.model.pretrained_checkpoint_dir}"
+                )
         else:
             raise ValueError(
                 "GLUE evaluation requires model configuration with pretrained checkpoint info!"
             )
 
-    pretrained_checkpoint = pretrained_checkpoint if 'pretrained_checkpoint' in locals() else None
+    pretrained_checkpoint = (
+        pretrained_checkpoint if "pretrained_checkpoint" in locals() else None
+    )
     if not from_hub and pretrained_checkpoint is not None:
         checkpoint_path = os.path.join(
-            cfg.model.pretrained_checkpoint_dir,
-            str(pretrained_checkpoint)
+            cfg.model.pretrained_checkpoint_dir, str(pretrained_checkpoint)
         )
-        
+
         # Check if it's a DeepSpeed checkpoint
         is_deepspeed = os.path.exists(os.path.join(checkpoint_path, "zero_to_fp32.py"))
-        
+
         if is_deepspeed:
             logger.info(f"Loading DeepSpeed checkpoint from {checkpoint_path}")
             try:
@@ -577,7 +593,7 @@ def trainer(cfg: Config):
                     checkpoint_path,
                     tag="",  # Empty tag since path includes checkpoint number
                 )
-                logger.info(f"Successfully loaded DeepSpeed checkpoint")
+                logger.info("Successfully loaded DeepSpeed checkpoint")
             except Exception as e:
                 logger.error(f"Failed to load DeepSpeed checkpoint: {e}")
                 raise
@@ -586,27 +602,34 @@ def trainer(cfg: Config):
             state_dict_path = os.path.join(checkpoint_path, "state_dict.pt")
             if not os.path.exists(state_dict_path):
                 raise FileNotFoundError(f"No state_dict.pt found at {state_dict_path}")
-                
+
             logger.info(f"Loading state dict from {state_dict_path}")
             state_dict = torch.load(state_dict_path)
-            
+
             # Log state dict info
             logger.info(f"Loaded state dict with {len(state_dict)} keys")
-            
+
             # Remove classifier and decoder keys
-            cleaned_state_dict = {k: v for k, v in state_dict.items() 
-                                 if "classifier" not in k and "decoder" not in k}
+            cleaned_state_dict = {
+                k: v
+                for k, v in state_dict.items()
+                if "classifier" not in k and "decoder" not in k
+            }
             logger.info(f"After filtering: {len(cleaned_state_dict)} keys to load")
-            
+
             # Load into model
-            missing_keys, unexpected_keys = model.load_state_dict(cleaned_state_dict, strict=False)
-            
+            missing_keys, unexpected_keys = model.load_state_dict(
+                cleaned_state_dict, strict=False
+            )
+
             if missing_keys:
                 logger.info(f"Missing keys: {missing_keys}")
             if unexpected_keys:
                 logger.info(f"Unexpected keys: {unexpected_keys}")
-                
-            logger.info(f"✅ Successfully loaded pretrained weights from {state_dict_path}")
+
+            logger.info(
+                f"✅ Successfully loaded pretrained weights from {state_dict_path}"
+            )
 
     # Optimizer
     # Split weights in two groups, one with weight decay and the other not.
@@ -839,11 +862,15 @@ def trainer(cfg: Config):
     for epoch in range(starting_epoch, cfg.trainer.num_train_epochs):
         for batch in train_dataloader:
             logits = model(batch["input_ids"], batch["attention_mask"])["logits"]
-            
+
             # Debug logging for first few steps
             if completed_steps < 3:
-                logger.info(f"Step {completed_steps}: logits shape: {logits.shape}, logits mean: {logits.mean().item():.6f}, std: {logits.std().item():.6f}")
-                logger.info(f"Step {completed_steps}: logits sample: {logits[0].detach().cpu()}")
+                logger.info(
+                    f"Step {completed_steps}: logits shape: {logits.shape}, logits mean: {logits.mean().item():.6f}, std: {logits.std().item():.6f}"
+                )
+                logger.info(
+                    f"Step {completed_steps}: logits sample: {logits[0].detach().cpu()}"
+                )
                 logger.info(f"Step {completed_steps}: labels: {batch['labels'][:5]}")
 
             if not is_regression:

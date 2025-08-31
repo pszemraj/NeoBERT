@@ -157,6 +157,8 @@ The repository includes a comprehensive test suite that verifies:
 ### 📖 **Documentation**
 Each directory contains detailed README files with usage examples, best practices, and troubleshooting guides.
 
+**Known Issues:** See [docs/known_issues.md](docs/known_issues.md) for current limitations and workarounds.
+
 ## Contact
 
 For questions, do not hesitate to reach out and open an issue on here or on our **[GitHub](https://github.com/chandar-lab/NeoBERT)**.

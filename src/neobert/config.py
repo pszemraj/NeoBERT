@@ -163,7 +163,7 @@ class Config:
 
     # Task-specific
     task: str = "pretraining"  # pretraining, glue, mteb, contrastive
-    
+
     # Store raw model dict for GLUE tasks to preserve pretrained fields
     _raw_model_dict: Optional[Dict[str, Any]] = None
 
