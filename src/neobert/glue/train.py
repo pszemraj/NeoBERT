@@ -272,7 +272,15 @@ def trainer(cfg: Config):
     accelerator.wait_for_everyone()
 
     flash_attention = getattr(cfg, "flash_attention", True)
-    if hasattr(cfg.model, "from_hub") and cfg.model.from_hub:
+    
+    # Check from_hub in raw model dict for GLUE tasks
+    from_hub = False
+    if cfg._raw_model_dict:
+        from_hub = cfg._raw_model_dict.get("from_hub", False)
+    elif hasattr(cfg.model, "from_hub"):
+        from_hub = cfg.model.from_hub
+    
+    if from_hub:
         tokenizer = AutoTokenizer.from_pretrained(
             cfg.model.name,
             use_fast=True,
@@ -283,11 +291,14 @@ def trainer(cfg: Config):
         # Import our new config system
         from neobert.config import ConfigLoader
 
-        pretrained_config_path = getattr(
-            cfg.model,
-            "pretrained_config_path",
-            "tests/configs/pretraining/test_tiny_pretrain.yaml",
-        )
+        # For GLUE, we MUST have pretrained model info
+        if cfg._raw_model_dict and "pretrained_config_path" in cfg._raw_model_dict:
+            pretrained_config_path = cfg._raw_model_dict["pretrained_config_path"]
+        else:
+            raise ValueError(
+                "GLUE evaluation requires a pretrained model! "
+                "Please specify 'pretrained_config_path' in the model section of your config."
+            )
         model_pretraining_config = ConfigLoader.load(pretrained_config_path)
         model_pretraining_config.model.flash_attention = flash_attention
         tokenizer = get_tokenizer(
@@ -428,7 +439,7 @@ def trainer(cfg: Config):
         )
 
     # Model
-    if hasattr(cfg.model, "from_hub") and cfg.model.from_hub:
+    if from_hub:
         config = AutoConfig.from_pretrained(
             cfg.model.name,
             num_labels=num_labels,
@@ -469,20 +480,16 @@ def trainer(cfg: Config):
             if hasattr(model_pretraining_config.model, "__dict__")
             else {}
         )
-        tokenizer_config_dict = (
-            model_pretraining_config.tokenizer.__dict__.copy()
-            if hasattr(model_pretraining_config.tokenizer, "__dict__")
-            else {}
-        )
-
+        
         # Map dropout_prob to dropout and remove classifier_init_range from model config
         if "dropout_prob" in model_config_dict:
             model_config_dict["dropout"] = model_config_dict.pop("dropout_prob")
         if "classifier_init_range" in model_config_dict:
             model_config_dict.pop("classifier_init_range")
 
-        # Merge the configs, with tokenizer config taking precedence for overlapping keys
-        combined_config = {**model_config_dict, **tokenizer_config_dict}
+        # Use model config directly - don't merge with tokenizer config
+        # The tokenizer's vocab_size should match the model's anyway
+        combined_config = model_config_dict
 
         model = NeoBERTForSequenceClassification(
             NeoBERTConfig(**combined_config),
@@ -514,49 +521,90 @@ def trainer(cfg: Config):
             raise ValueError("Unable to retrieve checkpoint to transfer from.")
 
     else:
-        pretrained_checkpoint_dir = getattr(
-            cfg.model, "pretrained_checkpoint_dir", "./test_outputs"
-        )
-        cfg.model.pretrained_checkpoint_dir = os.path.join(
-            pretrained_checkpoint_dir, "model_checkpoints"
-        )
-
-    pretrained_checkpoint = getattr(cfg.model, "pretrained_checkpoint", None)
-    if (
-        not (hasattr(cfg.model, "from_hub") and cfg.model.from_hub)
-        and pretrained_checkpoint is not None
-    ):
-        try:
-            model = load_state_dict_from_zero_checkpoint(
-                model,
-                cfg.model.pretrained_checkpoint_dir,
-                tag=str(pretrained_checkpoint),
+        # Get checkpoint info from raw model dict for GLUE
+        logger.info(f"Looking for pretrained checkpoint info...")
+        logger.info(f"Has _raw_model_dict: {hasattr(cfg, '_raw_model_dict') and cfg._raw_model_dict is not None}")
+        
+        if cfg._raw_model_dict:
+            logger.info(f"Raw model dict keys: {list(cfg._raw_model_dict.keys())}")
+            pretrained_checkpoint_dir = cfg._raw_model_dict.get(
+                "pretrained_checkpoint_dir", None
             )
-        except FileNotFoundError:
-            state_dict = torch.load(
-                os.path.join(
-                    cfg.model.pretrained_checkpoint_dir,
-                    str(pretrained_checkpoint),
-                    "state_dict.pt",
-                )
-            )
-            # Remove classifier and decoder keys, handle model. prefix
-            cleaned_state_dict = {}
-            for k, v in state_dict.items():
-                if "classifier" in k or "decoder" in k:
-                    continue
-                # Remove 'model.' prefix if present
-                if k.startswith("model."):
-                    k = k[6:]  # Remove 'model.' prefix
-                cleaned_state_dict[k] = v
+            pretrained_checkpoint = cfg._raw_model_dict.get("pretrained_checkpoint", None)
             
-            # Load the cleaned state dict
+            logger.info(f"Pretrained checkpoint dir: {pretrained_checkpoint_dir}")
+            logger.info(f"Pretrained checkpoint: {pretrained_checkpoint}")
+            
+            if not pretrained_checkpoint_dir or not pretrained_checkpoint:
+                raise ValueError(
+                    "GLUE evaluation requires pretrained weights! "
+                    "Please specify 'pretrained_checkpoint_dir' and 'pretrained_checkpoint' "
+                    "in the model section of your config, or set 'allow_random_weights: true' "
+                    "if you really want to use random initialization (NOT RECOMMENDED)."
+                )
+            
+            # Allow override with explicit flag
+            if cfg._raw_model_dict.get("allow_random_weights", False):
+                logger.warning("⚠️ WARNING: Running GLUE with RANDOM WEIGHTS as allow_random_weights=true")
+                pretrained_checkpoint = None
+            else:
+                cfg.model.pretrained_checkpoint_dir = os.path.join(
+                    pretrained_checkpoint_dir, "model_checkpoints"
+                )
+                logger.info(f"Set checkpoint dir to: {cfg.model.pretrained_checkpoint_dir}")
+        else:
+            raise ValueError(
+                "GLUE evaluation requires model configuration with pretrained checkpoint info!"
+            )
+
+    pretrained_checkpoint = pretrained_checkpoint if 'pretrained_checkpoint' in locals() else None
+    if not from_hub and pretrained_checkpoint is not None:
+        checkpoint_path = os.path.join(
+            cfg.model.pretrained_checkpoint_dir,
+            str(pretrained_checkpoint)
+        )
+        
+        # Check if it's a DeepSpeed checkpoint
+        is_deepspeed = os.path.exists(os.path.join(checkpoint_path, "zero_to_fp32.py"))
+        
+        if is_deepspeed:
+            logger.info(f"Loading DeepSpeed checkpoint from {checkpoint_path}")
+            try:
+                model = load_state_dict_from_zero_checkpoint(
+                    model,
+                    checkpoint_path,
+                    tag="",  # Empty tag since path includes checkpoint number
+                )
+                logger.info(f"Successfully loaded DeepSpeed checkpoint")
+            except Exception as e:
+                logger.error(f"Failed to load DeepSpeed checkpoint: {e}")
+                raise
+        else:
+            # Load state_dict directly
+            state_dict_path = os.path.join(checkpoint_path, "state_dict.pt")
+            if not os.path.exists(state_dict_path):
+                raise FileNotFoundError(f"No state_dict.pt found at {state_dict_path}")
+                
+            logger.info(f"Loading state dict from {state_dict_path}")
+            state_dict = torch.load(state_dict_path)
+            
+            # Log state dict info
+            logger.info(f"Loaded state dict with {len(state_dict)} keys")
+            
+            # Remove classifier and decoder keys
+            cleaned_state_dict = {k: v for k, v in state_dict.items() 
+                                 if "classifier" not in k and "decoder" not in k}
+            logger.info(f"After filtering: {len(cleaned_state_dict)} keys to load")
+            
+            # Load into model
             missing_keys, unexpected_keys = model.load_state_dict(cleaned_state_dict, strict=False)
-            logger.info(f"Loaded checkpoint with {len(cleaned_state_dict)} parameters")
+            
             if missing_keys:
-                logger.info(f"Missing keys: {missing_keys[:5]}...")
+                logger.info(f"Missing keys: {missing_keys}")
             if unexpected_keys:
-                logger.info(f"Unexpected keys: {unexpected_keys[:5]}...")
+                logger.info(f"Unexpected keys: {unexpected_keys}")
+                
+            logger.info(f"✅ Successfully loaded pretrained weights from {state_dict_path}")
 
     # Optimizer
     # Split weights in two groups, one with weight decay and the other not.

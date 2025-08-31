@@ -163,6 +163,9 @@ class Config:
 
     # Task-specific
     task: str = "pretraining"  # pretraining, glue, mteb, contrastive
+    
+    # Store raw model dict for GLUE tasks to preserve pretrained fields
+    _raw_model_dict: Optional[Dict[str, Any]] = None
 
     # Accelerate config
     accelerate_config_file: Optional[str] = None
@@ -216,9 +219,18 @@ class ConfigLoader:
 
         # Update model config
         if "model" in cfg_dict:
-            for k, v in cfg_dict["model"].items():
-                if hasattr(config.model, k):
-                    setattr(config.model, k, v)
+            # For GLUE tasks, preserve all model fields including pretrained paths
+            if cfg_dict.get("task") == "glue":
+                # Store the raw model dict to preserve pretrained fields
+                config._raw_model_dict = cfg_dict["model"].copy()
+                # Also set standard model fields
+                for k, v in cfg_dict["model"].items():
+                    if hasattr(config.model, k):
+                        setattr(config.model, k, v)
+            else:
+                for k, v in cfg_dict["model"].items():
+                    if hasattr(config.model, k):
+                        setattr(config.model, k, v)
 
         # Update dataset config
         if "dataset" in cfg_dict:
