@@ -184,11 +184,13 @@ def get_best_checkpoint_path(base_dir, task, num_checkpoints_to_merge=1):
 
 def save_checkpoint(cfg, model, accelerator, completed_steps):
     model_checkpoint_dir = os.path.join(cfg.trainer.output_dir, "model_checkpoints")
+    
+    max_ckpt = getattr(cfg.trainer, 'max_ckpt', 0)
 
     # Delete checkpoints with the lesser evaluation accuracy if there are too many
     if (
-        cfg.trainer.max_ckpt is not None
-        and cfg.trainer.max_ckpt > 0
+        max_ckpt is not None
+        and max_ckpt > 0
         and os.path.isdir(model_checkpoint_dir)
     ):
         files = os.listdir(model_checkpoint_dir)
@@ -196,12 +198,12 @@ def save_checkpoint(cfg, model, accelerator, completed_steps):
         iterations.sort()
 
         # Remove files with the smallest iterations until the limit is met
-        while iterations is not None and len(iterations) >= cfg.trainer.max_ckpt:
+        while iterations is not None and len(iterations) >= max_ckpt:
             file_to_remove = iterations.pop(0)
             shutil.rmtree(os.path.join(model_checkpoint_dir, str(file_to_remove)))
             print(
                 f"Deleted old model checkpoint {file_to_remove} due to limit "
-                f"(max_ckpt = {cfg.trainer.max_ckpt})"
+                f"(max_ckpt = {max_ckpt})"
             )
 
     # Save the checkpoint
@@ -217,6 +219,18 @@ def save_checkpoint(cfg, model, accelerator, completed_steps):
 
 
 def trainer(cfg: Config):
+    # Extract task and meta_task from config
+    task = cfg.glue.task_name if hasattr(cfg, 'glue') else cfg.task
+    meta_task = "glue"  # Default for GLUE tasks
+    experiment_id = getattr(cfg, "id", "0")
+    
+    # Update cfg to have these as direct attributes for compatibility
+    cfg.task = task
+    cfg.meta_task = meta_task
+    cfg.id = experiment_id
+    cfg.mode = getattr(cfg, "mode", "eval")  # Default to eval mode
+    cfg.num_labels = cfg.glue.num_labels if hasattr(cfg, 'glue') else 2
+    cfg.max_seq_len = cfg.glue.max_seq_length if hasattr(cfg, 'glue') else 128
     # Accelerator object
     project_config = ProjectConfiguration(
         cfg.trainer.output_dir,
@@ -281,11 +295,8 @@ def trainer(cfg: Config):
         model_pretraining_config = ConfigLoader.load(pretrained_config_path)
         model_pretraining_config.model.flash_attention = flash_attention
         tokenizer = get_tokenizer(
-            name=model_pretraining_config.tokenizer.name,
-            path=getattr(model_pretraining_config.tokenizer, "path", None),
+            pretrained_model_name_or_path=model_pretraining_config.tokenizer.name,
             max_length=model_pretraining_config.tokenizer.max_length,
-            padding=getattr(model_pretraining_config.tokenizer, "padding", True),
-            truncation=getattr(model_pretraining_config.tokenizer, "truncation", True),
         )
 
     print("Loading metric...")
@@ -456,10 +467,21 @@ def trainer(cfg: Config):
                 ignore_mismatched_sizes=False,
             )
     else:
+        # Convert config objects to dict for unpacking
+        model_config_dict = model_pretraining_config.model.__dict__.copy() if hasattr(model_pretraining_config.model, '__dict__') else {}
+        tokenizer_config_dict = model_pretraining_config.tokenizer.__dict__.copy() if hasattr(model_pretraining_config.tokenizer, '__dict__') else {}
+        
+        # Map dropout_prob to dropout and remove classifier_init_range from model config
+        if 'dropout_prob' in model_config_dict:
+            model_config_dict['dropout'] = model_config_dict.pop('dropout_prob')
+        if 'classifier_init_range' in model_config_dict:
+            model_config_dict.pop('classifier_init_range')
+        
+        # Merge the configs, with tokenizer config taking precedence for overlapping keys
+        combined_config = {**model_config_dict, **tokenizer_config_dict}
+        
         model = NeoBERTForSequenceClassification(
-            NeoBERTConfig(
-                **model_pretraining_config.model, **model_pretraining_config.tokenizer
-            ),
+            NeoBERTConfig(**combined_config),
             num_labels=num_labels,
             classifier_dropout=getattr(cfg.model, "classifier_dropout", 0.1),
             classifier_init_range=getattr(cfg.model, "classifier_init_range", 0.02),
@@ -520,6 +542,20 @@ def trainer(cfg: Config):
     # Optimizer
     # Split weights in two groups, one with weight decay and the other not.
     no_decay = ["bias", "LayerNorm.weight"]
+    
+    # Handle both config styles (with and without hparams)
+    if hasattr(cfg.optimizer, 'hparams'):
+        weight_decay = cfg.optimizer.hparams.weight_decay
+        optimizer_params = cfg.optimizer.hparams
+    else:
+        weight_decay = cfg.optimizer.weight_decay
+        optimizer_params = {
+            'lr': cfg.optimizer.lr,
+            'weight_decay': cfg.optimizer.weight_decay,
+            'betas': getattr(cfg.optimizer, 'betas', [0.9, 0.999]),
+            'eps': getattr(cfg.optimizer, 'eps', 1e-8)
+        }
+    
     optimizer_grouped_parameters = [
         {
             "params": [
@@ -527,7 +563,7 @@ def trainer(cfg: Config):
                 for n, p in model.named_parameters()
                 if not any(nd in n for nd in no_decay)
             ],
-            "weight_decay": cfg.optimizer.hparams.weight_decay,
+            "weight_decay": weight_decay,
         },
         {
             "params": [
@@ -538,7 +574,7 @@ def trainer(cfg: Config):
             "weight_decay": 0.0,
         },
     ]
-    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, **cfg.optimizer.hparams)
+    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, **optimizer_params)
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
@@ -565,9 +601,22 @@ def trainer(cfg: Config):
         cfg.scheduler.decay_steps = math.ceil(
             cfg.trainer.max_steps / 100 * cfg.scheduler.decay_percent
         )
+    elif cfg.scheduler.decay_steps is None:
+        # For linear scheduler without decay_percent, set decay_steps to total steps
+        cfg.scheduler.decay_steps = cfg.trainer.max_steps
 
+    # Get learning rate from optimizer config
+    lr = optimizer_params.get('lr', optimizer_params['lr'] if isinstance(optimizer_params, dict) else cfg.optimizer.lr)
+    
+    # Convert scheduler config to dict if needed
+    scheduler_params = cfg.scheduler.__dict__.copy() if hasattr(cfg.scheduler, '__dict__') else cfg.scheduler.copy()
+    
+    # Map 'name' to 'decay' if present
+    if 'name' in scheduler_params:
+        scheduler_params['decay'] = scheduler_params.pop('name')
+    
     scheduler = get_scheduler(
-        optimizer=optimizer, lr=cfg.optimizer.hparams.lr, **cfg.scheduler
+        optimizer=optimizer, lr=lr, **scheduler_params
     )
 
     # Prepare everything with our `accelerator`.
@@ -599,12 +648,10 @@ def trainer(cfg: Config):
     )
 
     # To keep the last n checkpoints before the best model and do k cycles before early stopping, we save the last k+n models
-    if (
-        cfg.trainer.max_ckpt is not None
-        and cfg.trainer.max_ckpt > 0
-        and cfg.trainer.early_stopping > 0
-    ):
-        cfg.trainer.max_ckpt += cfg.trainer.early_stopping
+    early_stopping = getattr(cfg.trainer, 'early_stopping', 0)
+    max_ckpt = getattr(cfg.trainer, 'max_ckpt', 0)
+    if max_ckpt is not None and max_ckpt > 0 and early_stopping > 0:
+        cfg.trainer.max_ckpt = max_ckpt + early_stopping
 
     # Get loss function
     if not is_regression:
@@ -630,13 +677,13 @@ def trainer(cfg: Config):
     logger.info(
         f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}"
     )
-    logger.info(f"  Learning rate = {cfg.optimizer.hparams.lr}")
+    logger.info(f"  Learning rate = {lr}")
     logger.info(
         f"  Gradient accumulation steps = {cfg.trainer.gradient_accumulation_steps}"
     )
     logger.info(f"  Total optimization steps = {cfg.trainer.max_steps}")
     logger.info(f"  Evaluation steps = {cfg.trainer.eval_steps}")
-    logger.info(f"  Early stopping cycles = {cfg.trainer.early_stopping}")
+    logger.info(f"  Early stopping cycles = {early_stopping}")
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(
         range(cfg.trainer.max_steps), disable=not accelerator.is_local_main_process
@@ -822,16 +869,16 @@ def trainer(cfg: Config):
                     early_stopping_counter += 1
 
                 if (
-                    cfg.trainer.early_stopping > 0
-                    and early_stopping_counter >= cfg.trainer.early_stopping
+                    early_stopping > 0
+                    and early_stopping_counter >= early_stopping
                 ):
                     print(
-                        f"Evaluation accuracy has not improved in {cfg.trainer.early_stopping} cycles of {cfg.trainer.eval_steps} evaluation steps, stopping the training."
+                        f"Evaluation accuracy has not improved in {early_stopping} cycles of {cfg.trainer.eval_steps} evaluation steps, stopping the training."
                     )
                     early_stop = True
 
                 # Save model checkpoint
-                if cfg.trainer.max_ckpt != 0:
+                if max_ckpt != 0:
                     save_checkpoint(cfg, model, accelerator, completed_steps)
 
                 model.train()

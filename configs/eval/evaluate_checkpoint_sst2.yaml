@@ -26,7 +26,7 @@ tokenizer:
 
 trainer:
   output_dir: "./glue_outputs"
-  run_name: "neobert_100k_glue_eval"
+  run_name: "neobert_100k_sst2_eval"
   num_train_epochs: 3
   per_device_train_batch_size: 16
   per_device_eval_batch_size: 32
@@ -37,14 +37,14 @@ trainer:
   eval_steps: 500
   save_steps: 500
   dataloader_num_workers: 4
-  metric_for_best_model: "eval_matthews_correlation"  # For CoLA
+  metric_for_best_model: "eval_accuracy"  # For SST-2
   greater_is_better: true
   load_best_model_at_end: true
   report_to: ["wandb"]
   bf16: true
 
 glue:
-  task_name: "cola"
+  task_name: "sst2"
   num_labels: 2
   max_seq_length: 128
 
@@ -62,6 +62,6 @@ datacollator:
   pad_to_multiple_of: 8
 
 wandb:
-  project: "neobert-100k-eval"
-  name: "glue-cola-100k"
+  project: "neobert-evals"
+  name: "glue-sst2-100k"
   mode: "online"
