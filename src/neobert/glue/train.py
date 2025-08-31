@@ -1040,7 +1040,11 @@ def trainer(cfg: Config):
                     # Default to saving at eval steps if strategy is not 'no'
                     should_save = True
 
-                if should_save and max_ckpt != 0:
+                # Only save checkpoint if explicitly enabled
+                save_model = getattr(cfg.trainer, 'save_model', True)
+                save_total_limit = getattr(cfg.trainer, 'save_total_limit', None)
+                
+                if should_save and max_ckpt != 0 and save_model and (save_total_limit is None or save_total_limit > 0):
                     save_checkpoint(cfg, model, accelerator, completed_steps)
 
                 model.train()

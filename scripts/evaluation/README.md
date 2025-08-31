@@ -64,7 +64,22 @@ trainer:
   save_strategy: "epoch"
   per_device_train_batch_size: 32
   learning_rate: 2e-5
+  save_model: false  # Disable checkpoint saving (default: false)
+  save_total_limit: 0  # Set to 0 to disable checkpoints
   # ... other training arguments
+```
+
+### Model Checkpoint Saving
+
+By default, GLUE evaluations **do not save model checkpoints** to conserve disk space. Only evaluation metrics (JSON files) are saved. This is usually sufficient since you're evaluating a pretrained model.
+
+If you need to save the fine-tuned model checkpoints:
+
+```yaml
+trainer:
+  save_model: true  # Enable checkpoint saving
+  save_total_limit: 3  # Keep only the 3 best checkpoints
+  max_ckpt: 3  # Alternative limit setting
 ```
 
 ### Running All GLUE Tasks

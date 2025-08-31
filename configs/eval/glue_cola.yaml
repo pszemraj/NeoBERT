@@ -1,82 +1,54 @@
-# GLUE COLA Evaluation Configuration
-# This config evaluates a pretrained NeoBERT model on the COLA task
-
 task: glue
 seed: 80085
-
-# Model Configuration
 model:
-  # UPDATE THIS: Path to your pretraining config
   pretrained_config_path: configs/pretrain/pretrain_neobert100m_smollm2data.yaml
-  
-  # UPDATE THIS: Directory containing your model checkpoints
   pretrained_checkpoint_dir: outputs/smollm2_custom_tokenizer
-  
-  # UPDATE THIS: Specific checkpoint step to load (or "best" for best checkpoint)
   pretrained_checkpoint: 100000
-  
-  from_hub: false  # Set to true if loading from HuggingFace Hub
-  classifier_dropout: 0.1  # Dropout for the classification head
-  classifier_init_range: 0.02  # Initialization range for classifier weights
-
-# Training Configuration
+  from_hub: false
+  classifier_dropout: 0.1
+  classifier_init_range: 0.02
 trainer:
-  # UPDATE THIS: Where to save evaluation outputs
   output_dir: ./glue_outputs/cola
-  
   run_name: neobert_100k_cola
-  train_batch_size: 32  # Batch size per device
+  train_batch_size: 32
   eval_batch_size: 32
-  gradient_accumulation_steps: 4  # Effective batch = 32 * 4 = 128
-  num_train_epochs: 3  # Standard for GLUE fine-tuning
-  
-  # Evaluation strategy - epoch means evaluate at end of each epoch
-  eval_strategy: epoch  # Options: "epoch", "steps", "no"
-  save_strategy: epoch  # Options: "epoch", "steps", "best", "no"
-  
+  gradient_accumulation_steps: 4
+  num_train_epochs: 3
+  eval_strategy: epoch
+  save_strategy: epoch
   logging_steps: 10
-  max_ckpt: 3  # Keep only the 3 best checkpoints
-  early_stopping: 0  # Set to N to stop if no improvement for N evaluations
-  mixed_precision: bf16  # Use bf16 for modern GPUs (A100, etc)
-  tf32: true  # Enable TF32 for additional speedup on Ampere GPUs
-
-# GLUE Task Configuration
+  max_ckpt: 3
+  early_stopping: 0
+  mixed_precision: bf16
+  tf32: true
+  save_total_limit: 0
+  save_model: false
 glue:
   task_name: cola
-  num_labels: 2  # Classification labels (1 for regression tasks like STS-B)
-  max_seq_length: 512  # Maximum sequence length for tokenization
-
-# Optimizer Configuration
+  num_labels: 2
+  max_seq_length: 512
 optimizer:
-  lr: 5.0e-05  # Learning rate - standard for BERT fine-tuning
-  weight_decay: 0.01  # Weight decay for regularization
+  lr: 5.0e-05
+  weight_decay: 0.01
   betas:
-  - 0.9  # Adam beta1
-  - 0.999  # Adam beta2
-  eps: 1.0e-08  # Adam epsilon
-
-# Learning Rate Scheduler
+  - 0.9
+  - 0.999
+  eps: 1.0e-08
 scheduler:
-  name: linear  # Linear decay with warmup
-  warmup_percent: 5  # Warmup for 5% of total steps
-  decay_percent: null  # Decay to end of training
-  
-  # IMPORTANT: Set these to null to override dataclass defaults
-  warmup_steps: null  # Calculated from warmup_percent
-  decay_steps: null  # Set to total training steps
-
-# Weights & Biases Configuration (optional)
+  name: linear
+  warmup_percent: 5
+  decay_percent: null
+  warmup_steps: null
+  decay_steps: null
 wandb:
-  # UPDATE THIS: Your W&B project name
   project: neobert-evals
-  
   name: glue-cola-100k
-  entity: null  # UPDATE THIS: Your W&B entity/username
+  entity: null
   tags:
   - glue
   - cola
   - 100k_checkpoint
   - epoch_eval
   dir: logs/wandb
-  mode: online  # Set to "disabled" to turn off W&B logging
+  mode: online
   resume: false
