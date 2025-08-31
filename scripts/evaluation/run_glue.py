@@ -14,9 +14,7 @@ def main():
     parser.add_argument(
         "--model_name_or_path", type=str, default=None, help="Model path"
     )
-    parser.add_argument(
-        "--output_dir", type=str, default=None, help="Output directory"
-    )
+    parser.add_argument("--output_dir", type=str, default=None, help="Output directory")
 
     # Parse args
     args = parser.parse_args()

@@ -236,7 +236,9 @@ class TestEndToEndIntegration(unittest.TestCase):
 
     def test_tokenizer_model_compatibility(self):
         """Test tokenizer and model vocab_size compatibility."""
-        config = ConfigLoader.load(str(self.config_dir / "pretraining/test_tiny_pretrain.yaml"))
+        config = ConfigLoader.load(
+            str(self.config_dir / "pretraining/test_tiny_pretrain.yaml")
+        )
 
         # Model and tokenizer should have matching vocab sizes
         self.assertEqual(config.model.vocab_size, config.tokenizer.vocab_size)

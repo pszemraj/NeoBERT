@@ -184,15 +184,11 @@ def get_best_checkpoint_path(base_dir, task, num_checkpoints_to_merge=1):
 
 def save_checkpoint(cfg, model, accelerator, completed_steps):
     model_checkpoint_dir = os.path.join(cfg.trainer.output_dir, "model_checkpoints")
-    
-    max_ckpt = getattr(cfg.trainer, 'max_ckpt', 0)
+
+    max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
 
     # Delete checkpoints with the lesser evaluation accuracy if there are too many
-    if (
-        max_ckpt is not None
-        and max_ckpt > 0
-        and os.path.isdir(model_checkpoint_dir)
-    ):
+    if max_ckpt is not None and max_ckpt > 0 and os.path.isdir(model_checkpoint_dir):
         files = os.listdir(model_checkpoint_dir)
         iterations = [f for f in files if f.isdigit()]
         iterations.sort()
@@ -220,17 +216,17 @@ def save_checkpoint(cfg, model, accelerator, completed_steps):
 
 def trainer(cfg: Config):
     # Extract task and meta_task from config
-    task = cfg.glue.task_name if hasattr(cfg, 'glue') else cfg.task
+    task = cfg.glue.task_name if hasattr(cfg, "glue") else cfg.task
     meta_task = "glue"  # Default for GLUE tasks
     experiment_id = getattr(cfg, "id", "0")
-    
+
     # Update cfg to have these as direct attributes for compatibility
     cfg.task = task
     cfg.meta_task = meta_task
     cfg.id = experiment_id
     cfg.mode = getattr(cfg, "mode", "eval")  # Default to eval mode
-    cfg.num_labels = cfg.glue.num_labels if hasattr(cfg, 'glue') else 2
-    cfg.max_seq_len = cfg.glue.max_seq_length if hasattr(cfg, 'glue') else 128
+    cfg.num_labels = cfg.glue.num_labels if hasattr(cfg, "glue") else 2
+    cfg.max_seq_len = cfg.glue.max_seq_length if hasattr(cfg, "glue") else 128
     # Accelerator object
     project_config = ProjectConfiguration(
         cfg.trainer.output_dir,
@@ -468,18 +464,26 @@ def trainer(cfg: Config):
             )
     else:
         # Convert config objects to dict for unpacking
-        model_config_dict = model_pretraining_config.model.__dict__.copy() if hasattr(model_pretraining_config.model, '__dict__') else {}
-        tokenizer_config_dict = model_pretraining_config.tokenizer.__dict__.copy() if hasattr(model_pretraining_config.tokenizer, '__dict__') else {}
-        
+        model_config_dict = (
+            model_pretraining_config.model.__dict__.copy()
+            if hasattr(model_pretraining_config.model, "__dict__")
+            else {}
+        )
+        tokenizer_config_dict = (
+            model_pretraining_config.tokenizer.__dict__.copy()
+            if hasattr(model_pretraining_config.tokenizer, "__dict__")
+            else {}
+        )
+
         # Map dropout_prob to dropout and remove classifier_init_range from model config
-        if 'dropout_prob' in model_config_dict:
-            model_config_dict['dropout'] = model_config_dict.pop('dropout_prob')
-        if 'classifier_init_range' in model_config_dict:
-            model_config_dict.pop('classifier_init_range')
-        
+        if "dropout_prob" in model_config_dict:
+            model_config_dict["dropout"] = model_config_dict.pop("dropout_prob")
+        if "classifier_init_range" in model_config_dict:
+            model_config_dict.pop("classifier_init_range")
+
         # Merge the configs, with tokenizer config taking precedence for overlapping keys
         combined_config = {**model_config_dict, **tokenizer_config_dict}
-        
+
         model = NeoBERTForSequenceClassification(
             NeoBERTConfig(**combined_config),
             num_labels=num_labels,
@@ -542,20 +546,20 @@ def trainer(cfg: Config):
     # Optimizer
     # Split weights in two groups, one with weight decay and the other not.
     no_decay = ["bias", "LayerNorm.weight"]
-    
+
     # Handle both config styles (with and without hparams)
-    if hasattr(cfg.optimizer, 'hparams'):
+    if hasattr(cfg.optimizer, "hparams"):
         weight_decay = cfg.optimizer.hparams.weight_decay
         optimizer_params = cfg.optimizer.hparams
     else:
         weight_decay = cfg.optimizer.weight_decay
         optimizer_params = {
-            'lr': cfg.optimizer.lr,
-            'weight_decay': cfg.optimizer.weight_decay,
-            'betas': getattr(cfg.optimizer, 'betas', [0.9, 0.999]),
-            'eps': getattr(cfg.optimizer, 'eps', 1e-8)
+            "lr": cfg.optimizer.lr,
+            "weight_decay": cfg.optimizer.weight_decay,
+            "betas": getattr(cfg.optimizer, "betas", [0.9, 0.999]),
+            "eps": getattr(cfg.optimizer, "eps", 1e-8),
         }
-    
+
     optimizer_grouped_parameters = [
         {
             "params": [
@@ -606,22 +610,31 @@ def trainer(cfg: Config):
         cfg.scheduler.decay_steps = cfg.trainer.max_steps
 
     # Get learning rate from optimizer config
-    lr = optimizer_params.get('lr', optimizer_params['lr'] if isinstance(optimizer_params, dict) else cfg.optimizer.lr)
-    
+    lr = optimizer_params.get(
+        "lr",
+        optimizer_params["lr"]
+        if isinstance(optimizer_params, dict)
+        else cfg.optimizer.lr,
+    )
+
     # Convert scheduler config to dict if needed
-    scheduler_params = cfg.scheduler.__dict__.copy() if hasattr(cfg.scheduler, '__dict__') else cfg.scheduler.copy()
-    
+    scheduler_params = (
+        cfg.scheduler.__dict__.copy()
+        if hasattr(cfg.scheduler, "__dict__")
+        else cfg.scheduler.copy()
+    )
+
     # Map 'name' to 'decay' if present
-    if 'name' in scheduler_params:
-        scheduler_params['decay'] = scheduler_params.pop('name')
-    
+    if "name" in scheduler_params:
+        scheduler_params["decay"] = scheduler_params.pop("name")
+
     # Debug logging
     logger.info(f"Scheduler params before calling get_scheduler: {scheduler_params}")
-    logger.info(f"warmup_steps: {scheduler_params.get('warmup_steps')}, decay_steps: {scheduler_params.get('decay_steps')}")
-    
-    scheduler = get_scheduler(
-        optimizer=optimizer, lr=lr, **scheduler_params
+    logger.info(
+        f"warmup_steps: {scheduler_params.get('warmup_steps')}, decay_steps: {scheduler_params.get('decay_steps')}"
     )
+
+    scheduler = get_scheduler(optimizer=optimizer, lr=lr, **scheduler_params)
 
     # Prepare everything with our `accelerator`.
     model, optimizer, train_dataloader, eval_dataloader, scheduler = (
@@ -647,26 +660,33 @@ def trainer(cfg: Config):
     )
 
     # Handle evaluation strategy - support both 'epoch' and 'steps'
-    eval_strategy = getattr(cfg.trainer, 'eval_strategy', 'steps')
-    if eval_strategy == 'epoch':
+    eval_strategy = getattr(cfg.trainer, "eval_strategy", "steps")
+    if eval_strategy == "epoch":
         # Evaluate at the end of each epoch
         cfg.trainer.eval_steps = num_update_steps_per_epoch
-        logger.info(f"Using epoch-based evaluation: will evaluate every {cfg.trainer.eval_steps} steps (1 epoch)")
-    elif eval_strategy == 'steps':
+        logger.info(
+            f"Using epoch-based evaluation: will evaluate every {cfg.trainer.eval_steps} steps (1 epoch)"
+        )
+    elif eval_strategy == "steps":
         # Use the provided eval_steps or default to min of provided and epoch size
-        if hasattr(cfg.trainer, 'eval_steps'):
+        if hasattr(cfg.trainer, "eval_steps"):
             cfg.trainer.eval_steps = min(
-                cfg.trainer.eval_steps, len(train_dataset) // cfg.trainer.train_batch_size
+                cfg.trainer.eval_steps,
+                len(train_dataset) // cfg.trainer.train_batch_size,
             )
         else:
             cfg.trainer.eval_steps = min(500, num_update_steps_per_epoch)
-            logger.info(f"No eval_steps provided, defaulting to {cfg.trainer.eval_steps}")
+            logger.info(
+                f"No eval_steps provided, defaulting to {cfg.trainer.eval_steps}"
+            )
     else:
-        raise ValueError(f"Invalid eval_strategy: {eval_strategy}. Must be 'epoch' or 'steps'")
+        raise ValueError(
+            f"Invalid eval_strategy: {eval_strategy}. Must be 'epoch' or 'steps'"
+        )
 
     # To keep the last n checkpoints before the best model and do k cycles before early stopping, we save the last k+n models
-    early_stopping = getattr(cfg.trainer, 'early_stopping', 0)
-    max_ckpt = getattr(cfg.trainer, 'max_ckpt', 0)
+    early_stopping = getattr(cfg.trainer, "early_stopping", 0)
+    max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
     if max_ckpt is not None and max_ckpt > 0 and early_stopping > 0:
         cfg.trainer.max_ckpt = max_ckpt + early_stopping
 
@@ -885,32 +905,32 @@ def trainer(cfg: Config):
                 else:
                     early_stopping_counter += 1
 
-                if (
-                    early_stopping > 0
-                    and early_stopping_counter >= early_stopping
-                ):
+                if early_stopping > 0 and early_stopping_counter >= early_stopping:
                     print(
                         f"Evaluation accuracy has not improved in {early_stopping} cycles of {cfg.trainer.eval_steps} evaluation steps, stopping the training."
                     )
                     early_stop = True
 
                 # Save model checkpoint based on save_strategy
-                save_strategy = getattr(cfg.trainer, 'save_strategy', 'steps')
+                save_strategy = getattr(cfg.trainer, "save_strategy", "steps")
                 should_save = False
-                
-                if save_strategy == 'epoch' and completed_steps % num_update_steps_per_epoch == 0:
+
+                if (
+                    save_strategy == "epoch"
+                    and completed_steps % num_update_steps_per_epoch == 0
+                ):
                     should_save = True
-                elif save_strategy == 'steps' and hasattr(cfg.trainer, 'save_steps'):
+                elif save_strategy == "steps" and hasattr(cfg.trainer, "save_steps"):
                     if completed_steps % cfg.trainer.save_steps == 0:
                         should_save = True
-                elif save_strategy == 'best':
+                elif save_strategy == "best":
                     # Save only if this is the best model so far
                     if curr_accuracy > prev_accuracy:
                         should_save = True
-                elif save_strategy != 'no':
+                elif save_strategy != "no":
                     # Default to saving at eval steps if strategy is not 'no'
                     should_save = True
-                
+
                 if should_save and max_ckpt != 0:
                     save_checkpoint(cfg, model, accelerator, completed_steps)
 

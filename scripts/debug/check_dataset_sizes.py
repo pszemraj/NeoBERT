@@ -8,7 +8,7 @@ for task in tasks:
     print(f"\n{task.upper()}:")
     print(f"  Train: {train_size:,} samples")
     print(f"  Val: {val_size:,} samples")
-    
+
     # Calculate steps per epoch with batch_size=16 (from config)
     batch_size = 16
     steps_per_epoch = train_size // batch_size
