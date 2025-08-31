@@ -271,7 +271,9 @@ def trainer(cfg: Config):
         os.makedirs(cfg.trainer.output_dir, exist_ok=True)
     accelerator.wait_for_everyone()
 
-    flash_attention = getattr(cfg, "flash_attention", True)
+    # Disable flash attention for GLUE due to xformers alignment issues with variable length sequences
+    # TODO: Fix mask alignment in model to support flash attention with non-aligned sequences
+    flash_attention = False  # Always disable for GLUE until mask alignment is fixed
     
     # Check from_hub in raw model dict for GLUE tasks
     from_hub = False
