@@ -1041,10 +1041,15 @@ def trainer(cfg: Config):
                     should_save = True
 
                 # Only save checkpoint if explicitly enabled
-                save_model = getattr(cfg.trainer, 'save_model', True)
-                save_total_limit = getattr(cfg.trainer, 'save_total_limit', None)
-                
-                if should_save and max_ckpt != 0 and save_model and (save_total_limit is None or save_total_limit > 0):
+                save_model = getattr(cfg.trainer, "save_model", True)
+                save_total_limit = getattr(cfg.trainer, "save_total_limit", None)
+
+                if (
+                    should_save
+                    and max_ckpt != 0
+                    and save_model
+                    and (save_total_limit is None or save_total_limit > 0)
+                ):
                     save_checkpoint(cfg, model, accelerator, completed_steps)
 
                 model.train()
@@ -1071,7 +1076,7 @@ def trainer(cfg: Config):
         for key, value in final_metrics.items():
             print(f"  {key}: {value:.4f}")
         print("=" * 60)
-        
+
         # Also log for debugging
         logger.info("=" * 60)
         logger.info(f"Training completed for {cfg.task.upper()}")
