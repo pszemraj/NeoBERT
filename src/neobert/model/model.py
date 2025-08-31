@@ -101,7 +101,10 @@ class NeoBERTConfig(PretrainedConfig):
         self.pad_token_id = pad_token_id
 
         # Positional length: accept HF-style 'max_position_embeddings'
-        if "max_position_embeddings" in kwargs and kwargs["max_position_embeddings"] is not None:
+        if (
+            "max_position_embeddings" in kwargs
+            and kwargs["max_position_embeddings"] is not None
+        ):
             self.max_length = int(kwargs["max_position_embeddings"])
         else:
             self.max_length = max_length

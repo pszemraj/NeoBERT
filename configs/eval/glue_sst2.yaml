@@ -1,0 +1,54 @@
+task: glue
+seed: 80085
+model:
+  pretrained_config_path: configs/pretrain/pretrain_neobert100m_smollm2data.yaml
+  pretrained_checkpoint_dir: outputs/smollm2_custom_tokenizer
+  pretrained_checkpoint: 100000
+  from_hub: false
+  classifier_dropout: 0.1
+  classifier_init_range: 0.02
+trainer:
+  output_dir: ./glue_outputs/sst2
+  run_name: neobert_100k_sst2
+  train_batch_size: 32
+  eval_batch_size: 32
+  gradient_accumulation_steps: 4
+  num_train_epochs: 3
+  eval_strategy: epoch
+  save_strategy: epoch
+  logging_steps: 10
+  max_ckpt: 3
+  early_stopping: 0
+  mixed_precision: bf16
+  tf32: true
+  save_total_limit: 0
+  save_model: false
+glue:
+  task_name: sst2
+  num_labels: 2
+  max_seq_length: 512
+optimizer:
+  lr: 5.0e-05
+  weight_decay: 0.01
+  betas:
+  - 0.9
+  - 0.999
+  eps: 1.0e-08
+scheduler:
+  name: linear
+  warmup_percent: 5
+  decay_percent: null
+  warmup_steps: null
+  decay_steps: null
+wandb:
+  project: neobert-evals
+  name: glue-sst2-100k
+  entity: null
+  tags:
+  - glue
+  - sst2
+  - 100k_checkpoint
+  - epoch_eval
+  dir: logs/wandb
+  mode: online
+  resume: false
