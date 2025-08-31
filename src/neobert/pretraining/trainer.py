@@ -572,8 +572,13 @@ def trainer(cfg: Config):
                         with open(tokenizer_info_path, "w") as f:
                             json.dump(tokenizer_info, f, indent=2)
 
+                        # Save full tokenizer with save_pretrained
+                        tokenizer_dir = os.path.join(checkpoint_path, "tokenizer")
+                        os.makedirs(tokenizer_dir, exist_ok=True)
+                        tokenizer.save_pretrained(tokenizer_dir)
+
                         accelerator.print(
-                            f"Saved checkpoint with config and tokenizer info to {checkpoint_path}"
+                            f"Saved checkpoint with config, tokenizer info, and full tokenizer to {checkpoint_path}"
                         )
 
                 # Zero out the optimizer
