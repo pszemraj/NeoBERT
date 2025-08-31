@@ -540,8 +540,23 @@ def trainer(cfg: Config):
                     "state_dict.pt",
                 )
             )
-            state_dict = {k: v for k, v in state_dict.items() if "classifier" not in k}
-            model.load_state_dict(state_dict, strict=False)
+            # Remove classifier and decoder keys, handle model. prefix
+            cleaned_state_dict = {}
+            for k, v in state_dict.items():
+                if "classifier" in k or "decoder" in k:
+                    continue
+                # Remove 'model.' prefix if present
+                if k.startswith("model."):
+                    k = k[6:]  # Remove 'model.' prefix
+                cleaned_state_dict[k] = v
+            
+            # Load the cleaned state dict
+            missing_keys, unexpected_keys = model.load_state_dict(cleaned_state_dict, strict=False)
+            logger.info(f"Loaded checkpoint with {len(cleaned_state_dict)} parameters")
+            if missing_keys:
+                logger.info(f"Missing keys: {missing_keys[:5]}...")
+            if unexpected_keys:
+                logger.info(f"Unexpected keys: {unexpected_keys[:5]}...")
 
     # Optimizer
     # Split weights in two groups, one with weight decay and the other not.
