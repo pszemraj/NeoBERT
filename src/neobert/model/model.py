@@ -77,6 +77,7 @@ class NeoBERTConfig(PretrainedConfig):
     ):
         super().__init__(**kwargs)
 
+        # Core dims
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
@@ -84,7 +85,12 @@ class NeoBERTConfig(PretrainedConfig):
             raise ValueError("Hidden size must be divisible by the number of heads.")
         self.dim_head = hidden_size // num_attention_heads
         self.intermediate_size = intermediate_size
+
+        # Dropout: accept legacy 'dropout_prob' as alias
+        if "dropout_prob" in kwargs and "dropout" not in kwargs:
+            dropout = kwargs["dropout_prob"]
         self.dropout = dropout
+
         self.embedding_init_range = embedding_init_range
         self.decoder_init_range = decoder_init_range
         self.rms_norm = rms_norm
@@ -93,10 +99,18 @@ class NeoBERTConfig(PretrainedConfig):
         self.hidden_act = hidden_act
         self.vocab_size = vocab_size
         self.pad_token_id = pad_token_id
-        self.max_length = max_length
+
+        # Positional length: accept HF-style 'max_position_embeddings'
+        if "max_position_embeddings" in kwargs and kwargs["max_position_embeddings"] is not None:
+            self.max_length = int(kwargs["max_position_embeddings"])
+        else:
+            self.max_length = max_length
+
         self.flash_attention = flash_attention
         self.base_scale = base_scale
         self.ngpt = ngpt
+
+        # Store any extra kwargs for reference
         self.kwargs = kwargs
 
 
