@@ -961,17 +961,28 @@ def trainer(cfg: Config):
                         f"step {completed_steps} eval metric mismatched: {res_mm}"
                     )
 
-                accelerator.log(
-                    {
-                        "eval_metric": eval_metric if cfg.task != "mnli" else results,
-                        "train_metric": train_metric,
-                        "train_loss": total_loss / completed_steps,
-                        "epoch": epoch,
-                        "step": completed_steps,
-                        "learning_rate": optimizer.param_groups[0]["lr"],
-                    },
-                    step=completed_steps,
-                )
+                # Flatten eval metrics for proper wandb logging
+                metrics_to_log = {
+                    "train_loss": total_loss / completed_steps,
+                    "epoch": epoch,
+                    "step": completed_steps,
+                    "learning_rate": optimizer.param_groups[0]["lr"],
+                }
+
+                # Add evaluation metrics with proper names
+                if cfg.task != "mnli":
+                    for key, value in eval_metric.items():
+                        metrics_to_log[f"eval_{key}"] = value
+                else:
+                    for key, value in results.items():
+                        metrics_to_log[f"eval_{key}"] = value
+
+                # Add training metrics
+                if train_metric:
+                    for key, value in train_metric.items():
+                        metrics_to_log[f"train_{key}"] = value
+
+                accelerator.log(metrics_to_log, step=completed_steps)
 
                 all_results = {f"eval_{k}": v for k, v in eval_metric.items()}
                 if cfg.task == "mnli":
@@ -1043,11 +1054,46 @@ def trainer(cfg: Config):
         if completed_steps >= cfg.trainer.max_steps or early_stop:
             break
 
+    # Log final metrics to wandb before ending training
+    final_metrics = {f"eval_{k}": v for k, v in eval_metric.items()}
+    if cfg.task == "mnli":
+        final_metrics = {f"eval_{k}": v for k, v in results.items()}
+
+    # Print final metrics to console
+    logger.info("=" * 60)
+    logger.info(f"Training completed for {cfg.task.upper()}")
+    logger.info(f"Final metrics at step {completed_steps}:")
+    for key, value in final_metrics.items():
+        logger.info(f"  {key}: {value:.4f}")
+    logger.info("=" * 60)
+
+    # Add final metrics to wandb
+    accelerator.log(
+        {
+            **final_metrics,
+            "final_train_loss": total_loss / completed_steps
+            if completed_steps > 0
+            else 0,
+            "final_epoch": epoch,
+            "final_step": completed_steps,
+        },
+        step=completed_steps,
+    )
+
     accelerator.end_training()
 
-    all_results = {f"eval_{k}": v for k, v in eval_metric.items()}
-    if cfg.task == "mnli":
-        all_results = {f"eval_{k}": v for k, v in results.items()}
-
+    # Save final results to JSON
     with open(os.path.join(cfg.trainer.output_dir, "all_results.json"), "w") as f:
-        json.dump(all_results, f)
+        json.dump(final_metrics, f)
+
+    # Also save to timestamped file for clarity
+    with open(
+        os.path.join(
+            cfg.trainer.output_dir, f"all_results_step_{completed_steps}.json"
+        ),
+        "w",
+    ) as f:
+        json.dump(final_metrics, f)
+        logger.info(
+            f"Final results saved to {cfg.trainer.output_dir}/all_results_step_{completed_steps}.json"
+        )

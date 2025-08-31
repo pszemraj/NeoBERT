@@ -37,7 +37,9 @@ def load_pretrained_model(checkpoint_dir, checkpoint_step, config_path, tokenize
     model = NeoBERTForSequenceClassification(model_config, num_labels=2)
 
     # Load checkpoint
-    checkpoint_path = os.path.join(checkpoint_dir, str(checkpoint_step), "state_dict.pt")
+    checkpoint_path = os.path.join(
+        checkpoint_dir, str(checkpoint_step), "state_dict.pt"
+    )
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
 
