@@ -31,10 +31,10 @@ python scripts/evaluation/run_glue.py \
 
 ```bash
 # Run all 9 GLUE tasks (uses model paths from configs)
-bash scripts/run_all_glue.sh
+bash jobs/run_all_glue.sh
 
 # Or override model path for all tasks
-bash scripts/run_all_glue.sh outputs/different_model
+bash jobs/run_all_glue.sh outputs/different_model
 ```
 
 ### GLUE Task Details

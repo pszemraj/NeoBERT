@@ -9,6 +9,7 @@ jobs/
 ├── README.md                 # This file
 ├── example_pretrain.sh      # Example pretraining job
 ├── example_evaluate.sh      # Example evaluation job
+├── run_all_glue.sh         # Run all 9 GLUE tasks
 ├── contrastive/            # Contrastive learning jobs
 ├── evaluation/             # Model evaluation jobs
 ├── glue/                   # GLUE benchmark jobs
@@ -29,6 +30,13 @@ Evaluation script for trained models:
 - GLUE evaluation
 - MTEB evaluation
 - Custom evaluation setups
+
+### `run_all_glue.sh`
+Comprehensive GLUE evaluation script:
+- Runs all 9 GLUE tasks sequentially
+- Supports model path override
+- Provides colored output and summary
+- Logs results to `logs/` directory
 
 ## Usage
 
