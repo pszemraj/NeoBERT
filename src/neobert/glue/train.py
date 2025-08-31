@@ -1059,13 +1059,22 @@ def trainer(cfg: Config):
     if cfg.task == "mnli":
         final_metrics = {f"eval_{k}": v for k, v in results.items()}
 
-    # Print final metrics to console
-    logger.info("=" * 60)
-    logger.info(f"Training completed for {cfg.task.upper()}")
-    logger.info(f"Final metrics at step {completed_steps}:")
-    for key, value in final_metrics.items():
-        logger.info(f"  {key}: {value:.4f}")
-    logger.info("=" * 60)
+    # Print final metrics to console (both logger and print for visibility)
+    if accelerator.is_main_process:
+        print("=" * 60)
+        print(f"Training completed for {cfg.task.upper()}")
+        print(f"Final metrics at step {completed_steps}:")
+        for key, value in final_metrics.items():
+            print(f"  {key}: {value:.4f}")
+        print("=" * 60)
+        
+        # Also log for debugging
+        logger.info("=" * 60)
+        logger.info(f"Training completed for {cfg.task.upper()}")
+        logger.info(f"Final metrics at step {completed_steps}:")
+        for key, value in final_metrics.items():
+            logger.info(f"  {key}: {value:.4f}")
+        logger.info("=" * 60)
 
     # Add final metrics to wandb
     accelerator.log(
