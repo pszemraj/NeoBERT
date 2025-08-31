@@ -86,9 +86,12 @@ class TrainerConfig:
     per_device_train_batch_size: int = 16
     per_device_eval_batch_size: int = 32
     gradient_accumulation_steps: int = 1
-    max_steps: int = 1000000
+    num_train_epochs: int = 3
+    max_steps: Optional[int] = None  # If None, calculated from num_train_epochs
     save_steps: int = 10000
     eval_steps: int = 10000
+    eval_strategy: str = "steps"  # "epoch" or "steps"
+    save_strategy: str = "steps"  # "epoch", "steps", "best", or "no"
     logging_steps: int = 100
     output_dir: str = "./output"
     overwrite_output_dir: bool = True
@@ -109,6 +112,7 @@ class TrainerConfig:
     mixed_precision: str = "no"
     train_batch_size: int = 16
     eval_batch_size: int = 32
+    early_stopping: int = 0  # 0 to disable, N to stop after N evals without improvement
 
 
 @dataclass
