@@ -18,8 +18,14 @@ python scripts/pretraining/pretrain.py \
 ### Running Single Task
 
 ```bash
+# Recommended: Use v2 configs with epoch-based evaluation
 python scripts/evaluation/run_glue.py \
-    --config configs/evaluate_neobert.yaml \
+    --config configs/eval/glue_cola_v2.yaml \
+    --model_name_or_path outputs/pretrained_model
+
+# Legacy: Step-based evaluation
+python scripts/evaluation/run_glue.py \
+    --config configs/eval/evaluate_neobert.yaml \
     --task_name cola \
     --model_name_or_path outputs/pretrained_model
 ```
@@ -50,7 +56,11 @@ python scripts/evaluation/run_glue.py \
 
 ### Configuration for GLUE
 
+#### Recommended: v2 Configuration (Epoch-based)
+
 ```yaml
+task: glue
+
 glue:
   task_name: cola
   num_labels: 2  # Automatically set based on task
@@ -58,27 +68,73 @@ glue:
   
 trainer:
   num_train_epochs: 3
-  per_device_eval_batch_size: 32
-  eval_steps: 500
-  save_steps: 500
+  train_batch_size: 32
+  gradient_accumulation_steps: 4  # Effective batch size = 128
+  eval_strategy: "epoch"  # Evaluate at end of each epoch
+  save_strategy: "epoch"  # Save at end of each epoch
   metric_for_best_model: eval_matthews_correlation  # Task-specific
   greater_is_better: true
+  
+scheduler:
+  name: linear
+  warmup_steps: null  # IMPORTANT: Override dataclass default
+  decay_steps: null   # IMPORTANT: Override dataclass default
+  warmup_ratio: 0.05  # 5% of total steps for warmup
 ```
+
+#### Legacy: Step-based Configuration
+
+```yaml
+glue:
+  task_name: cola
+  num_labels: 2
+  max_seq_length: 128
+  
+trainer:
+  num_train_epochs: 3
+  per_device_eval_batch_size: 32
+  eval_steps: 500  # Evaluate every 500 steps
+  save_steps: 500  # Save every 500 steps
+  metric_for_best_model: eval_matthews_correlation
+  greater_is_better: true
+```
+
+### Evaluation Strategies
+
+The evaluation system supports multiple strategies:
+
+- **`eval_strategy: "epoch"`** - Evaluate at the end of each epoch (recommended)
+- **`eval_strategy: "steps"`** - Evaluate every N steps (legacy)
+- **`eval_strategy: "no"`** - No evaluation during training
+
+### Save Strategies
+
+Control when checkpoints are saved:
+
+- **`save_strategy: "epoch"`** - Save at the end of each epoch
+- **`save_strategy: "steps"`** - Save every N steps
+- **`save_strategy: "best"`** - Save only when metric improves
+- **`save_strategy: "no"`** - Don't save checkpoints
 
 ### Task-Specific Tips
 
 **CoLA (Corpus of Linguistic Acceptability)**:
 ```bash
---trainer.learning_rate 2e-5 \
---trainer.num_train_epochs 3 \
---trainer.warmup_steps 320
+# Using v2 config with epoch-based evaluation
+python scripts/evaluation/run_glue.py \
+    --config configs/eval/glue_cola_v2.yaml \
+    --optimizer.lr 5e-5 \
+    --trainer.num_train_epochs 3
 ```
 
 **MNLI (Multi-Genre NLI)**:
 ```bash
---glue.max_seq_length 128 \
---trainer.per_device_train_batch_size 32 \
---trainer.learning_rate 3e-5
+# Using v2 config pattern
+python scripts/evaluation/run_glue.py \
+    --config configs/eval/glue_mnli_v2.yaml \
+    --glue.max_seq_length 128 \
+    --trainer.train_batch_size 32 \
+    --optimizer.lr 3e-5
 ```
 
 **STS-B (Semantic Textual Similarity)**:
@@ -194,7 +250,7 @@ def evaluate_domain_specific(model, dataset):
     return {"accuracy": accuracy, "f1": f1}
 ```
 
-## Evaluation Strategies
+## Advanced Evaluation Strategies
 
 ### 1. Few-Shot Learning
 
@@ -336,7 +392,22 @@ plt.savefig('embeddings_tsne.png')
 
 ## Best Practices
 
-### 1. Reproducibility
+### 1. Configuration Best Practices
+
+```yaml
+# When creating evaluation configs, explicitly override dataclass defaults
+scheduler:
+  name: linear
+  warmup_steps: null  # Override default of 10000
+  decay_steps: null   # Override default of 50000
+  warmup_ratio: 0.05  # Use ratio-based warmup
+
+trainer:
+  eval_strategy: "epoch"  # Modern approach
+  save_strategy: "epoch"  # Aligned with eval
+```
+
+### 2. Reproducibility
 
 ```bash
 # Set seeds
@@ -345,7 +416,7 @@ plt.savefig('embeddings_tsne.png')
 --trainer.data_seed 42
 ```
 
-### 2. Statistical Significance
+### 3. Statistical Significance
 
 ```python
 # Multiple runs with different seeds
@@ -361,7 +432,7 @@ std_score = np.std(scores)
 print(f"Score: {mean_score:.3f} ± {std_score:.3f}")
 ```
 
-### 3. Compute Efficiency
+### 4. Compute Efficiency
 
 ```bash
 # Batch evaluation
@@ -411,8 +482,21 @@ def safe_metric_computation(preds, labels):
     }
 ```
 
+## Configuration Files
+
+Recommended evaluation configurations are in `configs/eval/`:
+
+- **`glue_cola_v2.yaml`** - CoLA with epoch-based evaluation
+- **`glue_sst2_v2.yaml`** - SST-2 with epoch-based evaluation  
+- **`glue_mrpc_v2.yaml`** - MRPC with epoch-based evaluation
+
+These v2 configs follow the same patterns as HuggingFace Transformers:
+- Evaluate at the end of each epoch
+- Use warmup ratio instead of fixed steps
+- Support gradient accumulation for larger effective batch sizes
+
 ## Next Steps
 
 - Review [Training Guide](training.md) for fine-tuning tips
 - Check [Model Architecture](architecture.md) for model variants
-- See [Configuration](configuration.md) for evaluation settings
+- See [Configuration README](../configs/README.md) for detailed config documentation

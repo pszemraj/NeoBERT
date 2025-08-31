@@ -2,16 +2,34 @@
 
 This directory contains production YAML configuration files for the NeoBERT training and evaluation pipeline. Test configurations are located in `tests/configs/`.
 
+## Directory Organization
+
+Configurations are organized into subdirectories by task type:
+
+```
+configs/
+├── pretrain/          # Pretraining configurations
+├── eval/              # Evaluation configurations (GLUE, MTEB)
+├── contrastive/       # Contrastive learning configurations
+└── legacy/            # Backward compatibility configs
+```
+
 ## Production Configurations
 
-### Pretraining
+### Pretraining (`configs/pretrain/`)
 - **`pretrain_neobert.yaml`** - Standard pretraining configuration (768 hidden, 12 layers)
 - **`pretrain_streaming.yaml`** - Streaming dataset configuration for large-scale training
 - **`pretrain_gpu_small.yaml`** - Small model config for GPU testing with SwiGLU activation
 - **`pretrain_smollm2_custom_tokenizer.yaml`** - Full 250M model on SmolLM2 with 32k tokenizer, 1024 context
+- **`pretrain_neobert100m_smollm2data.yaml`** - 100M model on SmolLM2 dataset
 
-### Fine-tuning & Evaluation
-- **`evaluate_neobert.yaml`** - GLUE evaluation configuration
+### Fine-tuning & Evaluation (`configs/eval/`)
+- **`evaluate_neobert.yaml`** - Legacy GLUE evaluation configuration
+- **`glue_cola_v2.yaml`** - CoLA with epoch-based evaluation (recommended)
+- **`glue_sst2_v2.yaml`** - SST-2 with epoch-based evaluation (recommended)
+- **`glue_mrpc_v2.yaml`** - MRPC with epoch-based evaluation (recommended)
+
+### Contrastive Learning (`configs/contrastive/`)
 - **`contrastive_neobert.yaml`** - Contrastive learning configuration (SimCSE-style)
 
 ### Custom Tokenizer
@@ -59,14 +77,18 @@ optimizer:
 
 scheduler:
   # Learning rate scheduler
-  name: cosine
-  warmup_steps: 10000
+  name: linear
+  warmup_steps: null  # IMPORTANT: Use null to override dataclass defaults
+  decay_steps: null   # IMPORTANT: Use null to override dataclass defaults
+  warmup_ratio: 0.05  # Alternative: use ratio instead of steps
   # ... scheduler parameters
 
 trainer:
   # Training configuration
   per_device_train_batch_size: 16
   max_steps: 1000000
+  eval_strategy: "steps"  # or "epoch" for epoch-based evaluation
+  save_strategy: "steps"  # or "epoch", "best", "no"
   # ... trainer parameters
 
 # Additional sections for specific tasks
@@ -74,13 +96,30 @@ datacollator:  # For pretraining
 wandb:         # For experiment tracking
 ```
 
+### Important: Overriding Dataclass Defaults
+
+Some configuration fields have default values in the dataclasses that need to be explicitly overridden with `null` in YAML:
+
+```yaml
+scheduler:
+  name: linear
+  warmup_steps: null  # Override default of 10000
+  decay_steps: null   # Override default of 50000
+  warmup_ratio: 0.05  # Use ratio-based warmup instead
+```
+
+This is particularly important for scheduler configurations where the dataclass defaults may not match your intended training setup.
+
 ## Usage
 
 ### Basic Usage
 
 ```bash
-# Use a configuration file directly
-python scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml
+# Use a configuration file directly (note the subdirectory)
+python scripts/pretraining/pretrain.py --config configs/pretrain/pretrain_neobert.yaml
+
+# Evaluation with v2 configs (recommended)
+python scripts/evaluation/run_glue.py --config configs/eval/glue_cola_v2.yaml
 ```
 
 ### Command-Line Overrides
@@ -106,10 +145,12 @@ The configuration system includes validation for:
 
 ## Creating Custom Configurations
 
-1. **Start with a base config**: Copy one of the existing configurations
-2. **Modify parameters**: Update the values for your specific use case
-3. **Validate**: Run with `--debug` flag to check configuration validity
-4. **Test**: Use test configs for initial validation before full training
+1. **Start with a base config**: Copy one of the existing configurations from the appropriate subdirectory
+2. **Place in correct subdirectory**: Put pretraining configs in `configs/pretrain/`, evaluation configs in `configs/eval/`, etc.
+3. **Modify parameters**: Update the values for your specific use case
+4. **Override dataclass defaults**: Use `null` for fields you want to compute dynamically (e.g., warmup_steps)
+5. **Validate**: Run with `--debug` flag to check configuration validity
+6. **Test**: Use test configs for initial validation before full training
 
 ### Example: Custom Pretraining Config
 
@@ -134,10 +175,26 @@ wandb:
 ## Configuration Tips
 
 1. **Start Small**: Use test configs to validate your setup before full training
-2. **Use Overrides**: Command-line overrides are great for experimentation
-3. **Version Control**: Keep configurations in git to track experiments
-4. **Documentation**: Add comments to your custom configs for clarity
-5. **Validation**: Always check configs with validation before long training runs
+2. **Use v2 Configs**: For evaluation, prefer the v2 configs with epoch-based evaluation
+3. **Override Defaults Carefully**: Use `null` to override dataclass defaults when needed
+4. **Use Overrides**: Command-line overrides are great for experimentation
+5. **Version Control**: Keep configurations in git to track experiments
+6. **Documentation**: Add comments to your custom configs for clarity
+7. **Validation**: Always check configs with validation before long training runs
+
+### Epoch-based vs Step-based Evaluation
+
+The v2 evaluation configs support epoch-based evaluation similar to HuggingFace Transformers:
+
+```yaml
+trainer:
+  eval_strategy: "epoch"  # Evaluate at the end of each epoch
+  save_strategy: "epoch"  # Save checkpoint at the end of each epoch
+  num_train_epochs: 3
+  # eval_steps is automatically calculated based on dataset size
+```
+
+This is more intuitive than step-based evaluation and ensures consistent evaluation frequency regardless of batch size or dataset size.
 
 ## Environment Variables
 
