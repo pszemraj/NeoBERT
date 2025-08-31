@@ -837,6 +837,12 @@ def trainer(cfg: Config):
     for epoch in range(starting_epoch, cfg.trainer.num_train_epochs):
         for batch in train_dataloader:
             logits = model(batch["input_ids"], batch["attention_mask"])["logits"]
+            
+            # Debug logging for first few steps
+            if completed_steps < 3:
+                logger.info(f"Step {completed_steps}: logits shape: {logits.shape}, logits mean: {logits.mean().item():.6f}, std: {logits.std().item():.6f}")
+                logger.info(f"Step {completed_steps}: logits sample: {logits[0].detach().cpu()}")
+                logger.info(f"Step {completed_steps}: labels: {batch['labels'][:5]}")
 
             if not is_regression:
                 loss = loss_fct(logits.view(-1, num_labels), batch["labels"].view(-1))
