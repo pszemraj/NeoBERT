@@ -1,0 +1,34 @@
+task: "evaluation"
+
+model:
+  hidden_size: 768
+  num_hidden_layers: 12  # Match the actual checkpoint
+  num_attention_heads: 12
+  intermediate_size: 3072
+  dropout_prob: 0.1
+  vocab_size: 31999  # BEE-spoke tokenizer vocab size
+  max_position_embeddings: 1024
+  flash_attention: true
+  ngpt: false
+  hidden_act: "swiglu"
+  rope: true
+  rms_norm: true
+
+dataset:
+  name: "glue"
+  max_seq_length: 128
+
+tokenizer:
+  name: "BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp"
+  vocab_size: 31999
+  max_length: 128
+
+trainer:
+  output_dir: "./eval_results"
+  per_device_eval_batch_size: 32
+  dataloader_num_workers: 4
+
+glue:
+  task_name: "cola"
+  num_labels: 2
+  max_seq_length: 128
