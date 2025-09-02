@@ -1,3 +1,4 @@
+import json
 import os
 import re
 
@@ -20,7 +21,7 @@ from torch.nn import CrossEntropyLoss
 from tqdm import tqdm
 from transformers import BatchEncoding
 
-from ..config import Config
+from ..config import Config, ConfigLoader
 from ..dataloader import get_dataloader
 from ..model import NeoBERTConfig, NeoBERTLMHead
 from ..optimizer import get_optimizer
@@ -539,6 +540,9 @@ def trainer(cfg: Config):
                         model.save_checkpoint(
                             model_checkpoint_dir, tag=metrics["train/steps"]
                         )
+                        checkpoint_path = os.path.join(
+                            model_checkpoint_dir, str(metrics["train/steps"])
+                        )
                     else:
                         path = os.path.join(
                             model_checkpoint_dir, str(metrics["train/steps"])
@@ -547,6 +551,34 @@ def trainer(cfg: Config):
                         torch.save(
                             model.state_dict(),
                             os.path.join(path, "state_dict.pt"),
+                        )
+                        checkpoint_path = path
+
+                    # Save config and tokenizer info (only from main process)
+                    if accelerator.is_main_process:
+                        # Save config as YAML
+                        config_path = os.path.join(checkpoint_path, "config.yaml")
+                        ConfigLoader.save(cfg, config_path)
+
+                        # Save tokenizer info as JSON
+                        tokenizer_info = {
+                            "tokenizer_name": cfg.tokenizer.path or cfg.tokenizer.name,
+                            "vocab_size": tokenizer.vocab_size,
+                            "pad_token_id": tokenizer.pad_token_id,
+                        }
+                        tokenizer_info_path = os.path.join(
+                            checkpoint_path, "tokenizer_info.json"
+                        )
+                        with open(tokenizer_info_path, "w") as f:
+                            json.dump(tokenizer_info, f, indent=2)
+
+                        # Save full tokenizer with save_pretrained
+                        tokenizer_dir = os.path.join(checkpoint_path, "tokenizer")
+                        os.makedirs(tokenizer_dir, exist_ok=True)
+                        tokenizer.save_pretrained(tokenizer_dir)
+
+                        accelerator.print(
+                            f"Saved checkpoint with config, tokenizer info, and full tokenizer to {checkpoint_path}"
                         )
 
                 # Zero out the optimizer

@@ -210,6 +210,12 @@ class ConfigLoader:
         """Convert dictionary to Config dataclass"""
         config = Config()
 
+        # Store raw model dict for GLUE compatibility
+        if "model" in cfg_dict:
+            config._raw_model_dict = cfg_dict["model"]
+        else:
+            config._raw_model_dict = None
+
         # Update model config
         if "model" in cfg_dict:
             for k, v in cfg_dict["model"].items():
