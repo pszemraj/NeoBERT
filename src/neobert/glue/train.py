@@ -284,7 +284,7 @@ def trainer(cfg: Config):
 
     # Check from_hub in raw model dict for GLUE tasks
     from_hub = False
-    if cfg._raw_model_dict:
+    if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
         from_hub = cfg._raw_model_dict.get("from_hub", False)
     elif hasattr(cfg.model, "from_hub"):
         from_hub = cfg.model.from_hub
@@ -301,7 +301,11 @@ def trainer(cfg: Config):
         from neobert.config import ConfigLoader
 
         # For GLUE, we MUST have pretrained model info
-        if cfg._raw_model_dict and "pretrained_config_path" in cfg._raw_model_dict:
+        if (
+            hasattr(cfg, "_raw_model_dict")
+            and cfg._raw_model_dict
+            and "pretrained_config_path" in cfg._raw_model_dict
+        ):
             pretrained_config_path = cfg._raw_model_dict["pretrained_config_path"]
         else:
             raise ValueError(
