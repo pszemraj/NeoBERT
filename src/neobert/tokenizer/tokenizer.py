@@ -23,43 +23,46 @@ def get_tokenizer(
         trust_remote_code=True,
     )
 
-    # List of tokenizers that already have the correct special tokens
-    tokenizers_with_special_tokens = [
-        "bert-base-uncased",
-        "google-bert/bert-base-uncased",
-        "BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp",
-    ]
+    # If loading from a local path, assume the tokenizer is already configured.
+    # Otherwise, apply special token logic for models from the Hub.
+    if not os.path.isdir(pretrained_model_name_or_path):
+        # List of tokenizers that already have the correct special tokens
+        tokenizers_with_special_tokens = [
+            "bert-base-uncased",
+            "google-bert/bert-base-uncased",
+            "BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp",
+        ]
 
-    if pretrained_model_name_or_path not in tokenizers_with_special_tokens:
-        # Define special tokens to be consistent with RoBERTa
-        special_tokens = {
-            "bos_token": "<s>",
-            "eos_token": "</s>",
-            "unk_token": "<unk>",
-            "sep_token": "</s>",
-            "pad_token": "<pad>",
-            "cls_token": "<s>",
-            "mask_token": "<mask>",
-        }
+        if pretrained_model_name_or_path not in tokenizers_with_special_tokens:
+            # Define special tokens to be consistent with RoBERTa
+            special_tokens = {
+                "bos_token": "<s>",
+                "eos_token": "</s>",
+                "unk_token": "<unk>",
+                "sep_token": "</s>",
+                "pad_token": "<pad>",
+                "cls_token": "<s>",
+                "mask_token": "<mask>",
+            }
 
-        tokenizer.add_special_tokens(special_tokens)
+            tokenizer.add_special_tokens(special_tokens)
 
-        # Update the processor to add <eos> and <bos> tokens
-        tokenizer._tokenizer.post_processor = TemplateProcessing(
-            single=tokenizer.bos_token + " $A " + tokenizer.eos_token,
-            pair=tokenizer.bos_token
-            + " $A "
-            + tokenizer.sep_token
-            + " "
-            + tokenizer.bos_token
-            + " $B "
-            + tokenizer.eos_token,
-            special_tokens=[
-                (tokenizer.eos_token, tokenizer.eos_token_id),
-                (tokenizer.bos_token, tokenizer.bos_token_id),
-                (tokenizer.sep_token, tokenizer.sep_token_id),
-            ],
-        )
+            # Update the processor to add <eos> and <bos> tokens
+            tokenizer._tokenizer.post_processor = TemplateProcessing(
+                single=tokenizer.bos_token + " $A " + tokenizer.eos_token,
+                pair=tokenizer.bos_token
+                + " $A "
+                + tokenizer.sep_token
+                + " "
+                + tokenizer.bos_token
+                + " $B "
+                + tokenizer.eos_token,
+                special_tokens=[
+                    (tokenizer.eos_token, tokenizer.eos_token_id),
+                    (tokenizer.bos_token, tokenizer.bos_token_id),
+                    (tokenizer.sep_token, tokenizer.sep_token_id),
+                ],
+            )
 
     return tokenizer
 

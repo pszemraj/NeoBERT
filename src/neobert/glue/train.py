@@ -289,35 +289,8 @@ def trainer(cfg: Config):
     elif hasattr(cfg.model, "from_hub"):
         from_hub = cfg.model.from_hub
 
-    if from_hub:
-        tokenizer = AutoTokenizer.from_pretrained(
-            cfg.model.name,
-            use_fast=True,
-            revision="main",
-            trust_remote_code=True,
-        )
-    else:
-        # Import our new config system
-        from neobert.config import ConfigLoader
-
-        # For GLUE, we MUST have pretrained model info
-        if (
-            hasattr(cfg, "_raw_model_dict")
-            and cfg._raw_model_dict
-            and "pretrained_config_path" in cfg._raw_model_dict
-        ):
-            pretrained_config_path = cfg._raw_model_dict["pretrained_config_path"]
-        else:
-            raise ValueError(
-                "GLUE evaluation requires a pretrained model! "
-                "Please specify 'pretrained_config_path' in the model section of your config."
-            )
-        model_pretraining_config = ConfigLoader.load(pretrained_config_path)
-        model_pretraining_config.model.flash_attention = flash_attention
-        tokenizer = get_tokenizer(
-            pretrained_model_name_or_path=model_pretraining_config.tokenizer.name,
-            max_length=model_pretraining_config.tokenizer.max_length,
-        )
+    # Tokenizer will be loaded later, after we determine the correct checkpoint path
+    tokenizer = None
 
     print("Loading metric...")
     # Get the metric function
@@ -581,6 +554,39 @@ def trainer(cfg: Config):
     pretrained_checkpoint = (
         pretrained_checkpoint if "pretrained_checkpoint" in locals() else None
     )
+
+    # Load tokenizer
+    if from_hub:
+        tokenizer = AutoTokenizer.from_pretrained(
+            cfg.model.name,
+            use_fast=True,
+            revision="main",
+            trust_remote_code=True,
+        )
+    elif pretrained_checkpoint is not None:
+        # Construct path to the tokenizer saved within the checkpoint
+        checkpoint_path = os.path.join(
+            cfg.model.pretrained_checkpoint_dir, str(pretrained_checkpoint)
+        )
+        tokenizer_path = os.path.join(checkpoint_path, "tokenizer")
+
+        logger.info(f"Attempting to load tokenizer from: {tokenizer_path}")
+
+        if not os.path.isdir(tokenizer_path):
+            raise FileNotFoundError(
+                f"Tokenizer not found at {tokenizer_path}. "
+                "Please ensure your checkpoint is self-contained and includes a 'tokenizer' directory."
+            )
+
+        tokenizer = get_tokenizer(
+            pretrained_model_name_or_path=tokenizer_path,
+            max_length=cfg.glue.max_seq_length,
+        )
+        logger.info(f"✅ Successfully loaded tokenizer from {tokenizer_path}")
+
+    if tokenizer is None:
+        raise ValueError("Tokenizer could not be loaded. Please check your configuration.")
+
     if not from_hub and pretrained_checkpoint is not None:
         checkpoint_path = os.path.join(
             cfg.model.pretrained_checkpoint_dir, str(pretrained_checkpoint)
