@@ -30,6 +30,7 @@ from neobert.tokenizer import get_tokenizer
 
 from ..config import Config
 from ..scheduler import get_scheduler
+from ..validation import ValidationError, validate_glue_config
 from .process import process_function
 
 logger = get_logger(__name__)
@@ -70,58 +71,72 @@ def get_evaluation(
     flash_attention=False,
 ):
     samples_seen = 0
-    predictions = torch.Tensor()
+    # Fix: Use list for efficient accumulation instead of repeated torch.cat
+    predictions_list = [] if return_predictions else None
     eval_metric = None
     progress_bar = tqdm(range(len(dataloader)), desc="Running evaluation...")
-    for step, batch in tqdm(enumerate(dataloader)):
-        progress_bar.update(1)
-        with torch.no_grad():
-            if flash_attention:
-                pad_mask = torch.where(
-                    batch["attention_mask"] == 1, float(0.0), float("-inf")
-                ).type(dtype_pad_mask)
+
+    # Ensure Flash Attention is properly disabled for GLUE
+    with (
+        torch.backends.cuda.sdp_kernel(
+            enable_flash=False, enable_math=True, enable_mem_efficient=False
+        )
+        if torch.cuda.is_available()
+        else torch.no_grad()
+    ):
+        for step, batch in tqdm(enumerate(dataloader)):
+            progress_bar.update(1)
+            with torch.no_grad(), torch.inference_mode():
+                if flash_attention:
+                    pad_mask = torch.where(
+                        batch["attention_mask"] == 1, float(0.0), float("-inf")
+                    ).type(dtype_pad_mask)
+                else:
+                    pad_mask = batch["attention_mask"].type(dtype_pad_mask)
+                logits = model(batch["input_ids"], pad_mask)["logits"]
+
+            if not is_regression:
+                batch_predictions = logits.argmax(dim=-1)
             else:
-                pad_mask = batch["attention_mask"].type(dtype_pad_mask)
-            logits = model(batch["input_ids"], pad_mask)["logits"]
+                batch_predictions = logits.squeeze()
 
-        if not is_regression:
-            batch_predictions = logits.argmax(dim=-1)
-        else:
-            batch_predictions = logits.squeeze()
+            if compute_metric:
+                if accelerator is not None:
+                    batch_predictions, references = accelerator.gather(
+                        (batch_predictions, batch["labels"])
+                    )
+                    # If we are in a multiprocess environment, the last batch has duplicates
+                    if accelerator.num_processes > 1:
+                        if step == len(dataloader) - 1:
+                            batch_predictions = batch_predictions[
+                                : len(dataloader.dataset) - samples_seen
+                            ]
+                            references = references[
+                                : len(dataloader.dataset) - samples_seen
+                            ]
+                        else:
+                            samples_seen += references.shape[0]
+                else:
+                    references = batch["labels"]
 
-        if compute_metric:
-            if accelerator is not None:
-                batch_predictions, references = accelerator.gather(
-                    (batch_predictions, batch["labels"])
+                metric.add_batch(
+                    predictions=batch_predictions,
+                    references=references,
                 )
-                # If we are in a multiprocess environment, the last batch has duplicates
-                if accelerator.num_processes > 1:
-                    if step == len(dataloader) - 1:
-                        batch_predictions = batch_predictions[
-                            : len(dataloader.dataset) - samples_seen
-                        ]
-                        references = references[
-                            : len(dataloader.dataset) - samples_seen
-                        ]
-                    else:
-                        samples_seen += references.shape[0]
-            else:
-                references = batch["labels"]
 
-            metric.add_batch(
-                predictions=batch_predictions,
-                references=references,
-            )
+            batch_predictions = batch_predictions.to("cpu")
 
-        batch_predictions = batch_predictions.to("cpu")
-
-        if return_predictions:
-            predictions = torch.cat([predictions, batch_predictions])
+            if return_predictions:
+                # Fix: Append to list instead of concatenating tensors
+                predictions_list.append(batch_predictions)
 
     if compute_metric:
         eval_metric = metric.compute()
         if len(eval_metric) > 1:
             eval_metric["combined_score"] = np.mean(list(eval_metric.values())).item()
+
+    # Fix: Concatenate predictions list once at the end
+    predictions = torch.cat(predictions_list) if predictions_list else torch.Tensor()
 
     return {"predictions": predictions, "eval_metric": eval_metric}
 
@@ -232,11 +247,16 @@ def trainer(cfg: Config):
         cfg.trainer.output_dir,
         automatic_checkpoint_naming=False,
     )
+    # Handle mixed precision setting (could be bool or string)
+    mixed_precision = cfg.trainer.mixed_precision
+    if isinstance(mixed_precision, bool):
+        mixed_precision = "no" if not mixed_precision else "fp16"
+    elif mixed_precision == "fp32":
+        mixed_precision = "no"
+
     accelerator = Accelerator(
         log_with="wandb",
-        mixed_precision="no"
-        if cfg.trainer.mixed_precision == "fp32"
-        else cfg.trainer.mixed_precision,
+        mixed_precision=mixed_precision,
         project_config=project_config,
     )
 
@@ -257,6 +277,13 @@ def trainer(cfg: Config):
     )
 
     set_seed(int(cfg.seed))
+
+    # Validate configuration after accelerator is initialized (for logger)
+    try:
+        validate_glue_config(cfg)
+    except ValidationError as e:
+        logger.error(f"Configuration validation failed: {e}")
+        raise
 
     # Enable TF32 on matmul and on cuDNN
     torch.backends.cuda.matmul.allow_tf32 = cfg.trainer.tf32
@@ -301,7 +328,17 @@ def trainer(cfg: Config):
         from neobert.config import ConfigLoader
 
         # For GLUE, we MUST have pretrained model info
-        if (
+        # Check if we're allowing random weights for testing
+        allow_random_weights = (
+            hasattr(cfg, "_raw_model_dict")
+            and cfg._raw_model_dict
+            and cfg._raw_model_dict.get("allow_random_weights", False)
+        )
+
+        if allow_random_weights:
+            # Skip pretrained config loading for testing
+            pretrained_config_path = None
+        elif (
             hasattr(cfg, "_raw_model_dict")
             and cfg._raw_model_dict
             and "pretrained_config_path" in cfg._raw_model_dict
@@ -310,14 +347,22 @@ def trainer(cfg: Config):
         else:
             raise ValueError(
                 "GLUE evaluation requires a pretrained model! "
-                "Please specify 'pretrained_config_path' in the model section of your config."
+                "Please specify 'pretrained_config_path' in the model section of your config, "
+                "or set 'allow_random_weights: true' for testing."
             )
-        model_pretraining_config = ConfigLoader.load(pretrained_config_path)
-        model_pretraining_config.model.flash_attention = flash_attention
-        tokenizer = get_tokenizer(
-            pretrained_model_name_or_path=model_pretraining_config.tokenizer.name,
-            max_length=model_pretraining_config.tokenizer.max_length,
-        )
+        if pretrained_config_path:
+            model_pretraining_config = ConfigLoader.load(pretrained_config_path)
+            model_pretraining_config.model.flash_attention = flash_attention
+            tokenizer = get_tokenizer(
+                pretrained_model_name_or_path=model_pretraining_config.tokenizer.name,
+                max_length=model_pretraining_config.tokenizer.max_length,
+            )
+        else:
+            # Use default tokenizer for random weights test
+            tokenizer = get_tokenizer(
+                pretrained_model_name_or_path="bert-base-uncased",
+                max_length=128,
+            )
 
     print("Loading metric...")
     # Get the metric function
@@ -488,17 +533,41 @@ def trainer(cfg: Config):
             )
     else:
         # Convert config objects to dict for unpacking
-        model_config_dict = (
-            model_pretraining_config.model.__dict__.copy()
-            if hasattr(model_pretraining_config.model, "__dict__")
-            else {}
-        )
+        if "model_pretraining_config" in locals() and model_pretraining_config:
+            model_config_dict = (
+                model_pretraining_config.model.__dict__.copy()
+                if hasattr(model_pretraining_config.model, "__dict__")
+                else {}
+            )
+        elif hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
+            # Use raw model dict when allow_random_weights is true
+            model_config_dict = cfg._raw_model_dict.copy()
+        else:
+            # Fallback to cfg.model attributes
+            model_config_dict = {
+                "hidden_size": getattr(cfg.model, "hidden_size", 768),
+                "num_hidden_layers": getattr(cfg.model, "num_hidden_layers", 12),
+                "num_attention_heads": getattr(cfg.model, "num_attention_heads", 12),
+                "intermediate_size": getattr(cfg.model, "intermediate_size", 3072),
+                "vocab_size": getattr(cfg.model, "vocab_size", 30522),
+                "hidden_act": getattr(cfg.model, "hidden_act", "gelu"),
+                "max_position_embeddings": getattr(
+                    cfg.model, "max_position_embeddings", 512
+                ),
+                "layer_norm_eps": getattr(cfg.model, "layer_norm_eps", 1e-12),
+            }
 
         # Map dropout_prob to dropout and remove classifier_init_range from model config
         if "dropout_prob" in model_config_dict:
             model_config_dict["dropout"] = model_config_dict.pop("dropout_prob")
         if "classifier_init_range" in model_config_dict:
             model_config_dict.pop("classifier_init_range")
+        if "allow_random_weights" in model_config_dict:
+            model_config_dict.pop("allow_random_weights")
+        if "pretrained_checkpoint_dir" in model_config_dict:
+            model_config_dict.pop("pretrained_checkpoint_dir")
+        if "pretrained_checkpoint" in model_config_dict:
+            model_config_dict.pop("pretrained_checkpoint")
 
         # Use model config directly - don't merge with tokenizer config
         # The tokenizer's vocab_size should match the model's anyway
@@ -937,7 +1006,17 @@ def trainer(cfg: Config):
                     flash_attention=flash_attention,
                 )["eval_metric"]
 
-                logger.info(f"step {completed_steps} eval metric: {eval_metric}")
+                # Log all metrics properly for STS-B (both Pearson and Spearman)
+                if cfg.task == "stsb" and "spearmanr" in eval_metric:
+                    logger.info(
+                        f"step {completed_steps} eval pearson: {eval_metric.get('pearson', 0):.4f}"
+                    )
+                    logger.info(
+                        f"step {completed_steps} eval spearmanr: {eval_metric.get('spearmanr', 0):.4f}"
+                    )
+                else:
+                    logger.info(f"step {completed_steps} eval metric: {eval_metric}")
+
                 logger.info(f"step {completed_steps} train metric: {train_metric}")
                 logger.info(
                     f"step {completed_steps} train loss: {total_loss / completed_steps}"
@@ -1101,6 +1180,26 @@ def trainer(cfg: Config):
         },
         step=completed_steps,
     )
+
+    # Fix: Update W&B summary with final metrics
+    if accelerator.is_main_process:
+        try:
+            # Get wandb tracker and update summary
+            for tracker in accelerator.trackers:
+                if tracker.__class__.__name__ == "WandBTracker":
+                    if hasattr(tracker, "run") and tracker.run:
+                        # Update summary with final metrics
+                        summary_metrics = {
+                            f"summary/{k}": v for k, v in final_metrics.items()
+                        }
+                        summary_metrics["summary/final_train_loss"] = (
+                            total_loss / completed_steps if completed_steps > 0 else 0
+                        )
+                        summary_metrics["summary/final_step"] = completed_steps
+                        tracker.run.summary.update(summary_metrics)
+                        logger.info("Updated W&B run summary with final metrics")
+        except Exception as e:
+            logger.warning(f"Failed to update W&B summary: {e}")
 
     accelerator.end_training()
 
