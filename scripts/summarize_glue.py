@@ -8,8 +8,10 @@ Usage:
     python scripts/summarize_glue.py  # Default: outputs/glue/neobert-100m
 """
 
+import argparse
 import json
 from pathlib import Path
+
 import pandas as pd
 
 # Expected metrics for each task
@@ -70,34 +72,35 @@ def get_task_results(task_dir):
 
 
 def main():
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="Summarize GLUE evaluation results")
+    parser = argparse.ArgumentParser(
+        description="Parse and summarize GLUE evaluation results",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     parser.add_argument(
         "path",
         nargs="?",
         type=str,
-        help="Path to GLUE results directory (e.g., outputs/glue/neobert-100m or ./outputs/experiment_xyz)"
+        help="Path to GLUE results directory (e.g., outputs/glue/neobert-100m or ./outputs/experiment_xyz)",
     )
     parser.add_argument(
         "--baseline",
         type=str,
         default="bert-base",
         choices=["bert-base", "bert-large", "roberta-base", "roberta-large", "none"],
-        help="Baseline model to compare against (default: bert-base)"
+        help="Baseline model to compare against",
     )
     args = parser.parse_args()
-    
+
     # Determine the base directory
     if args.path:
         base_dir = Path(args.path)
     else:
         # Default to outputs/glue/neobert-100m for backward compatibility
         base_dir = Path("outputs/glue/neobert-100m")
-    
+
     if not base_dir.exists():
         print(f"Error: Directory {base_dir} does not exist!")
-        
+
         # Try to be helpful by showing nearby directories
         parent = base_dir.parent
         if parent.exists():
@@ -106,23 +109,35 @@ def main():
                 if subdir.is_dir():
                     print(f"  - {subdir.name}")
         return
-    
+
     # Select baseline scores based on argument
     baseline_scores = BERT_BASE_SCORES  # Default
     baseline_name = "BERT-base"
-    
+
     if args.baseline == "bert-large":
         baseline_scores = {
-            "cola": 60.5, "sst2": 94.9, "mrpc": 89.3,
-            "stsb": 86.5, "qqp": 72.1, "mnli": 86.7,
-            "qnli": 92.7, "rte": 70.1, "wnli": 65.1
+            "cola": 60.5,
+            "sst2": 94.9,
+            "mrpc": 89.3,
+            "stsb": 86.5,
+            "qqp": 72.1,
+            "mnli": 86.7,
+            "qnli": 92.7,
+            "rte": 70.1,
+            "wnli": 65.1,
         }
         baseline_name = "BERT-large"
     elif args.baseline == "roberta-base":
         baseline_scores = {
-            "cola": 63.6, "sst2": 94.8, "mrpc": 90.2,
-            "stsb": 91.2, "qqp": 91.9, "mnli": 87.6,
-            "qnli": 92.8, "rte": 78.7, "wnli": 65.1
+            "cola": 63.6,
+            "sst2": 94.8,
+            "mrpc": 90.2,
+            "stsb": 91.2,
+            "qqp": 91.9,
+            "mnli": 87.6,
+            "qnli": 92.8,
+            "rte": 78.7,
+            "wnli": 65.1,
         }
         baseline_name = "RoBERTa-base"
     elif args.baseline == "none":
@@ -140,7 +155,11 @@ def main():
                 "Status": "❌",
             }
             if baseline_name and baseline_scores:
-                result_dict[baseline_name] = f"{baseline_scores.get(task, 'N/A'):.1f}" if baseline_scores.get(task) else "N/A"
+                result_dict[baseline_name] = (
+                    f"{baseline_scores.get(task, 'N/A'):.1f}"
+                    if baseline_scores.get(task)
+                    else "N/A"
+                )
             results.append(result_dict)
             continue
 
@@ -153,7 +172,11 @@ def main():
                 "Status": "⏳",
             }
             if baseline_name and baseline_scores:
-                result_dict[baseline_name] = f"{baseline_scores.get(task, 'N/A'):.1f}" if baseline_scores.get(task) else "N/A"
+                result_dict[baseline_name] = (
+                    f"{baseline_scores.get(task, 'N/A'):.1f}"
+                    if baseline_scores.get(task)
+                    else "N/A"
+                )
             results.append(result_dict)
         else:
             score_pct = score * scale
@@ -167,7 +190,9 @@ def main():
                 "Status": "✅",
             }
             if baseline_name and baseline_scores:
-                result_dict[baseline_name] = f"{bert_score:.1f}" if bert_score else "N/A"
+                result_dict[baseline_name] = (
+                    f"{bert_score:.1f}" if bert_score else "N/A"
+                )
                 if diff is not None:
                     result_dict["Diff"] = f"{diff:+.1f}" if bert_score else "N/A"
             results.append(result_dict)
