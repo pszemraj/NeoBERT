@@ -6,7 +6,7 @@ NeoBERT is a **next-generation encoder** model for English text representation, 
 
 - Paper: [paper](https://arxiv.org/abs/2502.19587)
 - Model: [huggingface](https://huggingface.co/chandar-lab/NeoBERT)
-- Documentation: [docs/](docs/README.md)
+- **Documentation: [docs/](docs/README.md)**
 
 ## Get started
 
@@ -51,14 +51,13 @@ print(embedding.shape)
 
 ## Documentation
 
-For detailed guides and documentation, see the [docs/](docs/) directory:
+For detailed guides and documentation, see the **[Documentation](docs/README.md)**:
 
-- [Quick Start Guide](docs/quickstart.md)
-- [Installation](docs/installation.md)
-- [Training Guide](docs/training.md)
-- [Custom Tokenizers](docs/custom_tokenizers.md)
-- [Evaluation Guide](docs/evaluation.md)
-- [Architecture Details](docs/architecture.md)
+- [Quick Start Guide](docs/quickstart.md) - Get up and running in 5 minutes
+- [Training Guide](docs/training.md) - Pretraining and fine-tuning
+- [Evaluation Guide](docs/evaluation.md) - GLUE and MTEB benchmarks
+- [Configuration System](docs/configuration.md) - Understanding configs
+- [Architecture Details](docs/architecture.md) - Technical model details
 
 ## Features
 | **Feature**       | **NeoBERT**                             |
@@ -102,7 +101,7 @@ If you use this model in your research, please cite:
 
 This repository includes the complete training and evaluation codebase for NeoBERT, featuring:
 
-### 🔧 **Configuration System**
+### **Configuration System**
 - **Hierarchical YAML configs** with command-line overrides
 - **Task-specific configurations** for pretraining, GLUE, contrastive learning, and MTEB evaluation
 - **CPU-friendly test configs** for development and validation
@@ -118,14 +117,14 @@ python scripts/pretraining/pretrain.py \
     --optimizer.lr 2e-4
 ```
 
-### 📁 **Repository Structure**
+### **Repository Structure**
 - **`configs/`** - YAML configuration files ([README](configs/README.md))
 - **`scripts/`** - Training and evaluation scripts ([README](scripts/README.md))
 - **`jobs/`** - Shell scripts for running experiments ([README](jobs/README.md))
 - **`tests/`** - Comprehensive test suite ([README](tests/README.md))
 - **`src/neobert/`** - Core model and training code
 
-### 🚀 **Quick Start for Training**
+### **Quick Start for Training**
 
 1. **Install dependencies:**
    ```bash
@@ -147,14 +146,14 @@ python scripts/pretraining/pretrain.py \
    python scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml
    ```
 
-### 🧪 **Testing**
+### **Testing**
 The repository includes a comprehensive test suite that verifies:
 - Configuration system functionality
 - Model architecture and forward passes  
 - Training pipeline integration
 - CPU-only compatibility (no GPU required for tests)
 
-### 📖 **Documentation**
+### **Documentation**
 Each directory contains detailed README files with usage examples, best practices, and troubleshooting guides.
 
 ## Contact
