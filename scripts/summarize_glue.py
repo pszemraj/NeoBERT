@@ -63,54 +63,110 @@ def get_task_results(task_dir):
 
 
 def main():
-    base_dir = Path("outputs/glue/neobert-100m")
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Summarize GLUE evaluation results")
+    parser.add_argument(
+        "--model", 
+        type=str, 
+        default="neobert-100m",
+        help="Model name/directory under outputs/glue/ (default: neobert-100m)"
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="outputs/glue",
+        help="Base output directory (default: outputs/glue)"
+    )
+    parser.add_argument(
+        "--baseline",
+        type=str,
+        default="bert-base",
+        choices=["bert-base", "bert-large", "roberta-base", "roberta-large", "none"],
+        help="Baseline model to compare against (default: bert-base)"
+    )
+    args = parser.parse_args()
+    
+    base_dir = Path(args.output_dir) / args.model
+    if not base_dir.exists():
+        print(f"Error: Directory {base_dir} does not exist!")
+        print(f"Available models in {args.output_dir}:")
+        output_path = Path(args.output_dir)
+        if output_path.exists():
+            for model_dir in output_path.iterdir():
+                if model_dir.is_dir():
+                    print(f"  - {model_dir.name}")
+        return
+    
+    # Select baseline scores based on argument
+    baseline_scores = BERT_BASE_SCORES  # Default
+    baseline_name = "BERT-base"
+    
+    if args.baseline == "bert-large":
+        baseline_scores = {
+            "cola": 60.5, "sst2": 94.9, "mrpc": 89.3,
+            "stsb": 86.5, "qqp": 72.1, "mnli": 86.7,
+            "qnli": 92.7, "rte": 70.1, "wnli": 65.1
+        }
+        baseline_name = "BERT-large"
+    elif args.baseline == "roberta-base":
+        baseline_scores = {
+            "cola": 63.6, "sst2": 94.8, "mrpc": 90.2,
+            "stsb": 91.2, "qqp": 91.9, "mnli": 87.6,
+            "qnli": 92.8, "rte": 78.7, "wnli": 65.1
+        }
+        baseline_name = "RoBERTa-base"
+    elif args.baseline == "none":
+        baseline_scores = {}
+        baseline_name = None
 
     results = []
     for task, (metric_name, scale) in TASK_METRICS.items():
         task_dir = base_dir / task
         if not task_dir.exists():
-            results.append(
-                {
-                    "Task": task.upper(),
-                    "Metric": metric_name.replace("_", " ").title(),
-                    "Score": "Not run",
-                    "BERT-base": f"{BERT_BASE_SCORES.get(task, 'N/A'):.1f}",
-                    "Status": "❌",
-                }
-            )
+            result_dict = {
+                "Task": task.upper(),
+                "Metric": metric_name.replace("_", " ").title(),
+                "Score": "Not run",
+                "Status": "❌",
+            }
+            if baseline_name and baseline_scores:
+                result_dict[baseline_name] = f"{baseline_scores.get(task, 'N/A'):.1f}" if baseline_scores.get(task) else "N/A"
+            results.append(result_dict)
             continue
 
         score = get_task_results(task_dir)
         if score is None:
-            results.append(
-                {
-                    "Task": task.upper(),
-                    "Metric": metric_name.replace("_", " ").title(),
-                    "Score": "In progress",
-                    "BERT-base": f"{BERT_BASE_SCORES.get(task, 'N/A'):.1f}",
-                    "Status": "⏳",
-                }
-            )
+            result_dict = {
+                "Task": task.upper(),
+                "Metric": metric_name.replace("_", " ").title(),
+                "Score": "In progress",
+                "Status": "⏳",
+            }
+            if baseline_name and baseline_scores:
+                result_dict[baseline_name] = f"{baseline_scores.get(task, 'N/A'):.1f}" if baseline_scores.get(task) else "N/A"
+            results.append(result_dict)
         else:
             score_pct = score * scale
-            bert_score = BERT_BASE_SCORES.get(task, 0)
-            diff = score_pct - bert_score
+            bert_score = baseline_scores.get(task, 0) if baseline_scores else 0
+            diff = score_pct - bert_score if baseline_scores else None
 
-            results.append(
-                {
-                    "Task": task.upper(),
-                    "Metric": metric_name.replace("_", " ").title(),
-                    "Score": f"{score_pct:.1f}",
-                    "BERT-base": f"{bert_score:.1f}",
-                    "Diff": f"{diff:+.1f}" if bert_score else "N/A",
-                    "Status": "✅",
-                }
-            )
+            result_dict = {
+                "Task": task.upper(),
+                "Metric": metric_name.replace("_", " ").title(),
+                "Score": f"{score_pct:.1f}",
+                "Status": "✅",
+            }
+            if baseline_name and baseline_scores:
+                result_dict[baseline_name] = f"{bert_score:.1f}" if bert_score else "N/A"
+                if diff is not None:
+                    result_dict["Diff"] = f"{diff:+.1f}" if bert_score else "N/A"
+            results.append(result_dict)
 
     # Create DataFrame and print
     df = pd.DataFrame(results)
     print("\n" + "=" * 60)
-    print("NeoBERT-100m GLUE Results (100k checkpoint)")
+    print(f"{args.model.upper()} GLUE Results")
     print("=" * 60)
     print(df.to_string(index=False))
 
@@ -121,8 +177,10 @@ def main():
         avg_score = sum(scores) / len(scores)
         print("\n" + "-" * 60)
         print(f"Average GLUE Score: {avg_score:.1f}")
-        print("BERT-base Average: ~79.6")
-        print(f"Difference: {avg_score - 79.6:+.1f}")
+        if baseline_name and baseline_scores:
+            baseline_avg = sum(baseline_scores.values()) / len(baseline_scores)
+            print(f"{baseline_name} Average: {baseline_avg:.1f}")
+            print(f"Difference: {avg_score - baseline_avg:+.1f}")
     else:
         print(f"\nCompleted {len(completed)}/9 tasks")
 
