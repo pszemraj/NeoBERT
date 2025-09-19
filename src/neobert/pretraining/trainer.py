@@ -539,7 +539,7 @@ def trainer(cfg: Config):
                     save_total_limit = getattr(cfg.trainer, "save_total_limit", 0)
                     max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
                     limit = max(save_total_limit, max_ckpt)  # Use whichever is set
-                    
+
                     if limit > 0 and os.path.exists(model_checkpoint_dir):
                         # Get all checkpoint directories
                         checkpoints = []
@@ -547,18 +547,23 @@ def trainer(cfg: Config):
                             item_path = os.path.join(model_checkpoint_dir, item)
                             if os.path.isdir(item_path) and item.isdigit():
                                 checkpoints.append(int(item))
-                        
+
                         # Sort and remove oldest checkpoints if over limit
                         if len(checkpoints) >= limit:
                             checkpoints.sort()
                             # Remove oldest checkpoints
-                            for old_ckpt in checkpoints[:len(checkpoints) - limit + 1]:
-                                old_path = os.path.join(model_checkpoint_dir, str(old_ckpt))
+                            for old_ckpt in checkpoints[: len(checkpoints) - limit + 1]:
+                                old_path = os.path.join(
+                                    model_checkpoint_dir, str(old_ckpt)
+                                )
                                 if os.path.exists(old_path):
                                     import shutil
+
                                     shutil.rmtree(old_path)
-                                    accelerator.print(f"Removed old checkpoint: {old_path} (limit={limit})")
-                    
+                                    accelerator.print(
+                                        f"Removed old checkpoint: {old_path} (limit={limit})"
+                                    )
+
                     # Save the checkpoint
                     if accelerator.distributed_type is DistributedType.DEEPSPEED:
                         model.save_checkpoint(

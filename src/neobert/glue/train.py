@@ -201,20 +201,26 @@ def save_checkpoint(cfg, model, accelerator, completed_steps):
     model_checkpoint_dir = os.path.join(cfg.trainer.output_dir, "model_checkpoints")
 
     max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
+    save_total_limit = getattr(cfg.trainer, "save_total_limit", None)
 
-    # Delete checkpoints with the lesser evaluation accuracy if there are too many
-    if max_ckpt is not None and max_ckpt > 0 and os.path.isdir(model_checkpoint_dir):
+    # Determine effective limit from save_total_limit (preferred) or max_ckpt
+    effective_limit = None
+    if save_total_limit is not None and save_total_limit > 0:
+        effective_limit = save_total_limit
+    elif max_ckpt is not None and max_ckpt > 0:
+        effective_limit = max_ckpt
+
+    if effective_limit is not None and os.path.isdir(model_checkpoint_dir):
         files = os.listdir(model_checkpoint_dir)
-        iterations = [f for f in files if f.isdigit()]
-        iterations.sort()
+        iterations = sorted([int(f) for f in files if f.isdigit()])
 
-        # Remove files with the smallest iterations until the limit is met
-        while iterations is not None and len(iterations) >= max_ckpt:
+        # Remove oldest checkpoints until under limit
+        while iterations and len(iterations) >= effective_limit:
             file_to_remove = iterations.pop(0)
             shutil.rmtree(os.path.join(model_checkpoint_dir, str(file_to_remove)))
             print(
                 f"Deleted old model checkpoint {file_to_remove} due to limit "
-                f"(max_ckpt = {max_ckpt})"
+                f"(limit = {effective_limit})"
             )
 
     # Save the checkpoint
@@ -622,12 +628,18 @@ def trainer(cfg: Config):
             logger.info(f"Pretrained checkpoint: {pretrained_checkpoint}")
 
             if not pretrained_checkpoint_dir or not pretrained_checkpoint:
-                raise ValueError(
-                    "GLUE evaluation requires pretrained weights! "
-                    "Please specify 'pretrained_checkpoint_dir' and 'pretrained_checkpoint' "
-                    "in the model section of your config, or set 'allow_random_weights: true' "
-                    "if you really want to use random initialization (NOT RECOMMENDED)."
-                )
+                if cfg._raw_model_dict.get("allow_random_weights", False):
+                    logger.warning(
+                        "⚠️  Using random weights for testing as allow_random_weights=true"
+                    )
+                    pretrained_checkpoint = None
+                else:
+                    raise ValueError(
+                        "GLUE evaluation requires pretrained weights! "
+                        "Please specify 'pretrained_checkpoint_dir' and 'pretrained_checkpoint' "
+                        "in the model section of your config, or set 'allow_random_weights: true' "
+                        "if you really want to use random initialization (NOT RECOMMENDED)."
+                    )
 
             # Allow override with explicit flag
             if cfg._raw_model_dict.get("allow_random_weights", False):
@@ -1127,12 +1139,12 @@ def trainer(cfg: Config):
                 save_model = getattr(cfg.trainer, "save_model", True)
                 save_total_limit = getattr(cfg.trainer, "save_total_limit", None)
 
-                if (
-                    should_save
-                    and max_ckpt != 0
-                    and save_model
-                    and (save_total_limit is None or save_total_limit > 0)
-                ):
+                # Save if either save_total_limit>0 or max_ckpt>0 is configured
+                limit_enabled = (
+                    save_total_limit is not None and save_total_limit > 0
+                ) or (max_ckpt is not None and max_ckpt > 0)
+
+                if should_save and save_model and limit_enabled:
                     save_checkpoint(cfg, model, accelerator, completed_steps)
 
                 model.train()
