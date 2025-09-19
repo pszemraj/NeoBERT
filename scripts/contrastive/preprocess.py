@@ -5,25 +5,11 @@ import shutil
 from datasets import DatasetDict, load_from_disk
 
 from neobert.config import load_config_from_args
-from neobert.contrastive.datasets import (
-    ALLNLI,
-    AMAZONQA,
-    CONCURRENTQA,
-    FEVER,
-    GITHUBISSUE,
-    GOOAQ,
-    MSMARCO,
-    PAQ,
-    PUBMEDQA,
-    QQP,
-    SENTENCECOMP,
-    STACKEXCHANGE,
-    STACKOVERFLOW,
-    STS12,
-    STSBENCHMARK,
-    TRIVIAQA,
-    WIKIHOW,
-)
+from neobert.contrastive.datasets import (ALLNLI, AMAZONQA, CONCURRENTQA,
+                                          FEVER, GITHUBISSUE, GOOAQ, MSMARCO,
+                                          PAQ, PUBMEDQA, QQP, SENTENCECOMP,
+                                          STACKEXCHANGE, STACKOVERFLOW, STS12,
+                                          STSBENCHMARK, TRIVIAQA, WIKIHOW)
 from neobert.tokenizer import get_tokenizer, tokenize
 
 DATASETS = {

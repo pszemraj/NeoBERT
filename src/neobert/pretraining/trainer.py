@@ -1,20 +1,15 @@
 import json
+import logging
 import os
 import re
 
 # PyTorch
 import torch
 from accelerate import Accelerator
-from accelerate.utils import (
-    DistributedDataParallelKwargs,
-    DistributedType,
-    ProjectConfiguration,
-    set_seed,
-)
-
+from accelerate.utils import (DistributedDataParallelKwargs, DistributedType,
+                              ProjectConfiguration, set_seed)
 # Hugging Face
 from datasets import load_dataset, load_from_disk
-
 # Deepspeed
 from deepspeed.utils import safe_get_full_fp32_param
 from torch.nn import CrossEntropyLoss
@@ -27,9 +22,11 @@ from ..model import NeoBERTConfig, NeoBERTLMHead
 from ..optimizer import get_optimizer
 from ..scheduler import get_scheduler
 from ..tokenizer import get_tokenizer
-
 # Our metric object and model
 from .metrics import Metrics
+
+# Set up logger
+logger = logging.getLogger(__name__)
 
 
 def to_target_batch_size(
@@ -102,11 +99,10 @@ def trainer(cfg: Config):
             + 1
         )
 
-    # Accelerator object
+    # Accelerator object - disable automatic checkpointing to avoid duplicate checkpoints/ directory
     project_config = ProjectConfiguration(
         cfg.trainer.output_dir,
-        automatic_checkpoint_naming=True,
-        total_limit=2,  # Keep only 2 accelerate checkpoints
+        automatic_checkpoint_naming=False,  # We handle checkpointing manually in model_checkpoints/
         iteration=iteration,
     )
     kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
@@ -529,9 +525,8 @@ def trainer(cfg: Config):
                     metrics["train/learning_rate"] = optimizer.param_groups[0]["lr"]
                     metrics.log(accelerator)
 
-                # Save the accelerator state from the main process
-                if metrics["train/steps"] % cfg.trainer.save_steps == 0:
-                    accelerator.save_state()
+                # Skip saving accelerator state - we only need model checkpoints
+                # This avoids the duplicate checkpoints/ directory
 
                 # Save the pytorch model
                 if metrics["train/steps"] % cfg.trainer.save_steps == 0:
@@ -560,9 +555,11 @@ def trainer(cfg: Config):
                                     import shutil
 
                                     shutil.rmtree(old_path)
-                                    accelerator.print(
-                                        f"Removed old checkpoint: {old_path} (limit={limit})"
-                                    )
+                                    # Use logger instead of accelerator.print to avoid progress bar interference
+                                    if accelerator.is_main_process:
+                                        logger.info(
+                                            f"Removed old checkpoint: {old_path} (limit={limit})"
+                                        )
 
                     # Save the checkpoint
                     if accelerator.distributed_type is DistributedType.DEEPSPEED:
@@ -606,7 +603,8 @@ def trainer(cfg: Config):
                         os.makedirs(tokenizer_dir, exist_ok=True)
                         tokenizer.save_pretrained(tokenizer_dir)
 
-                        accelerator.print(
+                        # Use logger instead of accelerator.print to avoid progress bar interference
+                        logger.info(
                             f"Saved checkpoint with config, tokenizer info, and full tokenizer to {checkpoint_path}"
                         )
 

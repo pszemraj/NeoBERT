@@ -11,11 +11,8 @@ import torch
 from datasets import Dataset
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import (
-    DataCollatorWithPadding,
-    PreTrainedModel,
-    PreTrainedTokenizerFast,
-)
+from transformers import (DataCollatorWithPadding, PreTrainedModel,
+                          PreTrainedTokenizerFast)
 
 DEFAULT_PROMPTS = {
     "STS": "Retrieve semantically similar text.",

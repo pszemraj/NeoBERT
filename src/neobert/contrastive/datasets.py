@@ -3,7 +3,8 @@ from abc import ABC, abstractmethod
 from typing import Optional
 
 import pandas as pd
-from datasets import Dataset, concatenate_datasets, load_dataset, load_from_disk
+from datasets import (Dataset, concatenate_datasets, load_dataset,
+                      load_from_disk)
 
 DATASET_TO_BSZ = {
     "ALLNLI": 2,

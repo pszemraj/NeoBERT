@@ -5,14 +5,10 @@ import unittest
 
 import torch
 
-from neobert.model import (
-    NeoBERT,
-    NeoBERTConfig,
-    NeoBERTForSequenceClassification,
-    NeoBERTHFForSequenceClassification,
-    NeoBERTLMHead,
-    NormNeoBERT,
-)
+from neobert.model import (NeoBERT, NeoBERTConfig,
+                           NeoBERTForSequenceClassification,
+                           NeoBERTHFForSequenceClassification, NeoBERTLMHead,
+                           NormNeoBERT)
 
 
 class TestModelForward(unittest.TestCase):

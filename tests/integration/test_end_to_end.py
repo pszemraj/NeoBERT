@@ -144,7 +144,8 @@ class TestEndToEndIntegration(unittest.TestCase):
 
                 # Choose appropriate model based on task
                 if "glue" in config_name:
-                    from neobert.model import NeoBERTHFForSequenceClassification
+                    from neobert.model import \
+                        NeoBERTHFForSequenceClassification
 
                     model_config.num_labels = config.glue.num_labels
                     model = NeoBERTHFForSequenceClassification(model_config)
