@@ -1,128 +1,111 @@
 # Quick Start Guide
 
-This guide will help you get started with NeoBERT quickly.
+Get NeoBERT running in 5 minutes.
 
 ## Installation
 
 ```bash
-# Clone the repository
+# Clone and install
 git clone https://github.com/pszemraj/NeoBERT.git
 cd NeoBERT
-
-# Install in development mode
 pip install -e .
 
-# For GPU training with flash attention (optional)
+# Optional: Install Flash Attention for faster training (requires CUDA)
 pip install flash-attn --no-build-isolation
+```
+
+## Test Your Setup
+
+```bash
+# Quick test with tiny model (5 minutes, CPU-friendly)
+python scripts/pretraining/pretrain.py \
+    --config tests/configs/pretraining/test_tiny_pretrain.yaml
+
+# Run tests
+python tests/run_tests.py
 ```
 
 ## Basic Usage
 
-### 1. Pretraining a Small Model
+### Pretrain a Model
 
 ```bash
-# Pretrain a small model for testing
-# The trainer will automatically tokenize raw text datasets
-python scripts/pretraining/pretrain.py --config tests/configs/pretraining/test_tiny_pretrain.yaml
+# Full pretraining (requires GPU)
+python scripts/pretraining/pretrain.py \
+    --config configs/pretrain_neobert.yaml
 
-# What happens automatically:
-# 1. Loads pszemraj/simple_wikipedia_LM dataset (raw text)
-# 2. Detects the 'text' column needs tokenization
-# 3. Tokenizes using bert-base-uncased tokenizer
-# 4. Starts training with MLM objective
-
-# Pretrain with custom settings
+# Override settings via CLI
 python scripts/pretraining/pretrain.py \
     --config configs/pretrain_neobert.yaml \
-    --trainer.max_steps 1000 \
-    --trainer.per_device_train_batch_size 8
+    --trainer.max_steps 10000 \
+    --trainer.per_device_train_batch_size 16 \
+    --optimizer.lr 2e-4
 ```
 
-### 2. Using a Custom Tokenizer
+### Evaluate on GLUE
 
 ```bash
-# Option 1: Let the trainer tokenize automatically
+# Single GLUE task
+python scripts/evaluation/run_glue.py --config configs/glue/cola.yaml
+
+# All GLUE tasks
+bash scripts/run_full_glue.sh
+
+# Summarize results
+python scripts/summarize_glue.py outputs/glue/neobert-100m
+```
+
+### Use Custom Tokenizer
+
+```bash
+# Just specify the tokenizer - dataset tokenization is automatic
 python scripts/pretraining/pretrain.py \
-    --config tests/configs/pretraining/test_tiny_pretrain.yaml \
-    --tokenizer.name "your-tokenizer-name" \
-    --model.vocab_size 32000  # Match your tokenizer's vocab
-
-# Option 2: Pre-tokenize for faster startup (optional)
-python scripts/pretraining/tokenize_dataset.py \
-    --tokenizer "your-tokenizer-name" \
-    --dataset "your-dataset" \
-    --output "./tokenized_data/custom"
-
-# Then train with pre-tokenized data
-python scripts/pretraining/pretrain.py \
-    --config configs/train_small_custom_tokenizer.yaml
+    --config configs/pretrain_neobert.yaml \
+    --tokenizer.name "your-tokenizer" \
+    --model.vocab_size 32000  # Match your tokenizer
 ```
 
-### 3. Evaluating on GLUE
+## Key Commands
+
+| Task | Command |
+|------|---------|
+| Pretrain | `python scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml` |
+| GLUE eval | `python scripts/evaluation/run_glue.py --config configs/glue/{task}.yaml` |
+| Run tests | `python tests/run_tests.py` |
+| Summarize GLUE | `python scripts/summarize_glue.py {results_path}` |
+
+## Configuration
+
+All settings use YAML configs with CLI overrides:
 
 ```bash
-# Run GLUE evaluation
-python scripts/evaluation/run_glue.py \
-    --config configs/evaluate_neobert.yaml \
-    --task_name cola
+# Base config from YAML
+--config configs/pretrain_neobert.yaml
 
-# Evaluate on all GLUE tasks
-python scripts/evaluation/run_glue.py \
-    --config configs/evaluate_neobert.yaml \
-    --task_name all
+# Override with dot notation
+--model.hidden_size 1024
+--trainer.batch_size 64
+--optimizer.lr 1e-4
 ```
 
-### 4. Running Tests
+See [Configuration Guide](configuration.md) for details.
 
-```bash
-# Run all tests
-python tests/run_tests.py
+## Common Settings
 
-# Run specific test suite
-python tests/run_tests.py --test-dir model
-python tests/run_tests.py --test-dir training
-```
+**Model sizes:**
+- Tiny (test): 2 layers, 128 hidden
+- Small: 6 layers, 512 hidden  
+- Base: 12 layers, 768 hidden
+- Large: 24 layers, 1024 hidden
 
-## Key Configuration Options
-
-### Model Configuration
-- `model.hidden_size`: Hidden dimension size (e.g., 768)
-- `model.num_hidden_layers`: Number of transformer layers (e.g., 12)
-- `model.num_attention_heads`: Number of attention heads (e.g., 12)
-- `model.hidden_act`: Activation function ("gelu" for CPU, "swiglu" for GPU with xformers)
-
-### Training Configuration
-- `trainer.max_steps`: Maximum training steps
-- `trainer.per_device_train_batch_size`: Batch size per device
-- `trainer.learning_rate`: Learning rate (via optimizer.lr)
-- `trainer.output_dir`: Where to save checkpoints
-
-### Data Configuration
-- `dataset.name`: HuggingFace dataset name or path to local data
-- `dataset.streaming`: Enable streaming for large datasets (memory efficient)
-- `tokenizer.name`: Tokenizer identifier
-- `dataset.max_seq_length`: Maximum sequence length
-
-## Common Issues
-
-### XFormers/Flash Attention
-If you encounter xformers errors, use GELU activation instead:
-```bash
---model.hidden_act gelu --model.flash_attention false
-```
-
-### Memory Issues
-Reduce batch size or use gradient accumulation:
-```bash
---trainer.per_device_train_batch_size 4 \
---trainer.gradient_accumulation_steps 4
-```
-
-### Dataset Not Tokenized
-For raw text datasets, tokenize first using the tokenize_dataset.py script.
+**Training tips:**
+- Use `bf16` mixed precision (not fp16)
+- Enable Flash Attention if available
+- Start with batch size 32, lr 1e-4 for pretraining
+- Use batch size 32, lr 2e-5 for GLUE
 
 ## Next Steps
 
-- Read the [Configuration Guide](configuration.md) for detailed configuration options
-- Check out [Training Guide](training.md) for advanced training techniques
-- See [Custom Tokenizers](custom_tokenizers.md) for using your own tokenizer
+- [Training Guide](training.md) - Detailed pretraining instructions
+- [Evaluation Guide](evaluation.md) - GLUE and MTEB benchmarks
+- [Configuration](configuration.md) - Config system details
