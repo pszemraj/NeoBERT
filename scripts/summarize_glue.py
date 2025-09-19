@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Summarize GLUE results from output directories."""
+"""Summarize GLUE results from output directories.
+
+Usage:
+    python scripts/summarize_glue.py outputs/glue/neobert-100m
+    python scripts/summarize_glue.py ./outputs/experiment_xyz/glue_results
+    python scripts/summarize_glue.py outputs/glue/neobert-100m --baseline roberta-base
+    python scripts/summarize_glue.py  # Default: outputs/glue/neobert-100m
+"""
 
 import json
 from pathlib import Path
@@ -67,16 +74,10 @@ def main():
     
     parser = argparse.ArgumentParser(description="Summarize GLUE evaluation results")
     parser.add_argument(
-        "--model", 
-        type=str, 
-        default="neobert-100m",
-        help="Model name/directory under outputs/glue/ (default: neobert-100m)"
-    )
-    parser.add_argument(
-        "--output-dir",
+        "path",
+        nargs="?",
         type=str,
-        default="outputs/glue",
-        help="Base output directory (default: outputs/glue)"
+        help="Path to GLUE results directory (e.g., outputs/glue/neobert-100m or ./outputs/experiment_xyz)"
     )
     parser.add_argument(
         "--baseline",
@@ -87,15 +88,23 @@ def main():
     )
     args = parser.parse_args()
     
-    base_dir = Path(args.output_dir) / args.model
+    # Determine the base directory
+    if args.path:
+        base_dir = Path(args.path)
+    else:
+        # Default to outputs/glue/neobert-100m for backward compatibility
+        base_dir = Path("outputs/glue/neobert-100m")
+    
     if not base_dir.exists():
         print(f"Error: Directory {base_dir} does not exist!")
-        print(f"Available models in {args.output_dir}:")
-        output_path = Path(args.output_dir)
-        if output_path.exists():
-            for model_dir in output_path.iterdir():
-                if model_dir.is_dir():
-                    print(f"  - {model_dir.name}")
+        
+        # Try to be helpful by showing nearby directories
+        parent = base_dir.parent
+        if parent.exists():
+            print(f"\nAvailable directories in {parent}:")
+            for subdir in sorted(parent.iterdir()):
+                if subdir.is_dir():
+                    print(f"  - {subdir.name}")
         return
     
     # Select baseline scores based on argument
@@ -166,7 +175,9 @@ def main():
     # Create DataFrame and print
     df = pd.DataFrame(results)
     print("\n" + "=" * 60)
-    print(f"{args.model.upper()} GLUE Results")
+    # Extract a meaningful name from the path for the title
+    model_name = base_dir.name if base_dir.name != "glue" else base_dir.parent.name
+    print(f"GLUE Results: {model_name}")
     print("=" * 60)
     print(df.to_string(index=False))
 
