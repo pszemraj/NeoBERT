@@ -98,6 +98,17 @@ class TrainerConfig:
     mixed_precision: str = "bf16"
     seed: int = 42
     resume_from_checkpoint: Optional[str] = None
+    
+    # Training control
+    num_train_epochs: int = 3
+    eval_strategy: str = "steps"  # "steps" or "epoch"
+    save_strategy: str = "steps"  # "steps", "epoch", "best", or "no"
+    save_total_limit: Optional[int] = 3
+    early_stopping: int = 0
+    metric_for_best_model: Optional[str] = None
+    greater_is_better: bool = True
+    load_best_model_at_end: bool = False
+    save_model: bool = True
 
     # For backwards compatibility with old configs
     disable_tqdm: bool = False
@@ -106,9 +117,9 @@ class TrainerConfig:
     report_to: List[str] = field(default_factory=list)
     tf32: bool = True
     max_ckpt: int = 3
-    mixed_precision: str = "no"
-    train_batch_size: int = 16
-    eval_batch_size: int = 32
+    # Legacy batch size fields (use per_device versions instead)
+    train_batch_size: Optional[int] = None
+    eval_batch_size: Optional[int] = None
 
 
 @dataclass
@@ -131,9 +142,25 @@ class WandbConfig:
 
 @dataclass
 class GLUEConfig:
+    # Task configuration
     task_name: str = "cola"
     num_labels: int = 2
-    max_seq_length: int = 512
+    max_seq_length: int = 128
+    
+    # Model loading
+    pretrained_model_path: Optional[str] = None  # Path to pretrained model config.yaml
+    pretrained_checkpoint_dir: Optional[str] = None  # Directory containing checkpoints
+    pretrained_checkpoint: Optional[Union[str, int]] = None  # Specific checkpoint to load
+    allow_random_weights: bool = False  # Allow testing with random weights
+    
+    # Fine-tuning specific
+    classifier_dropout: float = 0.1
+    classifier_init_range: float = 0.02
+    transfer_from_task: bool = False  # Whether to transfer from another GLUE task
+    
+    # Data configuration (override dataset defaults)
+    num_workers: int = 4
+    preprocessing_num_proc: int = 4
 
 
 @dataclass
