@@ -6,10 +6,16 @@ import re
 # PyTorch
 import torch
 from accelerate import Accelerator
-from accelerate.utils import (DistributedDataParallelKwargs, DistributedType,
-                              ProjectConfiguration, set_seed)
+from accelerate.utils import (
+    DistributedDataParallelKwargs,
+    DistributedType,
+    ProjectConfiguration,
+    set_seed,
+)
+
 # Hugging Face
 from datasets import load_dataset, load_from_disk
+
 # Deepspeed
 from deepspeed.utils import safe_get_full_fp32_param
 from torch.nn import CrossEntropyLoss
@@ -22,6 +28,7 @@ from ..model import NeoBERTConfig, NeoBERTLMHead
 from ..optimizer import get_optimizer
 from ..scheduler import get_scheduler
 from ..tokenizer import get_tokenizer
+
 # Our metric object and model
 from .metrics import Metrics
 

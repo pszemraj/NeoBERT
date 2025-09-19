@@ -1,6 +1,5 @@
 import torch
-from torch.optim.lr_scheduler import (CosineAnnealingLR, LambdaLR, LinearLR,
-                                      SequentialLR)
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
 
 
 def get_scheduler(

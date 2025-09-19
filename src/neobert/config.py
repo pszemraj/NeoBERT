@@ -98,7 +98,7 @@ class TrainerConfig:
     mixed_precision: str = "bf16"
     seed: int = 42
     resume_from_checkpoint: Optional[str] = None
-    
+
     # Training control
     num_train_epochs: int = 3
     eval_strategy: str = "steps"  # "steps" or "epoch"
@@ -146,18 +146,20 @@ class GLUEConfig:
     task_name: str = "cola"
     num_labels: int = 2
     max_seq_length: int = 128
-    
+
     # Model loading
     pretrained_model_path: Optional[str] = None  # Path to pretrained model config.yaml
     pretrained_checkpoint_dir: Optional[str] = None  # Directory containing checkpoints
-    pretrained_checkpoint: Optional[Union[str, int]] = None  # Specific checkpoint to load
+    pretrained_checkpoint: Optional[Union[str, int]] = (
+        None  # Specific checkpoint to load
+    )
     allow_random_weights: bool = False  # Allow testing with random weights
-    
+
     # Fine-tuning specific
     classifier_dropout: float = 0.1
     classifier_init_range: float = 0.02
     transfer_from_task: bool = False  # Whether to transfer from another GLUE task
-    
+
     # Data configuration (override dataset defaults)
     num_workers: int = 4
     preprocessing_num_proc: int = 4

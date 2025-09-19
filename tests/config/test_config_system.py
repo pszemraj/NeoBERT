@@ -7,9 +7,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from neobert.config import (Config, ConfigLoader, DatasetConfig, ModelConfig,
-                            OptimizerConfig, SchedulerConfig, TokenizerConfig,
-                            TrainerConfig, load_config_from_args)
+from neobert.config import (
+    Config,
+    ConfigLoader,
+    DatasetConfig,
+    ModelConfig,
+    OptimizerConfig,
+    SchedulerConfig,
+    TokenizerConfig,
+    TrainerConfig,
+    load_config_from_args,
+)
 
 
 class TestConfigSystem(unittest.TestCase):

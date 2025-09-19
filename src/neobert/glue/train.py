@@ -18,8 +18,12 @@ from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
 from torch.nn import CrossEntropyLoss, MSELoss
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from transformers import (AutoConfig, AutoModelForSequenceClassification,
-                          AutoTokenizer, DataCollatorWithPadding)
+from transformers import (
+    AutoConfig,
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
+    DataCollatorWithPadding,
+)
 
 from neobert.model import NeoBERTConfig, NeoBERTForSequenceClassification
 from neobert.tokenizer import get_tokenizer
@@ -155,7 +159,7 @@ def run_evaluation_and_save(
     mm_metric=None,
 ):
     """Run evaluation, log metrics, and save results.
-    
+
     Returns:
         tuple: (eval_metric dict, current_accuracy float, should_stop bool)
     """
@@ -171,7 +175,7 @@ def run_evaluation_and_save(
         flash_attention=flash_attention,
     )
     eval_metric = eval_result["eval_metric"]
-    
+
     # Log metrics
     if cfg.task == "stsb" and "spearmanr" in eval_metric:
         logger.info(
@@ -182,15 +186,17 @@ def run_evaluation_and_save(
         )
     else:
         logger.info(f"step {completed_steps} eval metric: {eval_metric}")
-    
+
     logger.info(f"step {completed_steps} train metric: {train_metric}")
-    logger.info(f"step {completed_steps} train loss: {total_loss / completed_steps if completed_steps > 0 else 0}")
-    
+    logger.info(
+        f"step {completed_steps} train loss: {total_loss / completed_steps if completed_steps > 0 else 0}"
+    )
+
     # Handle MNLI mismatched set
     results = {}
     if cfg.task == "mnli":
         results["accuracy"] = eval_metric["accuracy"]
-        
+
         if mm_eval_dataloader is not None and mm_metric is not None:
             mm_eval_result = get_evaluation(
                 model=model,
@@ -204,16 +210,20 @@ def run_evaluation_and_save(
             )
             mm_eval_metric = mm_eval_result["eval_metric"]
             results["accuracy_mm"] = mm_eval_metric["accuracy"]
-            logger.info(f"step {completed_steps} eval metric mismatched: {results['accuracy_mm']}")
-    
+            logger.info(
+                f"step {completed_steps} eval metric mismatched: {results['accuracy_mm']}"
+            )
+
     # Prepare metrics for logging
     metrics_to_log = {
         "train_loss": total_loss / completed_steps if completed_steps > 0 else 0,
         "epoch": epoch,
         "step": completed_steps,
-        "learning_rate": model.module.config if hasattr(model, 'module') else 0.0001,  # Placeholder
+        "learning_rate": model.module.config
+        if hasattr(model, "module")
+        else 0.0001,  # Placeholder
     }
-    
+
     # Add evaluation metrics
     if cfg.task != "mnli":
         for key, value in eval_metric.items():
@@ -221,31 +231,30 @@ def run_evaluation_and_save(
     else:
         for key, value in results.items():
             metrics_to_log[f"eval_{key}"] = value
-    
+
     # Add training metrics
     if train_metric:
         for key, value in train_metric.items():
             metrics_to_log[f"train_{key}"] = value
-    
+
     # Log to wandb
     accelerator.log(metrics_to_log, step=completed_steps)
-    
+
     # Save results to JSON
     all_results = {f"eval_{k}": v for k, v in eval_metric.items()}
     if cfg.task == "mnli":
         all_results = {f"eval_{k}": v for k, v in results.items()}
-    
+
     output_file = os.path.join(
-        cfg.trainer.output_dir,
-        f"all_results_step_{completed_steps}.json"
+        cfg.trainer.output_dir, f"all_results_step_{completed_steps}.json"
     )
     with open(output_file, "w") as f:
         json.dump(all_results, f)
     logger.info(f"Saved evaluation results to {output_file}")
-    
+
     # Return current accuracy for early stopping
     curr_accuracy = list(eval_metric.values())[0]
-    
+
     model.train()
     return eval_metric, curr_accuracy, False  # Last value is early_stop flag
 
@@ -308,21 +317,21 @@ def get_best_checkpoint_path(base_dir, task, num_checkpoints_to_merge=1):
 
 def load_pretrained_weights(model, checkpoint_dir, checkpoint_id, logger):
     """Load pretrained weights from a checkpoint directory.
-    
+
     Args:
         model: The model to load weights into
         checkpoint_dir: Directory containing checkpoint folders
         checkpoint_id: Specific checkpoint number/name to load
         logger: Logger for output
-        
+
     Returns:
         model with loaded weights
     """
     checkpoint_path = os.path.join(checkpoint_dir, str(checkpoint_id))
-    
+
     # Check if it's a DeepSpeed checkpoint
     is_deepspeed = os.path.exists(os.path.join(checkpoint_path, "zero_to_fp32.py"))
-    
+
     if is_deepspeed:
         logger.info(f"Loading DeepSpeed checkpoint from {checkpoint_path}")
         try:
@@ -340,13 +349,13 @@ def load_pretrained_weights(model, checkpoint_dir, checkpoint_id, logger):
         state_dict_path = os.path.join(checkpoint_path, "state_dict.pt")
         if not os.path.exists(state_dict_path):
             raise FileNotFoundError(f"No state_dict.pt found at {state_dict_path}")
-        
+
         logger.info(f"Loading state dict from {state_dict_path}")
         state_dict = torch.load(state_dict_path)
-        
+
         # Log state dict info
         logger.info(f"Loaded state dict with {len(state_dict)} keys")
-        
+
         # Remove classifier and decoder keys for fine-tuning
         cleaned_state_dict = {
             k: v
@@ -354,25 +363,25 @@ def load_pretrained_weights(model, checkpoint_dir, checkpoint_id, logger):
             if "classifier" not in k and "decoder" not in k
         }
         logger.info(f"After filtering: {len(cleaned_state_dict)} keys to load")
-        
+
         # Load into model
         missing_keys, unexpected_keys = model.load_state_dict(
             cleaned_state_dict, strict=False
         )
-        
+
         if missing_keys:
             logger.info(f"Missing keys: {missing_keys}")
         if unexpected_keys:
             logger.info(f"Unexpected keys: {unexpected_keys}")
-        
+
         logger.info(f"✅ Successfully loaded pretrained weights from {state_dict_path}")
-    
+
     return model
 
 
 def save_training_checkpoint(cfg, model, accelerator, completed_steps):
     """Save a training checkpoint during fine-tuning.
-    
+
     Args:
         cfg: Configuration object
         model: Model to save
@@ -668,9 +677,13 @@ def trainer(cfg: Config):
         return batch
 
     # Use per_device batch sizes consistently
-    train_batch_size = cfg.trainer.per_device_train_batch_size or cfg.trainer.train_batch_size or 16
-    eval_batch_size = cfg.trainer.per_device_eval_batch_size or cfg.trainer.eval_batch_size or 32
-    
+    train_batch_size = (
+        cfg.trainer.per_device_train_batch_size or cfg.trainer.train_batch_size or 16
+    )
+    eval_batch_size = (
+        cfg.trainer.per_device_eval_batch_size or cfg.trainer.eval_batch_size or 32
+    )
+
     train_dataloader = DataLoader(
         train_dataset,
         shuffle=True,
@@ -796,18 +809,20 @@ def trainer(cfg: Config):
     else:
         # Get checkpoint info from raw model dict for GLUE
         logger.info("Looking for pretrained checkpoint info...")
-        
+
         # Check for checkpoint info in raw model dict
-        if hasattr(cfg, '_raw_model_dict') and cfg._raw_model_dict:
+        if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
             pretrained_checkpoint_dir = cfg._raw_model_dict.get(
                 "pretrained_checkpoint_dir", None
             )
             pretrained_checkpoint = cfg._raw_model_dict.get(
                 "pretrained_checkpoint", None
             )
-            allow_random_weights = cfg._raw_model_dict.get("allow_random_weights", False)
+            allow_random_weights = cfg._raw_model_dict.get(
+                "allow_random_weights", False
+            )
         # Also check GLUEConfig if available
-        elif hasattr(cfg, 'glue'):
+        elif hasattr(cfg, "glue"):
             pretrained_checkpoint_dir = cfg.glue.pretrained_checkpoint_dir
             pretrained_checkpoint = cfg.glue.pretrained_checkpoint
             allow_random_weights = cfg.glue.allow_random_weights
@@ -815,7 +830,7 @@ def trainer(cfg: Config):
             pretrained_checkpoint_dir = None
             pretrained_checkpoint = None
             allow_random_weights = False
-        
+
         # Validate checkpoint configuration
         if not pretrained_checkpoint_dir or not pretrained_checkpoint:
             if allow_random_weights:
@@ -836,15 +851,18 @@ def trainer(cfg: Config):
                 pretrained_checkpoint_dir = os.path.join(
                     pretrained_checkpoint_dir, "model_checkpoints"
                 )
-            logger.info(f"Will load checkpoint {pretrained_checkpoint} from {pretrained_checkpoint_dir}")
+            logger.info(
+                f"Will load checkpoint {pretrained_checkpoint} from {pretrained_checkpoint_dir}"
+            )
 
     # Load pretrained weights if available
-    if not from_hub and 'pretrained_checkpoint' in locals() and pretrained_checkpoint is not None:
+    if (
+        not from_hub
+        and "pretrained_checkpoint" in locals()
+        and pretrained_checkpoint is not None
+    ):
         model = load_pretrained_weights(
-            model, 
-            pretrained_checkpoint_dir, 
-            pretrained_checkpoint, 
-            logger
+            model, pretrained_checkpoint_dir, pretrained_checkpoint, logger
         )
 
     # Optimizer
@@ -888,7 +906,7 @@ def trainer(cfg: Config):
     num_update_steps_per_epoch = math.ceil(
         len(train_dataloader) / cfg.trainer.gradient_accumulation_steps
     )
-    
+
     # Determine max_steps: explicit value or calculate from epochs
     if cfg.trainer.max_steps is None or cfg.trainer.max_steps <= 0:
         cfg.trainer.max_steps = (
@@ -1013,9 +1031,7 @@ def trainer(cfg: Config):
     logger.info(f"  Num eval examples = {len(eval_dataset)}")
     logger.info(f"  Num epochs = {cfg.trainer.num_train_epochs}")
     logger.info(f"  Total training steps = {total_steps}")
-    logger.info(
-        f"  Instantaneous batch size per device = {train_batch_size}"
-    )
+    logger.info(f"  Instantaneous batch size per device = {train_batch_size}")
     logger.info(
         f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}"
     )
@@ -1296,7 +1312,7 @@ def trainer(cfg: Config):
         final_metrics = {f"eval_{k}": v for k, v in eval_metric.items()}
     else:
         final_metrics = {}
-        
+
     if cfg.task == "mnli":
         final_metrics = {f"eval_{k}": v for k, v in results.items()}
 
