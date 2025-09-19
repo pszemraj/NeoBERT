@@ -22,8 +22,8 @@ model:
 
 # GLUE-specific configuration
 glue:
-  task_name: "stsb"
-  num_labels: 1  # Regression task
+  task_name: "mrpc"
+  num_labels: 2
   max_seq_length: 128
 
 # Tokenizer
@@ -33,7 +33,7 @@ tokenizer:
 
 # Training configuration - following best practices for GLUE
 trainer:
-  output_dir: "./glue_outputs/stsb"
+  output_dir: "./outputs/glue/neobert-100m/mrpc"
   num_train_epochs: 3  # Standard for GLUE fine-tuning
   max_steps: -1  # Auto-calculate from epochs
   per_device_train_batch_size: 32  # Increased from repo default of 8
@@ -41,14 +41,14 @@ trainer:
   gradient_accumulation_steps: 1
   # Evaluation and saving
   eval_strategy: "steps"
-  eval_steps: 150  # STS-B is small
+  eval_steps: 100  # MRPC is small
   save_strategy: "steps"
-  save_steps: 150
+  save_steps: 100
   save_total_limit: 3
-  logging_steps: 50
+  logging_steps: 100
   # Early stopping
   early_stopping: 5  # Stop if no improvement for 5 evaluations
-  metric_for_best_model: "eval_pearson"  # STS-B uses Pearson correlation
+  metric_for_best_model: "eval_f1"  # MRPC uses F1
   greater_is_better: true
   load_best_model_at_end: true
   # Mixed precision
@@ -78,5 +78,5 @@ datacollator:
 # Weights & Biases
 wandb:
   project: "neobert-glue"
-  name: "neobert-100m-stsb-100k"
+  name: "neobert-100m-mrpc-100k"
   mode: "online"  # Set to "disabled" to turn off

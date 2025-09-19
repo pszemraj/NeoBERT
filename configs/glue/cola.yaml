@@ -33,7 +33,7 @@ tokenizer:
 
 # Training configuration - following best practices for GLUE
 trainer:
-  output_dir: "./glue_outputs/cola"
+  output_dir: "./outputs/glue/neobert-100m/cola"
   num_train_epochs: 3  # Standard for GLUE fine-tuning
   max_steps: -1  # Auto-calculate from epochs
   per_device_train_batch_size: 32  # Increased from repo default of 8
