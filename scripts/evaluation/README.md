@@ -149,22 +149,6 @@ python scripts/evaluation/eval_checkpoint.py \
   --config configs/pretrain/pretrain_neobert.yaml
 ```
 
-## Post-Pretraining Sanity Check
-
-After pretraining, verify the model has learned meaningful representations:
-
-```bash
-python scripts/pretraining/post_pretrain_sanity_check.py \
-  --checkpoint_dir outputs/smollm2_custom_tokenizer/model_checkpoints \
-  --checkpoint_step 100000 \
-  --config_path configs/pretrain/pretrain_neobert100m_smollm2data.yaml
-```
-
-This script tests:
-- Semantic similarity between related/unrelated sentences
-- Basic sentiment discrimination
-- Representation diversity
-
 ## Troubleshooting
 
 ### Low Performance on GLUE
