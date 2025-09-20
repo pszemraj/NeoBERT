@@ -238,6 +238,67 @@ def test_end_to_end_pipeline(model_path: Path) -> Tuple[bool, str]:
         return False, f"Pipeline failed: {e}"
 
 
+def test_cosine_similarity_sanity(model_path: Path) -> Tuple[bool, str]:
+    """Test cosine similarity between similar and different sentences."""
+    
+    try:
+        print("  Testing cosine similarity sanity check...")
+        
+        # Load model and tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
+        model = AutoModel.from_pretrained(str(model_path), trust_remote_code=True)
+        
+        # Test sentences: two similar pairs and two very different
+        sentences = [
+            "The cat sat on the mat.",  # Similar pair 1
+            "The feline rested on the rug.",  # Similar pair 1
+            "I love programming in Python.",  # Similar pair 2  
+            "I enjoy coding with Python.",  # Similar pair 2
+            "The cat sat on the mat.",  # Different from below
+            "Quantum physics explores subatomic particles.",  # Very different
+        ]
+        
+        # Get embeddings
+        embeddings = []
+        with torch.no_grad():
+            for sent in sentences:
+                inputs = tokenizer(sent, return_tensors="pt")
+                outputs = model(**inputs)
+                # CLS token embedding
+                emb = outputs.last_hidden_state[:, 0, :].squeeze()
+                embeddings.append(emb)
+        
+        # Compute cosine similarities
+        def cosine_sim(a, b):
+            return (a @ b) / (a.norm() * b.norm())
+        
+        # Similar pairs should have high similarity
+        sim1 = cosine_sim(embeddings[0], embeddings[1]).item()
+        sim2 = cosine_sim(embeddings[2], embeddings[3]).item()
+        
+        # Different pair should have lower similarity
+        diff = cosine_sim(embeddings[4], embeddings[5]).item()
+        
+        print(f"    Similar pair 1 (cat/feline): {sim1:.3f}")
+        print(f"    Similar pair 2 (programming): {sim2:.3f}")
+        print(f"    Different pair (cat/quantum): {diff:.3f}")
+        
+        # Sanity checks
+        if sim1 < 0.7:
+            return False, f"Similar sentences have low similarity: {sim1:.3f}"
+        if sim2 < 0.7:
+            return False, f"Similar sentences have low similarity: {sim2:.3f}"
+        if diff > 0.8:
+            return False, f"Different sentences have high similarity: {diff:.3f}"
+        if diff > max(sim1, sim2):
+            return False, f"Different pair ({diff:.3f}) more similar than similar pairs ({sim1:.3f}, {sim2:.3f})"
+        
+        return True, "Cosine similarity sanity check passed"
+        
+    except Exception as e:
+        return False, f"Cosine similarity test failed: {e}"
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Validate exported HuggingFace models",
@@ -332,6 +393,16 @@ Examples:
     else:
         print(f"  ✅ {message}")
     results.append(("Pipeline test", success, message))
+    
+    # 6. Test cosine similarity sanity
+    print("\n🔬 Testing cosine similarity...")
+    success, message = test_cosine_similarity_sanity(model_path)
+    if not success:
+        print(f"  ❌ {message}")
+        all_passed = False
+    else:
+        print(f"  ✅ {message}")
+    results.append(("Cosine similarity", success, message))
     
     # Print summary
     print("\n" + "=" * 60)
