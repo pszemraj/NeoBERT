@@ -268,7 +268,7 @@ tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
 model = AutoModelForMaskedLM.from_pretrained(repo_id, trust_remote_code=True)
 
 # Example: Predict masked tokens
-text = "NeoBERT is the most [MASK] model of its kind!"
+text = f"NeoBERT is the most {{tokenizer.mask_token}} model of its kind!"
 inputs = tokenizer(text, return_tensors="pt")
 outputs = model(**inputs)
 
