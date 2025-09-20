@@ -147,5 +147,5 @@ The cosine similarity test ensures the model produces meaningful embeddings:
 ## Next Steps
 
 - Upload to HuggingFace Hub: Use `huggingface-cli upload` or the web interface
-- Fine-tune for downstream tasks: See [evaluation.md](evaluation.md) for GLUE fine-tuning
+- Fine-tune for downstream tasks: See [evaluation docs](../../docs/evaluation.md) for GLUE fine-tuning
 - Deploy for inference: Compatible with any HuggingFace Transformers deployment

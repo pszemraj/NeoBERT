@@ -182,4 +182,4 @@ When modifying the GLUE trainer:
 
 - [`scripts/evaluation/`](../../../scripts/evaluation/) - Evaluation scripts
 - [`configs/glue/`](../../../configs/glue/) - GLUE task configurations
-- [`jobs/run_all_glue.sh`](../../../jobs/run_all_glue.sh) - Batch evaluation script
+- [`scripts/evaluation/run_all_glue.sh`](../../../scripts/evaluation/run_all_glue.sh) - Batch evaluation script
