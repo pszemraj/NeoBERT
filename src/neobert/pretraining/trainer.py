@@ -1,3 +1,5 @@
+import json
+import logging
 import os
 import re
 
@@ -20,7 +22,7 @@ from torch.nn import CrossEntropyLoss
 from tqdm import tqdm
 from transformers import BatchEncoding
 
-from ..config import Config
+from ..config import Config, ConfigLoader
 from ..dataloader import get_dataloader
 from ..model import NeoBERTConfig, NeoBERTLMHead
 from ..optimizer import get_optimizer
@@ -29,6 +31,9 @@ from ..tokenizer import get_tokenizer
 
 # Our metric object and model
 from .metrics import Metrics
+
+# Set up logger
+logger = logging.getLogger(__name__)
 
 
 def to_target_batch_size(
@@ -101,11 +106,10 @@ def trainer(cfg: Config):
             + 1
         )
 
-    # Accelerator object
+    # Accelerator object - disable automatic checkpointing to avoid duplicate checkpoints/ directory
     project_config = ProjectConfiguration(
         cfg.trainer.output_dir,
-        automatic_checkpoint_naming=True,
-        total_limit=2,  # Keep only 2 accelerate checkpoints
+        automatic_checkpoint_naming=False,  # We handle checkpointing manually in model_checkpoints/
         iteration=iteration,
     )
     kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
@@ -528,16 +532,49 @@ def trainer(cfg: Config):
                     metrics["train/learning_rate"] = optimizer.param_groups[0]["lr"]
                     metrics.log(accelerator)
 
-                # Save the accelerator state from the main process
-                if metrics["train/steps"] % cfg.trainer.save_steps == 0:
-                    accelerator.save_state()
+                # Skip saving accelerator state - we only need model checkpoints
+                # This avoids the duplicate checkpoints/ directory
 
                 # Save the pytorch model
                 if metrics["train/steps"] % cfg.trainer.save_steps == 0:
+                    # Clean up old checkpoints if limit is set
+                    save_total_limit = getattr(cfg.trainer, "save_total_limit", 0)
+                    max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
+                    limit = max(save_total_limit, max_ckpt)  # Use whichever is set
+
+                    if limit > 0 and os.path.exists(model_checkpoint_dir):
+                        # Get all checkpoint directories
+                        checkpoints = []
+                        for item in os.listdir(model_checkpoint_dir):
+                            item_path = os.path.join(model_checkpoint_dir, item)
+                            if os.path.isdir(item_path) and item.isdigit():
+                                checkpoints.append(int(item))
+
+                        # Sort and remove oldest checkpoints if over limit
+                        if len(checkpoints) >= limit:
+                            checkpoints.sort()
+                            # Remove oldest checkpoints
+                            for old_ckpt in checkpoints[: len(checkpoints) - limit + 1]:
+                                old_path = os.path.join(
+                                    model_checkpoint_dir, str(old_ckpt)
+                                )
+                                if os.path.exists(old_path):
+                                    import shutil
+
+                                    shutil.rmtree(old_path)
+                                    # Use logger instead of accelerator.print to avoid progress bar interference
+                                    if accelerator.is_main_process:
+                                        logger.info(
+                                            f"Removed old checkpoint: {old_path} (limit={limit})"
+                                        )
+
                     # Save the checkpoint
                     if accelerator.distributed_type is DistributedType.DEEPSPEED:
                         model.save_checkpoint(
                             model_checkpoint_dir, tag=metrics["train/steps"]
+                        )
+                        checkpoint_path = os.path.join(
+                            model_checkpoint_dir, str(metrics["train/steps"])
                         )
                     else:
                         path = os.path.join(
@@ -547,6 +584,35 @@ def trainer(cfg: Config):
                         torch.save(
                             model.state_dict(),
                             os.path.join(path, "state_dict.pt"),
+                        )
+                        checkpoint_path = path
+
+                    # Save config and tokenizer info (only from main process)
+                    if accelerator.is_main_process:
+                        # Save config as YAML
+                        config_path = os.path.join(checkpoint_path, "config.yaml")
+                        ConfigLoader.save(cfg, config_path)
+
+                        # Save tokenizer info as JSON
+                        tokenizer_info = {
+                            "tokenizer_name": cfg.tokenizer.path or cfg.tokenizer.name,
+                            "vocab_size": tokenizer.vocab_size,
+                            "pad_token_id": tokenizer.pad_token_id,
+                        }
+                        tokenizer_info_path = os.path.join(
+                            checkpoint_path, "tokenizer_info.json"
+                        )
+                        with open(tokenizer_info_path, "w") as f:
+                            json.dump(tokenizer_info, f, indent=2)
+
+                        # Save full tokenizer with save_pretrained
+                        tokenizer_dir = os.path.join(checkpoint_path, "tokenizer")
+                        os.makedirs(tokenizer_dir, exist_ok=True)
+                        tokenizer.save_pretrained(tokenizer_dir)
+
+                        # Use logger instead of accelerator.print to avoid progress bar interference
+                        logger.info(
+                            f"Saved checkpoint with config, tokenizer info, and full tokenizer to {checkpoint_path}"
                         )
 
                 # Zero out the optimizer

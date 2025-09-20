@@ -94,7 +94,9 @@ class TestConfigModelIntegration(unittest.TestCase):
         pretrain_config = ConfigLoader.load(
             str(self.config_dir / "pretraining" / "test_tiny_pretrain.yaml")
         )
-        glue_config = ConfigLoader.load(str(self.config_dir / "evaluation" / "test_tiny_glue.yaml"))
+        glue_config = ConfigLoader.load(
+            str(self.config_dir / "evaluation" / "test_tiny_glue.yaml")
+        )
         contrastive_config = ConfigLoader.load(
             str(self.config_dir / "contrastive" / "test_tiny_contrastive.yaml")
         )

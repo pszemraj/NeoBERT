@@ -33,18 +33,17 @@ datacollator:
   pad_to_multiple_of: 8
 
 trainer:
-  output_dir: "./outputs/smollm2_custom_tokenizer"
-  run_name: "neoBERT-120m-smollm2-wordpiece_msp_tok"
+  output_dir: "./outputs/neobert_100m_100k"
+  run_name: "neobert-100m-100k"
   max_steps: 100000
   per_device_train_batch_size: 16
   per_device_eval_batch_size: 16
   gradient_accumulation_steps: 4
-  learning_rate: 1e-4
   warmup_steps: 5000
   logging_steps: 25
   eval_steps: 5000
   save_steps: 10000
-  dataloader_num_workers: 4
+  save_total_limit: 3  # Keep only last 3 checkpoints
   remove_unused_columns: false
   report_to: ["wandb"]
   bf16: true
@@ -61,11 +60,10 @@ optimizer:
 scheduler:
   name: "cosine"
   warmup_steps: 5000
-  total_steps: 100000
 
 wandb:
-  project: "neobert-testing"
-  name: "neoBERT-120m-smollm2-wordpiece_msp_tok"
+  project: "neobert-pretraining"
+  name: "neobert-100m-100k"
   mode: "online"
 
 # Additional settings

@@ -6,86 +6,129 @@ This guide covers evaluating NeoBERT models on various benchmarks.
 
 ### Prerequisites
 
-GLUE evaluation requires a pretrained NeoBERT model. First train a model:
+GLUE evaluation requires a pretrained NeoBERT model. You can:
+
+1. Use an existing checkpoint from pretraining
+2. Train a new model (see [Training Guide](training.md))
+3. Test with random weights using `--glue.allow_random_weights true`
+
+### Running Single GLUE Task
 
 ```bash
-# Train a small model for testing
-python scripts/pretraining/pretrain.py \
-    --config configs/test_tiny_pretrain.yaml \
-    --trainer.max_steps 100
-```
+# Run a specific GLUE task (e.g., CoLA)
+python scripts/evaluation/run_glue.py --config configs/glue/cola.yaml
 
-### Running Single Task
-
-```bash
+# Override checkpoint path
 python scripts/evaluation/run_glue.py \
-    --config configs/evaluate_neobert.yaml \
-    --task_name cola \
-    --model_name_or_path outputs/pretrained_model
+    --config configs/glue/cola.yaml \
+    --glue.pretrained_checkpoint_dir ./outputs/your_checkpoint \
+    --glue.pretrained_checkpoint 50000
 ```
 
 ### Running All GLUE Tasks
 
 ```bash
-# Automated script for all tasks
-python scripts/evaluation/run_glue.py \
-    --config configs/evaluate_neobert.yaml \
-    --task_name all \
-    --model_name_or_path outputs/pretrained_model
+# Run full GLUE evaluation suite
+bash scripts/run_full_glue.sh
+
+# Tasks run in order from smallest to largest for quick feedback:
+# WNLI, RTE, MRPC, STS-B, CoLA, SST-2, QNLI, QQP, MNLI
 ```
 
 ### GLUE Task Details
 
-| Task | Type | Metrics | Description |
-|------|------|---------|-------------|
-| CoLA | Classification | Matthews Corr | Linguistic acceptability |
-| MNLI | Classification | Accuracy | Natural language inference |
-| MRPC | Classification | F1/Accuracy | Paraphrase detection |
-| QNLI | Classification | Accuracy | Question answering NLI |
-| QQP | Classification | F1/Accuracy | Question pair similarity |
-| RTE | Classification | Accuracy | Recognizing textual entailment |
-| SST-2 | Classification | Accuracy | Sentiment analysis |
-| STS-B | Regression | Pearson/Spearman | Semantic textual similarity |
-| WNLI | Classification | Accuracy | Coreference resolution |
+| Task  | Type           | Metrics          | Train Size | Description                    |
+| ----- | -------------- | ---------------- | ---------- | ------------------------------ |
+| CoLA  | Classification | Matthews Corr    | 8.5k       | Linguistic acceptability       |
+| SST-2 | Classification | Accuracy         | 67k        | Sentiment analysis             |
+| MRPC  | Classification | F1/Accuracy      | 3.7k       | Paraphrase detection           |
+| STS-B | Regression     | Pearson/Spearman | 5.7k       | Semantic textual similarity    |
+| QQP   | Classification | F1/Accuracy      | 364k       | Question pair similarity       |
+| MNLI  | Classification | Accuracy         | 393k       | Natural language inference     |
+| QNLI  | Classification | Accuracy         | 105k       | Question answering NLI         |
+| RTE   | Classification | Accuracy         | 2.5k       | Recognizing textual entailment |
+| WNLI  | Classification | Accuracy         | 600        | Coreference resolution         |
 
-### Configuration for GLUE
+### Configuration Structure
+
+All GLUE configs are in `configs/glue/` with standardized structure:
 
 ```yaml
+task: glue
+
+model:
+  name_or_path: neobert-100m
+  pretrained_checkpoint_dir: ./outputs/neobert_100m_100k
+  pretrained_checkpoint: 100000  # Step number or "latest"
+  pretrained_config_path: ./outputs/neobert_100m_100k/model_checkpoints/100000/config.yaml
+  # Model architecture params...
+
 glue:
-  task_name: cola
-  num_labels: 2  # Automatically set based on task
-  max_seq_length: 128
-  
+  task_name: cola  # Task identifier
+  num_labels: 2    # Automatically set based on task
+  max_seq_length: 128  # Most tasks use 128, RTE uses 256
+
 trainer:
+  output_dir: ./outputs/glue/neobert-100m/cola
   num_train_epochs: 3
+  per_device_train_batch_size: 32
   per_device_eval_batch_size: 32
-  eval_steps: 500
-  save_steps: 500
+  eval_strategy: steps  # Evaluate periodically
+  eval_steps: 50       # Task-dependent (smaller for small datasets)
+  save_strategy: steps
+  save_steps: 50
+  save_total_limit: 3  # Keep only best 3 checkpoints
+  early_stopping: 5    # Stop if no improvement for 5 evals
   metric_for_best_model: eval_matthews_correlation  # Task-specific
-  greater_is_better: true
+  mixed_precision: bf16
+  tf32: true
+
+optimizer:
+  name: adamw
+  lr: 2e-5  # Standard GLUE learning rate
+  weight_decay: 0.01
+
+scheduler:
+  name: linear
+  warmup_percent: 10  # 10% warmup is standard for GLUE
+
+wandb:
+  project: neobert-glue
+  name: neobert-100m-{task}-{checkpoint}
 ```
 
-### Task-Specific Tips
+### Summarizing Results
 
-**CoLA (Corpus of Linguistic Acceptability)**:
+After running GLUE evaluation, use the summary script:
+
 ```bash
---trainer.learning_rate 2e-5 \
---trainer.num_train_epochs 3 \
---trainer.warmup_steps 320
+# Summarize results from a specific path
+python scripts/summarize_glue.py outputs/glue/neobert-100m
+
+# Compare against different baselines
+python scripts/summarize_glue.py outputs/glue/neobert-100m --baseline roberta-base
+python scripts/summarize_glue.py outputs/glue/neobert-100m --baseline bert-large
+python scripts/summarize_glue.py outputs/glue/neobert-100m --baseline none
+
+# Works with any output directory structure
+python scripts/summarize_glue.py ./experiments/test_123/glue_results
 ```
 
-**MNLI (Multi-Genre NLI)**:
-```bash
---glue.max_seq_length 128 \
---trainer.per_device_train_batch_size 32 \
---trainer.learning_rate 3e-5
-```
+### Output Structure
 
-**STS-B (Semantic Textual Similarity)**:
-```bash
-# Note: This is a regression task
---glue.task_name stsb \
---trainer.metric_for_best_model eval_combined_score
+GLUE results are organized as:
+
+```
+outputs/
+└── glue/
+    └── {model_name}/
+        ├── cola/
+        │   ├── checkpoint-{step}/
+        │   ├── all_results.json
+        │   └── all_results_step_{step}.json
+        ├── sst2/
+        ├── mrpc/
+        └── ...
 ```
 
 ## MTEB Benchmark
@@ -93,26 +136,11 @@ trainer:
 ### Running MTEB Evaluation
 
 ```bash
+# Run full MTEB evaluation
 python scripts/evaluation/run_mteb.py \
-    --config configs/evaluate_neobert.yaml \
-    --model_name_or_path outputs/pretrained_model \
-    --task_types all
-```
+    --config configs/evaluate_neobert.yaml
 
-### MTEB Task Types
-
-- `retrieval`: Information retrieval tasks
-- `sts`: Semantic textual similarity
-- `clustering`: Text clustering
-- `pair_classification`: Pair classification
-- `reranking`: Passage reranking
-- `classification`: Text classification
-- `summarization`: Summarization evaluation
-
-### Specific MTEB Tasks
-
-```bash
-# Run specific task type
+# Run specific task types
 python scripts/evaluation/run_mteb.py \
     --config configs/evaluate_neobert.yaml \
     --task_types retrieval,sts
@@ -122,6 +150,16 @@ python scripts/evaluation/run_mteb.py \
     --config configs/evaluate_neobert.yaml \
     --tasks "MSMARCO,NQ,HotpotQA"
 ```
+
+### MTEB Task Types
+
+- **Retrieval**: Information retrieval (MSMARCO, NQ, HotpotQA, etc.)
+- **STS**: Semantic textual similarity
+- **Clustering**: Text clustering
+- **PairClassification**: Pair classification tasks
+- **Reranking**: Passage reranking
+- **Classification**: Text classification
+- **Summarization**: Summarization evaluation
 
 ### MTEB Configuration
 
@@ -136,283 +174,162 @@ mteb:
   corpus_chunk_size: 50000  # For retrieval tasks
 ```
 
-## Custom Evaluation
+## Loading Pretrained Checkpoints
 
-### Perplexity Evaluation
-
-```bash
-python scripts/evaluation/pseudo_perplexity.py \
-    --model_name_or_path outputs/pretrained_model \
-    --dataset_name wikitext \
-    --dataset_config wikitext-103-raw-v1 \
-    --split test
-```
-
-### Zero-Shot Evaluation
+NeoBERT uses DeepSpeed checkpoints from pretraining. The GLUE evaluation system handles this automatically:
 
 ```python
-from neobert.model import NeoBERT
-from transformers import pipeline
+# In configs, specify:
+glue:
+  pretrained_checkpoint_dir: ./outputs/neobert_100m_100k
+  pretrained_checkpoint: 100000  # or "latest"
 
-# Load model
-model = NeoBERT.from_pretrained("outputs/pretrained_model")
-tokenizer = AutoTokenizer.from_pretrained("outputs/pretrained_model")
-
-# Create pipeline
-classifier = pipeline(
-    "zero-shot-classification",
-    model=model,
-    tokenizer=tokenizer
-)
-
-# Evaluate
-result = classifier(
-    "This movie is fantastic!",
-    candidate_labels=["positive", "negative", "neutral"]
-)
-```
-
-### Domain-Specific Evaluation
-
-```python
-# Custom metric example
-def evaluate_domain_specific(model, dataset):
-    predictions = []
-    references = []
-    
-    for batch in dataloader:
-        with torch.no_grad():
-            outputs = model(**batch)
-            preds = outputs.logits.argmax(dim=-1)
-            predictions.extend(preds.tolist())
-            references.extend(batch["labels"].tolist())
-    
-    # Calculate domain-specific metrics
-    accuracy = accuracy_score(references, predictions)
-    f1 = f1_score(references, predictions, average='weighted')
-    
-    return {"accuracy": accuracy, "f1": f1}
-```
-
-## Evaluation Strategies
-
-### 1. Few-Shot Learning
-
-```python
-# Configure for few-shot
-trainer_args = TrainingArguments(
-    num_train_epochs=10,  # More epochs for small data
-    learning_rate=5e-5,   # Higher LR
-    per_device_train_batch_size=8,
-    gradient_accumulation_steps=2,
-    warmup_ratio=0.1,
-    weight_decay=0.01,
-)
-
-# Sample few examples per class
-train_dataset = train_dataset.select(range(16))  # 16 examples
-```
-
-### 2. Cross-Validation
-
-```python
-from sklearn.model_selection import KFold
-
-kfold = KFold(n_splits=5, shuffle=True, random_state=42)
-cv_scores = []
-
-for fold, (train_idx, val_idx) in enumerate(kfold.split(dataset)):
-    # Train on fold
-    fold_model = train_on_fold(train_idx, val_idx)
-    
-    # Evaluate
-    score = evaluate(fold_model, val_idx)
-    cv_scores.append(score)
-
-print(f"CV Score: {np.mean(cv_scores)} ± {np.std(cv_scores)}")
-```
-
-### 3. Multi-Task Evaluation
-
-```bash
-# Train on multiple GLUE tasks jointly
-python scripts/evaluation/run_glue.py \
-    --config configs/evaluate_neobert.yaml \
-    --task_name cola,mrpc,rte \
-    --multi_task true
-```
-
-## Metrics and Interpretation
-
-### Classification Metrics
-
-```python
-from sklearn.metrics import classification_report
-
-# Get detailed metrics
-report = classification_report(
-    y_true=labels,
-    y_pred=predictions,
-    target_names=class_names,
-    output_dict=True
-)
-
-# Key metrics
-accuracy = report['accuracy']
-macro_f1 = report['macro avg']['f1-score']
-weighted_f1 = report['weighted avg']['f1-score']
-```
-
-### Regression Metrics
-
-```python
-from scipy.stats import pearsonr, spearmanr
-from sklearn.metrics import mean_squared_error
-
-# For STS-B
-pearson_corr, _ = pearsonr(predictions, labels)
-spearman_corr, _ = spearmanr(predictions, labels)
-mse = mean_squared_error(labels, predictions)
-```
-
-### Embedding Quality Metrics
-
-```python
-# Intrinsic evaluation
-from sklearn.metrics import silhouette_score
-
-# Clustering quality
-silhouette = silhouette_score(embeddings, cluster_labels)
-
-# Semantic similarity
-cos_sim = cosine_similarity(embeddings)
-```
-
-## Visualization
-
-### Training Curves
-
-```python
-import matplotlib.pyplot as plt
-
-# Plot loss curves
-plt.figure(figsize=(10, 6))
-plt.plot(train_losses, label='Train Loss')
-plt.plot(eval_losses, label='Eval Loss')
-plt.xlabel('Steps')
-plt.ylabel('Loss')
-plt.legend()
-plt.savefig('training_curves.png')
-```
-
-### Confusion Matrix
-
-```python
-from sklearn.metrics import confusion_matrix
-import seaborn as sns
-
-cm = confusion_matrix(y_true, y_pred)
-plt.figure(figsize=(8, 6))
-sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-plt.xlabel('Predicted')
-plt.ylabel('Actual')
-plt.savefig('confusion_matrix.png')
-```
-
-### Embedding Visualization
-
-```python
-from sklearn.manifold import TSNE
-
-# Reduce dimensions
-tsne = TSNE(n_components=2, random_state=42)
-embeddings_2d = tsne.fit_transform(embeddings)
-
-# Plot
-plt.scatter(embeddings_2d[:, 0], embeddings_2d[:, 1], c=labels)
-plt.colorbar()
-plt.savefig('embeddings_tsne.png')
+# The system will:
+# 1. Load the DeepSpeed checkpoint
+# 2. Extract model weights
+# 3. Initialize the GLUE model with these weights
+# 4. Add task-specific classification head
 ```
 
 ## Best Practices
 
-### 1. Reproducibility
+### 1. Hyperparameter Selection
 
-```bash
-# Set seeds
---seed 42 \
---trainer.seed 42 \
---trainer.data_seed 42
+Standard GLUE hyperparameters that work well:
+
+- Learning rate: 2e-5 (occasionally 1e-5 or 3e-5)
+- Batch size: 32 (16 for large models)
+- Epochs: 3 (sometimes 5 for small datasets)
+- Warmup: 10% of training steps
+- Max sequence length: 128 (256 for RTE)
+
+### 2. Early Stopping
+
+Configure early stopping to prevent overfitting:
+
+```yaml
+trainer:
+  early_stopping: 5  # Patience in evaluation steps
+  load_best_model_at_end: true
+  metric_for_best_model: eval_{metric}
+  greater_is_better: true  # false for loss
 ```
 
-### 2. Statistical Significance
+### 3. Evaluation Frequency
 
-```python
-# Multiple runs with different seeds
-seeds = [42, 1337, 2023, 3407, 5555]
-scores = []
+Balance between compute cost and monitoring:
 
-for seed in seeds:
-    score = evaluate_with_seed(seed)
-    scores.append(score)
+- Small datasets (WNLI, RTE, MRPC): eval_steps=20-50
+- Medium datasets (CoLA, STS-B): eval_steps=50-100
+- Large datasets (SST-2, QNLI): eval_steps=500
+- Very large (QQP, MNLI): eval_steps=1000-2000
 
-mean_score = np.mean(scores)
-std_score = np.std(scores)
-print(f"Score: {mean_score:.3f} ± {std_score:.3f}")
-```
+### 4. Mixed Precision
 
-### 3. Compute Efficiency
+Always use bf16 for modern GPUs:
 
-```bash
-# Batch evaluation
---trainer.per_device_eval_batch_size 128 \
---trainer.dataloader_num_workers 4 \
---trainer.bf16 true \
---trainer.mixed_precision "bf16"
+```yaml
+trainer:
+  mixed_precision: bf16
+  tf32: true  # Additional speedup on Ampere+
 ```
 
 ## Troubleshooting
 
-### Out of Memory During Evaluation
+### Flash Attention Issues
+
+If you encounter Flash Attention errors with GLUE:
+
+```
+Flash attention is not supported for GLUE evaluation due to memory alignment issues
+```
+
+This is expected - GLUE uses variable-length sequences that can cause issues with Flash Attention. The system automatically falls back to standard attention.
+
+### Out of Memory
 
 ```bash
 # Reduce batch size
---trainer.per_device_eval_batch_size 16
+--trainer.per_device_train_batch_size 16
+--trainer.gradient_accumulation_steps 2  # Maintain effective batch size
 
-# Use gradient checkpointing
---trainer.gradient_checkpointing true
-
-# Clear cache between evaluations
-torch.cuda.empty_cache()
+# Enable gradient checkpointing
+--model.gradient_checkpointing true
 ```
 
-### Slow Evaluation
+### Slow Training
 
 ```bash
-# Enable faster inference
---model.use_cache true \
---trainer.bf16 true \
---trainer.dataloader_pin_memory true
+# Ensure mixed precision is enabled
+--trainer.mixed_precision bf16
+--trainer.tf32 true
+
+# Increase dataloader workers
+--trainer.dataloader_num_workers 4
 ```
 
-### Metric Computation Issues
+### Poor Results
+
+If getting random or near-random results:
+
+1. Check the pretrained checkpoint loaded correctly (check logs)
+2. Verify learning rate (2e-5 is standard)
+3. Ensure sufficient training (3 epochs minimum)
+4. Check early stopping isn't too aggressive
+
+## Advanced Usage
+
+### Custom Metrics
+
+Add custom metrics to GLUE evaluation:
 
 ```python
-# Handle edge cases
-def safe_metric_computation(preds, labels):
-    if len(np.unique(labels)) == 1:
-        # Single class - return 0 for undefined metrics
-        return {"f1": 0.0, "precision": 0.0, "recall": 1.0}
-    
+def compute_metrics(eval_pred):
+    predictions, labels = eval_pred
+    predictions = np.argmax(predictions, axis=1)
+
+    # Standard metrics
+    accuracy = accuracy_score(labels, predictions)
+
+    # Add custom metrics
+    custom_metric = your_custom_function(labels, predictions)
+
     return {
-        "f1": f1_score(labels, preds, average='macro'),
-        "precision": precision_score(labels, preds, average='macro'),
-        "recall": recall_score(labels, preds, average='macro')
+        "accuracy": accuracy,
+        "custom": custom_metric
     }
 ```
 
+### Multi-Run Evaluation
+
+For statistical significance:
+
+```bash
+# Run with different seeds
+for seed in 42 1337 2023; do
+    python scripts/evaluation/run_glue.py \
+        --config configs/glue/cola.yaml \
+        --trainer.seed $seed \
+        --trainer.output_dir outputs/glue/seed_$seed
+done
+
+# Aggregate results
+python scripts/aggregate_results.py outputs/glue/seed_*
+```
+
+## WandB Integration
+
+All GLUE runs are tracked in WandB:
+
+- Project: `neobert-glue`
+- Run names: `{model}-{task}-{checkpoint}`
+- Logged metrics: loss, task metrics, learning rate
+- Logged configs: full configuration
+
+View results at: <https://wandb.ai/your-username/neobert-glue>
+
 ## Next Steps
 
-- Review [Training Guide](training.md) for fine-tuning tips
-- Check [Model Architecture](architecture.md) for model variants
-- See [Configuration](configuration.md) for evaluation settings
+- Review [Training Guide](training.md) for pretraining details
+- Check [Configuration Guide](configuration.md) for config system
+- See [Testing Guide](testing.md) for running tests

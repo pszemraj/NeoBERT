@@ -1,0 +1,82 @@
+task: "glue"
+
+# Model configuration - pointing to the pretrained 100k checkpoint
+model:
+  name_or_path: "neobert-100m"
+  # Pretrained model checkpoint (100k steps, ~2.0 CE loss)
+  pretrained_checkpoint_dir: "./outputs/neobert_100m_100k"
+  pretrained_checkpoint: 100000
+  pretrained_config_path: "./outputs/neobert_100m_100k/model_checkpoints/100000/config.yaml"
+  # Model architecture (must match pretrained)
+  hidden_size: 768
+  num_hidden_layers: 12
+  num_attention_heads: 12
+  intermediate_size: 3072
+  dropout_prob: 0.1
+  vocab_size: 30522
+  max_position_embeddings: 512
+  hidden_act: "swiglu"
+  # Classifier settings
+  classifier_dropout: 0.1
+  classifier_init_range: 0.02
+
+# GLUE-specific configuration
+glue:
+  task_name: "cola"
+  num_labels: 2
+  max_seq_length: 128  # Standard for CoLA/SST-2
+
+# Tokenizer
+tokenizer:
+  name: "bert-base-uncased"
+  max_length: 128
+
+# Training configuration - following best practices for GLUE
+trainer:
+  output_dir: "./outputs/glue/neobert-100m/cola"
+  num_train_epochs: 3  # Standard for GLUE fine-tuning
+  max_steps: -1  # Auto-calculate from epochs
+  per_device_train_batch_size: 32  # Increased from repo default of 8
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 1
+  # Evaluation and saving
+  eval_strategy: "steps"
+  eval_steps: 200  # Reasonable for CoLA dataset size
+  save_strategy: "steps"
+  save_steps: 200
+  save_total_limit: 3
+  logging_steps: 50
+  # Early stopping
+  early_stopping: 5  # Stop if no improvement for 5 evaluations
+  metric_for_best_model: "eval_matthews_correlation"
+  greater_is_better: true
+  load_best_model_at_end: true
+  # Mixed precision
+  mixed_precision: "bf16"  # Using bf16 instead of fp16
+  tf32: true
+  # Misc
+  seed: 42
+  report_to: ["wandb"]
+
+# Optimizer - GLUE best practices
+optimizer:
+  name: "adamw"
+  lr: 2e-5  # Standard for GLUE (not 1e-4 from repo)
+  weight_decay: 0.01
+  betas: [0.9, 0.999]  # Standard BERT fine-tuning (not 0.95)
+  eps: 1e-8
+
+# Learning rate scheduler
+scheduler:
+  name: "linear"
+  warmup_percent: 10  # 10% warmup is standard for GLUE
+
+# Data collator
+datacollator:
+  pad_to_multiple_of: 8
+
+# Weights & Biases
+wandb:
+  project: "neobert-glue"
+  name: "neobert-100m-cola-100k"
+  mode: "online"  # Set to "disabled" to turn off
