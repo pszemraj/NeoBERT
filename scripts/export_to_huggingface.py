@@ -178,21 +178,24 @@ def export_checkpoint(checkpoint_path: Path, output_dir: Path = None):
     torch.save(mapped_state_dict, output_dir / "pytorch_model.bin")
     print("  Saved pytorch_model.bin")
 
-    # 3. Copy tokenizer files
-    print("Copying tokenizer files...")
+    # 3. Load tokenizer, fix model_max_length, and save
+    print("Loading and fixing tokenizer...")
     tokenizer_dir = checkpoint_path / "tokenizer"
     if tokenizer_dir.exists():
-        for file in tokenizer_dir.glob("*.json"):
-            shutil.copy(file, output_dir / file.name)
-            print(f"  Copied {file.name}")
-
-    # Also copy vocab.txt if it exists in original HF repo
-    orig_vocab = (
-        Path(__file__).parent.parent / "outputs" / "original-NeoBERT-hf" / "vocab.txt"
-    )
-    if orig_vocab.exists():
-        shutil.copy(orig_vocab, output_dir / "vocab.txt")
-        print("  Copied vocab.txt")
+        from transformers import AutoTokenizer
+        
+        # Load the tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_dir))
+        
+        # Get max_position_embeddings from model config
+        max_pos = model_config.get("max_position_embeddings", 4096)
+        
+        # Set the correct model_max_length
+        tokenizer.model_max_length = max_pos
+        
+        # Save the tokenizer with corrected config
+        tokenizer.save_pretrained(str(output_dir))
+        print(f"  Saved tokenizer with model_max_length={max_pos}")
 
     # 4. Copy HF modeling files
     copy_hf_modeling_files(output_dir)
