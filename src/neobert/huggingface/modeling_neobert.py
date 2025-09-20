@@ -6,7 +6,7 @@ from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from torch.nn.functional import scaled_dot_product_attention
 
-from typing import Optional, Tuple
+from typing import Optional
 import numpy as np
 
 from xformers.ops import SwiGLU

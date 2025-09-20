@@ -608,7 +608,7 @@ def trainer(cfg: Config):
                         # Save full tokenizer with save_pretrained
                         tokenizer_dir = os.path.join(checkpoint_path, "tokenizer")
                         os.makedirs(tokenizer_dir, exist_ok=True)
-                        
+
                         # Ensure tokenizer.model_max_length matches model's max_position_embeddings
                         tokenizer.model_max_length = cfg.model.max_position_embeddings
                         tokenizer.save_pretrained(tokenizer_dir)

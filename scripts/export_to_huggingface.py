@@ -185,13 +185,13 @@ def export_checkpoint(checkpoint_path: Path, output_dir: Path = None):
     if tokenizer_dir.exists():
         # Load the tokenizer
         tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_dir))
-        
+
         # Get max_position_embeddings from model config
         max_pos = model_config.get("max_position_embeddings", 4096)
-        
+
         # Set the correct model_max_length
         tokenizer.model_max_length = max_pos
-        
+
         # Save the tokenizer with corrected config
         tokenizer.save_pretrained(str(output_dir))
         print(f"  Saved tokenizer with model_max_length={max_pos}")
