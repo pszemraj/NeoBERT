@@ -178,6 +178,5 @@ All evaluations log to:
 
 ## See Also
 
-- [`docs/known_issues.md`](../../docs/known_issues.md) - Known limitations including flash attention compatibility
-- [`configs/eval/`](../../configs/eval/) - Pre-configured evaluation configs
+- [`configs/glue/`](../../configs/glue/) - Pre-configured GLUE evaluation configs
 - [`src/neobert/glue/`](../../src/neobert/glue/) - GLUE trainer implementation

@@ -164,10 +164,9 @@ glue_outputs/
 
 ## Known Issues
 
-See [`docs/known_issues.md`](../../../docs/known_issues.md) for:
-- Flash attention compatibility details
-- Workarounds for memory alignment issues
-- Future improvement plans
+- **Flash Attention Compatibility**: Flash attention is disabled for GLUE evaluation due to memory alignment issues with head_dim=64
+- **Workaround**: The trainer automatically sets `flash_attention=False` when loading models
+- **Future Plans**: Upgrade to Flash Attention 3 which supports head_dim=64
 
 ## Development
 
@@ -182,5 +181,5 @@ When modifying the GLUE trainer:
 ## Related
 
 - [`scripts/evaluation/`](../../../scripts/evaluation/) - Evaluation scripts
-- [`configs/eval/`](../../../configs/eval/) - GLUE task configurations
+- [`configs/glue/`](../../../configs/glue/) - GLUE task configurations
 - [`jobs/run_all_glue.sh`](../../../jobs/run_all_glue.sh) - Batch evaluation script

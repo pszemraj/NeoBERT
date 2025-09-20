@@ -384,4 +384,4 @@ class NeoBERTWithAdapter(NeoBERT):
 
 - Learn about [Training](training.md) NeoBERT models
 - Explore [Configuration](configuration.md) options
-- See [Performance Tuning](performance.md) guide
+- Review [Evaluation](evaluation.md) guide
