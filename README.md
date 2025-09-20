@@ -1,8 +1,30 @@
 # NeoBERT
 
+> [!NOTE]
+> This is a fork of the [original chandar-lab/NeoBERT](https://github.com/chandar-lab/NeoBERT), refactored to support experimentation. ⚠️ WIP/active development⚠️
+
+---
+
+- [NeoBERT](#neobert)
+  - [Description](#description)
+  - [Get started](#get-started)
+  - [How to use](#how-to-use)
+  - [Documentation](#documentation)
+  - [Features](#features)
+  - [License](#license)
+  - [Citation](#citation)
+  - [Training and Development](#training-and-development)
+    - [Configuration System](#configuration-system)
+    - [Repository Structure](#repository-structure)
+    - [Quick Start for Training](#quick-start-for-training)
+    - [Testing](#testing)
+  - [Contact](#contact)
+
+---
+
 ## Description
 
-NeoBERT is a **next-generation encoder** model for English text representation, pre-trained from scratch on the RefinedWeb dataset. NeoBERT integrates state-of-the-art advancements in architecture, modern data, and optimized pre-training methodologies. It is designed for seamless adoption: it serves as a plug-and-play replacement for existing base models, relies on an **optimal depth-to-width ratio**, and leverages an extended context length of **4,096 tokens**. Despite its compact 250M parameter footprint, it is the most efficient model of its kind and achieves **state-of-the-art results** on the massive MTEB benchmark, outperforming BERT large, RoBERTa large, NomicBERT, and ModernBERT under identical fine-tuning conditions. 
+NeoBERT is a **next-generation encoder** model for English text representation, pre-trained from scratch on the RefinedWeb dataset. NeoBERT integrates state-of-the-art advancements in architecture, modern data, and optimized pre-training methodologies. It is designed for seamless adoption: it serves as a plug-and-play replacement for existing base models, relies on an **optimal depth-to-width ratio**, and leverages an extended context length of **4,096 tokens**. Despite its compact 250M parameter footprint, it is the most efficient model of its kind and achieves **state-of-the-art results** on the massive MTEB benchmark, outperforming BERT large, RoBERTa large, NomicBERT, and ModernBERT under identical fine-tuning conditions.
 
 - Paper: [paper](https://arxiv.org/abs/2502.19587)
 - Model: [huggingface](https://huggingface.co/chandar-lab/NeoBERT)
@@ -30,7 +52,7 @@ pip install transformers torch  # Core dependencies
 
 ## How to use
 
-Load the model using Hugging Face Transformers:
+Load [the official model](https://huggingface.co/chandar-lab/NeoBERT) using Hugging Face Transformers:
 
 ```python
 from transformers import AutoModel, AutoTokenizer
@@ -60,22 +82,23 @@ For detailed guides and documentation, see the **[Documentation](docs/README.md)
 - [Architecture Details](docs/architecture.md) - Technical model details
 
 ## Features
-| **Feature**       | **NeoBERT**                             |
-|---------------------------|-----------------------------|
-| `Depth-to-width`        | 28 × 768  |
-| `Parameter count`           | 250M                        |
-| `Activation`               | SwiGLU                      |
-| `Positional embeddings`     | RoPE                        |
-| `Normalization`            | Pre-RMSNorm                 |
-| `Data Source`              | RefinedWeb                  |
-| `Data Size`                | 2.8 TB                       |
-| `Tokenizer`                | google/bert                 |
-| `Context length`    | 4,096                       |
-| `MLM Masking Rate`             | 20%                         |
-| `Optimizer`                | AdamW                       |
-| `Scheduler`                | CosineDecay                 |
-| `Training Tokens`          | 2.1 T                        |
-| `Efficiency`               | FlashAttention              |
+
+| **Feature**             | **NeoBERT**    |
+| ----------------------- | -------------- |
+| `Depth-to-width`        | 28 × 768       |
+| `Parameter count`       | 250M           |
+| `Activation`            | SwiGLU         |
+| `Positional embeddings` | RoPE           |
+| `Normalization`         | Pre-RMSNorm    |
+| `Data Source`           | RefinedWeb     |
+| `Data Size`             | 2.8 TB         |
+| `Tokenizer`             | google/bert    |
+| `Context length`        | 4,096          |
+| `MLM Masking Rate`      | 20%            |
+| `Optimizer`             | AdamW          |
+| `Scheduler`             | CosineDecay    |
+| `Training Tokens`       | 2.1 T          |
+| `Efficiency`            | FlashAttention |
 
 ## License
 
@@ -87,13 +110,13 @@ If you use this model in your research, please cite:
 
 ```bibtex
 @misc{breton2025neobertnextgenerationbert,
-      title={NeoBERT: A Next-Generation BERT}, 
+      title={NeoBERT: A Next-Generation BERT},
       author={Lola Le Breton and Quentin Fournier and Mariam El Mezouar and Sarath Chandar},
       year={2025},
       eprint={2502.19587},
       archivePrefix={arXiv},
       primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2502.19587}, 
+      url={https://arxiv.org/abs/2502.19587},
 }
 ```
 
@@ -101,7 +124,8 @@ If you use this model in your research, please cite:
 
 This repository includes the complete training and evaluation codebase for NeoBERT, featuring:
 
-### **Configuration System**
+### Configuration System
+
 - **Hierarchical YAML configs** with command-line overrides
 - **Task-specific configurations** for pretraining, GLUE, contrastive learning, and MTEB evaluation
 - **CPU-friendly test configs** for development and validation
@@ -117,47 +141,52 @@ python scripts/pretraining/pretrain.py \
     --optimizer.lr 2e-4
 ```
 
-### **Repository Structure**
+### Repository Structure
+
 - **`configs/`** - YAML configuration files ([README](configs/README.md))
 - **`scripts/`** - Training and evaluation scripts ([README](scripts/README.md))
 - **`jobs/`** - Shell scripts for running experiments ([README](jobs/README.md))
 - **`tests/`** - Comprehensive test suite ([README](tests/README.md))
 - **`src/neobert/`** - Core model and training code
 
-### **Quick Start for Training**
+### Quick Start for Training
 
 1. **Install dependencies:**
+
    ```bash
    pip install -e .
    ```
 
 2. **Run tests to validate setup:**
+
    ```bash
    python tests/run_tests.py
    ```
 
 3. **Start with a small test run:**
+
    ```bash
    python scripts/pretraining/pretrain.py --config tests/configs/pretraining/test_tiny_pretrain.yaml
    ```
 
 4. **Scale up to full training:**
+
    ```bash
    python scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml
    ```
 
-### **Testing**
+### Testing
+
 The repository includes a comprehensive test suite that verifies:
+
 - Configuration system functionality
-- Model architecture and forward passes  
+- Model architecture and forward passes
 - Training pipeline integration
 - CPU-only compatibility (no GPU required for tests)
 
-### **Documentation**
-Each directory contains detailed README files with usage examples, best practices, and troubleshooting guides.
 
 ## Contact
 
-For questions, do not hesitate to reach out and open an issue on here or on our **[GitHub](https://github.com/chandar-lab/NeoBERT)**.
+For questions, do not hesitate to reach out and open an issue on **[GitHub](https://github.com/chandar-lab/NeoBERT)**.
 
 ---
