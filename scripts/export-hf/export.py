@@ -200,10 +200,32 @@ def export_checkpoint(checkpoint_path: Path, output_dir: Path = None):
     # 4. Copy HF modeling files
     copy_hf_modeling_files(output_dir)
 
-    # 5. Create README
-    readme_content = f"""# NeoBERT Model
+    # 5. Create README with HuggingFace YAML header
+    # Get dataset info from config
+    dataset_name = neobert_config.get("dataset", {}).get("name", "")
+    if not dataset_name and neobert_config.get("dataset", {}).get("path"):
+        # If using local path, try to extract dataset name from path
+        dataset_path = neobert_config.get("dataset", {}).get("path", "")
+        dataset_name = dataset_path.split("/")[-1] if dataset_path else ""
+    
+    # Build HF YAML header
+    yaml_header = "---\n"
+    yaml_header += "library_name: transformers\n"
+    yaml_header += "license: mit\n"
+    if dataset_name:
+        yaml_header += f"datasets:\n- {dataset_name}\n"
+    yaml_header += "language:\n- en\n"
+    yaml_header += "---\n\n"
+    
+    # Get repo_id from output directory name
+    repo_id = output_dir.name
+    
+    # Convert full config to YAML string for details section
+    config_yaml = yaml.dump(neobert_config, default_flow_style=False, sort_keys=False)
+    
+    readme_content = f"""{yaml_header}# NeoBERT Model
 
-This is a NeoBERT model exported from training checkpoint.
+This is a NeoBERT model trained with [pszemraj/NeoBERT](https://github.com/pszemraj/NeoBERT) and exported to `transformers` format.
 
 ## Model Details
 - **Architecture**: NeoBERT
@@ -216,24 +238,56 @@ This is a NeoBERT model exported from training checkpoint.
 ## Usage
 
 ```python
-from transformers import AutoModel, AutoTokenizer
-
-model = AutoModel.from_pretrained("{output_dir.name}", trust_remote_code=True)
-tokenizer = AutoTokenizer.from_pretrained("{output_dir.name}")
-
-# For masked language modeling
-from transformers import AutoModelForMaskedLM
-model = AutoModelForMaskedLM.from_pretrained("{output_dir.name}", trust_remote_code=True)
-
-# Example usage
-text = "NeoBERT is an efficient model!"
-inputs = tokenizer(text, return_tensors="pt")
-outputs = model(**inputs)
-embeddings = outputs.last_hidden_state
+repo_id = "{repo_id}"  # Update this to your HF repo ID
 ```
 
-## Training Information
-{json.dumps(hf_config.get("training_info", {}), indent=2) if "training_info" in hf_config else "Not available"}
+### For Embeddings / Feature Extraction
+
+```python
+from transformers import AutoModel, AutoTokenizer
+
+tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
+model = AutoModel.from_pretrained(repo_id, trust_remote_code=True)
+
+# Example: Generate embeddings
+text = "NeoBERT is an efficient transformer model!"
+inputs = tokenizer(text, return_tensors="pt")
+outputs = model(**inputs)
+
+# Get CLS token embedding
+cls_embedding = outputs.last_hidden_state[:, 0, :]
+print(f"Embedding shape: {{cls_embedding.shape}}")
+```
+
+### For Masked Language Modeling
+
+```python
+from transformers import AutoModelForMaskedLM, AutoTokenizer
+
+tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
+model = AutoModelForMaskedLM.from_pretrained(repo_id, trust_remote_code=True)
+
+# Example: Predict masked tokens
+text = "NeoBERT is the most [MASK] model of its kind!"
+inputs = tokenizer(text, return_tensors="pt")
+outputs = model(**inputs)
+
+# Get predictions for masked token
+mask_token_index = (inputs.input_ids == tokenizer.mask_token_id)[0].nonzero(as_tuple=True)[0]
+predicted_token_id = outputs.logits[0, mask_token_index].argmax(axis=-1)
+predicted_token = tokenizer.decode(predicted_token_id)
+print(f"Predicted word: {{predicted_token}}")
+```
+
+## Training Configuration
+
+<details>
+  <summary><strong>Full Config</strong> (click to expand)</summary>
+
+  Full training config:
+  ```yaml
+{config_yaml}  ```
+</details>
 """
 
     with open(output_dir / "README.md", "w") as f:
