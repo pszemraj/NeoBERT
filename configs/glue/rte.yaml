@@ -31,8 +31,8 @@ trainer:
   eval_strategy: steps
   eval_steps: 50
   save_strategy: steps
-  save_steps: 50
-  save_total_limit: 3
+  save_steps: -1  # Disabled
+  save_total_limit: 0  # No checkpoints
   logging_steps: 100
   early_stopping: 5
   metric_for_best_model: eval_accuracy
