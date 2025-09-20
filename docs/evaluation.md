@@ -7,6 +7,7 @@ This guide covers evaluating NeoBERT models on various benchmarks.
 ### Prerequisites
 
 GLUE evaluation requires a pretrained NeoBERT model. You can:
+
 1. Use an existing checkpoint from pretraining
 2. Train a new model (see [Training Guide](training.md))
 3. Test with random weights using `--glue.allow_random_weights true`
@@ -36,17 +37,17 @@ bash scripts/run_full_glue.sh
 
 ### GLUE Task Details
 
-| Task | Type | Metrics | Train Size | Description |
-|------|------|---------|------------|-------------|
-| CoLA | Classification | Matthews Corr | 8.5k | Linguistic acceptability |
-| SST-2 | Classification | Accuracy | 67k | Sentiment analysis |
-| MRPC | Classification | F1/Accuracy | 3.7k | Paraphrase detection |
-| STS-B | Regression | Pearson/Spearman | 5.7k | Semantic textual similarity |
-| QQP | Classification | F1/Accuracy | 364k | Question pair similarity |
-| MNLI | Classification | Accuracy | 393k | Natural language inference |
-| QNLI | Classification | Accuracy | 105k | Question answering NLI |
-| RTE | Classification | Accuracy | 2.5k | Recognizing textual entailment |
-| WNLI | Classification | Accuracy | 600 | Coreference resolution |
+| Task  | Type           | Metrics          | Train Size | Description                    |
+| ----- | -------------- | ---------------- | ---------- | ------------------------------ |
+| CoLA  | Classification | Matthews Corr    | 8.5k       | Linguistic acceptability       |
+| SST-2 | Classification | Accuracy         | 67k        | Sentiment analysis             |
+| MRPC  | Classification | F1/Accuracy      | 3.7k       | Paraphrase detection           |
+| STS-B | Regression     | Pearson/Spearman | 5.7k       | Semantic textual similarity    |
+| QQP   | Classification | F1/Accuracy      | 364k       | Question pair similarity       |
+| MNLI  | Classification | Accuracy         | 393k       | Natural language inference     |
+| QNLI  | Classification | Accuracy         | 105k       | Question answering NLI         |
+| RTE   | Classification | Accuracy         | 2.5k       | Recognizing textual entailment |
+| WNLI  | Classification | Accuracy         | 600        | Coreference resolution         |
 
 ### Configuration Structure
 
@@ -66,7 +67,7 @@ glue:
   task_name: cola  # Task identifier
   num_labels: 2    # Automatically set based on task
   max_seq_length: 128  # Most tasks use 128, RTE uses 256
-  
+
 trainer:
   output_dir: ./outputs/glue/neobert-100m/cola
   num_train_epochs: 3
@@ -81,12 +82,12 @@ trainer:
   metric_for_best_model: eval_matthews_correlation  # Task-specific
   mixed_precision: bf16
   tf32: true
-  
+
 optimizer:
   name: adamw
   lr: 2e-5  # Standard GLUE learning rate
   weight_decay: 0.01
-  
+
 scheduler:
   name: linear
   warmup_percent: 10  # 10% warmup is standard for GLUE
@@ -116,6 +117,7 @@ python scripts/summarize_glue.py ./experiments/test_123/glue_results
 ### Output Structure
 
 GLUE results are organized as:
+
 ```
 outputs/
 └── glue/
@@ -181,7 +183,7 @@ NeoBERT uses DeepSpeed checkpoints from pretraining. The GLUE evaluation system 
 glue:
   pretrained_checkpoint_dir: ./outputs/neobert_100m_100k
   pretrained_checkpoint: 100000  # or "latest"
-  
+
 # The system will:
 # 1. Load the DeepSpeed checkpoint
 # 2. Extract model weights
@@ -194,6 +196,7 @@ glue:
 ### 1. Hyperparameter Selection
 
 Standard GLUE hyperparameters that work well:
+
 - Learning rate: 2e-5 (occasionally 1e-5 or 3e-5)
 - Batch size: 32 (16 for large models)
 - Epochs: 3 (sometimes 5 for small datasets)
@@ -203,6 +206,7 @@ Standard GLUE hyperparameters that work well:
 ### 2. Early Stopping
 
 Configure early stopping to prevent overfitting:
+
 ```yaml
 trainer:
   early_stopping: 5  # Patience in evaluation steps
@@ -214,14 +218,16 @@ trainer:
 ### 3. Evaluation Frequency
 
 Balance between compute cost and monitoring:
+
 - Small datasets (WNLI, RTE, MRPC): eval_steps=20-50
-- Medium datasets (CoLA, STS-B): eval_steps=50-100  
+- Medium datasets (CoLA, STS-B): eval_steps=50-100
 - Large datasets (SST-2, QNLI): eval_steps=500
 - Very large (QQP, MNLI): eval_steps=1000-2000
 
 ### 4. Mixed Precision
 
 Always use bf16 for modern GPUs:
+
 ```yaml
 trainer:
   mixed_precision: bf16
@@ -233,9 +239,11 @@ trainer:
 ### Flash Attention Issues
 
 If you encounter Flash Attention errors with GLUE:
+
 ```
 Flash attention is not supported for GLUE evaluation due to memory alignment issues
 ```
+
 This is expected - GLUE uses variable-length sequences that can cause issues with Flash Attention. The system automatically falls back to standard attention.
 
 ### Out of Memory
@@ -263,6 +271,7 @@ This is expected - GLUE uses variable-length sequences that can cause issues wit
 ### Poor Results
 
 If getting random or near-random results:
+
 1. Check the pretrained checkpoint loaded correctly (check logs)
 2. Verify learning rate (2e-5 is standard)
 3. Ensure sufficient training (3 epochs minimum)
@@ -278,13 +287,13 @@ Add custom metrics to GLUE evaluation:
 def compute_metrics(eval_pred):
     predictions, labels = eval_pred
     predictions = np.argmax(predictions, axis=1)
-    
+
     # Standard metrics
     accuracy = accuracy_score(labels, predictions)
-    
+
     # Add custom metrics
     custom_metric = your_custom_function(labels, predictions)
-    
+
     return {
         "accuracy": accuracy,
         "custom": custom_metric
@@ -311,12 +320,13 @@ python scripts/aggregate_results.py outputs/glue/seed_*
 ## WandB Integration
 
 All GLUE runs are tracked in WandB:
+
 - Project: `neobert-glue`
 - Run names: `{model}-{task}-{checkpoint}`
 - Logged metrics: loss, task metrics, learning rate
 - Logged configs: full configuration
 
-View results at: https://wandb.ai/your-username/neobert-glue
+View results at: <https://wandb.ai/your-username/neobert-glue>
 
 ## Next Steps
 

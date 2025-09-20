@@ -28,6 +28,7 @@ class NeoBERT(nn.Module):
 ```
 
 Key differences from BERT:
+
 - No position embedding layer (uses RoPE instead)
 - No token type embeddings
 - Simpler, more efficient design
@@ -44,6 +45,7 @@ def compute_rope_embeddings(seq_len, dim, base=10000):
 ```
 
 Benefits:
+
 - Relative position encoding
 - Extrapolates to longer sequences
 - No learned parameters
@@ -56,13 +58,14 @@ class RMSNorm(nn.Module):
         super().__init__()
         self.scale = nn.Parameter(torch.ones(dim))
         self.eps = eps
-    
+
     def forward(self, x):
         norm = x.pow(2).mean(-1, keepdim=True).sqrt()
         return x / (norm + self.eps) * self.scale
 ```
 
 Advantages over LayerNorm:
+
 - ~2x faster
 - No mean centering
 - More stable training
@@ -74,7 +77,7 @@ class MultiheadAttention(nn.Module):
     def __init__(self, config):
         self.num_heads = config.num_attention_heads
         self.head_dim = config.hidden_size // self.num_heads
-        
+
         self.q_proj = nn.Linear(config.hidden_size, config.hidden_size)
         self.k_proj = nn.Linear(config.hidden_size, config.hidden_size)
         self.v_proj = nn.Linear(config.hidden_size, config.hidden_size)
@@ -82,6 +85,7 @@ class MultiheadAttention(nn.Module):
 ```
 
 Features:
+
 - Supports Flash Attention for efficiency
 - RoPE integration for positions
 - Grouped Query Attention compatible
@@ -96,12 +100,13 @@ class SwiGLU(nn.Module):
         self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)
-    
+
     def forward(self, x):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 ```
 
 Benefits:
+
 - Better than GELU/ReLU
 - Smoother gradients
 - Improved performance
@@ -114,11 +119,11 @@ class EncoderBlock(nn.Module):
         # Normalization layers
         self.attention_norm = RMSNorm(config.hidden_size)
         self.ffn_norm = RMSNorm(config.hidden_size)
-        
+
         # Core layers
         self.attention = MultiheadAttention(config)
         self.feed_forward = FeedForward(config)
-    
+
     def forward(self, x, pad_mask=None, freqs_cis=None):
         # Pre-norm architecture
         h = x + self.attention(self.attention_norm(x), pad_mask, freqs_cis)
@@ -171,6 +176,7 @@ model = NormNeoBERT(config)
 ### Model Sizes
 
 **NeoBERT-Small** (110M parameters):
+
 ```yaml
 model:
   hidden_size: 768
@@ -180,6 +186,7 @@ model:
 ```
 
 **NeoBERT-Base** (220M parameters):
+
 ```yaml
 model:
   hidden_size: 1024
@@ -189,6 +196,7 @@ model:
 ```
 
 **NeoBERT-Large** (440M parameters):
+
 ```yaml
 model:
   hidden_size: 1024
@@ -207,6 +215,7 @@ model:
 ```
 
 **SwiGLU Requirements:**
+
 - Install xformers for optimal performance: `pip install xformers==0.0.28.post3`
 - Falls back to native PyTorch implementation if xformers unavailable
 - ~5-10% performance improvement over GELU
@@ -225,10 +234,10 @@ model:
 ### Memory Usage
 
 | Model Size | Parameters | Memory (FP32) | Memory (BF16) |
-|------------|-----------|---------------|---------------|
-| Small      | 110M      | 440MB         | 220MB         |
-| Base       | 220M      | 880MB         | 440MB         |
-| Large      | 440M      | 1.76GB        | 880MB         |
+| ---------- | ---------- | ------------- | ------------- |
+| Small      | 110M       | 440MB         | 220MB         |
+| Base       | 220M       | 880MB         | 440MB         |
+| Large      | 440M       | 1.76GB        | 880MB         |
 
 **Note**: BF16 (bfloat16) is recommended for all modern GPUs (NVIDIA Ampere/RTX 30xx and newer). BF16 provides better numerical stability than FP16 while maintaining the same memory efficiency.
 
@@ -237,7 +246,7 @@ model:
 Training throughput (examples/second):
 
 | Model | V100 (32GB) | A100 (40GB) | RTX 4090 |
-|-------|-------------|-------------|----------|
+| ----- | ----------- | ----------- | -------- |
 | Small | 450         | 720         | 380      |
 | Base  | 230         | 380         | 180      |
 | Large | 110         | 190         | 85       |
@@ -247,17 +256,20 @@ Training throughput (examples/second):
 ### 1. Flash Attention
 
 Enable for 2-4x speedup:
+
 ```python
 config.flash_attention = True
 ```
 
 Requirements:
+
 - GPU with compute capability >= 7.0
 - flash-attn package installed (tested with v2.7.3)
 
 ### 2. Gradient Checkpointing
 
 Trade compute for memory:
+
 ```python
 model.gradient_checkpointing_enable()
 ```
@@ -281,6 +293,7 @@ model = torch.compile(model)
 ### Attention Mask Format
 
 NeoBERT uses additive attention masks:
+
 ```python
 # Convert HuggingFace format
 def convert_attention_mask(attention_mask):
@@ -296,20 +309,22 @@ def convert_attention_mask(attention_mask):
 ### Position Encoding
 
 RoPE is applied in the attention layer:
+
 ```python
 def apply_rope(q, k, freqs_cis):
     q_complex = view_as_complex(q)
     k_complex = view_as_complex(k)
-    
+
     q_rotated = q_complex * freqs_cis
     k_rotated = k_complex * freqs_cis
-    
+
     return view_as_real(q_rotated), view_as_real(k_rotated)
 ```
 
 ### Initialization
 
 Weight initialization follows BERT:
+
 ```python
 def _init_weights(module):
     if isinstance(module, nn.Linear):
@@ -322,14 +337,14 @@ def _init_weights(module):
 
 ## Differences from BERT
 
-| Feature | BERT | NeoBERT |
-|---------|------|---------|
-| Position Encoding | Learned embeddings | RoPE |
-| Normalization | LayerNorm | RMSNorm |
-| Activation | GELU | SwiGLU |
-| Attention | Standard | Flash Attention |
-| Token Types | Yes | No |
-| Architecture | Post-norm | Pre-norm |
+| Feature           | BERT               | NeoBERT         |
+| ----------------- | ------------------ | --------------- |
+| Position Encoding | Learned embeddings | RoPE            |
+| Normalization     | LayerNorm          | RMSNorm         |
+| Activation        | GELU               | SwiGLU          |
+| Attention         | Standard           | Flash Attention |
+| Token Types       | Yes                | No              |
+| Architecture      | Post-norm          | Pre-norm        |
 
 ## Extension Points
 

@@ -5,6 +5,7 @@ NeoBERT uses a hierarchical configuration system based on dataclasses, YAML file
 ## Overview
 
 The configuration system provides:
+
 - **Type-safe dataclasses** for all configuration options
 - **YAML files** for base configurations
 - **Command-line overrides** using dot notation
@@ -107,7 +108,7 @@ trainer:
   dataloader_num_workers: 4
   seed: 42
   report_to: ["wandb"]        # or ["tensorboard", "none"]
-  
+
   # GLUE-specific
   num_train_epochs: 3         # For fine-tuning
   early_stopping: 5           # Patience for early stopping
@@ -124,16 +125,16 @@ dataset:
   name: wikipedia
   config: 20220301.en
   split: train
-  
+
   # Or custom files
   data_files:
     train: data/train.txt
     validation: data/val.txt
-  
+
   # Streaming for large datasets
   streaming: true
   shuffle_buffer_size: 10000
-  
+
   # Processing options
   max_seq_length: 512
   mlm_probability: 0.15
@@ -150,7 +151,7 @@ optimizer:
   weight_decay: 0.01
   betas: [0.9, 0.999]
   eps: 1e-8
-  
+
   # Optional gradient clipping
   max_grad_norm: 1.0
 ```
@@ -175,12 +176,12 @@ glue:
   task_name: cola           # GLUE task identifier
   num_labels: 2             # Set automatically based on task
   max_seq_length: 128
-  
+
   # Loading pretrained checkpoints
   pretrained_checkpoint_dir: ./outputs/neobert_100m_100k
   pretrained_checkpoint: 100000  # or "latest"
   pretrained_config_path: ./outputs/neobert_100m_100k/model_checkpoints/100000/config.yaml
-  
+
   # Testing options
   allow_random_weights: false  # For testing without pretrained model
 ```
@@ -220,22 +221,22 @@ model:
   num_hidden_layers: 12
   num_attention_heads: 12
   intermediate_size: 3072
-  
+
 trainer:
   output_dir: ./outputs/neobert_100m
   max_steps: 1000000
   per_device_train_batch_size: 32
   mixed_precision: bf16
-  
+
 dataset:
   name: wikipedia
   streaming: true
   max_seq_length: 512
-  
+
 optimizer:
   lr: 1e-4
   weight_decay: 0.01
-  
+
 scheduler:
   name: cosine
   warmup_steps: 10000
@@ -251,12 +252,12 @@ model:
   name_or_path: neobert-100m
   pretrained_checkpoint_dir: ./outputs/neobert_100m_100k
   pretrained_checkpoint: 100000
-  
+
 glue:
   task_name: cola
   num_labels: 2
   max_seq_length: 128
-  
+
 trainer:
   output_dir: ./outputs/glue/neobert-100m/cola
   num_train_epochs: 3
@@ -265,10 +266,10 @@ trainer:
   eval_steps: 50
   early_stopping: 5
   metric_for_best_model: eval_matthews_correlation
-  
+
 optimizer:
   lr: 2e-5
-  
+
 scheduler:
   name: linear
   warmup_percent: 10
@@ -318,6 +319,7 @@ class ExtendedConfig(Config):
 ### Configuration Validation
 
 The system automatically validates:
+
 - Type correctness (int, float, str, bool, list)
 - Required fields
 - Value ranges (where specified)
@@ -338,6 +340,7 @@ python scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml
 ### 1. Use YAML for Base Configurations
 
 Keep stable, reusable configurations in YAML files:
+
 - Model architectures
 - Standard hyperparameters
 - Dataset specifications
@@ -345,6 +348,7 @@ Keep stable, reusable configurations in YAML files:
 ### 2. Use CLI for Experiments
 
 Override via command line for experimentation:
+
 - Learning rates
 - Batch sizes
 - Output directories
@@ -353,6 +357,7 @@ Override via command line for experimentation:
 ### 3. Organize by Task
 
 Structure configs by task type:
+
 ```
 configs/
 ├── pretraining/
@@ -364,6 +369,7 @@ configs/
 ### 4. Version Control Configs
 
 Track configuration files in git to ensure reproducibility:
+
 ```bash
 git add configs/experiment_v1.yaml
 git commit -m "Add experiment v1 configuration"
@@ -372,6 +378,7 @@ git commit -m "Add experiment v1 configuration"
 ### 5. Document Custom Configs
 
 Add comments in YAML files:
+
 ```yaml
 model:
   hidden_size: 768  # Standard BERT-base size
@@ -402,6 +409,7 @@ model:
 ### Debugging Configuration
 
 Print loaded configuration:
+
 ```python
 # In your script
 print(config)  # Shows full configuration
@@ -412,6 +420,7 @@ print(config.trainer)
 ```
 
 Check configuration in logs:
+
 ```bash
 # Logs show configuration at start
 grep "Configuration:" logs/training.log

@@ -88,13 +88,13 @@ class TestConfig(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures."""
         self.test_config_path = Path(__file__).parent / "test_config.yaml"
-    
+
     def test_config_loading(self):
         """Test configuration loading."""
         config = ConfigLoader.load(str(self.test_config_path))
         self.assertIsNotNone(config)
         self.assertEqual(config.model.hidden_size, 768)
-    
+
     def tearDown(self):
         """Clean up after tests."""
         # Cleanup code here
@@ -111,19 +111,19 @@ class TestModelComponents(unittest.TestCase):
     def test_attention_mechanism(self):
         """Test attention computation."""
         from neobert.model import MultiheadAttention
-        
+
         # Create attention layer
         attn = MultiheadAttention(
             embed_dim=64,
             num_heads=4
         )
-        
+
         # Test input
         x = torch.randn(2, 10, 64)  # [batch, seq_len, dim]
-        
+
         # Forward pass
         output = attn(x)
-        
+
         # Assertions
         self.assertEqual(output.shape, x.shape)
         self.assertFalse(torch.isnan(output).any())
@@ -137,7 +137,7 @@ class TestTrainingPipeline(unittest.TestCase):
         """Test MLM loss computation."""
         from neobert.model import NeoBERTLMHead
         from neobert.config import ModelConfig
-        
+
         # Small model for testing
         config = ModelConfig(
             hidden_size=32,
@@ -145,18 +145,18 @@ class TestTrainingPipeline(unittest.TestCase):
             num_attention_heads=2,
             vocab_size=100
         )
-        
+
         model = NeoBERTLMHead(config)
-        
+
         # Mock data
         input_ids = torch.randint(0, 100, (2, 10))
         labels = input_ids.clone()
         labels[labels == 0] = -100  # Ignore padding
-        
+
         # Compute loss
         outputs = model(input_ids, labels=labels)
         loss = outputs["loss"]
-        
+
         # Assertions
         self.assertIsInstance(loss, torch.Tensor)
         self.assertTrue(loss.item() > 0)
@@ -232,7 +232,7 @@ class TestModelCreation(unittest.TestCase):
         """Create fresh model for each test."""
         self.config = create_test_config()
         self.model = None
-    
+
     def tearDown(self):
         """Clean up model and free memory."""
         if self.model:
@@ -251,11 +251,11 @@ class TestActivationFunctions:
         """Test different activation functions."""
         config = ModelConfig(hidden_act=activation)
         model = NeoBERT(config)
-        
+
         # Test forward pass
         x = torch.randn(2, 10, config.hidden_size)
         output = model(x)
-        
+
         assert output.shape == x.shape
 ```
 
@@ -265,21 +265,21 @@ class TestActivationFunctions:
 def test_empty_input():
     """Test model with empty input."""
     model = create_test_model()
-    
+
     # Empty batch
     input_ids = torch.tensor([], dtype=torch.long).reshape(0, 10)
-    
+
     # Should not crash
     with torch.no_grad():
         output = model(input_ids)
-    
+
     assert output.shape[0] == 0
 
 def test_single_token():
     """Test model with single token sequences."""
     model = create_test_model()
     input_ids = torch.randint(0, 100, (2, 1))
-    
+
     output = model(input_ids)
     assert output.shape == (2, 1, model.config.hidden_size)
 ```
@@ -293,21 +293,21 @@ def test_inference_speed():
     """Test model inference speed."""
     model = create_test_model()
     model.eval()
-    
+
     # Warm up
     dummy_input = torch.randint(0, 100, (8, 128))
     with torch.no_grad():
         _ = model(dummy_input)
-    
+
     # Time inference
     start = time.time()
     with torch.no_grad():
         for _ in range(100):
             _ = model(dummy_input)
-    
+
     elapsed = time.time() - start
     throughput = (100 * 8) / elapsed  # samples/second
-    
+
     assert throughput > 100  # Minimum expected throughput
 ```
 
@@ -329,13 +329,13 @@ pytest tests/model/test_model_forward.py --showlocals
 def test_complex_scenario():
     """Test with debugging."""
     import pdb
-    
+
     model = create_model()
     data = create_test_data()
-    
+
     # Set breakpoint
     pdb.set_trace()
-    
+
     output = model(data)
     assert output is not None
 ```
@@ -349,13 +349,13 @@ def test_with_logging():
     """Test with detailed logging."""
     logging.basicConfig(level=logging.DEBUG)
     logger = logging.getLogger(__name__)
-    
+
     model = create_model()
     logger.debug(f"Model config: {model.config}")
-    
+
     data = create_test_data()
     logger.debug(f"Input shape: {data.shape}")
-    
+
     output = model(data)
     logger.debug(f"Output shape: {output.shape}")
 ```
@@ -376,24 +376,24 @@ jobs:
     strategy:
       matrix:
         python-version: [3.8, 3.9, "3.10"]
-    
+
     steps:
     - uses: actions/checkout@v2
-    
+
     - name: Set up Python
       uses: actions/setup-python@v2
       with:
         python-version: ${{ matrix.python-version }}
-    
+
     - name: Install dependencies
       run: |
         pip install -e .
         pip install pytest pytest-cov
-    
+
     - name: Run tests
       run: |
         python tests/run_tests.py --verbose
-    
+
     - name: Upload coverage
       uses: codecov/codecov-action@v2
 ```
@@ -434,7 +434,7 @@ open htmlcov/index.html
 # .coveragerc
 [run]
 source = neobert
-omit = 
+omit =
     */tests/*
     */migrations/*
     */venv/*
@@ -480,7 +480,7 @@ def set_seed(seed=42):
     """Set random seeds for reproducibility."""
     import random
     import numpy as np
-    
+
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)

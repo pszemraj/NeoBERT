@@ -67,12 +67,12 @@ python scripts/pretraining/pretrain.py \
 
 ## Key Commands
 
-| Task | Command |
-|------|---------|
-| Pretrain | `python scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml` |
-| GLUE eval | `python scripts/evaluation/run_glue.py --config configs/glue/{task}.yaml` |
-| Run tests | `python tests/run_tests.py` |
-| Summarize GLUE | `python scripts/summarize_glue.py {results_path}` |
+| Task           | Command                                                                         |
+| -------------- | ------------------------------------------------------------------------------- |
+| Pretrain       | `python scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml` |
+| GLUE eval      | `python scripts/evaluation/run_glue.py --config configs/glue/{task}.yaml`       |
+| Run tests      | `python tests/run_tests.py`                                                     |
+| Summarize GLUE | `python scripts/summarize_glue.py {results_path}`                               |
 
 ## Configuration
 
@@ -93,12 +93,14 @@ See [Configuration Guide](configuration.md) for details.
 ## Common Settings
 
 **Model sizes:**
+
 - Tiny (test): 2 layers, 128 hidden
-- Small: 6 layers, 512 hidden  
+- Small: 6 layers, 512 hidden
 - Base: 12 layers, 768 hidden
 - Large: 24 layers, 1024 hidden
 
 **Training tips:**
+
 - Use `bf16` mixed precision (not fp16)
 - Enable Flash Attention if available
 - Start with batch size 32, lr 1e-4 for pretraining

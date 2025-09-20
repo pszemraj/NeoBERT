@@ -35,8 +35,8 @@ model:
   use_rope: true           # RoPE positional encoding
   rope_theta: 10000
   flash_attention: true    # Enable Flash Attention 2
-  
-# Training settings  
+
+# Training settings
 trainer:
   output_dir: ./outputs/neobert_100m
   max_steps: 1000000
@@ -50,7 +50,7 @@ trainer:
   mixed_precision: bf16    # Always use bf16
   tf32: true              # Enable TensorFloat32
   dataloader_num_workers: 4
-  
+
 # Optimizer
 optimizer:
   name: adamw
@@ -58,7 +58,7 @@ optimizer:
   weight_decay: 0.01
   betas: [0.9, 0.999]
   eps: 1e-8
-  
+
 # Scheduler
 scheduler:
   name: cosine
@@ -82,6 +82,7 @@ python scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml
 ```
 
 DeepSpeed configuration is handled automatically in `src/neobert/training/pretraining.py`:
+
 - Detects available GPUs
 - Configures optimal ZeRO stage
 - Enables mixed precision based on hardware
@@ -97,17 +98,19 @@ dataset:
   streaming: true
   max_seq_length: 512
   mlm_probability: 0.15
-  shuffle_buffer_size: 10000  
+  shuffle_buffer_size: 10000
   num_workers: 0  # Must be 0 for streaming
 ```
 
 Benefits:
+
 - No need to download entire dataset upfront
 - Tokenization happens on-the-fly
 - Memory efficient for multi-TB datasets
 - Automatic shuffling with buffer
 
 Example streaming config:
+
 ```bash
 python scripts/pretraining/pretrain.py \
     --config configs/streaming_pretrain.yaml
@@ -116,6 +119,7 @@ python scripts/pretraining/pretrain.py \
 ### Monitoring Training
 
 With Weights & Biases (automatic):
+
 ```yaml
 wandb:
   project: neobert-pretraining
@@ -124,6 +128,7 @@ wandb:
 ```
 
 Key metrics tracked:
+
 - `train/loss`: MLM loss
 - `train/perplexity`: exp(loss)
 - `train/learning_rate`: Current LR
@@ -134,6 +139,7 @@ Key metrics tracked:
 ### Checkpointing
 
 Checkpoints are saved in DeepSpeed format:
+
 ```
 outputs/neobert_100m/
 ├── model_checkpoints/
@@ -150,6 +156,7 @@ outputs/neobert_100m/
 ```
 
 Resume from checkpoint:
+
 ```bash
 python scripts/pretraining/pretrain.py \
     --config configs/pretrain_neobert.yaml \
@@ -208,6 +215,7 @@ model = load_pretrained_weights(model, checkpoint_dir, checkpoint_id)
 ### Memory Optimization
 
 1. **Gradient Accumulation**:
+
 ```yaml
 trainer:
   gradient_accumulation_steps: 4
@@ -216,12 +224,14 @@ trainer:
 ```
 
 2. **Gradient Checkpointing**:
+
 ```yaml
 model:
   gradient_checkpointing: true
 ```
 
 3. **Mixed Precision (Always use BF16)**:
+
 ```yaml
 trainer:
   mixed_precision: bf16
@@ -229,6 +239,7 @@ trainer:
 ```
 
 4. **DeepSpeed ZeRO Stages**:
+
 - Stage 1: Optimizer state sharding
 - Stage 2: Optimizer + gradient sharding (default)
 - Stage 3: Full model sharding (for very large models)
@@ -236,18 +247,21 @@ trainer:
 ### Performance Optimization
 
 1. **Flash Attention 2**:
+
 ```yaml
 model:
   flash_attention: true  # Automatic fallback if not available
 ```
 
 2. **SwiGLU with xFormers**:
+
 ```yaml
 model:
   hidden_act: swiglu  # Optimized via xformers if available
 ```
 
 3. **Efficient Data Loading**:
+
 ```yaml
 trainer:
   dataloader_num_workers: 4
@@ -257,6 +271,7 @@ trainer:
 ### Learning Rate Scheduling
 
 Available schedulers:
+
 ```yaml
 scheduler:
   name: cosine  # or linear, constant, polynomial
@@ -296,7 +311,7 @@ python scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml
 ```python
 # Enable PyTorch profiler
 with torch.profiler.profile(
-    activities=[torch.profiler.ProfilerActivity.CPU, 
+    activities=[torch.profiler.ProfilerActivity.CPU,
                 torch.profiler.ProfilerActivity.CUDA],
     record_shapes=True
 ) as prof:
@@ -334,6 +349,7 @@ dataset:
 ### Using Custom Text Data
 
 1. Prepare text files:
+
 ```bash
 data/
 ├── train.txt
@@ -342,6 +358,7 @@ data/
 ```
 
 2. Configure dataset:
+
 ```yaml
 dataset:
   name: text
@@ -390,6 +407,7 @@ scheduler:
 ### Multi-Node Training
 
 For multi-node setups:
+
 ```bash
 # On each node
 torchrun --nproc_per_node=8 \
