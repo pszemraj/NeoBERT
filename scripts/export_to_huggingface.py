@@ -100,30 +100,23 @@ def map_weights(
 
 
 def copy_hf_modeling_files(target_dir: Path):
-    """Copy the HuggingFace modeling files."""
+    """Copy the HuggingFace modeling files from src/neobert/huggingface/."""
     print("Copying HuggingFace modeling files...")
 
-    # First check if we have the HF modeling files in src/neobert/huggingface/
     src_dir = Path(__file__).parent.parent / "src" / "neobert" / "huggingface"
 
-    if src_dir.exists():
-        # Use our HF-compatible modeling files
-        files_to_copy = ["modeling_neobert.py", "rotary.py"]
-        for filename in files_to_copy:
-            src_file = src_dir / filename
-            dst_name = "model.py" if filename == "modeling_neobert.py" else filename
-            if src_file.exists():
-                shutil.copy(src_file, target_dir / dst_name)
-                print(f"  Copied {filename} -> {dst_name}")
-    else:
-        # Fallback: copy from original HF repo
-        orig_dir = Path(__file__).parent.parent / "outputs" / "original-NeoBERT-hf"
-        if orig_dir.exists():
-            for filename in ["model.py", "rotary.py"]:
-                src_file = orig_dir / filename
-                if src_file.exists():
-                    shutil.copy(src_file, target_dir / filename)
-                    print(f"  Copied {filename} from original HF repo")
+    if not src_dir.exists():
+        raise ValueError(f"HuggingFace model files not found at {src_dir}")
+
+    # Copy the required files
+    files_to_copy = ["modeling_neobert.py", "rotary.py"]
+    for filename in files_to_copy:
+        src_file = src_dir / filename
+        dst_name = "model.py" if filename == "modeling_neobert.py" else filename
+        if not src_file.exists():
+            raise ValueError(f"Required file {src_file} not found")
+        shutil.copy(src_file, target_dir / dst_name)
+        print(f"  Copied {filename} -> {dst_name}")
 
 
 def export_checkpoint(checkpoint_path: Path, output_dir: Path = None):
