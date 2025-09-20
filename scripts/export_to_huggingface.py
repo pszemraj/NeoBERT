@@ -20,6 +20,7 @@ from typing import Dict, Any
 import torch
 import yaml
 from safetensors.torch import save_file
+from transformers import AutoTokenizer
 
 
 def load_config(config_path: Path) -> Dict[str, Any]:
@@ -182,8 +183,6 @@ def export_checkpoint(checkpoint_path: Path, output_dir: Path = None):
     print("Loading and fixing tokenizer...")
     tokenizer_dir = checkpoint_path / "tokenizer"
     if tokenizer_dir.exists():
-        from transformers import AutoTokenizer
-        
         # Load the tokenizer
         tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_dir))
         
