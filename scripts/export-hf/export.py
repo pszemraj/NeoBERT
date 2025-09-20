@@ -104,7 +104,8 @@ def copy_hf_modeling_files(target_dir: Path):
     """Copy the HuggingFace modeling files from src/neobert/huggingface/."""
     print("Copying HuggingFace modeling files...")
 
-    src_dir = Path(__file__).parent.parent / "src" / "neobert" / "huggingface"
+    # Go up to repo root then down to src/neobert/huggingface
+    src_dir = Path(__file__).parent.parent.parent / "src" / "neobert" / "huggingface"
 
     if not src_dir.exists():
         raise ValueError(f"HuggingFace model files not found at {src_dir}")
