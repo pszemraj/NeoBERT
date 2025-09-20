@@ -8,16 +8,16 @@ NeoBERT training saves checkpoints in a specific format with `state_dict.pt` and
 
 ## Export Script
 
-The export script is located at `scripts/export_to_huggingface.py`.
+The export script is located at `scripts/export-hf/export.py`.
 
 ### Basic Usage
 
 ```bash
 # Export a checkpoint
-python scripts/export_to_huggingface.py outputs/neobert_100m_100k/model_checkpoints/100000
+python scripts/export-hf/export.py outputs/neobert_100m_100k/model_checkpoints/100000
 
 # Export to a specific directory
-python scripts/export_to_huggingface.py outputs/neobert_100m_100k/model_checkpoints/100000 --output my_model
+python scripts/export-hf/export.py outputs/neobert_100m_100k/model_checkpoints/100000 --output my_model
 ```
 
 ### What Gets Exported
@@ -61,7 +61,7 @@ model = AutoModelForMaskedLM.from_pretrained(model_path, trust_remote_code=True)
 Use the validation script to ensure your exported model works correctly:
 
 ```bash
-python tests/test_huggingface_export.py outputs/neobert_100m_100k/hf/neobert_100m_100k_100000
+python scripts/export-hf/validate.py outputs/neobert_100m_100k/hf/neobert_100m_100k_100000
 ```
 
 The test script checks:
