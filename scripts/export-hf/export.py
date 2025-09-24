@@ -207,7 +207,7 @@ def export_checkpoint(checkpoint_path: Path, output_dir: Path = None):
         # If using local path, try to extract dataset name from path
         dataset_path = neobert_config.get("dataset", {}).get("path", "")
         dataset_name = dataset_path.split("/")[-1] if dataset_path else ""
-    
+
     # Build HF YAML header
     yaml_header = "---\n"
     yaml_header += "library_name: transformers\n"
@@ -216,13 +216,13 @@ def export_checkpoint(checkpoint_path: Path, output_dir: Path = None):
         yaml_header += f"datasets:\n- {dataset_name}\n"
     yaml_header += "language:\n- en\n"
     yaml_header += "---\n\n"
-    
+
     # Get repo_id from output directory name
     repo_id = output_dir.name
-    
+
     # Convert full config to YAML string for details section
     config_yaml = yaml.dump(neobert_config, default_flow_style=False, sort_keys=False)
-    
+
     readme_content = f"""{yaml_header}# NeoBERT Model
 
 This is a NeoBERT model trained with [pszemraj/NeoBERT](https://github.com/pszemraj/NeoBERT) and exported to `transformers` format.

@@ -1,14 +1,12 @@
 # From https://github.com/facebookresearch/llama/blob/main/llama/model.py
 
+from typing import Optional
+
+import numpy as np
 import torch
 from torch import nn
-
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from torch.nn.functional import scaled_dot_product_attention
-
-from typing import Optional
-import numpy as np
-
 from xformers.ops import SwiGLU
 
 try:
@@ -19,9 +17,9 @@ except ImportError:
     FLASH_ATTN_AVAILABLE = False
 
 from transformers import (
-    PreTrainedModel,
-    PretrainedConfig,
     DataCollatorForLanguageModeling,
+    PretrainedConfig,
+    PreTrainedModel,
 )
 from transformers.modeling_outputs import (
     BaseModelOutput,
@@ -29,7 +27,7 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutput,
 )
 
-from .rotary import precompute_freqs_cis, apply_rotary_emb
+from .rotary import apply_rotary_emb, precompute_freqs_cis
 
 
 class DataCollatorWithPacking(DataCollatorForLanguageModeling):
