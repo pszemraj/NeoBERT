@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 import torch
-from transformers import AutoModel, AutoTokenizer, AutoModelForMaskedLM
+from transformers import AutoModel, AutoModelForMaskedLM, AutoTokenizer
 from transformers import logging as transformers_logging
 
 

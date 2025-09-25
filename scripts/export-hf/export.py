@@ -15,7 +15,7 @@ import argparse
 import json
 import shutil
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict
 
 import torch
 import yaml
