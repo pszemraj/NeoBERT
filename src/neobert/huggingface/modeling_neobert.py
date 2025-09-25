@@ -7,7 +7,13 @@ import torch
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from torch.nn.functional import scaled_dot_product_attention
-from xformers.ops import SwiGLU
+
+try:
+    from xformers.ops import SwiGLU
+
+    XFORMERS_AVAILABLE = True
+except ImportError:
+    XFORMERS_AVAILABLE = False
 
 try:
     from flash_attn.flash_attn_interface import flash_attn_varlen_func
@@ -99,6 +105,22 @@ class NeoBERTConfig(PretrainedConfig):
         self.kwargs = kwargs
 
 
+# Adapted from transformers.models.llama.modeling_llama.LlamaMLP
+class NeobertMLP(nn.Module):
+    def __init__(self, hidden_size, intermediate_size, bias=False):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.w12 = nn.Linear(self.hidden_size, 2 * self.intermediate_size, bias=bias)
+        self.w3 = nn.Linear(self.intermediate_size, self.hidden_size, bias=bias)
+        self.act_fn = nn.SiLU()
+
+    def forward(self, x):
+        w1, w2 = self.w12(x).chunk(2, dim=-1)
+        w3 = self.w3(self.act_fn(w1) * w2)
+        return w3
+
+
 class EncoderBlock(nn.Module):
     """Transformer encoder block."""
 
@@ -123,9 +145,12 @@ class EncoderBlock(nn.Module):
         intermediate_size = multiple_of * (
             (intermediate_size + multiple_of - 1) // multiple_of
         )
-        self.ffn = SwiGLU(
-            config.hidden_size, intermediate_size, config.hidden_size, bias=False
-        )
+        if XFORMERS_AVAILABLE:
+            self.ffn = SwiGLU(
+                config.hidden_size, intermediate_size, config.hidden_size, bias=False
+            )
+        else:
+            self.ffn = NeobertMLP(config.hidden_size, intermediate_size, bias=False)
 
         # Layer norms
         self.attention_norm = nn.RMSNorm(config.hidden_size, config.norm_eps)
@@ -218,13 +243,16 @@ class EncoderBlock(nn.Module):
                 dropout_p=0,
             ).transpose(1, 2)
 
-        return self.wo(
-            attn.reshape(
-                batch_size,
-                seq_len,
-                self.config.num_attention_heads * self.config.dim_head,
-            )
-        ), attn_weights
+        return (
+            self.wo(
+                attn.reshape(
+                    batch_size,
+                    seq_len,
+                    self.config.num_attention_heads * self.config.dim_head,
+                )
+            ),
+            attn_weights,
+        )
 
 
 class NeoBERTPreTrainedModel(PreTrainedModel):
@@ -272,23 +300,17 @@ class NeoBERT(NeoBERTPreTrainedModel):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor] = None,
+        input_ids: torch.Tensor,
         position_ids: torch.Tensor = None,
         max_seqlen: int = None,
         cu_seqlens: torch.Tensor = None,
         attention_mask: torch.Tensor = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
         output_hidden_states: bool = False,
         output_attentions: bool = False,
         **kwargs,
     ):
         # Initialize
         hidden_states, attentions = [], []
-
-        if (input_ids is None) ^ (inputs_embeds is not None):
-            raise ValueError(
-                "You must specify exactly one of input_ids or inputs_embeds"
-            )
 
         # Expand and repeat: (Batch, Length) -> (Batch, Heads, Length, Length)
         if attention_mask is not None:
@@ -309,12 +331,10 @@ class NeoBERT(NeoBERTPreTrainedModel):
             assert max_seqlen is not None, (
                 "Missing max_seqlen. It must be provided when cu_seqlens are not None."
             )
-            assert (input_ids if input_ids is not None else inputs_embeds).shape[
-                0
-            ] == 1, (
-                "Cumulative sequence lengths are provided but inputs are not packed."
+            assert input_ids.shape[0] == 1, (
+                "Cumulative sequence lengths are provided but input_ids are not packed."
             )
-            assert (input_ids if input_ids is not None else inputs_embeds).is_cuda, (
+            assert input_ids.is_cuda, (
                 "Packing uses an implementation of flash-attention and is only supported on GPU."
             )
 
@@ -322,13 +342,11 @@ class NeoBERT(NeoBERTPreTrainedModel):
         freqs_cis = (
             self.freqs_cis[position_ids]
             if position_ids is not None
-            else self.freqs_cis[
-                : (input_ids if input_ids is not None else inputs_embeds).shape[1]
-            ].unsqueeze(0)
+            else self.freqs_cis[: input_ids.shape[1]].unsqueeze(0)
         )
 
         # Embedding
-        x = self.encoder(input_ids) if input_ids is not None else inputs_embeds
+        x = self.encoder(input_ids)
 
         # Transformer encoder
         for layer in self.transformer_encoder:
@@ -376,13 +394,13 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
         **kwargs,
     ):
         output = self.model.forward(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            max_seqlen=max_seqlen,
-            cu_seqlens=cu_seqlens,
-            attention_mask=attention_mask,
-            output_hidden_states=output_hidden_states,
-            output_attentions=output_attentions,
+            input_ids,
+            position_ids,
+            max_seqlen,
+            cu_seqlens,
+            attention_mask,
+            output_hidden_states,
+            output_attentions,
         )
         logits = self.decoder(output.last_hidden_state)
 
@@ -421,7 +439,7 @@ class NeoBERTForSequenceClassification(NeoBERTPreTrainedModel):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor] = None,
+        input_ids: torch.Tensor,
         position_ids: torch.Tensor = None,
         max_seqlen: int = None,
         cu_seqlens: torch.Tensor = None,
@@ -431,18 +449,14 @@ class NeoBERTForSequenceClassification(NeoBERTPreTrainedModel):
         labels: Optional[torch.Tensor] = None,
         return_dict: Optional[bool] = None,
     ):
-        return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
-        )
-
         output = self.model.forward(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            max_seqlen=max_seqlen,
-            cu_seqlens=cu_seqlens,
-            attention_mask=attention_mask,
-            output_hidden_states=output_hidden_states,
-            output_attentions=output_attentions,
+            input_ids,
+            position_ids,
+            max_seqlen,
+            cu_seqlens,
+            attention_mask,
+            output_hidden_states,
+            output_attentions,
         )
         hidden_states = output.last_hidden_state
 
