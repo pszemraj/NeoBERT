@@ -91,7 +91,7 @@ def test_model_loading(model_path: Path) -> Tuple[bool, str]:
     """
     try:
         model, loading_info = _from_pretrained_with_info(AutoModel, model_path)
-        
+
         # Check if model has MLM head weights that AutoModel doesn't expect
         # This is normal for models that support AutoModelForMaskedLM
         issues = _format_loading_issues(loading_info)
@@ -100,22 +100,27 @@ def test_model_loading(model_path: Path) -> Tuple[bool, str]:
             config_path = model_path / "config.json"
             if config_path.exists():
                 import json
+
                 with open(config_path, "r") as f:
                     config = json.load(f)
                 architectures = config.get("architectures", [])
                 auto_map = config.get("auto_map", {})
-                
+
                 # If model supports MaskedLM, decoder weights are expected
-                if "AutoModelForMaskedLM" in auto_map or any("MaskedLM" in arch for arch in architectures):
+                if "AutoModelForMaskedLM" in auto_map or any(
+                    "MaskedLM" in arch for arch in architectures
+                ):
                     # Filter out decoder-related unexpected keys
                     if loading_info and loading_info.get("unexpected_keys"):
                         unexpected = loading_info["unexpected_keys"]
                         # Keep only unexpected keys that are NOT decoder-related
-                        non_decoder_unexpected = [k for k in unexpected if not k.startswith("decoder.")]
+                        non_decoder_unexpected = [
+                            k for k in unexpected if not k.startswith("decoder.")
+                        ]
                         if not non_decoder_unexpected:
                             # Only decoder weights were unexpected, which is fine
                             issues = None
-        
+
         if issues:
             return False, "load issues: " + issues
 
