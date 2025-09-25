@@ -582,7 +582,7 @@ def trainer(cfg: Config):
                         )
                         os.makedirs(path, exist_ok=True)
                         torch.save(
-                            model.state_dict(),
+                            accelerator.unwrap_model(model).state_dict(),
                             os.path.join(path, "state_dict.pt"),
                         )
                         checkpoint_path = path
