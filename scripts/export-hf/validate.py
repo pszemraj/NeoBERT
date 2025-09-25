@@ -28,7 +28,7 @@ from transformers import AutoModel, AutoModelForMaskedLM, AutoTokenizer
 
 
 def validate_model_files(model_path: Path) -> List[str]:
-    # Project-specific expectations; adjust if you want generic HF validation.
+    # Project-specific expectations
     required_files = [
         "config.json",
         "model.py",
@@ -42,7 +42,9 @@ def validate_model_files(model_path: Path) -> List[str]:
     return missing
 
 
-def _from_pretrained_with_info(model_cls, model_path: Path):
+def _from_pretrained_with_info(
+    model_cls, model_path: Path, verbose: bool = False
+) -> Tuple[object, Optional[dict]]:
     # Prefer output_loading_info for deterministic checks; fall back if remote code doesn't support it.
     try:
         model, loading_info = model_cls.from_pretrained(
@@ -50,6 +52,10 @@ def _from_pretrained_with_info(model_cls, model_path: Path):
             trust_remote_code=True,
             output_loading_info=True,
         )
+        if verbose:
+            print("Model info:")
+            print(model)
+
     except TypeError:
         model = model_cls.from_pretrained(str(model_path), trust_remote_code=True)
         loading_info = None
@@ -77,6 +83,12 @@ def _format_loading_issues(loading_info: Optional[dict]) -> Optional[str]:
 
 
 def test_model_loading(model_path: Path) -> Tuple[bool, str]:
+    """
+    test_model_loading - tries to load the model (AutoModel) and run a forward pass
+
+    :param Path model_path: path to model directory
+    :return Tuple[bool, str]: (success, message)
+    """
     try:
         model, loading_info = _from_pretrained_with_info(AutoModel, model_path)
         issues = _format_loading_issues(loading_info)
@@ -111,9 +123,11 @@ def test_tokenizer_loading(model_path: Path) -> Tuple[bool, str]:
         return False, f"{type(e).__name__}: {e}"
 
 
-def test_masked_lm_loading(model_path: Path) -> Tuple[bool, str]:
+def test_masked_lm_loading(model_path: Path, verbose: bool = False) -> Tuple[bool, str]:
     try:
-        mlm, loading_info = _from_pretrained_with_info(AutoModelForMaskedLM, model_path)
+        mlm, loading_info = _from_pretrained_with_info(
+            AutoModelForMaskedLM, model_path, verbose=verbose
+        )
         issues = _format_loading_issues(loading_info)
         if issues:
             return False, "mlm load issues: " + issues
@@ -198,11 +212,15 @@ def test_cosine_similarity_sanity(model_path: Path) -> Tuple[bool, str]:
 
 def main():
     p = argparse.ArgumentParser(
-        description="Validate an exported HF model (concise output)."
+        description="Validate an exported HF model (concise output).",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("model_path", type=str, help="Path to exported model dir")
     p.add_argument(
         "--strict", action="store_true", help="treat Python warnings as errors"
+    )
+    p.add_argument(
+        "-print", "--print_model_info", action="store_true", help="print model info"
     )
     args = p.parse_args()
 
@@ -236,7 +254,7 @@ def main():
 
     # 2) Model
     ok, msg = test_model_loading(model_path)
-    print(("model: OK" if ok else "model: FAIL") + ("" if ok else f" - {msg}"))
+    print(("AutoModel: OK" if ok else "AutoModel: FAIL") + ("" if ok else f" - {msg}"))
     all_ok &= ok
 
     # 3) Tokenizer
@@ -245,8 +263,11 @@ def main():
     all_ok &= ok
 
     # 4) Masked LM
-    ok, msg = test_masked_lm_loading(model_path)
-    print(("mlm: OK" if ok else "mlm: FAIL") + ("" if ok else f" - {msg}"))
+    ok, msg = test_masked_lm_loading(model_path, verbose=args.print_model_info)
+    print(
+        ("AutoModelForMaskedLM: OK" if ok else "AutoModelForMaskedLM: FAIL")
+        + ("" if ok else f" - {msg}")
+    )
     all_ok &= ok
 
     # 5) Pipeline
