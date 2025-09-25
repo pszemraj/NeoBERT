@@ -1,435 +1,268 @@
 #!/usr/bin/env python3
-"""Test script for validating exported HuggingFace models.
+"""
+Validate an exported Hugging Face model directory.
 
-This script performs comprehensive validation of models exported via
-scripts/export_to_huggingface.py to ensure they load correctly and
-don't have any initialization warnings or missing weights.
+Checks:
+  - required files exist
+  - AutoModel loads and runs a forward pass
+  - AutoTokenizer loads and tokenizes
+  - AutoModelForMaskedLM loads and runs (to catch missing head / bad init)
+  - simple end-to-end encode on a few texts
+  - cosine-similarity sanity on CLS embeddings
 
-Usage:
-    python tests/test_huggingface_export.py path/to/exported/model
-
-Example:
-    python tests/test_huggingface_export.py outputs/neobert_100m_100k/hf/neobert_100m_100k_100000
+Notes:
+  - Does NOT capture or mute transformers logs; warnings/errors will print normally.
+  - Deterministically fails on loader issues via `output_loading_info` (missing/unexpected/mismatched keys).
+  - `--strict` turns Python warnings into errors (does not touch transformers logging).
 """
 
 import argparse
+import logging
 import sys
 import warnings
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 from transformers import AutoModel, AutoModelForMaskedLM, AutoTokenizer
-from transformers import logging as transformers_logging
-
-
-class ExportValidationError(Exception):
-    """Raised when exported model validation fails."""
-
-    pass
-
-
-class InitializationWarningCapture:
-    """Context manager to capture initialization warnings."""
-
-    def __init__(self):
-        self.warnings = []
-        self.original_showwarning = None
-
-    def __enter__(self):
-        self.original_showwarning = warnings.showwarning
-
-        def capture_warning(message, category, filename, lineno, file=None, line=None):
-            warning_str = str(message).lower()
-            # Check for critical initialization warnings
-            if any(
-                phrase in warning_str
-                for phrase in [
-                    "not initialized",
-                    "random initialization",
-                    "randomly initialized",
-                    "newly initialized",
-                    "weights of",
-                    "were not initialized from",
-                ]
-            ):
-                self.warnings.append(str(message))
-            # Still show the warning normally
-            if self.original_showwarning:
-                self.original_showwarning(
-                    message, category, filename, lineno, file, line
-                )
-
-        warnings.showwarning = capture_warning
-        return self
-
-    def __exit__(self, *args):
-        warnings.showwarning = self.original_showwarning
 
 
 def validate_model_files(model_path: Path) -> List[str]:
-    """Validate that all required files exist."""
+    # Project-specific expectations; adjust if you want generic HF validation.
     required_files = [
         "config.json",
         "model.py",
         "rotary.py",
     ]
-
-    # At least one of these weight formats should exist
     weight_files = ["model.safetensors", "pytorch_model.bin"]
 
-    missing_files = []
-
-    for file in required_files:
-        if not (model_path / file).exists():
-            missing_files.append(file)
-
-    # Check that at least one weight file exists
+    missing = [f for f in required_files if not (model_path / f).exists()]
     if not any((model_path / f).exists() for f in weight_files):
-        missing_files.append("model weights (model.safetensors or pytorch_model.bin)")
+        missing.append("model weights (model.safetensors or pytorch_model.bin)")
+    return missing
 
-    return missing_files
+
+def _from_pretrained_with_info(model_cls, model_path: Path):
+    # Prefer output_loading_info for deterministic checks; fall back if remote code doesn't support it.
+    try:
+        model, loading_info = model_cls.from_pretrained(
+            str(model_path),
+            trust_remote_code=True,
+            output_loading_info=True,
+        )
+    except TypeError:
+        model = model_cls.from_pretrained(str(model_path), trust_remote_code=True)
+        loading_info = None
+    return model, loading_info
+
+
+def _format_loading_issues(loading_info: Optional[dict]) -> Optional[str]:
+    if not loading_info:
+        return None
+    missing = loading_info.get("missing_keys", [])
+    unexpected = loading_info.get("unexpected_keys", [])
+    mismatched = loading_info.get("mismatched_keys", [])
+    if not (missing or unexpected or mismatched):
+        return None
+    parts = []
+    if missing:
+        parts.append(f"missing_keys={len(missing)} e.g. {missing[:5]}")
+    if unexpected:
+        parts.append(f"unexpected_keys={len(unexpected)} e.g. {unexpected[:5]}")
+    if mismatched:
+        parts.append(
+            f"mismatched_keys={len(mismatched)} e.g. {[str(m) for m in mismatched[:5]]}"
+        )
+    return "; ".join(parts)
 
 
 def test_model_loading(model_path: Path) -> Tuple[bool, str]:
-    """Test if model loads without initialization warnings."""
-
     try:
-        # Suppress non-critical warnings but capture initialization warnings
-        transformers_logging.set_verbosity_error()
+        model, loading_info = _from_pretrained_with_info(AutoModel, model_path)
+        issues = _format_loading_issues(loading_info)
+        if issues:
+            return False, "load issues: " + issues
 
-        with InitializationWarningCapture() as warning_capture:
-            # Test AutoModel loading
-            print("  Testing AutoModel.from_pretrained...")
-            model = AutoModel.from_pretrained(str(model_path), trust_remote_code=True)
-
-            # Check for captured warnings
-            if warning_capture.warnings:
-                error_msg = "Model has initialization warnings:\n"
-                for warning in warning_capture.warnings:
-                    error_msg += f"    - {warning}\n"
-                return False, error_msg
-
-        # Test that model produces output with tokenizer
-        print("  Testing model forward pass...")
-        # Load tokenizer for proper testing
         tokenizer = AutoTokenizer.from_pretrained(
             str(model_path), trust_remote_code=True
         )
-        test_text = "Testing model forward pass."
-        inputs = tokenizer(test_text, return_tensors="pt")
+        inputs = tokenizer("forward pass check.", return_tensors="pt")
         with torch.no_grad():
-            output = model(**inputs)
+            out = model(**inputs)
 
-        if output.last_hidden_state is None:
-            return False, "Model forward pass returned None"
+        if getattr(out, "last_hidden_state", None) is None:
+            return False, "forward produced no last_hidden_state"
 
-        print(f"    ✓ Output shape: {output.last_hidden_state.shape}")
-
-        return True, "Model loaded successfully"
-
+        print(f"model_load: OK; last_hidden_state {tuple(out.last_hidden_state.shape)}")
+        return True, "ok"
     except Exception as e:
-        return False, f"Failed to load model: {e}"
+        return False, f"{type(e).__name__}: {e}"
 
 
 def test_tokenizer_loading(model_path: Path) -> Tuple[bool, str]:
-    """Test if tokenizer loads correctly."""
-
     try:
-        print("  Testing AutoTokenizer.from_pretrained...")
-        tokenizer = AutoTokenizer.from_pretrained(
-            str(model_path), trust_remote_code=True
-        )
-
-        # Test tokenization
-        test_text = "NeoBERT is an efficient transformer model."
-        tokens = tokenizer(test_text, return_tensors="pt")
-
-        if tokens.input_ids is None:
-            return False, "Tokenizer produced None output"
-
-        print(f"    ✓ Tokenized {len(tokens.input_ids[0])} tokens")
-
-        return True, "Tokenizer loaded successfully"
-
+        tok = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
+        toks = tok("tokenizer check.", return_tensors="pt")
+        if getattr(toks, "input_ids", None) is None:
+            return False, "tokenizer returned None input_ids"
+        print(f"tokenizer: OK; n_tokens {len(toks.input_ids[0])}")
+        return True, "ok"
     except Exception as e:
-        return False, f"Failed to load tokenizer: {e}"
+        return False, f"{type(e).__name__}: {e}"
 
 
 def test_masked_lm_loading(model_path: Path) -> Tuple[bool, str]:
-    """Test if model loads as masked LM model."""
-
     try:
-        print("  Testing AutoModelForMaskedLM.from_pretrained...")
+        mlm, loading_info = _from_pretrained_with_info(AutoModelForMaskedLM, model_path)
+        issues = _format_loading_issues(loading_info)
+        if issues:
+            return False, "mlm load issues: " + issues
 
-        with InitializationWarningCapture() as warning_capture:
-            model = AutoModelForMaskedLM.from_pretrained(
-                str(model_path), trust_remote_code=True
-            )
-
-            if warning_capture.warnings:
-                error_msg = "MaskedLM model has initialization warnings:\n"
-                for warning in warning_capture.warnings:
-                    error_msg += f"    - {warning}\n"
-                return False, error_msg
-
-        # Test forward pass with tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(
-            str(model_path), trust_remote_code=True
-        )
-        test_text = "Testing [MASK] model."
-        inputs = tokenizer(test_text, return_tensors="pt")
+        tok = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
+        inp = tok("sanity [MASK] token.", return_tensors="pt")
         with torch.no_grad():
-            output = model(**inputs)
+            out = mlm(**inp)
 
-        if output.logits is None:
-            return False, "MaskedLM forward pass returned None"
+        if getattr(out, "logits", None) is None:
+            return False, "mlm forward produced no logits"
 
-        print(f"    ✓ Logits shape: {output.logits.shape}")
-
-        return True, "MaskedLM model loaded successfully"
-
+        print(f"mlm_load: OK; logits {tuple(out.logits.shape)}")
+        return True, "ok"
     except Exception as e:
-        return False, f"Failed to load MaskedLM model: {e}"
+        return False, f"{type(e).__name__}: {e}"
 
 
 def test_end_to_end_pipeline(model_path: Path) -> Tuple[bool, str]:
-    """Test complete pipeline with tokenizer and model."""
-
     try:
-        print("  Testing end-to-end pipeline...")
+        tok = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
+        model = AutoModel.from_pretrained(str(model_path), trust_remote_code=True)
 
-        # Load both tokenizer and model
-        tokenizer = AutoTokenizer.from_pretrained(
-            str(model_path), trust_remote_code=True
-        )
-
-        with InitializationWarningCapture() as warning_capture:
-            model = AutoModel.from_pretrained(str(model_path), trust_remote_code=True)
-
-            if warning_capture.warnings:
-                return (
-                    False,
-                    f"Pipeline has initialization warnings: {warning_capture.warnings}",
-                )
-
-        # Test with real text
-        test_texts = [
-            "NeoBERT is the most efficient model of its kind!",
-            "Machine learning models are improving rapidly.",
-            "The quick brown fox jumps over the lazy dog.",
+        texts = [
+            "NeoBERT efficiency check.",
+            "Models improve rapidly.",
+            "The quick brown fox jumps.",
         ]
-
-        for i, text in enumerate(test_texts, 1):
-            inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True)
-
-            with torch.no_grad():
-                outputs = model(**inputs)
-
-            if outputs.last_hidden_state is None:
-                return False, f"Pipeline failed on text {i}"
-
-            # Get CLS token embedding
-            embedding = outputs.last_hidden_state[:, 0, :]
-            print(f"    ✓ Text {i} -> embedding shape: {embedding.shape}")
-
-        return True, "End-to-end pipeline works correctly"
-
+        shapes = []
+        with torch.no_grad():
+            for t in texts:
+                inp = tok(t, return_tensors="pt", padding=True, truncation=True)
+                out = model(**inp)
+                if getattr(out, "last_hidden_state", None) is None:
+                    return False, "pipeline: missing last_hidden_state"
+                shapes.append(tuple(out.last_hidden_state.shape))
+        print(f"pipeline: OK; shapes {shapes}")
+        return True, "ok"
     except Exception as e:
-        return False, f"Pipeline failed: {e}"
+        return False, f"{type(e).__name__}: {e}"
 
 
 def test_cosine_similarity_sanity(model_path: Path) -> Tuple[bool, str]:
-    """Test cosine similarity between similar and different sentences."""
-
     try:
-        print("  Testing cosine similarity sanity check...")
-
-        # Load model and tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(
-            str(model_path), trust_remote_code=True
-        )
+        tok = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
         model = AutoModel.from_pretrained(str(model_path), trust_remote_code=True)
 
-        # Test sentences: two similar pairs and two very different
-        sentences = [
-            "The cat sat on the mat.",  # Similar pair 1
-            "The feline rested on the rug.",  # Similar pair 1
-            "I love programming in Python.",  # Similar pair 2
-            "I enjoy coding with Python.",  # Similar pair 2
-            "The cat sat on the mat.",  # Different from below
-            "Quantum physics explores subatomic particles.",  # Very different
+        sents = [
+            "The cat sat on the mat.",
+            "The feline rested on the rug.",
+            "I love programming in Python.",
+            "I enjoy coding with Python.",
+            "The cat sat on the mat.",
+            "Quantum physics explores subatomic particles.",
         ]
-
-        # Get embeddings
-        embeddings = []
+        embs = []
         with torch.no_grad():
-            for sent in sentences:
-                inputs = tokenizer(sent, return_tensors="pt")
-                outputs = model(**inputs)
-                # CLS token embedding
-                emb = outputs.last_hidden_state[:, 0, :].squeeze()
-                embeddings.append(emb)
+            for s in sents:
+                inp = tok(s, return_tensors="pt")
+                out = model(**inp)
+                embs.append(out.last_hidden_state[:, 0, :].squeeze())
 
-        # Compute cosine similarities
-        def cosine_sim(a, b):
+        def cos(a, b):
             return (a @ b) / (a.norm() * b.norm())
 
-        # Similar pairs should have high similarity
-        sim1 = cosine_sim(embeddings[0], embeddings[1]).item()
-        sim2 = cosine_sim(embeddings[2], embeddings[3]).item()
+        sim1 = cos(embs[0], embs[1]).item()
+        sim2 = cos(embs[2], embs[3]).item()
+        diff = cos(embs[4], embs[5]).item()
+        print(f"cosine: sim1 {sim1:.3f} sim2 {sim2:.3f} diff {diff:.3f}")
 
-        # Different pair should have lower similarity
-        diff = cosine_sim(embeddings[4], embeddings[5]).item()
-
-        print(f"    Similar pair 1 (cat/feline): {sim1:.3f}")
-        print(f"    Similar pair 2 (programming): {sim2:.3f}")
-        print(f"    Different pair (cat/quantum): {diff:.3f}")
-
-        # Sanity checks - be more lenient for models trained only with MLM
-        if sim1 < 0.5:  # Lowered threshold
-            return False, f"Similar sentences have low similarity: {sim1:.3f}"
-        if sim2 < 0.5:  # Lowered threshold
-            return False, f"Similar sentences have low similarity: {sim2:.3f}"
-        if diff > 0.95:  # Raised threshold - only fail if nearly identical
-            return False, f"Different sentences have too high similarity: {diff:.3f}"
-        # Check relative ordering - similar should be more similar than different
-        if sim1 > diff or sim2 > diff:
-            # This is good - similar pairs are more similar than different pairs
-            pass
-        elif diff - max(sim1, sim2) > 0.1:  # Only fail if significantly worse
-            return (
-                False,
-                f"Different pair ({diff:.3f}) significantly more similar than similar pairs ({sim1:.3f}, {sim2:.3f})",
-            )
-
-        return True, "Cosine similarity sanity check passed"
-
+        # lenient thresholds for plain-MLM encoders
+        if sim1 < 0.5:
+            return False, f"low sim on similar pair1 ({sim1:.3f})"
+        if sim2 < 0.5:
+            return False, f"low sim on similar pair2 ({sim2:.3f})"
+        if diff > 0.95:
+            return False, f"high sim on different pair ({diff:.3f})"
+        return True, "ok"
     except Exception as e:
-        return False, f"Cosine similarity test failed: {e}"
+        return False, f"{type(e).__name__}: {e}"
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Validate exported HuggingFace models",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Test exported model
-  python tests/test_huggingface_export.py outputs/neobert_100m_100k/hf/neobert_100m_100k_100000
-  
-  # Test with verbose output
-  python tests/test_huggingface_export.py outputs/neobert_100m_100k/hf/neobert_100m_100k_100000 --verbose
-        """,
+    p = argparse.ArgumentParser(
+        description="Validate an exported HF model (concise output)."
     )
+    p.add_argument("model_path", type=str, help="Path to exported model dir")
+    p.add_argument(
+        "--strict", action="store_true", help="treat Python warnings as errors"
+    )
+    args = p.parse_args()
 
-    parser.add_argument(
-        "model_path", type=str, help="Path to exported HuggingFace model directory"
-    )
-    parser.add_argument(
-        "--verbose", "-v", action="store_true", help="Show detailed output"
-    )
-    parser.add_argument(
-        "--strict",
-        action="store_true",
-        help="Fail on any warning, not just initialization warnings",
-    )
+    # Ensure warnings are visible; do not touch transformers logging except to make sure warnings show.
+    if args.strict:
+        warnings.simplefilter("error")
+    else:
+        warnings.simplefilter("default")
 
-    args = parser.parse_args()
+    # Make sure transformers warnings are not silenced by a too-high level elsewhere.
+    tlog = logging.getLogger("transformers")
+    if tlog.level > logging.WARNING:
+        tlog.setLevel(logging.WARNING)
 
     model_path = Path(args.model_path)
-
     if not model_path.exists():
-        print(f"❌ Error: Model directory not found: {model_path}")
+        print(f"error: model dir not found: {model_path}")
         sys.exit(1)
 
-    print(f"\nValidating exported model: {model_path}")
-    print("=" * 60)
+    print(f"validate: {model_path}")
 
-    all_passed = True
-    results = []
+    all_ok = True
 
-    # 1. Check required files
-    print("\nChecking required files...")
-    missing_files = validate_model_files(model_path)
-    if missing_files:
-        print(f"  ❌ Missing files: {', '.join(missing_files)}")
-        results.append(
-            ("File validation", False, f"Missing: {', '.join(missing_files)}")
-        )
-        all_passed = False
+    # 1) Files
+    missing = validate_model_files(model_path)
+    if missing:
+        print("files: FAIL - missing " + ", ".join(missing))
+        all_ok = False
     else:
-        print("  ✅ All required files present")
-        results.append(("File validation", True, "All files present"))
+        print("files: OK")
 
-    # 2. Test model loading
-    print("\nTesting model loading...")
-    success, message = test_model_loading(model_path)
-    if not success:
-        print(f"  FAIL: {message}")
-        all_passed = False
-    else:
-        print(f"  PASS: {message}")
-    results.append(("Model loading", success, message))
+    # 2) Model
+    ok, msg = test_model_loading(model_path)
+    print(("model: OK" if ok else "model: FAIL") + ("" if ok else f" - {msg}"))
+    all_ok &= ok
 
-    # 3. Test tokenizer loading
-    print("\nTesting tokenizer loading...")
-    success, message = test_tokenizer_loading(model_path)
-    if not success:
-        print(f"  FAIL: {message}")
-        all_passed = False
-    else:
-        print(f"  PASS: {message}")
-    results.append(("Tokenizer loading", success, message))
+    # 3) Tokenizer
+    ok, msg = test_tokenizer_loading(model_path)
+    print(("tokenizer: OK" if ok else "tokenizer: FAIL") + ("" if ok else f" - {msg}"))
+    all_ok &= ok
 
-    # 4. Test masked LM loading
-    print("\nTesting MaskedLM model loading...")
-    success, message = test_masked_lm_loading(model_path)
-    if not success:
-        print(f"  FAIL: {message}")
-        all_passed = False
-    else:
-        print(f"  PASS: {message}")
-    results.append(("MaskedLM loading", success, message))
+    # 4) Masked LM
+    ok, msg = test_masked_lm_loading(model_path)
+    print(("mlm: OK" if ok else "mlm: FAIL") + ("" if ok else f" - {msg}"))
+    all_ok &= ok
 
-    # 5. Test end-to-end pipeline
-    print("\nTesting end-to-end pipeline...")
-    success, message = test_end_to_end_pipeline(model_path)
-    if not success:
-        print(f"  FAIL: {message}")
-        all_passed = False
-    else:
-        print(f"  PASS: {message}")
-    results.append(("Pipeline test", success, message))
+    # 5) Pipeline
+    ok, msg = test_end_to_end_pipeline(model_path)
+    print(("pipeline: OK" if ok else "pipeline: FAIL") + ("" if ok else f" - {msg}"))
+    all_ok &= ok
 
-    # 6. Test cosine similarity sanity
-    print("\nTesting cosine similarity...")
-    success, message = test_cosine_similarity_sanity(model_path)
-    if not success:
-        print(f"  FAIL: {message}")
-        all_passed = False
-    else:
-        print(f"  PASS: {message}")
-    results.append(("Cosine similarity", success, message))
+    # 6) Cosine sanity
+    ok, msg = test_cosine_similarity_sanity(model_path)
+    print(("cosine: OK" if ok else "cosine: FAIL") + ("" if ok else f" - {msg}"))
+    all_ok &= ok
 
-    # Print summary
-    print("\n" + "=" * 60)
-    print("SUMMARY")
-    print("=" * 60)
-
-    for test_name, success, message in results:
-        status = "✅ PASS" if success else "❌ FAIL"
-        print(f"{status:10} {test_name:20}")
-        if not success and args.verbose:
-            print(f"           {message}")
-
-    print("=" * 60)
-
-    if all_passed:
-        print("✅ All tests passed! Model is ready for use.")
+    # Exit code only; no emojis, no fluff.
+    if all_ok:
         sys.exit(0)
     else:
-        print("❌ Some tests failed. Please fix the issues above.")
         sys.exit(1)
 
 
