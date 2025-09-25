@@ -336,6 +336,44 @@ This is a NeoBERT model trained with [pszemraj/NeoBERT](https://github.com/pszem
 > [!IMPORTANT]
 > Ensure you update `repo_id` to your actual HuggingFace repo ID or local path.
 
+### For Masked Language Modeling (Fill-Mask)
+
+```python
+from transformers import AutoModelForMaskedLM, AutoTokenizer
+import torch
+
+repo_id = "{repo_id}"  # Update this to your HF repo ID
+tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
+model = AutoModelForMaskedLM.from_pretrained(repo_id, trust_remote_code=True)
+
+# Example: Fill in masked tokens
+text = "NeoBERT is the most [MASK] model of its kind!"
+
+# Tokenize (handling Metaspace tokenizer's space tokens)
+inputs = tokenizer(text, return_tensors="pt")
+input_ids = inputs["input_ids"][0].tolist()
+
+# Remove extra space tokens before [MASK] if present (Metaspace tokenizer quirk)
+cleaned_ids = []
+for i, token_id in enumerate(input_ids):
+    if token_id == 454 and i < len(input_ids) - 1 and input_ids[i + 1] == tokenizer.mask_token_id:
+        continue
+    cleaned_ids.append(token_id)
+
+inputs["input_ids"] = torch.tensor([cleaned_ids])
+
+# Get predictions
+with torch.no_grad():
+    outputs = model(**inputs)
+    mask_pos = (inputs["input_ids"] == tokenizer.mask_token_id).nonzero(as_tuple=True)[1][0]
+    predictions = outputs.logits[0, mask_pos].topk(5)
+
+# Display top predictions
+for idx, score in zip(predictions.indices, predictions.values):
+    token = tokenizer.decode([idx])
+    print(f"{{token}}: {{score:.2f}}")
+```
+
 ### For Embeddings / Feature Extraction
 
 ```python
