@@ -366,7 +366,7 @@ def trainer(cfg):
                     )
                     os.makedirs(path, exist_ok=True)
                     torch.save(
-                        model.state_dict(),
+                        accelerator.unwrap_model(model).state_dict(),
                         os.path.join(path, "state_dict.pt"),
                     )
 

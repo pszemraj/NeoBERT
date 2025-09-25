@@ -32,7 +32,7 @@ for task in "${TASKS[@]}"; do
     echo -e "${YELLOW}Running $task...${NC}"
     
     # Build command
-    CMD="python scripts/evaluation/run_glue.py --config configs/eval/glue_${task}.yaml"
+    CMD="python scripts/evaluation/run_glue.py --config configs/glue/${task}.yaml"
     
     # Add model override if provided
     if [ -n "$MODEL_PATH_OVERRIDE" ]; then
@@ -66,7 +66,7 @@ fi
 echo ""
 echo "Results saved to:"
 for task in "${TASKS[@]}"; do
-    echo "  - glue_outputs/$task/"
+    echo "  - outputs/glue/neobert-100m/$task/"
 done
 echo ""
 echo "Logs saved to:"

@@ -30,9 +30,10 @@ trainer:
   gradient_accumulation_steps: 1
   eval_strategy: steps
   eval_steps: 1000
-  save_strategy: steps
-  save_steps: 1000
-  save_total_limit: 3
+  save_model: false  # Disable model checkpoint saving for GLUE evaluation
+  save_strategy: "no"
+  save_steps: -1  # Disabled
+  save_total_limit: 0  # No checkpoints
   logging_steps: 100
   early_stopping: 5
   metric_for_best_model: eval_accuracy

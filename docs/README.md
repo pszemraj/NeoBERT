@@ -13,9 +13,11 @@ Core documentation for training, evaluating, and using NeoBERT models.
 
 - **[Architecture](architecture.md)** - Model architecture details
 - **[Testing](testing.md)** - Running the test suite
+- **[Troubleshooting](troubleshooting.md)** - Common issues and solutions
 
 ## Quick Links
 
 - [Main README](../README.md)
 - [Example Configs](../configs/)
 - [GLUE Configs](../configs/glue/)
+- [HuggingFace Export](../scripts/export-hf/)

@@ -42,9 +42,10 @@ trainer:
   # Evaluation and saving
   eval_strategy: "steps"
   eval_steps: 100  # MRPC is small
-  save_strategy: "steps"
-  save_steps: 100
-  save_total_limit: 3
+  save_model: false  # Disable model checkpoint saving for GLUE evaluation
+  save_strategy: "no"  # Don't save checkpoints
+  save_steps: -1  # Disabled
+  save_total_limit: 0  # No checkpoints
   logging_steps: 100
   # Early stopping
   early_stopping: 5  # Stop if no improvement for 5 evaluations

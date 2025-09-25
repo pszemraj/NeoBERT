@@ -1,12 +1,15 @@
 #!/bin/bash
 # Example evaluation scripts using new configuration system
 
-# GLUE evaluation
+# GLUE evaluation - single task example
 python scripts/evaluation/run_glue.py \
     --config configs/evaluate_neobert.yaml \
     --task glue \
     --dataset.name cola \
     --trainer.output_dir ./output/glue/cola
+
+# GLUE evaluation - all tasks
+# bash scripts/evaluation/run_all_glue.sh
 
 # MTEB evaluation - all tasks
 python scripts/evaluation/run_mteb_new.py \

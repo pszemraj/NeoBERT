@@ -54,6 +54,8 @@ pip install transformers torch  # Core dependencies
 
 Load [the official model](https://huggingface.co/chandar-lab/NeoBERT) using Hugging Face Transformers:
 
+### For Text Embeddings
+
 ```python
 from transformers import AutoModel, AutoTokenizer
 
@@ -67,8 +69,28 @@ inputs = tokenizer(text, return_tensors="pt")
 
 # Generate embeddings
 outputs = model(**inputs)
-embedding = outputs.last_hidden_state[:, 0, :]
+embedding = outputs.last_hidden_state[:, 0, :]  # CLS token embedding
 print(embedding.shape)
+```
+
+### For Masked Language Modeling
+
+```python
+from transformers import AutoModelForMaskedLM, AutoTokenizer
+
+model_name = "chandar-lab/NeoBERT"
+tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+model = AutoModelForMaskedLM.from_pretrained(model_name, trust_remote_code=True)
+
+# Fill in masked tokens
+text = "The quick brown [MASK] jumps over the lazy dog."
+inputs = tokenizer(text, return_tensors="pt")
+
+# Get predictions
+outputs = model(**inputs)
+mask_token_index = (inputs["input_ids"] == tokenizer.mask_token_id).nonzero(as_tuple=True)[1]
+predicted_token_id = outputs.logits[0, mask_token_index].argmax(axis=-1)
+print(tokenizer.decode(predicted_token_id))
 ```
 
 ## Documentation

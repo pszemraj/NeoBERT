@@ -1,7 +1,6 @@
 test/
 wandb/
 notebooks/
-huggingface/
 tokenized_datasets/
 tokenized_data/
 mergekit
