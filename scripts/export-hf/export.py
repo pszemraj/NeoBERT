@@ -6,7 +6,7 @@ This script converts a NeoBERT checkpoint from the training format
 files for loading with transformers library.
 
 Usage:
-    python scripts/export_to_huggingface.py outputs/neobert_100m_100k/model_checkpoints/100000
+    python scripts/export-hf/export.py outputs/neobert_100m_100k/model_checkpoints/100000
 
 The script will create an hf/ directory in the parent folder with the exported model.
 """
@@ -14,10 +14,12 @@ The script will create an hf/ directory in the parent folder with the exported m
 import argparse
 import json
 import shutil
+import textwrap
 from pathlib import Path
 from typing import Any, Dict
 
 import torch
+import transformers
 import yaml
 from safetensors.torch import save_file
 from transformers import AutoTokenizer
@@ -55,18 +57,8 @@ def create_hf_config(neobert_config: Dict[str, Any]) -> Dict[str, Any]:
         "norm_eps": model_config.get("layer_norm_eps", 1e-5),
         "pad_token_id": 0,
         "torch_dtype": "float32",
-        "transformers_version": "4.48.2",
+        "transformers_version": transformers.__version__,
     }
-
-    # Add training info if available
-    if "trainer" in neobert_config:
-        trainer = neobert_config["trainer"]
-        hf_config["training_info"] = {
-            "num_train_epochs": trainer.get("num_train_epochs"),
-            "max_steps": trainer.get("max_steps"),
-            "batch_size": trainer.get("per_device_train_batch_size"),
-            "learning_rate": neobert_config.get("optimizer", {}).get("lr"),
-        }
 
     return hf_config
 
@@ -237,15 +229,15 @@ This is a NeoBERT model trained with [pszemraj/NeoBERT](https://github.com/pszem
 
 ## Usage
 
-```python
-repo_id = "{repo_id}"  # Update this to your HF repo ID
-```
+> [!IMPORTANT]
+> Ensure you update `repo_id` to your actual HuggingFace repo ID or local path.
 
 ### For Embeddings / Feature Extraction
 
 ```python
 from transformers import AutoModel, AutoTokenizer
 
+repo_id = "{repo_id}"  # Update this to your HF repo ID
 tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
 model = AutoModel.from_pretrained(repo_id, trust_remote_code=True)
 
@@ -259,34 +251,17 @@ cls_embedding = outputs.last_hidden_state[:, 0, :]
 print(f"Embedding shape: {{cls_embedding.shape}}")
 ```
 
-### For Masked Language Modeling
-
-```python
-from transformers import AutoModelForMaskedLM, AutoTokenizer
-
-tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
-model = AutoModelForMaskedLM.from_pretrained(repo_id, trust_remote_code=True)
-
-# Example: Predict masked tokens
-text = f"NeoBERT is the most {{tokenizer.mask_token}} model of its kind!"
-inputs = tokenizer(text, return_tensors="pt")
-outputs = model(**inputs)
-
-# Get predictions for masked token
-mask_token_index = (inputs.input_ids == tokenizer.mask_token_id)[0].nonzero(as_tuple=True)[0]
-predicted_token_id = outputs.logits[0, mask_token_index].argmax(axis=-1)
-predicted_token = tokenizer.decode(predicted_token_id)
-print(f"Predicted word: {{predicted_token}}")
-```
-
 ## Training Configuration
 
 <details>
   <summary><strong>Full Config</strong> (click to expand)</summary>
 
-  Full training config:
-  ```yaml
-{config_yaml}  ```
+Full training config:
+
+```yaml
+{config_yaml}
+```
+
 </details>
 """
 
@@ -294,11 +269,7 @@ print(f"Predicted word: {{predicted_token}}")
         f.write(readme_content)
     print("  Created README.md")
 
-    print(f"\n✅ Successfully exported checkpoint to: {output_dir}")
-    print("\nTo test the exported model:")
-    print(
-        f"  python -c \"from transformers import AutoModel; model = AutoModel.from_pretrained('{output_dir}', trust_remote_code=True); print(model)\""
-    )
+    print(f"\n✅ exported checkpoint to:\n\t{output_dir}")
 
     return output_dir
 
@@ -307,14 +278,16 @@ def main():
     parser = argparse.ArgumentParser(
         description="Export NeoBERT checkpoint to HuggingFace format",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Export checkpoint 100000 from neobert_100m_100k
-  python scripts/export_to_huggingface.py outputs/neobert_100m_100k/model_checkpoints/100000
-  
-  # Export to specific directory
-  python scripts/export_to_huggingface.py outputs/neobert_100m_100k/model_checkpoints/100000 --output my_model
-        """,
+        epilog=textwrap.dedent(
+            """\
+            Examples:
+            # Export checkpoint 100000 from neobert_100m_100k
+            python %(prog)s outputs/neobert_100m_100k/model_checkpoints/100000
+
+            # Export to specific directory
+            python %(prog)s outputs/neobert_100m_100k/model_checkpoints/100000 --output my_model
+        """
+        ),
     )
 
     parser.add_argument(
