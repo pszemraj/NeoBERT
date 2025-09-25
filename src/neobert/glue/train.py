@@ -446,7 +446,7 @@ def trainer(cfg: Config):
     # Handle mixed precision setting (could be bool or string)
     mixed_precision = cfg.trainer.mixed_precision
     if isinstance(mixed_precision, bool):
-        mixed_precision = "no" if not mixed_precision else "fp16"
+        mixed_precision = "no" if not mixed_precision else "bf16"
     elif mixed_precision == "fp32":
         mixed_precision = "no"
 
