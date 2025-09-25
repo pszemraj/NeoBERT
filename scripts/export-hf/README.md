@@ -51,10 +51,44 @@ embedding = outputs.last_hidden_state[:, 0, :]  # CLS token embedding
 ### Loading as Masked Language Model
 
 ```python
-from transformers import AutoModelForMaskedLM
+from transformers import AutoModelForMaskedLM, AutoTokenizer
+import torch
 
+# Load model and tokenizer
+model_path = "outputs/neobert_100m_100k/hf/neobert_100m_100k_100000"
+tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 model = AutoModelForMaskedLM.from_pretrained(model_path, trust_remote_code=True)
+
+# Example: Fill in masked tokens
+text = "NeoBERT is the most [MASK] model of its kind!"
+
+# Important: Handle Metaspace tokenizer's space tokens
+# The tokenizer adds space tokens (▁) before [MASK] which need to be removed
+inputs = tokenizer(text, return_tensors="pt")
+input_ids = inputs["input_ids"][0].tolist()
+
+# Remove extra space tokens before [MASK] (token ID 454)
+cleaned_ids = []
+for i, token_id in enumerate(input_ids):
+    if token_id == 454 and i < len(input_ids) - 1 and input_ids[i + 1] == tokenizer.mask_token_id:
+        continue
+    cleaned_ids.append(token_id)
+
+inputs["input_ids"] = torch.tensor([cleaned_ids])
+
+# Get predictions
+with torch.no_grad():
+    outputs = model(**inputs)
+    mask_pos = (inputs["input_ids"] == tokenizer.mask_token_id).nonzero(as_tuple=True)[1][0]
+    predictions = outputs.logits[0, mask_pos].topk(5)
+
+# Display results
+for idx, score in zip(predictions.indices, predictions.values):
+    token = tokenizer.decode([idx])
+    print(f"{token}: {score:.2f}")
 ```
+
+**Note on Metaspace Tokenizer**: NeoBERT uses a Metaspace tokenizer with `prepend_scheme="always"`, which automatically adds space tokens. When typing `[MASK]` directly in text (as opposed to masking existing tokens during training), an extra space token is inserted that needs to be handled for proper inference.
 
 ## Validation and Testing
 
@@ -123,6 +157,13 @@ Training config fields are mapped to HuggingFace config:
 - Training metadata is preserved in `training_info`
 
 ## Troubleshooting
+
+### MLM Predictions Always Return Same Token
+
+If the model always predicts the same token (e.g., "1") for masked positions:
+- **Check training checkpoint saving**: Ensure model is unwrapped from accelerator before saving (`accelerator.unwrap_model(model).state_dict()`)
+- **Handle Metaspace tokenizer**: Remove extra space tokens (ID 454) before [MASK] tokens when doing inference
+- **Verify attention mask**: The HF model needs proper None checking for attention_mask in the forward pass
 
 ### Initialization Warnings
 
