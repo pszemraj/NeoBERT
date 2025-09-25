@@ -239,7 +239,7 @@ class EncoderBlock(nn.Module):
                 query=xq.transpose(1, 2),
                 key=xk.transpose(1, 2),
                 value=xv.transpose(1, 2),
-                attn_mask=attention_mask.bool(),
+                attn_mask=attention_mask.bool() if attention_mask is not None else None,
                 dropout_p=0,
             ).transpose(1, 2)
 
