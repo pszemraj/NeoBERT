@@ -32,9 +32,68 @@ def load_config(config_path: Path) -> Dict[str, Any]:
     return config
 
 
-def create_hf_config(neobert_config: Dict[str, Any]) -> Dict[str, Any]:
+def get_torch_dtype_from_state_dict(state_dict: Dict[str, torch.Tensor]) -> str:
+    """Infer the torch dtype from the state dict weights."""
+    if not state_dict:
+        raise ValueError("State dict is empty, cannot infer dtype")
+
+    # Get the dtype of the first weight tensor
+    first_weight = next(iter(state_dict.values()))
+    if not isinstance(first_weight, torch.Tensor):
+        raise ValueError(f"Expected torch.Tensor, got {type(first_weight)}")
+
+    dtype = first_weight.dtype
+    if dtype == torch.float32:
+        return "float32"
+    elif dtype == torch.float16:
+        return "float16"
+    elif dtype == torch.bfloat16:
+        return "bfloat16"
+    elif dtype == torch.float64:
+        return "float64"
+    else:
+        # For any other dtype, fall back to the string representation
+        dtype_str = str(dtype).replace("torch.", "")
+        print(f"Warning: Found unexpected dtype {dtype}, using '{dtype_str}'")
+        return dtype_str
+
+
+def validate_required_config_fields(model_config: Dict[str, Any]) -> None:
+    """Validate that all required config fields are present."""
+    required_fields = [
+        "hidden_size",
+        "num_hidden_layers",
+        "num_attention_heads",
+        "intermediate_size",
+        "vocab_size",
+        "max_position_embeddings",
+        "norm_eps",
+        "pad_token_id",
+    ]
+
+    missing_fields = []
+    for field in required_fields:
+        if field not in model_config:
+            missing_fields.append(field)
+
+    if missing_fields:
+        raise ValueError(
+            f"Missing required config fields in model config: {missing_fields}. "
+            "The training config must contain all required fields for HF export."
+        )
+
+
+def create_hf_config(
+    neobert_config: Dict[str, Any], state_dict: Dict[str, torch.Tensor]
+) -> Dict[str, Any]:
     """Convert NeoBERT config.yaml to HuggingFace config.json format."""
     model_config = neobert_config.get("model", {})
+
+    # Validate that we have all required fields
+    validate_required_config_fields(model_config)
+
+    # Infer dtype from actual weights
+    torch_dtype = get_torch_dtype_from_state_dict(state_dict)
 
     # Map our config to HF format - using the original HF model structure
     hf_config = {
@@ -46,17 +105,17 @@ def create_hf_config(neobert_config: Dict[str, Any]) -> Dict[str, Any]:
             "AutoModelForMaskedLM": "model.NeoBERTLMHead",
             "AutoModelForSequenceClassification": "model.NeoBERTForSequenceClassification",
         },
-        "hidden_size": model_config.get("hidden_size", 768),
-        "num_hidden_layers": model_config.get("num_hidden_layers", 12),
-        "num_attention_heads": model_config.get("num_attention_heads", 12),
-        "intermediate_size": model_config.get("intermediate_size", 3072),
-        "vocab_size": model_config.get("vocab_size", 30522),
-        "max_length": model_config.get("max_position_embeddings", 512),
-        "embedding_init_range": 0.02,
-        "decoder_init_range": 0.02,
-        "norm_eps": model_config.get("layer_norm_eps", 1e-5),
-        "pad_token_id": 0,
-        "torch_dtype": "float32",
+        "hidden_size": model_config["hidden_size"],
+        "num_hidden_layers": model_config["num_hidden_layers"],
+        "num_attention_heads": model_config["num_attention_heads"],
+        "intermediate_size": model_config["intermediate_size"],
+        "vocab_size": model_config["vocab_size"],
+        "max_length": model_config["max_position_embeddings"],
+        "embedding_init_range": model_config.get("embedding_init_range", 0.02),
+        "decoder_init_range": model_config.get("decoder_init_range", 0.02),
+        "norm_eps": model_config["norm_eps"],
+        "pad_token_id": model_config["pad_token_id"],
+        "torch_dtype": torch_dtype,
         "transformers_version": transformers.__version__,
     }
 
@@ -90,6 +149,31 @@ def map_weights(
             mapped[key] = value
 
     return mapped
+
+
+def validate_tokenizer_special_tokens(tokenizer_dir: Path) -> None:
+    """Validate that the tokenizer has all required special tokens."""
+    special_tokens_path = tokenizer_dir / "special_tokens_map.json"
+    if not special_tokens_path.exists():
+        raise FileNotFoundError(
+            f"Tokenizer special_tokens_map.json not found at {special_tokens_path}"
+        )
+
+    with open(special_tokens_path, "r") as f:
+        special_tokens = json.load(f)
+
+    required_tokens = ["cls_token", "sep_token", "pad_token", "mask_token", "unk_token"]
+    missing_tokens = []
+
+    for token in required_tokens:
+        if token not in special_tokens:
+            missing_tokens.append(token)
+
+    if missing_tokens:
+        raise ValueError(
+            f"Tokenizer missing required special tokens: {missing_tokens}. "
+            "All special tokens must be defined for proper HF compatibility."
+        )
 
 
 def copy_hf_modeling_files(target_dir: Path):
@@ -147,20 +231,31 @@ def export_checkpoint(checkpoint_path: Path, output_dir: Path = None):
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Exporting checkpoint to: {output_dir}")
 
-    # 1. Load and convert config
+    # 1. Load state dict first to get dtype info
+    print("Loading model weights...")
+    state_dict = torch.load(state_dict_path, map_location="cpu")
+    if not state_dict:
+        raise ValueError(f"Loaded state dict is empty from {state_dict_path}")
+    print(
+        f"  Loaded {len(state_dict)} weight tensors with dtype: {next(iter(state_dict.values())).dtype}"
+    )
+
+    # 2. Load and convert config
     print("Converting config...")
     neobert_config = load_config(config_path)
-    hf_config = create_hf_config(neobert_config)
+    model_config = neobert_config.get("model", {})
+    if not model_config:
+        raise ValueError("Model config section is empty or missing from config.yaml")
+
+    hf_config = create_hf_config(neobert_config, state_dict)
 
     # Save config.json
     with open(output_dir / "config.json", "w") as f:
         json.dump(hf_config, f, indent=2)
     print("  Saved config.json")
 
-    # 2. Load and map weights
+    # 3. Map weights
     print("Converting and mapping model weights...")
-    state_dict = torch.load(state_dict_path, map_location="cpu")
-    model_config = neobert_config.get("model", {})
     mapped_state_dict = map_weights(state_dict, model_config)
 
     # Save as safetensors (preferred) and pytorch formats
@@ -172,15 +267,18 @@ def export_checkpoint(checkpoint_path: Path, output_dir: Path = None):
     torch.save(mapped_state_dict, output_dir / "pytorch_model.bin")
     print("  Saved pytorch_model.bin")
 
-    # 3. Load tokenizer, fix model_max_length, and save
-    print("Loading and fixing tokenizer...")
+    # 4. Load tokenizer, validate special tokens, fix model_max_length, and save
+    print("Loading and validating tokenizer...")
     tokenizer_dir = checkpoint_path / "tokenizer"
     if tokenizer_dir.exists():
+        # Validate tokenizer has all required special tokens
+        validate_tokenizer_special_tokens(tokenizer_dir)
+
         # Load the tokenizer
         tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_dir))
 
         # Get max_position_embeddings from model config
-        max_pos = model_config.get("max_position_embeddings", 4096)
+        max_pos = model_config["max_position_embeddings"]
 
         # Set the correct model_max_length
         tokenizer.model_max_length = max_pos
@@ -188,11 +286,16 @@ def export_checkpoint(checkpoint_path: Path, output_dir: Path = None):
         # Save the tokenizer with corrected config
         tokenizer.save_pretrained(str(output_dir))
         print(f"  Saved tokenizer with model_max_length={max_pos}")
+    else:
+        raise FileNotFoundError(
+            f"Tokenizer directory not found at {tokenizer_dir}. "
+            "Tokenizer is required for HF export."
+        )
 
-    # 4. Copy HF modeling files
+    # 5. Copy HF modeling files
     copy_hf_modeling_files(output_dir)
 
-    # 5. Create README with HuggingFace YAML header
+    # 6. Create README with HuggingFace YAML header
     # Get dataset info from config
     dataset_name = neobert_config.get("dataset", {}).get("name", "")
     if not dataset_name and neobert_config.get("dataset", {}).get("path"):
@@ -226,6 +329,7 @@ This is a NeoBERT model trained with [pszemraj/NeoBERT](https://github.com/pszem
 - **Attention Heads**: {hf_config["num_attention_heads"]}
 - **Vocab Size**: {hf_config["vocab_size"]}
 - **Max Length**: {hf_config["max_length"]}
+- **Dtype**: {hf_config["torch_dtype"]}
 
 ## Usage
 
