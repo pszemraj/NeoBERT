@@ -5,7 +5,7 @@ model:
   num_hidden_layers: 28  # Full NeoBERT size (250M params)
   num_attention_heads: 12
   intermediate_size: 3072
-  dropout_prob: 0.05
+  dropout_prob: 0.0
   vocab_size: 31999  # BEE-spoke-data tokenizer vocab size
   max_position_embeddings: 4096
   flash_attention: true
