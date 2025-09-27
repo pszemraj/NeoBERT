@@ -321,9 +321,10 @@ def trainer(cfg: Config):
     # Model
     # Calculate optimal vocab_size for GPU efficiency
     from ..config import round_up_to_multiple
+
     actual_vocab_size = len(tokenizer)
     rounded_vocab_size = round_up_to_multiple(actual_vocab_size, 128)
-    
+
     # Debug print
     if cfg.debug:
         print(f"Config model.vocab_size: {cfg.model.vocab_size}")

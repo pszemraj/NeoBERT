@@ -118,11 +118,16 @@ def trainer(cfg):
     # Model
     # Calculate optimal vocab_size for GPU efficiency when creating from scratch
     from ..config import round_up_to_multiple
+
     tokenizer_config = {**cfg.tokenizer.__dict__}
-    tokenizer_config['vocab_size'] = round_up_to_multiple(len(tokenizer), 128)
-    
+    tokenizer_config["vocab_size"] = round_up_to_multiple(len(tokenizer), 128)
+
     model = NeoBERTLMHead(
-        NeoBERTConfig(**cfg.model.__dict__, **tokenizer_config, pad_token_id=tokenizer.pad_token_id)
+        NeoBERTConfig(
+            **cfg.model.__dict__,
+            **tokenizer_config,
+            pad_token_id=tokenizer.pad_token_id,
+        )
     )
 
     # Log the number of parameters
