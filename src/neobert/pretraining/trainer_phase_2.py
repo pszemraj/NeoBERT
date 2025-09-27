@@ -121,12 +121,12 @@ def trainer(cfg):
 
     actual_vocab_size = len(tokenizer)
     rounded_vocab_size = round_up_to_multiple(actual_vocab_size, 128)
-    
+
     # Update all config sources with the actual rounded vocab_size BEFORE anything uses them
     cfg.model.vocab_size = rounded_vocab_size
-    if hasattr(cfg.tokenizer, 'vocab_size'):
+    if hasattr(cfg.tokenizer, "vocab_size"):
         cfg.tokenizer.vocab_size = rounded_vocab_size
-    
+
     tokenizer_config = {**cfg.tokenizer.__dict__}
     tokenizer_config["vocab_size"] = rounded_vocab_size
 
