@@ -176,7 +176,7 @@ def evaluate_mteb(cfg):
         num_attention_heads=cfg.model.num_attention_heads,
         intermediate_size=cfg.model.intermediate_size,
         max_position_embeddings=cfg.model.max_position_embeddings,
-        vocab_size=len(tokenizer),  # Use actual tokenizer size including special tokens
+        vocab_size=cfg.model.vocab_size,  # Use checkpoint's vocab_size since we always load weights
         rope=cfg.model.rope,
         rms_norm=cfg.model.rms_norm,
         hidden_act=cfg.model.hidden_act,

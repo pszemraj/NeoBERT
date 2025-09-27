@@ -776,6 +776,19 @@ def trainer(cfg: Config):
         # Use model config directly - don't merge with tokenizer config
         # The tokenizer's vocab_size should match the model's anyway
         combined_config = model_config_dict
+        
+        # If using random weights (for testing), round vocab_size for GPU efficiency
+        if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
+            allow_random_weights = cfg._raw_model_dict.get("allow_random_weights", False)
+        elif hasattr(cfg, "glue"):
+            allow_random_weights = cfg.glue.allow_random_weights
+        else:
+            allow_random_weights = False
+            
+        if allow_random_weights and "vocab_size" in combined_config:
+            from neobert.config import round_up_to_multiple
+            # Round vocab_size for GPU efficiency when using random weights
+            combined_config["vocab_size"] = round_up_to_multiple(len(tokenizer), 128)
 
         model = NeoBERTForSequenceClassification(
             NeoBERTConfig(**combined_config),

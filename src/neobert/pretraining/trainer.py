@@ -319,11 +319,17 @@ def trainer(cfg: Config):
     )
 
     # Model
+    # Calculate optimal vocab_size for GPU efficiency
+    from ..config import round_up_to_multiple
+    actual_vocab_size = len(tokenizer)
+    rounded_vocab_size = round_up_to_multiple(actual_vocab_size, 128)
+    
     # Debug print
     if cfg.debug:
         print(f"Config model.vocab_size: {cfg.model.vocab_size}")
         print(f"Tokenizer vocab_size: {tokenizer.vocab_size}")
-        print(f"Tokenizer len(): {len(tokenizer)}")
+        print(f"Tokenizer len(): {actual_vocab_size}")
+        print(f"Rounded vocab_size (for GPU efficiency): {rounded_vocab_size}")
         print(f"Tokenizer pad_token_id: {tokenizer.pad_token_id}")
 
     model_config = NeoBERTConfig(
@@ -332,7 +338,7 @@ def trainer(cfg: Config):
         num_attention_heads=cfg.model.num_attention_heads,
         intermediate_size=cfg.model.intermediate_size,
         max_position_embeddings=cfg.model.max_position_embeddings,
-        vocab_size=len(tokenizer),  # Use actual tokenizer size including special tokens
+        vocab_size=rounded_vocab_size,  # Use rounded size for GPU efficiency
         rope=cfg.model.rope,
         rms_norm=cfg.model.rms_norm,
         hidden_act=cfg.model.hidden_act,

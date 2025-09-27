@@ -6,6 +6,14 @@ from typing import Any, Dict, List, Optional, Union
 import yaml
 
 
+def round_up_to_multiple(x: int, N: int = 128) -> int:
+    """
+    Rounds up integer x to the nearest multiple of N (default: 128).
+    This improves GPU efficiency for matrix operations.
+    """
+    return ((x + N - 1) // N) * N
+
+
 @dataclass
 class ModelConfig:
     hidden_size: int = 768
