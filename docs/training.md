@@ -28,7 +28,7 @@ model:
   num_hidden_layers: 12
   num_attention_heads: 12
   intermediate_size: 3072
-  vocab_size: 30522
+  vocab_size: 30522          # Initial value - see note below
   max_position_embeddings: 512
   hidden_act: swiglu        # Modern activation
   normalization_type: rmsnorm  # RMSNorm instead of LayerNorm
@@ -87,6 +87,26 @@ DeepSpeed configuration is handled automatically in `src/neobert/training/pretra
 - Configures optimal ZeRO stage
 - Enables mixed precision based on hardware
 - Sets up gradient accumulation
+
+### Vocabulary Size Optimization
+
+When training from scratch, NeoBERT automatically rounds the vocabulary size to the nearest multiple of 128 for GPU efficiency. This happens transparently:
+
+1. **Config File**: Specify your tokenizer's base vocab_size (e.g., 30522 for BERT)
+2. **Runtime**: The trainer calculates the actual tokenizer size including special tokens
+3. **Optimization**: Rounds up to nearest multiple of 128 (e.g., 30522 → 30592)
+4. **Propagation**: This optimized size is used for:
+   - Model embedding/decoder matrices
+   - Saved checkpoint configs
+   - WandB logging
+   - HuggingFace exports
+
+Example with ModernBERT tokenizer:
+- Base vocab_size: 50280
+- With special tokens: 50373
+- Optimized (rounded): 50432
+
+This ensures optimal GPU performance while maintaining compatibility across the pipeline.
 
 ### Streaming Datasets
 
