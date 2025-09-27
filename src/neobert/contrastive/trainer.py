@@ -198,7 +198,11 @@ def trainer(cfg: Config):
     }
 
     # Model
-    model = NeoBERT(config=NeoBERTConfig(**cfg.model, **cfg.tokenizer))
+    # Create config with proper vocab_size from tokenizer
+    model_config = {**cfg.model.__dict__, **cfg.tokenizer.__dict__}
+    model_config['vocab_size'] = len(tokenizer)  # Use actual tokenizer size
+    model_config['pad_token_id'] = tokenizer.pad_token_id
+    model = NeoBERT(config=NeoBERTConfig(**model_config))
 
     # Get path of desired checkpoint
     if "ckpt" in cfg.model.keys() and cfg.model.ckpt != "latest":

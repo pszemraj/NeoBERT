@@ -590,6 +590,9 @@ def trainer(cfg: Config):
 
                     # Save config and tokenizer info (only from main process)
                     if accelerator.is_main_process:
+                        # Update config with actual vocab_size used during training
+                        cfg.model.vocab_size = model_config.vocab_size
+                        
                         # Save config as YAML
                         config_path = os.path.join(checkpoint_path, "config.yaml")
                         ConfigLoader.save(cfg, config_path)
