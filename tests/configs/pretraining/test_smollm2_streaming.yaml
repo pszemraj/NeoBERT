@@ -14,7 +14,7 @@ model:
   num_attention_heads: 8
   intermediate_size: 2048
   max_position_embeddings: 512
-  dropout_prob: 0.1
+  dropout_prob: 0.0
   use_flash_attention: false  # Disable if GPU doesn't support
   flash_attention: false
   rope: true

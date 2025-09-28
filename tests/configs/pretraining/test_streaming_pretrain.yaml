@@ -7,7 +7,7 @@ dataset:
 
 model:
   path: "google-bert/bert-base-uncased"
-  dropout_prob: 0.1
+  dropout_prob: 0.0
   use_flash_attention: false
   flash_attention: false
 
