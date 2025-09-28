@@ -325,6 +325,13 @@ def trainer(cfg: Config):
     actual_vocab_size = len(tokenizer)
     rounded_vocab_size = round_up_to_multiple(actual_vocab_size, 128)
 
+    # Log warning if vocab_size was rounded for GPU efficiency
+    if actual_vocab_size != rounded_vocab_size:
+        logging.warning(
+            f"Vocab size {actual_vocab_size} is not divisible by 128. "
+            f"Rounding up to {rounded_vocab_size} for GPU efficiency."
+        )
+
     # Update all config sources with the actual rounded vocab_size BEFORE anything uses them
     original_model_vocab_size = cfg.model.vocab_size
     original_tokenizer_vocab_size = (
