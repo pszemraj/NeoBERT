@@ -319,36 +319,12 @@ def trainer(cfg: Config):
     )
 
     # Model
-    # Calculate optimal vocab_size for GPU efficiency
-    from ..config import round_up_to_multiple
-
-    actual_vocab_size = len(tokenizer)
-    rounded_vocab_size = round_up_to_multiple(actual_vocab_size, 128)
-
-    # Log warning if vocab_size was rounded for GPU efficiency
-    if actual_vocab_size != rounded_vocab_size:
-        logging.warning(
-            f"Vocab size {actual_vocab_size} is not divisible by 128. "
-            f"Rounding up to {rounded_vocab_size} for GPU efficiency."
-        )
-
-    # Update all config sources with the actual rounded vocab_size BEFORE anything uses them
-    original_model_vocab_size = cfg.model.vocab_size
-    original_tokenizer_vocab_size = (
-        cfg.tokenizer.vocab_size if hasattr(cfg.tokenizer, "vocab_size") else None
-    )
-    cfg.model.vocab_size = rounded_vocab_size
-    if hasattr(cfg.tokenizer, "vocab_size"):
-        cfg.tokenizer.vocab_size = rounded_vocab_size
-
+    # vocab_size is now resolved during config preprocessing
     # Debug print
     if cfg.debug:
-        print(f"Original config model.vocab_size: {original_model_vocab_size}")
-        print(f"Original tokenizer.vocab_size: {original_tokenizer_vocab_size}")
-        print(f"Tokenizer actual vocab_size: {tokenizer.vocab_size}")
-        print(f"Tokenizer len(): {actual_vocab_size}")
-        print(f"Rounded vocab_size (for GPU efficiency): {rounded_vocab_size}")
-        print(f"Updated config model.vocab_size: {cfg.model.vocab_size}")
+        print(f"Config model.vocab_size: {cfg.model.vocab_size}")
+        print(f"Tokenizer vocab_size: {tokenizer.vocab_size}")
+        print(f"Tokenizer len(): {len(tokenizer)}")
         print(f"Tokenizer pad_token_id: {tokenizer.pad_token_id}")
 
     model_config = NeoBERTConfig(
@@ -357,7 +333,7 @@ def trainer(cfg: Config):
         num_attention_heads=cfg.model.num_attention_heads,
         intermediate_size=cfg.model.intermediate_size,
         max_position_embeddings=cfg.model.max_position_embeddings,
-        vocab_size=rounded_vocab_size,  # Use rounded size for GPU efficiency
+        vocab_size=cfg.model.vocab_size,  # Use preprocessed vocab_size
         rope=cfg.model.rope,
         rms_norm=cfg.model.rms_norm,
         hidden_act=cfg.model.hidden_act,
