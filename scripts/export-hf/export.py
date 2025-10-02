@@ -369,7 +369,9 @@ for i, token_id in enumerate(input_ids):
         continue
     cleaned_ids.append(token_id)
 
-inputs["input_ids"] = torch.tensor([cleaned_ids])
+if len(cleaned_ids) != len(input_ids):
+    inputs["input_ids"] = torch.tensor([cleaned_ids])
+    inputs["attention_mask"] = torch.ones_like(inputs["input_ids"])
 
 # Get predictions
 with torch.no_grad():
