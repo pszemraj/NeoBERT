@@ -319,10 +319,12 @@ def trainer(cfg: Config):
     )
 
     # Model
+    # vocab_size is now resolved during config preprocessing
     # Debug print
     if cfg.debug:
-        print(f"Model vocab_size: {cfg.model.vocab_size}")
+        print(f"Config model.vocab_size: {cfg.model.vocab_size}")
         print(f"Tokenizer vocab_size: {tokenizer.vocab_size}")
+        print(f"Tokenizer len(): {len(tokenizer)}")
         print(f"Tokenizer pad_token_id: {tokenizer.pad_token_id}")
 
     model_config = NeoBERTConfig(
@@ -331,7 +333,7 @@ def trainer(cfg: Config):
         num_attention_heads=cfg.model.num_attention_heads,
         intermediate_size=cfg.model.intermediate_size,
         max_position_embeddings=cfg.model.max_position_embeddings,
-        vocab_size=cfg.model.vocab_size,
+        vocab_size=cfg.model.vocab_size,  # Use preprocessed vocab_size
         rope=cfg.model.rope,
         rms_norm=cfg.model.rms_norm,
         hidden_act=cfg.model.hidden_act,
@@ -443,7 +445,7 @@ def trainer(cfg: Config):
                         batch["input_ids"], batch.get("attention_mask", None)
                     )["logits"]
                     train_loss = train_loss_fn(
-                        logits.view(-1, cfg.model.vocab_size),
+                        logits.view(-1, model_config.vocab_size),
                         batch["labels"].view(-1),
                     )
 
@@ -474,7 +476,7 @@ def trainer(cfg: Config):
                     "logits"
                 ]
                 train_loss = train_loss_fn(
-                    logits.view(-1, cfg.model.vocab_size), batch["labels"].view(-1)
+                    logits.view(-1, model_config.vocab_size), batch["labels"].view(-1)
                 )
 
                 # Compute gradient and apply clipping

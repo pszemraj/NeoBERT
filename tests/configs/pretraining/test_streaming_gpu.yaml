@@ -8,8 +8,8 @@ model:
   num_attention_heads: 4
   intermediate_size: 1024
   hidden_act: "swiglu"  # Test SwiGLU on GPU
-  hidden_dropout_prob: 0.1
-  attention_probs_dropout_prob: 0.1
+  hidden_dropout_prob: 0.0
+  attention_probs_dropout_prob: 0.0
   max_position_embeddings: 512
   layer_norm_eps: 1e-6
   rope: true

@@ -6,6 +6,14 @@ from typing import Any, Dict, List, Optional, Union
 import yaml
 
 
+def round_up_to_multiple(x: int, N: int = 128) -> int:
+    """
+    Rounds up integer x to the nearest multiple of N (default: 128).
+    This improves GPU efficiency for matrix operations.
+    """
+    return ((x + N - 1) // N) * N
+
+
 @dataclass
 class ModelConfig:
     hidden_size: int = 768
@@ -327,9 +335,50 @@ class ConfigLoader:
         return config
 
     @staticmethod
+    def preprocess_config(config: Config) -> Config:
+        """
+        Preprocess and validate config, resolving any dynamic values.
+        This should be called after config loading but before any downstream consumers.
+        """
+        # Resolve vocab_size for GPU efficiency
+        if hasattr(config.tokenizer, "name") and config.tokenizer.name:
+            # Import tokenizer here to avoid circular imports
+            from .tokenizer import get_tokenizer
+
+            # Create tokenizer to determine actual vocab size
+            tokenizer = get_tokenizer(
+                pretrained_model_name_or_path=config.tokenizer.name,
+                max_length=config.tokenizer.max_length,
+                vocab_size=config.tokenizer.vocab_size or config.model.vocab_size,
+            )
+
+            actual_vocab_size = len(tokenizer)
+            rounded_vocab_size = round_up_to_multiple(actual_vocab_size, 128)
+
+            # Update all vocab_size references consistently
+            original_model_vocab_size = config.model.vocab_size
+
+            config.model.vocab_size = rounded_vocab_size
+            if hasattr(config.tokenizer, "vocab_size"):
+                config.tokenizer.vocab_size = rounded_vocab_size
+
+            # Log the change if significant
+            if actual_vocab_size != rounded_vocab_size:
+                import logging
+
+                logger = logging.getLogger(__name__)
+                logger.warning(
+                    f"Config preprocessing: vocab_size {actual_vocab_size} rounded to "
+                    f"{rounded_vocab_size} for GPU efficiency (original config: {original_model_vocab_size})"
+                )
+
+        return config
+
+    @staticmethod
     def load(
         config_file: Optional[Union[str, Path]] = None,
         overrides: Optional[Dict[str, Any]] = None,
+        preprocess: bool = True,
     ) -> Config:
         """Load configuration from file and apply overrides"""
         config_dict = {}
@@ -342,7 +391,13 @@ class ConfigLoader:
         if overrides:
             config_dict = ConfigLoader.merge_configs(config_dict, overrides)
 
-        return ConfigLoader.dict_to_config(config_dict)
+        config = ConfigLoader.dict_to_config(config_dict)
+
+        # Preprocess config to resolve dynamic values
+        if preprocess:
+            config = ConfigLoader.preprocess_config(config)
+
+        return config
 
     @staticmethod
     def save(config: Config, path: Union[str, Path]):
@@ -550,4 +605,9 @@ def load_config_from_args() -> Config:
     if overrides:
         config_dict = ConfigLoader.merge_configs(config_dict, overrides)
 
-    return ConfigLoader.dict_to_config(config_dict)
+    config = ConfigLoader.dict_to_config(config_dict)
+
+    # Preprocess config to resolve dynamic values
+    config = ConfigLoader.preprocess_config(config)
+
+    return config

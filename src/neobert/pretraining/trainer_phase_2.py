@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import shutil
@@ -116,8 +117,33 @@ def trainer(cfg):
     ]
 
     # Model
+    # Calculate optimal vocab_size for GPU efficiency when creating from scratch
+    from ..config import round_up_to_multiple
+
+    actual_vocab_size = len(tokenizer)
+    rounded_vocab_size = round_up_to_multiple(actual_vocab_size, 128)
+
+    # Log warning if vocab_size was rounded for GPU efficiency
+    if actual_vocab_size != rounded_vocab_size:
+        logging.warning(
+            f"Vocab size {actual_vocab_size} is not divisible by 128. "
+            f"Rounding up to {rounded_vocab_size} for GPU efficiency."
+        )
+
+    # Update all config sources with the actual rounded vocab_size BEFORE anything uses them
+    cfg.model.vocab_size = rounded_vocab_size
+    if hasattr(cfg.tokenizer, "vocab_size"):
+        cfg.tokenizer.vocab_size = rounded_vocab_size
+
+    tokenizer_config = {**cfg.tokenizer.__dict__}
+    tokenizer_config["vocab_size"] = rounded_vocab_size
+
     model = NeoBERTLMHead(
-        NeoBERTConfig(**cfg.model, **cfg.tokenizer, pad_token_id=tokenizer.pad_token_id)
+        NeoBERTConfig(
+            **cfg.model.__dict__,
+            **tokenizer_config,
+            pad_token_id=tokenizer.pad_token_id,
+        )
     )
 
     # Log the number of parameters

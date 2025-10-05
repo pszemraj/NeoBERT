@@ -11,7 +11,7 @@ model:
   rope: true
   rms_norm: true
   hidden_act: "swiglu"
-  dropout_prob: 0.1
+  dropout_prob: 0.0
   flash_attention: true
 
 dataset:

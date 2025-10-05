@@ -94,7 +94,7 @@ def validate_glue_config(cfg: Any) -> None:
             # Handle both string and boolean values
             mixed_precision = cfg.trainer.mixed_precision
             if isinstance(mixed_precision, bool):
-                mixed_precision = "no" if not mixed_precision else "fp16"
+                mixed_precision = "no" if not mixed_precision else "bf16"
             if mixed_precision not in valid_precision:
                 errors.append(
                     f"Invalid mixed_precision: {cfg.trainer.mixed_precision}. "

@@ -95,6 +95,15 @@ def create_hf_config(
     # Infer dtype from actual weights
     torch_dtype = get_torch_dtype_from_state_dict(state_dict)
 
+    # Infer actual vocab_size from embedding weights if available
+    if "model.encoder.weight" in state_dict:
+        actual_vocab_size = state_dict["model.encoder.weight"].shape[0]
+        if actual_vocab_size != model_config.get("vocab_size"):
+            print(
+                f"  Note: Using actual vocab_size from weights ({actual_vocab_size}) instead of config ({model_config.get('vocab_size')})"
+            )
+            model_config["vocab_size"] = actual_vocab_size
+
     # Map our config to HF format - using the original HF model structure
     hf_config = {
         "architectures": ["NeoBERTLMHead"],
@@ -360,7 +369,9 @@ for i, token_id in enumerate(input_ids):
         continue
     cleaned_ids.append(token_id)
 
-inputs["input_ids"] = torch.tensor([cleaned_ids])
+if len(cleaned_ids) != len(input_ids):
+    inputs["input_ids"] = torch.tensor([cleaned_ids])
+    inputs["attention_mask"] = torch.ones_like(inputs["input_ids"])
 
 # Get predictions
 with torch.no_grad():
