@@ -324,8 +324,108 @@ def export_checkpoint(checkpoint_path: Path, output_dir: Path = None):
     # Get repo_id from output directory name
     repo_id = output_dir.name
 
+    # Check if tokenizer needs special handling for mask tokens
+    # Load the saved tokenizer to get actual special tokens
+    from transformers import AutoTokenizer as HFAutoTokenizer
+    saved_tokenizer = HFAutoTokenizer.from_pretrained(str(output_dir))
+    actual_mask_token = saved_tokenizer.mask_token
+    mask_display = "[MASK]" if actual_mask_token in ["[MASK]", "[mask]"] else actual_mask_token
+
+    # Check if tokenizer uses Metaspace/SentencePiece (has ▁ token)
+    try:
+        space_token_id = saved_tokenizer.convert_tokens_to_ids("▁")
+        has_metaspace = space_token_id is not None and space_token_id != saved_tokenizer.unk_token_id
+    except:
+        has_metaspace = False
+
     # Convert full config to YAML string for details section
     config_yaml = yaml.dump(neobert_config, default_flow_style=False, sort_keys=False)
+
+    # Generate MLM example based on actual tokenizer
+    if has_metaspace:
+        # Include space token handling for Metaspace tokenizers
+        mlm_example = f'''```python
+from transformers import AutoModelForMaskedLM, AutoTokenizer
+import torch
+
+repo_id = "{repo_id}"  # Update this to your HF repo ID
+tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
+model = AutoModelForMaskedLM.from_pretrained(repo_id, trust_remote_code=True)
+
+# Example: Fill in masked tokens
+text = "NeoBERT is the most {mask_display} model of its kind!"
+
+# Replace display mask with actual mask token if different
+text = text.replace("{mask_display}", tokenizer.mask_token)
+
+inputs = tokenizer(text, return_tensors="pt")
+
+# Handle Metaspace tokenizer quirk: remove extra space tokens before mask
+# Get the space token ID dynamically
+try:
+    space_token_id = tokenizer.convert_tokens_to_ids("▁")
+except:
+    space_token_id = None
+
+if space_token_id is not None:
+    input_ids = inputs["input_ids"][0].tolist()
+    cleaned_ids = []
+    for i, token_id in enumerate(input_ids):
+        # Skip space token if it's immediately before mask token
+        if token_id == space_token_id and i < len(input_ids) - 1 and input_ids[i + 1] == tokenizer.mask_token_id:
+            continue
+        cleaned_ids.append(token_id)
+
+    if len(cleaned_ids) != len(input_ids):
+        inputs["input_ids"] = torch.tensor([cleaned_ids])
+        inputs["attention_mask"] = torch.ones_like(inputs["input_ids"])
+
+# Get predictions
+with torch.no_grad():
+    outputs = model(**inputs)
+    mask_positions = (inputs["input_ids"] == tokenizer.mask_token_id).nonzero(as_tuple=True)
+    if len(mask_positions[0]) == 0:
+        raise ValueError("No mask token found in input")
+    mask_pos = mask_positions[1][0]
+    predictions = outputs.logits[0, mask_pos].topk(5)
+
+# Display top predictions
+for idx, score in zip(predictions.indices, predictions.values):
+    token = tokenizer.decode([idx])
+    print(f"{{token}}: {{score:.2f}}")
+```'''
+    else:
+        # Simpler version for non-Metaspace tokenizers
+        mlm_example = f'''```python
+from transformers import AutoModelForMaskedLM, AutoTokenizer
+import torch
+
+repo_id = "{repo_id}"  # Update this to your HF repo ID
+tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
+model = AutoModelForMaskedLM.from_pretrained(repo_id, trust_remote_code=True)
+
+# Example: Fill in masked tokens
+text = "NeoBERT is the most {mask_display} model of its kind!"
+
+# Replace display mask with actual mask token if different
+text = text.replace("{mask_display}", tokenizer.mask_token)
+
+inputs = tokenizer(text, return_tensors="pt")
+
+# Get predictions
+with torch.no_grad():
+    outputs = model(**inputs)
+    mask_positions = (inputs["input_ids"] == tokenizer.mask_token_id).nonzero(as_tuple=True)
+    if len(mask_positions[0]) == 0:
+        raise ValueError("No mask token found in input")
+    mask_pos = mask_positions[1][0]
+    predictions = outputs.logits[0, mask_pos].topk(5)
+
+# Display top predictions
+for idx, score in zip(predictions.indices, predictions.values):
+    token = tokenizer.decode([idx])
+    print(f"{{token}}: {{score:.2f}}")
+```'''
 
     readme_content = f"""{yaml_header}# NeoBERT Model
 
@@ -347,43 +447,7 @@ This is a NeoBERT model trained with [pszemraj/NeoBERT](https://github.com/pszem
 
 ### For Masked Language Modeling (Fill-Mask)
 
-```python
-from transformers import AutoModelForMaskedLM, AutoTokenizer
-import torch
-
-repo_id = "{repo_id}"  # Update this to your HF repo ID
-tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
-model = AutoModelForMaskedLM.from_pretrained(repo_id, trust_remote_code=True)
-
-# Example: Fill in masked tokens
-text = "NeoBERT is the most [MASK] model of its kind!"
-
-# Tokenize (handling Metaspace tokenizer's space tokens)
-inputs = tokenizer(text, return_tensors="pt")
-input_ids = inputs["input_ids"][0].tolist()
-
-# Remove extra space tokens before [MASK] if present (Metaspace tokenizer quirk)
-cleaned_ids = []
-for i, token_id in enumerate(input_ids):
-    if token_id == 454 and i < len(input_ids) - 1 and input_ids[i + 1] == tokenizer.mask_token_id:
-        continue
-    cleaned_ids.append(token_id)
-
-if len(cleaned_ids) != len(input_ids):
-    inputs["input_ids"] = torch.tensor([cleaned_ids])
-    inputs["attention_mask"] = torch.ones_like(inputs["input_ids"])
-
-# Get predictions
-with torch.no_grad():
-    outputs = model(**inputs)
-    mask_pos = (inputs["input_ids"] == tokenizer.mask_token_id).nonzero(as_tuple=True)[1][0]
-    predictions = outputs.logits[0, mask_pos].topk(5)
-
-# Display top predictions
-for idx, score in zip(predictions.indices, predictions.values):
-    token = tokenizer.decode([idx])
-    print(f"{{token}}: {{score:.2f}}")
-```
+{mlm_example}
 
 ### For Embeddings / Feature Extraction
 
