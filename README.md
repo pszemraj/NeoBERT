@@ -206,6 +206,29 @@ The repository includes a comprehensive test suite that verifies:
 - Training pipeline integration
 - CPU-only compatibility (no GPU required for tests)
 
+### Exporting Models to HuggingFace
+
+After training, export your model for use with HuggingFace Transformers:
+
+```bash
+# Export a checkpoint to HuggingFace format
+python scripts/export-hf/export.py outputs/neobert_100m_100k/model_checkpoints/100000
+
+# Validate the exported model
+python scripts/export-hf/validate.py outputs/neobert_100m_100k/hf/neobert_100m_100k_100000
+```
+
+The exported model can then be used with standard HuggingFace code:
+
+```python
+from transformers import AutoModel, AutoTokenizer
+
+model_path = "outputs/neobert_100m_100k/hf/neobert_100m_100k_100000"
+tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+model = AutoModel.from_pretrained(model_path, trust_remote_code=True)
+```
+
+See the [Evaluation Guide](docs/evaluation.md#exporting-to-huggingface-format) for detailed export instructions.
 
 ## Contact
 
