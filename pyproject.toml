@@ -37,7 +37,7 @@ license = { text = "MIT License" }
 keywords = []
 
 [project.optional-dependencies]
-dev = ["black", "pytest", "pytest-cov", "pytest-clarity", "xeger"]
+dev = ["ruff", "isort", "pytest", "pytest-cov", "pytest-clarity", "xeger"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
