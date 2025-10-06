@@ -17,11 +17,13 @@ def get_tokenizer(
     # Load Tokenizer and replace/add special tokens
     tokenizer = AutoTokenizer.from_pretrained(
         pretrained_model_name_or_path,
-        max_length=max_length,
         vocab_size=vocab_size,
         token=token,
         trust_remote_code=True,
     )
+
+    # Set model_max_length (not max_length which is deprecated)
+    tokenizer.model_max_length = max_length
 
     # Store original special tokens for comparison
     original_special_tokens = tokenizer.special_tokens_map.copy()
