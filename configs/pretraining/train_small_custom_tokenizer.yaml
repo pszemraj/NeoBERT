@@ -6,7 +6,7 @@ model:
   num_attention_heads: 4  # Changed from 8 to make head_dim=64 for flash attention compatibility
   intermediate_size: 1024
   dropout_prob: 0.0
-  vocab_size: 31999  # Match the custom tokenizer
+  vocab_size: 32000  # Match the custom tokenizer
   max_position_embeddings: 512
   flash_attention: true
   ngpt: false
@@ -25,8 +25,8 @@ dataset:
   eval_split: "validation[:500]"
 
 tokenizer:
-  name: "BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp"
-  vocab_size: 31999
+  name: "pszemraj/bytebpe-tokenizer-32k-mlm"
+  vocab_size: 32000
   max_length: 512
 
 datacollator:
@@ -34,8 +34,8 @@ datacollator:
   pad_to_multiple_of: 8
 
 trainer:
-  output_dir: "./outputs/custom_tokenizer_test"
-  run_name: "neobert_custom_tokenizer_200steps"
+  output_dir: "./outputs/custom_bytebpe-tokenizer-32k_test"
+  run_name: "neobert_custom_bytebpe-tokenizer-32k_200steps"
   max_steps: 200
   per_device_train_batch_size: 8
   per_device_eval_batch_size: 32
