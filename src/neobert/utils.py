@@ -6,13 +6,17 @@ import torch
 import torch.nn as nn
 
 
-def configure_tf32() -> bool:
+def configure_tf32(print_fn=None) -> bool:
     """Enable TF32 precision for GPUs with compute capability >= 8.0 (Ampere+).
 
+    :param print_fn: Optional function to use for printing messages (default: logging.info)
     :return: True if TF32 was enabled, False otherwise
     """
+    # Use provided print function or fall back to logging
+    log = print_fn if print_fn else logging.info
+
     if not torch.cuda.is_available():
-        logging.info("No GPU detected, running on CPU.")
+        log("No GPU detected, running on CPU.")
         return False
 
     try:
@@ -24,14 +28,18 @@ def configure_tf32() -> bool:
         if major >= 8:
             # Modern API - replaces both backend flags
             torch.set_float32_matmul_precision("high")
-            logging.info(f"{gpu_name} (compute {major}.{minor}) - TF32 enabled")
+            log(f"{gpu_name} (compute {major}.{minor}) - TF32 enabled")
             return True
         else:
-            logging.info(f"{gpu_name} (compute {major}.{minor}) - TF32 not supported")
+            log(f"{gpu_name} (compute {major}.{minor}) - TF32 not supported")
             return False
 
     except Exception as e:
-        logging.error(f"Failed to configure GPU: {e}")
+        error_msg = f"Failed to configure GPU: {e}"
+        if print_fn:
+            print_fn(error_msg)
+        else:
+            logging.error(error_msg)
         return False
 
 

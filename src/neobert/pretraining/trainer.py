@@ -145,7 +145,7 @@ def trainer(cfg: Config):
     set_seed(cfg.seed)
 
     # Configure TF32 precision for GPUs with compute capability >= 8.0
-    configure_tf32()
+    configure_tf32(print_fn=accelerator.print)
 
     # Local and global counters
     metrics = Metrics()
@@ -346,13 +346,9 @@ def trainer(cfg: Config):
     )
     model = NeoBERTLMHead(model_config)
 
-    # Log model parameters to console instead of wandb
-    model_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    accelerator.print(f"Model parameters: {model_params:,}")
-
     # Print model summary with hierarchical parameter counts
     if accelerator.is_main_process:
-        model_summary(model, max_depth=3, show_param_shapes=False)
+        model_summary(model, max_depth=3, show_param_shapes=True)
 
     # Optimizer and Scheduler
     optimizer = get_optimizer(
