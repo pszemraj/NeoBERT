@@ -2,6 +2,9 @@
 
 This comprehensive test suite validates all NeoBERT functionality, ensuring robust behavior across configuration, model, training, and evaluation components.
 
+> [!NOTE]
+> See [/docs/testing.md](/docs/testing.md) for detailed testing documentation and development practices.
+
 ## Overview
 
 The test suite verifies the configuration system and all NeoBERT functionality. Tests are designed to run on CPU-only machines using tiny model configurations.

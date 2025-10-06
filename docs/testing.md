@@ -2,6 +2,9 @@
 
 This guide covers running and writing tests for NeoBERT.
 
+> [!NOTE]
+> See [/tests/README.md](/tests/README.md) for test suite structure and [/tests/configs/README.md](/tests/configs/README.md) for test configurations.
+
 ## Running Tests
 
 ### Run All Tests

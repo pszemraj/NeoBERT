@@ -2,6 +2,9 @@
 
 This guide covers evaluating NeoBERT models on various benchmarks.
 
+> [!NOTE]
+> See [/scripts/evaluation/README.md](/scripts/evaluation/README.md) for implementation details and script-specific documentation.
+
 ## GLUE Benchmark
 
 ### Prerequisites
@@ -327,6 +330,86 @@ All GLUE runs are tracked in WandB:
 - Logged configs: full configuration
 
 View results at: <https://wandb.ai/your-username/neobert-glue>
+
+## Exporting to HuggingFace Format
+
+After training or fine-tuning your NeoBERT model, you can export it to HuggingFace format for easy sharing and deployment.
+
+> [!NOTE]
+> See [/docs/export.md](/docs/export.md) for comprehensive export documentation and [/scripts/export-hf/README.md](/scripts/export-hf/README.md) for script implementation details.
+
+### Export Checkpoint
+
+Convert a training checkpoint to HuggingFace format:
+
+```bash
+# Export a specific checkpoint
+python scripts/export-hf/export.py outputs/neobert_100m_100k/model_checkpoints/100000
+
+# The exported model will be saved to:
+# outputs/neobert_100m_100k/hf/neobert_100m_100k_100000/
+```
+
+The export script:
+- Converts model weights to HuggingFace format
+- Maps configuration parameters
+- Copies tokenizer files with corrected settings
+- Creates both SafeTensors and PyTorch formats
+- Generates a README with usage instructions
+
+### Validate Exported Model
+
+Verify the exported model works correctly:
+
+```bash
+# Validate the exported model
+python scripts/export-hf/validate.py outputs/neobert_100m_100k/hf/neobert_100m_100k_100000
+
+# This will:
+# - Load the model with HuggingFace transformers
+# - Run inference on sample text
+# - Verify outputs are reasonable
+```
+
+### Using Exported Models
+
+Once exported, use your model with standard HuggingFace code:
+
+```python
+from transformers import AutoModel, AutoTokenizer
+
+# Load from local path
+model_path = "outputs/neobert_100m_100k/hf/neobert_100m_100k_100000"
+tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+model = AutoModel.from_pretrained(model_path, trust_remote_code=True)
+
+# Or after uploading to HuggingFace Hub
+model_id = "your-username/neobert-custom"
+tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+model = AutoModel.from_pretrained(model_id, trust_remote_code=True)
+```
+
+### Upload to HuggingFace Hub
+
+Share your model on the HuggingFace Hub:
+
+```bash
+# Login to HuggingFace
+huggingface-cli login
+
+# Upload the model
+huggingface-cli upload your-username/model-name \
+    outputs/neobert_100m_100k/hf/neobert_100m_100k_100000 \
+    --repo-type model
+```
+
+### Export Configuration
+
+The export process handles:
+- **Weight mapping**: Converts training format to HuggingFace format
+- **Config translation**: Maps NeoBERT config to HuggingFace config
+- **Tokenizer setup**: Ensures correct max_length and special tokens
+- **Model files**: Includes custom modeling code for full compatibility
 
 ## Next Steps
 

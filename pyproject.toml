@@ -1,28 +1,28 @@
 [build-system]
-requires = ["setuptools >= 61.0"]
+requires = ["setuptools >= 61.0", "setuptools-scm[toml] >= 8.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "neobert"
-version = "0.0.0"
+dynamic = ["version"]
 description = "A state-of-the-art update of BERT"
 requires-python = ">= 3.10"
 dependencies = [
-    "torch",
     "accelerate",
-    "deepspeed",
-    "xformers",
-    "transformers",
     "datasets",
-    "wandb",
-    "numpy",
-    "scikit-learn",
-    "evaluate",
-    "mteb",
-    "libaio",
-    "tqdm",
+    "deepspeed",
     "einops",
+    "evaluate",
+    "libaio",
+    "mteb",
+    "numpy",
     "pyyaml",
+    "scikit-learn",
+    "torch",
+    "tqdm",
+    "transformers",
+    "wandb",
+    "xformers",
 ]
 authors = [
     { name = "Lola Le Breton", email = "lola.lebreton@mila.quebec" },
@@ -37,8 +37,13 @@ license = { text = "MIT License" }
 keywords = []
 
 [project.optional-dependencies]
-dev = ["black", "pytest", "pytest-cov", "pytest-clarity", "xeger"]
+dev = ["ruff", "isort", "pytest", "pytest-cov", "pytest-clarity", "xeger"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["neobert*"]
+
+[tool.setuptools_scm]
+write_to = "src/neobert/_version.py"
+version_scheme = "no-guess-dev"
+local_scheme = "dirty-tag"
