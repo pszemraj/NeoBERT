@@ -1,192 +1,66 @@
-# Exporting NeoBERT Models to HuggingFace Format
+# HuggingFace Export Scripts
 
-This guide covers how to export trained NeoBERT checkpoints to HuggingFace format for easy deployment and sharing.
+Scripts for exporting NeoBERT checkpoints to HuggingFace format.
 
-## Overview
+📚 **For comprehensive documentation, see [docs/export.md](../../docs/export.md)**
 
-NeoBERT training saves checkpoints in a specific format with `state_dict.pt` and `config.yaml` files. To use these models with HuggingFace Transformers or share them on the HuggingFace Hub, you need to convert them to HuggingFace format.
-
-## Export Script
-
-The export script is located at `scripts/export-hf/export.py`.
-
-### Basic Usage
+## Quick Start
 
 ```bash
 # Export a checkpoint
 python scripts/export-hf/export.py outputs/neobert_100m_100k/model_checkpoints/100000
 
-# Export to a specific directory
-python scripts/export-hf/export.py outputs/neobert_100m_100k/model_checkpoints/100000 --output my_model
-```
-
-### What Gets Exported
-
-The script creates a directory with:
-- `config.json` - HuggingFace configuration
-- `model.safetensors` and `pytorch_model.bin` - Model weights in both formats
-- `model.py` and `rotary.py` - Model implementation files
-- `tokenizer_config.json`, `tokenizer.json`, `vocab.txt` - Tokenizer files
-- `README.md` - Auto-generated documentation
-
-## Using Exported Models
-
-Once exported, the model can be loaded with standard HuggingFace code:
-
-```python
-from transformers import AutoModel, AutoTokenizer
-
-# Load from local directory
-model_path = "outputs/neobert_100m_100k/hf/neobert_100m_100k_100000"
-tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-model = AutoModel.from_pretrained(model_path, trust_remote_code=True)
-
-# Use the model
-text = "NeoBERT is the most efficient model of its kind!"
-inputs = tokenizer(text, return_tensors="pt")
-outputs = model(**inputs)
-embedding = outputs.last_hidden_state[:, 0, :]  # CLS token embedding
-```
-
-### Loading as Masked Language Model
-
-```python
-from transformers import AutoModelForMaskedLM, AutoTokenizer
-import torch
-
-# Load model and tokenizer
-model_path = "outputs/neobert_100m_100k/hf/neobert_100m_100k_100000"
-tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-model = AutoModelForMaskedLM.from_pretrained(model_path, trust_remote_code=True)
-
-# Example: Fill in masked tokens
-text = "NeoBERT is the most [MASK] model of its kind!"
-
-# Important: Handle Metaspace tokenizer's space tokens
-# The tokenizer adds space tokens (▁) before [MASK] which need to be removed
-inputs = tokenizer(text, return_tensors="pt")
-input_ids = inputs["input_ids"][0].tolist()
-
-# Remove extra space tokens before [MASK] (token ID 454)
-cleaned_ids = []
-for i, token_id in enumerate(input_ids):
-    if token_id == 454 and i < len(input_ids) - 1 and input_ids[i + 1] == tokenizer.mask_token_id:
-        continue
-    cleaned_ids.append(token_id)
-
-inputs["input_ids"] = torch.tensor([cleaned_ids])
-
-# Get predictions
-with torch.no_grad():
-    outputs = model(**inputs)
-    mask_pos = (inputs["input_ids"] == tokenizer.mask_token_id).nonzero(as_tuple=True)[1][0]
-    predictions = outputs.logits[0, mask_pos].topk(5)
-
-# Display results
-for idx, score in zip(predictions.indices, predictions.values):
-    token = tokenizer.decode([idx])
-    print(f"{token}: {score:.2f}")
-```
-
-**Note on Metaspace Tokenizer**: NeoBERT uses a Metaspace tokenizer with `prepend_scheme="always"`, which automatically adds space tokens. When typing `[MASK]` directly in text (as opposed to masking existing tokens during training), an extra space token is inserted that needs to be handled for proper inference.
-
-## Validation and Testing
-
-Use the validation script to ensure your exported model works correctly:
-
-```bash
+# Validate exported model
 python scripts/export-hf/validate.py outputs/neobert_100m_100k/hf/neobert_100m_100k_100000
 ```
 
-The test script checks:
-- ✅ All required files are present
-- ✅ Model loads without initialization warnings
-- ✅ Tokenizer works correctly
-- ✅ MaskedLM variant loads properly
-- ✅ End-to-end pipeline functions
-- ✅ Cosine similarity produces meaningful results
+## Scripts in this Directory
 
-### Example Test Output
+- **`export.py`** - Main export script that converts checkpoints to HuggingFace format
+- **`validate.py`** - Validation script to test exported models
 
-```
-Validating exported model: outputs/neobert_100m_100k/hf/neobert_100m_100k_100000
-============================================================
+## Implementation Notes
 
-Checking required files...
-  ✅ All required files present
+### Metaspace Tokenizer Handling
 
-Testing model loading...
-  Testing AutoModel.from_pretrained...
-  Testing model forward pass...
-  PASS: Model loaded successfully
+NeoBERT uses a Metaspace tokenizer with `prepend_scheme="always"`. When using `[MASK]` directly in text (vs. masking existing tokens during training), an extra space token (▁, ID 454) is inserted that needs special handling:
 
-Testing cosine similarity...
-  Testing cosine similarity sanity check...
-    Similar pair 1 (cat/feline): 0.835
-    Similar pair 2 (programming): 0.924
-    Different pair (cat/quantum): 0.488
-  PASS: Cosine similarity sanity check passed
-
-============================================================
-SUMMARY
-============================================================
-✅ PASS     File validation     
-✅ PASS     Model loading       
-✅ PASS     Tokenizer loading   
-✅ PASS     MaskedLM loading    
-✅ PASS     Pipeline test       
-✅ PASS     Cosine similarity   
-============================================================
-✅ All tests passed! Model is ready for use.
+```python
+# The export script automatically generates code to handle this in the README
+# See the exported model's README for the complete implementation
 ```
 
-## Technical Details
+### Validation Test Details
 
-### Weight Mapping
+The validation script (`validate.py`) performs these checks:
+- File presence validation
+- Model loading without initialization warnings
+- Tokenizer functionality
+- MaskedLM variant compatibility
+- End-to-end pipeline test
+- Cosine similarity sanity check (similar sentences > 0.7, different < 0.5)
 
-The export script handles the following transformations:
-1. **Prefix handling**: Training checkpoints have `model.*` prefix which is preserved for HuggingFace compatibility
-2. **Decoder weights**: LM head weights (`model.decoder.*`) are mapped to top-level `decoder.*`
-3. **SwiGLU weights**: The concatenated `w12` weights are preserved (no splitting needed)
+### Technical Implementation Details
 
-### Configuration Mapping
+**Weight Mapping Logic:**
+- Training checkpoints with `model.*` prefix are preserved for HuggingFace compatibility
+- LM head weights (`model.decoder.*`) are mapped to top-level `decoder.*`
+- SwiGLU concatenated `w12` weights are preserved without splitting
 
-Training config fields are mapped to HuggingFace config:
+**Config Field Mappings:**
 - `max_position_embeddings` → `max_length`
 - `layer_norm_eps` → `norm_eps`
-- Training metadata is preserved in `training_info`
+- Training metadata preserved in `training_info` field
 
-## Troubleshooting
+### Known Issues & Solutions
 
-### MLM Predictions Always Return Same Token
+**MLM Always Predicting Same Token:**
+- Ensure model unwrapped from accelerator before saving: `accelerator.unwrap_model(model).state_dict()`
+- Handle Metaspace tokenizer space tokens (ID 454) before [MASK]
+- Verify attention_mask None checking in HF model forward pass
 
-If the model always predicts the same token (e.g., "1") for masked positions:
-- **Check training checkpoint saving**: Ensure model is unwrapped from accelerator before saving (`accelerator.unwrap_model(model).state_dict()`)
-- **Handle Metaspace tokenizer**: Remove extra space tokens (ID 454) before [MASK] tokens when doing inference
-- **Verify attention mask**: The HF model needs proper None checking for attention_mask in the forward pass
+**Initialization Warnings:**
+Check missing weights with validation script, verify architecture match between training and export.
 
-### Initialization Warnings
-
-If you see warnings about randomly initialized weights:
-- Check that the checkpoint contains all expected weights
-- Verify the model architecture matches between training and export
-- Run the validation script to identify missing weights
-
-### Tokenizer Issues
-
-If tokenizer fails to load:
-- Ensure tokenizer files exist in the checkpoint directory
-- Check that `model_max_length` is an integer (not float)
-
-### Performance Validation
-
-The cosine similarity test ensures the model produces meaningful embeddings:
-- Similar sentences should have similarity > 0.7
-- Different sentences should have lower similarity
-- If all similarities are near 1.0, the model may not be properly trained
-
-## Next Steps
-
-- Upload to HuggingFace Hub: Use `huggingface-cli upload` or the web interface
-- Fine-tune for downstream tasks: See [evaluation docs](../../docs/evaluation.md) for GLUE fine-tuning
-- Deploy for inference: Compatible with any HuggingFace Transformers deployment
+**Tokenizer Loading Failures:**
+Ensure `model_max_length` is integer (not float) in tokenizer_config.json.
