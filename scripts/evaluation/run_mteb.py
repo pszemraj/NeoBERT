@@ -162,11 +162,9 @@ def evaluate_mteb(cfg):
 
     # Load tokenizer
     tokenizer = get_tokenizer(
-        name=cfg.tokenizer.name,
-        path=cfg.tokenizer.path,
+        pretrained_model_name_or_path=cfg.tokenizer.name,
         max_length=cfg.tokenizer.max_length,
-        padding=cfg.tokenizer.padding,
-        truncation=cfg.tokenizer.truncation,
+        vocab_size=cfg.tokenizer.vocab_size or cfg.model.vocab_size,
     )
 
     # Instantiate model
