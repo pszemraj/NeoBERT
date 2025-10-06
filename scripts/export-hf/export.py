@@ -327,15 +327,21 @@ def export_checkpoint(checkpoint_path: Path, output_dir: Path = None):
     # Check if tokenizer needs special handling for mask tokens
     # Load the saved tokenizer to get actual special tokens
     from transformers import AutoTokenizer as HFAutoTokenizer
+
     saved_tokenizer = HFAutoTokenizer.from_pretrained(str(output_dir))
     actual_mask_token = saved_tokenizer.mask_token
-    mask_display = "[MASK]" if actual_mask_token in ["[MASK]", "[mask]"] else actual_mask_token
+    mask_display = (
+        "[MASK]" if actual_mask_token in ["[MASK]", "[mask]"] else actual_mask_token
+    )
 
     # Check if tokenizer uses Metaspace/SentencePiece (has ▁ token)
     try:
         space_token_id = saved_tokenizer.convert_tokens_to_ids("▁")
-        has_metaspace = space_token_id is not None and space_token_id != saved_tokenizer.unk_token_id
-    except:
+        has_metaspace = (
+            space_token_id is not None
+            and space_token_id != saved_tokenizer.unk_token_id
+        )
+    except Exception:
         has_metaspace = False
 
     # Convert full config to YAML string for details section
