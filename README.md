@@ -1,6 +1,6 @@
 # NeoBERT
 
-> [!NOTE]
+> [!IMPORTANT]
 > This is a fork of the [original chandar-lab/NeoBERT](https://github.com/chandar-lab/NeoBERT), refactored to support experimentation. ⚠️ WIP/active development⚠️
 
 ---
@@ -9,6 +9,8 @@
   - [Description](#description)
   - [Get started](#get-started)
   - [How to use](#how-to-use)
+    - [For Text Embeddings](#for-text-embeddings)
+    - [For Masked Language Modeling](#for-masked-language-modeling)
   - [Documentation](#documentation)
   - [Features](#features)
   - [License](#license)
@@ -18,7 +20,7 @@
     - [Repository Structure](#repository-structure)
     - [Quick Start for Training](#quick-start-for-training)
     - [Testing](#testing)
-  - [Contact](#contact)
+    - [Exporting Models to HuggingFace](#exporting-models-to-huggingface)
 
 ---
 
@@ -49,6 +51,21 @@ pip install transformers torch  # Core dependencies
 # pip install flash-attn --no-build-isolation
 # pip install -v --no-build-isolation git+https://github.com/facebookresearch/xformers.git@main flash_attn
 ```
+
+It is **much safer** to first install as stated above. Then, you can clone this repo and install it in editable mode:
+
+```bash
+git clone https://github.com/pszemraj/NeoBERT.git
+cd NeoBERT
+pip install -e .
+```
+
+This will install the `neobert` package and all remaining dependencies[^1].
+
+[^1]: Technically, this command installs everything, but package order/resolution is not guaranteed, so it is better to install the core dependencies first.
+
+> [!NOTE]
+> If you want to install the development dependencies (for testing, linting, etc.), use `pip install -e .[dev]`.
 
 ## How to use
 
@@ -229,9 +246,5 @@ model = AutoModel.from_pretrained(model_path, trust_remote_code=True)
 ```
 
 See the [Evaluation Guide](docs/evaluation.md#exporting-to-huggingface-format) for detailed export instructions.
-
-## Contact
-
-For questions, do not hesitate to reach out and open an issue on **[GitHub](https://github.com/chandar-lab/NeoBERT)**.
 
 ---
