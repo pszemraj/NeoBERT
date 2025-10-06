@@ -8,21 +8,21 @@ dynamic = ["version"]
 description = "A state-of-the-art update of BERT"
 requires-python = ">= 3.10"
 dependencies = [
-    "torch",
     "accelerate",
-    "deepspeed",
-    "xformers",
-    "transformers",
     "datasets",
-    "wandb",
-    "numpy",
-    "scikit-learn",
-    "evaluate",
-    "mteb",
-    "libaio",
-    "tqdm",
+    "deepspeed",
     "einops",
+    "evaluate",
+    "libaio",
+    "mteb",
+    "numpy",
     "pyyaml",
+    "scikit-learn",
+    "torch",
+    "tqdm",
+    "transformers",
+    "wandb",
+    "xformers",
 ]
 authors = [
     { name = "Lola Le Breton", email = "lola.lebreton@mila.quebec" },
