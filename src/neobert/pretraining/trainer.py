@@ -28,6 +28,7 @@ from ..model import NeoBERTConfig, NeoBERTLMHead
 from ..optimizer import get_optimizer
 from ..scheduler import get_scheduler
 from ..tokenizer import get_tokenizer
+from ..utils import configure_tf32, model_summary
 
 # Our metric object and model
 from .metrics import Metrics
@@ -143,10 +144,8 @@ def trainer(cfg: Config):
     # Set the seed
     set_seed(cfg.seed)
 
-    # Enable TF32 on matmul and on cuDNN (if available)
-    if torch.cuda.is_available():
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+    # Configure TF32 precision for GPUs with compute capability >= 8.0
+    configure_tf32(print_fn=accelerator.print)
 
     # Local and global counters
     metrics = Metrics()
@@ -347,9 +346,9 @@ def trainer(cfg: Config):
     )
     model = NeoBERTLMHead(model_config)
 
-    # Log model parameters to console instead of wandb
-    model_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    accelerator.print(f"Model parameters: {model_params:,}")
+    # Print model summary with hierarchical parameter counts
+    if accelerator.is_main_process:
+        model_summary(model, max_depth=3, show_param_shapes=True)
 
     # Optimizer and Scheduler
     optimizer = get_optimizer(

@@ -194,8 +194,8 @@ class PretrainConfigValidator:
                 "No mixed_precision specified. Consider using 'bf16' for faster training."
             )
         elif trainer_config.get("mixed_precision") == "fp16":
-            self.warnings.append(
-                "Using fp16. Consider bf16 for better stability with modern GPUs."
+            self.errors.append(
+                "fp16 is not supported. Use bf16 for mixed precision training on modern GPUs."
             )
 
         # Check output directory

@@ -90,7 +90,7 @@ def validate_glue_config(cfg: Any) -> None:
 
         # Check mixed precision settings
         if hasattr(cfg.trainer, "mixed_precision"):
-            valid_precision = ["no", "fp16", "bf16", "fp32"]
+            valid_precision = ["no", "bf16", "fp32"]
             # Handle both string and boolean values
             mixed_precision = cfg.trainer.mixed_precision
             if isinstance(mixed_precision, bool):
