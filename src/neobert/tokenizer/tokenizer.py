@@ -17,20 +17,39 @@ def get_tokenizer(
     # Load Tokenizer and replace/add special tokens
     tokenizer = AutoTokenizer.from_pretrained(
         pretrained_model_name_or_path,
-        max_length=max_length,
         vocab_size=vocab_size,
         token=token,
         trust_remote_code=True,
     )
 
-    # List of tokenizers that already have the correct special tokens
-    tokenizers_with_special_tokens = [
-        "bert-base-uncased",
-        "google-bert/bert-base-uncased",
-        "BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp",
-    ]
+    # Set model_max_length (not max_length which is deprecated)
+    tokenizer.model_max_length = max_length
 
-    if pretrained_model_name_or_path not in tokenizers_with_special_tokens:
+    # Store original special tokens for comparison
+    original_special_tokens = tokenizer.special_tokens_map.copy()
+    original_mask = tokenizer.mask_token if hasattr(tokenizer, "mask_token") else None
+
+    # Check if tokenizer already has mask token defined
+    # If it does, keep the existing special tokens
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    if hasattr(tokenizer, "mask_token") and tokenizer.mask_token is not None:
+        # Tokenizer already has special tokens configured, keep them
+        logger.info(
+            f"Keeping existing special tokens for {pretrained_model_name_or_path}"
+        )
+        logger.info(f"  Special tokens map: {tokenizer.special_tokens_map}")
+        should_keep_special_tokens = True
+    else:
+        # No mask token defined, this is likely a standard LLM tokenizer
+        logger.info(
+            f"No mask token found for {pretrained_model_name_or_path}, adding RoBERTa-style special tokens"
+        )
+        should_keep_special_tokens = False
+
+    if not should_keep_special_tokens:
         # Define special tokens to be consistent with RoBERTa
         special_tokens = {
             "bos_token": "<s>",
@@ -59,6 +78,43 @@ def get_tokenizer(
                 (tokenizer.bos_token, tokenizer.bos_token_id),
                 (tokenizer.sep_token, tokenizer.sep_token_id),
             ],
+        )
+
+    # Check if special tokens were modified and warn the user prominently
+    final_special_tokens = tokenizer.special_tokens_map
+    final_mask = tokenizer.mask_token if hasattr(tokenizer, "mask_token") else None
+
+    # Check for modifications
+    tokens_modified = False
+    modified_tokens = []
+
+    if original_mask and final_mask and original_mask != final_mask:
+        tokens_modified = True
+        modified_tokens.append(f"mask_token: {original_mask} -> {final_mask}")
+
+    for key in original_special_tokens:
+        if key in final_special_tokens:
+            if original_special_tokens[key] != final_special_tokens[key]:
+                tokens_modified = True
+                modified_tokens.append(
+                    f"{key}: {original_special_tokens[key]} -> {final_special_tokens[key]}"
+                )
+
+    if tokens_modified:
+        # Print clear warning to console
+        print("\n" + "=" * 60, flush=True)
+        print(
+            f"⚠️  WARNING: Special tokens modified for {pretrained_model_name_or_path}",
+            flush=True,
+        )
+        print("=" * 60, flush=True)
+        for change in modified_tokens:
+            print(f"  {change}", flush=True)
+        print("=" * 60 + "\n", flush=True)
+
+        # Also log it
+        logger.warning(
+            f"Special tokens modified for {pretrained_model_name_or_path}: {modified_tokens}"
         )
 
     return tokenizer
