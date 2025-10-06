@@ -2,6 +2,9 @@
 
 This directory contains production YAML configuration files for the NeoBERT training and evaluation pipeline. Test configurations are located in `tests/configs/`.
 
+> [!NOTE]
+> See [/docs/configuration.md](/docs/configuration.md) for detailed documentation on the configuration system and parameter descriptions.
+
 ## Production Configurations
 
 ### Pretraining

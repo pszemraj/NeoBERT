@@ -2,7 +2,8 @@
 
 Scripts for exporting NeoBERT checkpoints to HuggingFace format.
 
-📚 **For comprehensive documentation, see [docs/export.md](../../docs/export.md)**
+> [!NOTE]
+> See [/docs/export.md](/docs/export.md) for comprehensive usage documentation and export guide.
 
 ## Quick Start
 

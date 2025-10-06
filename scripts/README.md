@@ -2,6 +2,9 @@
 
 This directory contains Python scripts for training, evaluation, and data processing. All scripts use the new hierarchical YAML configuration system with command-line override support.
 
+> [!NOTE]
+> See [/docs/training.md](/docs/training.md) for the training guide, [/docs/evaluation.md](/docs/evaluation.md) for evaluation guide, and [/docs/export.md](/docs/export.md) for export documentation.
+
 ## Directory Structure
 
 ```

@@ -2,6 +2,9 @@
 
 NeoBERT uses a hierarchical configuration system based on dataclasses, YAML files, and command-line overrides.
 
+> [!NOTE]
+> See [/configs/README.md](/configs/README.md) for available configuration files and [/scripts/README.md](/scripts/README.md) for script-specific usage.
+
 ## Overview
 
 The configuration system provides:

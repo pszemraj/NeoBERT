@@ -2,6 +2,9 @@
 
 This guide covers evaluating NeoBERT models on various benchmarks.
 
+> [!NOTE]
+> See [/scripts/evaluation/README.md](/scripts/evaluation/README.md) for implementation details and script-specific documentation.
+
 ## GLUE Benchmark
 
 ### Prerequisites
@@ -331,6 +334,9 @@ View results at: <https://wandb.ai/your-username/neobert-glue>
 ## Exporting to HuggingFace Format
 
 After training or fine-tuning your NeoBERT model, you can export it to HuggingFace format for easy sharing and deployment.
+
+> [!NOTE]
+> See [/docs/export.md](/docs/export.md) for comprehensive export documentation and [/scripts/export-hf/README.md](/scripts/export-hf/README.md) for script implementation details.
 
 ### Export Checkpoint
 

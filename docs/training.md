@@ -2,6 +2,9 @@
 
 This guide covers pretraining and fine-tuning NeoBERT models.
 
+> [!NOTE]
+> See [/scripts/README.md](/scripts/README.md) for script usage details and [/scripts/pretraining/](/scripts/pretraining/) for training script implementations.
+
 ## Pretraining
 
 ### Basic Pretraining

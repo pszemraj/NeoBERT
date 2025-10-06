@@ -2,7 +2,8 @@
 
 Scripts for evaluating NeoBERT models on benchmarks.
 
-📚 **For comprehensive documentation, see [docs/evaluation.md](../../docs/evaluation.md)**
+> [!NOTE]
+> See [/docs/evaluation.md](/docs/evaluation.md) for comprehensive evaluation guide and benchmark documentation.
 
 ## Scripts Overview
 

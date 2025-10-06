@@ -2,6 +2,9 @@
 
 This guide covers exporting NeoBERT checkpoints to HuggingFace format for easy distribution and deployment.
 
+> [!NOTE]
+> See [/scripts/export-hf/README.md](/scripts/export-hf/README.md) for implementation details and script-specific documentation.
+
 ## Overview
 
 The export process converts NeoBERT training checkpoints into a format compatible with the HuggingFace Transformers library. This enables:
