@@ -76,6 +76,19 @@ class OptimizerConfig:
     weight_decay: float = 0.01
     betas: List[float] = field(default_factory=lambda: [0.9, 0.999])
     eps: float = 1e-8
+    # MuonClip-specific parameters (ignored by other optimizers)
+    muon_beta: float = 0.95
+    muon_decay: float = 0.0
+    ns_steps: int = 5
+    enable_clipping: bool = True
+    clipping_threshold: float = 50.0
+    clipping_alpha: float = 0.5
+    clipping_warmup_steps: int = 0
+    monitor_attention_entropy: bool = True
+    detect_anomalies: bool = False
+    log_max_logits: bool = True
+    offload_hooks_to_cpu: bool = True
+    enable_profiling: bool = False
 
 
 @dataclass

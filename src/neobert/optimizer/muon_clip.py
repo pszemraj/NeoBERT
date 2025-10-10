@@ -700,31 +700,31 @@ class MuonClipOptimizer(Optimizer):
             eta_per_head: Scaling factors per head [num_heads]
             alpha: Q/K scaling balance (0.5 = equal)
         """
-        # Get dimensions
+        # Dimensions derived from model config
         hidden_size = self.model_config.hidden_size
         num_heads = self.model_config.num_attention_heads
         head_dim = hidden_size // num_heads
 
-        # QKV weight: [hidden_size, 3*hidden_size]
-        # Transpose to [3*hidden_size, hidden_size] for easier manipulation
-        qkv = param.data.T
+        if param.numel() != 3 * hidden_size * hidden_size:
+            raise RuntimeError(
+                f"Unexpected QKV parameter shape {tuple(param.shape)} for hidden_size={hidden_size}"
+            )
 
-        # Reshape to separate Q, K, V: [3, num_heads, head_dim, hidden_size]
-        qkv_reshaped = qkv.reshape(3, num_heads, head_dim, hidden_size)
+        # Ensure scaling factors are finite and on the right device/dtype
+        eta = eta_per_head.to(device=param.device, dtype=param.dtype)
+        eta = torch.clamp(eta, min=1e-6, max=1.0)
 
-        # Expand eta for broadcasting: [num_heads, 1, 1]
-        eta_expanded = eta_per_head.view(num_heads, 1, 1)
+        # Compute per-head scaling powers
+        eta_q = eta.pow(alpha).view(num_heads, 1, 1)
+        eta_k = eta.pow(1 - alpha).view(num_heads, 1, 1)
 
-        # Scale Q and K, leave V unchanged
-        qkv_reshaped[0] *= eta_expanded**alpha  # Query
-        qkv_reshaped[1] *= eta_expanded ** (1 - alpha)  # Key
-        # qkv_reshaped[2] unchanged (Value)
+        # Reshape parameter to [3, num_heads, head_dim, hidden_size]
+        # In-place scaling keeps the original tensor layout intact.
+        param_view = param.view(3, num_heads, head_dim, hidden_size)
 
-        # Reshape back to original shape
-        qkv_scaled = qkv_reshaped.reshape(3 * hidden_size, hidden_size)
-
-        # Transpose back and update parameter
-        param.data = qkv_scaled.T
+        param_view[0].mul_(eta_q)  # Query rows
+        param_view[1].mul_(eta_k)  # Key rows
+        # Value rows remain unchanged (param_view[2])
 
     def get_metrics(self) -> Dict:
         """
