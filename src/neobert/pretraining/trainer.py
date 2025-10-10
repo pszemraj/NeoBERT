@@ -351,14 +351,51 @@ def trainer(cfg: Config):
         model_summary(model, max_depth=3, show_param_shapes=True)
 
     # Optimizer and Scheduler
+    # Log if using MuonClip optimizer
+    if cfg.optimizer.name.lower() in ["muonclip", "muon-clip", "muon_clip"]:
+        logger.info("=" * 60)
+        logger.info("MuonClip Optimizer Configuration")
+        logger.info("=" * 60)
+        logger.info(f"QK-clipping: {getattr(cfg.optimizer, 'enable_clipping', True)}")
+        logger.info(
+            f"Clipping threshold: {getattr(cfg.optimizer, 'clipping_threshold', 50.0)}"
+        )
+        logger.info(
+            f"Newton-Schulz iterations: {getattr(cfg.optimizer, 'ns_steps', 5)}"
+        )
+        logger.info(
+            f"Monitoring entropy: {getattr(cfg.optimizer, 'monitor_attention_entropy', True)}"
+        )
+        logger.info(
+            f"Clipping warmup steps: {getattr(cfg.optimizer, 'clipping_warmup_steps', 0)}"
+        )
+        logger.info("=" * 60)
+
     optimizer = get_optimizer(
         model,
         accelerator.distributed_type,
+        model_config=model_config,  # Pass model config for MuonClip
         name=cfg.optimizer.name,
         lr=cfg.optimizer.lr,
         weight_decay=cfg.optimizer.weight_decay,
         betas=cfg.optimizer.betas,
         eps=cfg.optimizer.eps,
+        # MuonClip parameters (ignored by AdamW)
+        muon_beta=getattr(cfg.optimizer, "muon_beta", 0.95),
+        muon_decay=getattr(cfg.optimizer, "muon_decay", 0.0),
+        ns_steps=getattr(cfg.optimizer, "ns_steps", 5),
+        enable_clipping=getattr(cfg.optimizer, "enable_clipping", True),
+        clipping_threshold=getattr(cfg.optimizer, "clipping_threshold", 50.0),
+        clipping_alpha=getattr(cfg.optimizer, "clipping_alpha", 0.5),
+        clipping_warmup_steps=getattr(cfg.optimizer, "clipping_warmup_steps", 0),
+        monitor_attention_entropy=getattr(
+            cfg.optimizer, "monitor_attention_entropy", True
+        ),
+        detect_anomalies=getattr(cfg.optimizer, "detect_anomalies", False),
+        log_max_logits=getattr(cfg.optimizer, "log_max_logits", True),
+        log_interval=getattr(cfg.wandb, "log_interval", 100),
+        offload_hooks_to_cpu=getattr(cfg.optimizer, "offload_hooks_to_cpu", True),
+        enable_profiling=getattr(cfg.optimizer, "enable_profiling", False),
     )
     scheduler = get_scheduler(
         optimizer=optimizer,
@@ -529,6 +566,12 @@ def trainer(cfg: Config):
                         metrics["train/weight_norm"] = (
                             sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5
                         ).item()
+
+                    # Add MuonClip metrics if available
+                    if hasattr(optimizer, "get_metrics"):
+                        muonclip_metrics = optimizer.get_metrics()
+                        for key, value in muonclip_metrics.items():
+                            metrics[key] = value
 
                     metrics["train/learning_rate"] = optimizer.param_groups[0]["lr"]
                     metrics.log(accelerator)
