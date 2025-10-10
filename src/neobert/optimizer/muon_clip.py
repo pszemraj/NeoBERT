@@ -152,26 +152,39 @@ class NeoBERTAttentionHooks:
         """
         num_hooks = 0
 
-        # Find transformer_encoder layers
-        if hasattr(model, "transformer_encoder"):
-            for idx, layer in enumerate(model.transformer_encoder):
-                # Create hook for this layer
-                hook = self._create_layer_hook(idx)
-                handle = layer.register_forward_hook(hook)
-                self.hook_handles.append(handle)
-                num_hooks += 1
-                logger.debug(f"Registered hook on transformer_encoder[{idx}]")
-        else:
-            raise RuntimeError(
-                "Model missing 'transformer_encoder' attribute. "
-                "This implementation requires NeoBERT architecture."
-            )
+        layers = self._resolve_transformer_layers(model)
+
+        for idx, layer in enumerate(layers):
+            hook = self._create_layer_hook(idx)
+            handle = layer.register_forward_hook(hook)
+            self.hook_handles.append(handle)
+            num_hooks += 1
+            logger.debug(f"Registered hook on transformer_encoder[{idx}]")
 
         if num_hooks == 0:
             raise RuntimeError("No hooks registered! Check model architecture.")
 
         logger.info(f"Registered {num_hooks} attention hooks")
         return num_hooks
+
+    def _resolve_transformer_layers(self, model):
+        """Resolve underlying transformer layers, handling wrapped models."""
+        if hasattr(model, "transformer_encoder"):
+            return model.transformer_encoder
+
+        for attr_name in ("model", "base", "backbone"):
+            submodule = getattr(model, attr_name, None)
+            if submodule is None:
+                continue
+            try:
+                return self._resolve_transformer_layers(submodule)
+            except RuntimeError:
+                pass
+
+        raise RuntimeError(
+            "Model missing 'transformer_encoder' attribute. "
+            "Ensure MuonClip optimizer is used with a NeoBERT-style encoder."
+        )
 
     def _create_layer_hook(self, layer_idx: int):
         """Create forward hook for specific layer."""
@@ -344,7 +357,7 @@ class MuonClipOptimizer(Optimizer):
             self.hook_system = NeoBERTAttentionHooks(
                 model_config, offload_to_cpu=config.offload_hooks_to_cpu
             )
-            num_hooks = self.hook_system.register_hooks(model)
+            num_hooks = self.hook_system.register_hooks(self.model_base)
             logger.info(f"Hook system ready: {num_hooks} hooks registered")
         else:
             self.hook_system = None
@@ -369,18 +382,21 @@ class MuonClipOptimizer(Optimizer):
 
     def _validate_model(self, model):
         """Validate model architecture compatibility."""
-        # Check for transformer_encoder
-        if not hasattr(model, "transformer_encoder"):
+        base_model, transformer_layers = self._resolve_transformer_stack(model)
+        if base_model is None or transformer_layers is None:
             raise ValueError(
-                "Model must have 'transformer_encoder' attribute. "
-                "Is this a NeoBERT model?"
+                "Model must expose 'transformer_encoder' either directly or via a "
+                "'base' attribute. Is this a NeoBERT model?"
             )
 
+        self.model_base = base_model
+        self.transformer_layers = transformer_layers
+
         # Check first layer has fused QKV
-        if len(model.transformer_encoder) == 0:
+        if len(self.transformer_layers) == 0:
             raise ValueError("Model has no transformer layers")
 
-        first_layer = model.transformer_encoder[0]
+        first_layer = self.transformer_layers[0]
         if not hasattr(first_layer, "qkv"):
             raise ValueError(
                 "EncoderBlock must have 'qkv' attribute (fused QKV projection). "
@@ -459,6 +475,24 @@ class MuonClipOptimizer(Optimizer):
             raise ValueError("No trainable parameters found")
 
         return groups
+
+    def _resolve_transformer_stack(self, model):
+        """
+        Discover the underlying NeoBERT encoder stack, accounting for wrappers like
+        NeoBERTLMHead.
+        """
+        if hasattr(model, "transformer_encoder"):
+            return model, model.transformer_encoder
+
+        for attr_name in ("model", "base", "backbone"):
+            submodule = getattr(model, attr_name, None)
+            if submodule is None:
+                continue
+            base_model, layers = self._resolve_transformer_stack(submodule)
+            if base_model is not None:
+                return base_model, layers
+
+        return None, None
 
     @torch.no_grad()
     def step(self, closure=None):
