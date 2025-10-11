@@ -211,6 +211,7 @@ def main():
             return collator(samples)
 
         return provider
+
     print("  Dataset: HuggingFaceFW/fineweb (streaming)")
     print(f"  Batch size: {batch_size}")
 
@@ -257,10 +258,6 @@ def main():
         enable_clipping=True,
         clipping_threshold=50.0,
         clipping_alpha=0.5,
-        monitor_attention_entropy=False,
-        log_max_logits=False,
-        offload_hooks_to_cpu=False,
-        log_interval=50,
     )
 
     print("MuonClip config:")

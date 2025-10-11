@@ -265,12 +265,7 @@ for a full example.
 | `clipping_alpha` | `0.5` | Balance of scaling between Q (α) and K (1-α) |
 | `clipping_warmup_steps` | `0` | Delay clipping for the first *n* steps |
 | `clipping_layers_mapping` | `{}` | Optional mapping for models with separate `q_proj`/`k_proj` names |
-| `monitor_attention_entropy` | `false` | Collect attention entropy statistics each step |
-| `log_max_logits` | `false` | Track maximum attention logits for logging |
-| `offload_hooks_to_cpu` | `false` | Move collected attention stats off GPU between steps |
-| `enable_profiling` | `false` | Emit per-step profiling diagnostics |
-| `log_interval` | `100` | Metric sampling interval during warmup-only logging |
-| `log_dir` | `null` | If set, metrics are appended to `<log_dir>/muonclip_metrics.jsonl` |
+| `detect_anomalies` | `false` | Enable PyTorch anomaly detection (debug only) |
 
 > Note: Earlier MuonClip experiments used `betas=(0.9, 0.95)`, which can be too
 > aggressive for encoder pretraining. We default to β₂=0.98 and recommend

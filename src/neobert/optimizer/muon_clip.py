@@ -17,16 +17,14 @@ References:
 - MuonClip: https://github.com/GAD-cell/muon-clip
 """
 
-import json
 import logging
 import re
 import warnings
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple
 
 import torch
-import torch.nn.functional as F
+from torch.utils.hooks import RemovableHandle
 from torch.optim import Optimizer
 
 logger = logging.getLogger(__name__)
@@ -67,17 +65,7 @@ class MuonClipConfig:
     clipping_layers_mapping: Dict[str, str] = field(default_factory=dict)
 
     # Monitoring and debugging
-    monitor_attention_entropy: bool = False
     detect_anomalies: bool = False  # Enable gradient anomaly detection
-    log_max_logits: bool = False
-    log_interval: int = 100
-
-    # Performance optimization
-    offload_hooks_to_cpu: bool = False  # Save GPU memory
-    enable_profiling: bool = False  # Detailed timing info
-
-    # Logging
-    log_dir: Optional[Union[str, Path]] = None
 
     def __post_init__(self):
         """Validate configuration."""
@@ -128,9 +116,6 @@ class MuonClipConfig:
                 )
             self.clipping_layers_mapping = normalised_mapping
 
-        if self.log_dir is not None:
-            self.log_dir = Path(self.log_dir)
-
         _, beta2 = self.adam_betas
         if beta2 < 0.98:
             warnings.warn(
@@ -147,37 +132,31 @@ class MuonClipConfig:
 
 class NeoBERTAttentionHooks:
     """
-    Attention hook system specifically designed for NeoBERT's fused QKV architecture.
+    Lightweight hook system to capture attention inputs for QK clipping.
 
-    Captures attention logits from EncoderBlock forward pass by:
-    1. Hooking the QKV output
-    2. Splitting into Q, K, V
-    3. Computing Q@K^T attention scores
-    4. Tracking max logits per head for clipping
+    We record:
+      - The normalized attention input fed into each layer's QKV (or Q/K) projection.
+      - The pad mask and rotary embeddings passed to the encoder block.
+    The expensive QK statistics are computed lazily during the optimizer step.
     """
 
-    def __init__(
-        self,
-        model_config,
-        offload_to_cpu: bool = True,
-        layer_mapping: Optional[Dict[str, str]] = None,
-    ):
+    def __init__(self, model_config, layer_mapping: Optional[Dict[str, str]] = None):
         self.config = model_config
         self.num_heads = model_config.num_attention_heads
         self.head_dim = model_config.hidden_size // model_config.num_attention_heads
-        self.offload_to_cpu = offload_to_cpu
         self.layer_mapping = layer_mapping or {}
 
-        # Storage for captured data
-        self.layer_stats: Dict[int, Dict] = {}
-        self.enabled = True
-        self.hook_handles = []
+        self.layer_inputs: Dict[int, torch.Tensor] = {}
+        self.layer_pad_masks: Dict[int, Optional[torch.Tensor]] = {}
+        self.layer_freqs: Dict[int, Optional[torch.Tensor]] = {}
+        self.layers: Dict[int, torch.nn.Module] = {}
 
-        # Validation
+        self.enabled = True
+        self.hook_handles: List[RemovableHandle] = []
+
         self._validate_config()
 
     def _validate_config(self):
-        """Validate model config for hook compatibility."""
         if self.config.hidden_size % self.config.num_attention_heads != 0:
             raise ValueError(
                 f"hidden_size ({self.config.hidden_size}) must be divisible by "
@@ -185,31 +164,49 @@ class NeoBERTAttentionHooks:
             )
 
     def register_hooks(self, model) -> int:
-        """
-        Register forward hooks on all EncoderBlocks.
-
-        Returns:
-            Number of hooks registered
-        """
-        num_hooks = 0
-
+        """Register hooks across all transformer encoder layers."""
         layers = self._resolve_transformer_layers(model)
+        if not layers:
+            raise RuntimeError("No transformer layers found for MuonClip hooks")
 
+        num_hooks = 0
         for idx, layer in enumerate(layers):
-            hook = self._create_layer_hook(idx)
-            handle = layer.register_forward_hook(hook)
-            self.hook_handles.append(handle)
+            self.layers[idx] = layer
+
+            if hasattr(layer, "qkv"):
+                handle = layer.qkv.register_forward_hook(
+                    self._create_qkv_input_hook(idx)
+                )
+                self.hook_handles.append(handle)
+                num_hooks += 1
+            else:
+                q_proj_name = self.layer_mapping.get("q_proj")
+                if not q_proj_name:
+                    raise RuntimeError(
+                        "Encoder block lacks fused qkv projection; provide "
+                        "'clipping_layers_mapping' with q_proj entry."
+                    )
+                q_proj = getattr(layer, q_proj_name, None)
+                if q_proj is None:
+                    raise RuntimeError(
+                        f"Encoder block missing projection '{q_proj_name}'"
+                    )
+                handle = q_proj.register_forward_hook(self._create_qkv_input_hook(idx))
+                self.hook_handles.append(handle)
+                num_hooks += 1
+
+            block_handle = layer.register_forward_hook(
+                self._create_block_context_hook(idx)
+            )
+            self.hook_handles.append(block_handle)
             num_hooks += 1
-            logger.debug(f"Registered hook on transformer_encoder[{idx}]")
 
-        if num_hooks == 0:
-            raise RuntimeError("No hooks registered! Check model architecture.")
+            logger.debug(f"Registered MuonClip hooks on layer {idx}")
 
-        logger.info(f"Registered {num_hooks} attention hooks")
+        logger.info(f"Registered {num_hooks} MuonClip hooks")
         return num_hooks
 
     def _resolve_transformer_layers(self, model):
-        """Resolve underlying transformer layers, handling wrapped models."""
         if hasattr(model, "transformer_encoder"):
             return model.transformer_encoder
 
@@ -217,167 +214,55 @@ class NeoBERTAttentionHooks:
             submodule = getattr(model, attr_name, None)
             if submodule is None:
                 continue
-            try:
-                return self._resolve_transformer_layers(submodule)
-            except RuntimeError:
-                pass
+            layers = self._resolve_transformer_layers(submodule)
+            if layers is not None:
+                return layers
 
-        raise RuntimeError(
-            "Model missing 'transformer_encoder' attribute. "
-            "Ensure MuonClip optimizer is used with a NeoBERT-style encoder."
-        )
+        return None
 
-    def _create_layer_hook(self, layer_idx: int):
-        """Create forward hook for specific layer."""
-
-        def hook_fn(module, input_tuple, output):
-            if not self.enabled:
+    def _create_qkv_input_hook(self, layer_idx: int):
+        def hook_fn(module, inputs, output):
+            if not self.enabled or not inputs:
                 return
-
-            try:
-                # Extract inputs
-                if isinstance(input_tuple, tuple):
-                    x = input_tuple[0]
-                    pad_mask = input_tuple[1] if len(input_tuple) > 1 else None
-                    freqs_cis = input_tuple[2] if len(input_tuple) > 2 else None
-                else:
-                    x = input_tuple
-                    pad_mask = None
-                    freqs_cis = None
-
-                # Compute attention statistics
-                with torch.no_grad():
-                    stats = self._compute_attention_stats(
-                        module, x, pad_mask, freqs_cis
-                    )
-                    self.layer_stats[layer_idx] = stats
-
-            except Exception as e:
-                logger.error(f"Hook failed on layer {layer_idx}: {e}")
-                # Don't raise - allow training to continue
+            x = inputs[0]
+            if not torch.is_tensor(x):
+                return
+            self.layer_inputs[layer_idx] = x.detach()
 
         return hook_fn
 
-    def _compute_attention_stats(
-        self,
-        encoder_block,
-        x: torch.Tensor,
-        pad_mask: Optional[torch.Tensor],
-        freqs_cis: Optional[torch.Tensor],
-    ) -> Dict:
-        """
-        Compute attention statistics by replicating forward pass.
+    def _create_block_context_hook(self, layer_idx: int):
+        def hook_fn(module, inputs, output):
+            if not self.enabled or not inputs:
+                return
 
-        This is the critical function - must match NeoBERT's EncoderBlock._att_block.
-        """
-        batch_size, seq_len, _ = x.shape
+            pad_mask = inputs[1] if len(inputs) > 1 else None
+            freqs_cis = inputs[2] if len(inputs) > 2 else None
 
-        # Apply attention norm (as in EncoderBlock.forward)
-        x_norm = encoder_block.attention_norm(x)
-
-        # QKV projection
-        if hasattr(encoder_block, "qkv"):
-            qkv = encoder_block.qkv(x_norm)
-            qkv_reshaped = qkv.view(
-                batch_size, seq_len, self.num_heads, self.head_dim * 3
+            self.layer_pad_masks[layer_idx] = (
+                pad_mask.detach() if torch.is_tensor(pad_mask) else pad_mask
             )
-            xq, xk, _ = qkv_reshaped.chunk(3, dim=-1)
-        else:
-            q_proj_name = self.layer_mapping.get("q_proj")
-            k_proj_name = self.layer_mapping.get("k_proj")
-            if not q_proj_name or not k_proj_name:
-                raise AttributeError(
-                    "Encoder block missing fused qkv and no q/k projection "
-                    "mapping provided via 'clipping_layers_mapping'."
-                )
+            self.layer_freqs[layer_idx] = (
+                freqs_cis.detach() if torch.is_tensor(freqs_cis) else freqs_cis
+            )
 
-            q_proj = getattr(encoder_block, q_proj_name, None)
-            k_proj = getattr(encoder_block, k_proj_name, None)
-            if q_proj is None or k_proj is None:
-                raise AttributeError(
-                    f"Encoder block missing projections: "
-                    f"q_proj={q_proj_name}, k_proj={k_proj_name}"
-                )
+        return hook_fn
 
-            xq = q_proj(x_norm).view(batch_size, seq_len, self.num_heads, self.head_dim)
-            xk = k_proj(x_norm).view(batch_size, seq_len, self.num_heads, self.head_dim)
-
-        # Apply RoPE if enabled
-        if self.config.rope and freqs_cis is not None:
-            # Import RoPE function
-            from ..model.rotary import apply_rotary_emb
-
-            xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
-
-        # Compute attention scores Q@K^T
-        # Transpose to [batch, heads, seq, head_dim]
-        xq_heads = xq.transpose(1, 2)
-        xk_heads = xk.transpose(1, 2)
-
-        # Attention logits: [batch, heads, seq_q, seq_k]
-        attn_logits = torch.matmul(xq_heads, xk_heads.transpose(-2, -1))
-        attn_logits = attn_logits / (self.head_dim**0.5)
-
-        # Apply padding mask if present
-        if pad_mask is not None:
-            attn_logits = attn_logits + pad_mask
-
-        # Extract statistics
-        # Max logits per head (what we need for clipping)
-        max_logits_per_head = attn_logits.amax(dim=(-2, -1)).mean(dim=0)  # [heads]
-
-        # Attention entropy per head
-        attn_probs = F.softmax(attn_logits, dim=-1)
-        entropy_per_head = -torch.sum(
-            attn_probs * torch.log(attn_probs + 1e-10), dim=(-2, -1)
-        ).mean(dim=0)  # [heads]
-
-        # Additional diagnostics
-        mean_logit = attn_logits.mean().item()
-        std_logit = attn_logits.std().item()
-        max_logit_overall = attn_logits.max().item()
-
-        # Move to CPU if configured
-        if self.offload_to_cpu:
-            max_logits_per_head = max_logits_per_head.cpu()
-            entropy_per_head = entropy_per_head.cpu()
-
-        return {
-            "max_logits_per_head": max_logits_per_head,
-            "entropy_per_head": entropy_per_head,
-            "mean_logit": mean_logit,
-            "std_logit": std_logit,
-            "max_logit_overall": max_logit_overall,
-        }
-
-    def get_layer_stats(self, layer_idx: int) -> Optional[Dict]:
-        """Get attention statistics for specific layer."""
-        return self.layer_stats.get(layer_idx)
-
-    def get_global_max_logit(self) -> float:
-        """Get maximum attention logit across all layers."""
-        if not self.layer_stats:
-            return 0.0
-        return max(
-            stats["max_logits_per_head"].max().item()
-            for stats in self.layer_stats.values()
+    def get_layer_data(
+        self, layer_idx: int
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+        return (
+            self.layer_inputs.get(layer_idx),
+            self.layer_pad_masks.get(layer_idx),
+            self.layer_freqs.get(layer_idx),
         )
-
-    def get_mean_entropy(self) -> float:
-        """Get mean attention entropy across all layers and heads."""
-        if not self.layer_stats:
-            return 0.0
-        all_entropy = torch.cat(
-            [stats["entropy_per_head"] for stats in self.layer_stats.values()]
-        )
-        return all_entropy.mean().item()
 
     def clear(self):
-        """Clear captured statistics."""
-        self.layer_stats.clear()
+        self.layer_inputs.clear()
+        self.layer_pad_masks.clear()
+        self.layer_freqs.clear()
 
     def remove_hooks(self):
-        """Remove all registered hooks."""
         for handle in self.hook_handles:
             handle.remove()
         self.hook_handles.clear()
@@ -407,9 +292,8 @@ class MuonClipOptimizer(Optimizer):
         self.config = config
         self.model_config = model_config
         self._step = 0
-        self._metrics = {}
+        self._last_metrics: Dict[str, float] = {}
         self._layer_mapping = dict(self.config.clipping_layers_mapping)
-        self._metrics_log_path: Optional[Path] = None
 
         # Validate model architecture
         self._validate_model(model)
@@ -418,20 +302,13 @@ class MuonClipOptimizer(Optimizer):
         if config.enable_clipping:
             logger.info("Initializing attention hook system...")
             self.hook_system = NeoBERTAttentionHooks(
-                model_config,
-                offload_to_cpu=config.offload_hooks_to_cpu,
-                layer_mapping=self._layer_mapping,
+                model_config, layer_mapping=self._layer_mapping
             )
             num_hooks = self.hook_system.register_hooks(self.model_base)
             logger.info(f"Hook system ready: {num_hooks} hooks registered")
         else:
             self.hook_system = None
             logger.info("QK-clipping disabled, no hooks registered")
-
-        if self.config.log_dir is not None:
-            log_dir = Path(self.config.log_dir)
-            log_dir.mkdir(parents=True, exist_ok=True)
-            self._metrics_log_path = log_dir / "muonclip_metrics.jsonl"
 
         # Build parameter groups
         param_groups = self._build_param_groups(model)
@@ -484,8 +361,7 @@ class MuonClipOptimizer(Optimizer):
             ]
             if missing:
                 raise ValueError(
-                    "EncoderBlock missing required projection(s): "
-                    + ", ".join(missing)
+                    "EncoderBlock missing required projection(s): " + ", ".join(missing)
                 )
             logger.debug(
                 "Detected separate attention projections using mapping %s",
@@ -628,9 +504,8 @@ class MuonClipOptimizer(Optimizer):
             if self._step >= self.config.clipping_warmup_steps:
                 self._apply_qk_clipping()
             else:
-                # Still collect metrics during warmup
-                if self._step % self.config.log_interval == 0:
-                    self._collect_attention_metrics_only()
+                self.hook_system.clear()
+                self._last_metrics.clear()
 
         self._step += 1
         return loss
@@ -759,19 +634,15 @@ class MuonClipOptimizer(Optimizer):
 
     def _apply_qk_clipping(self):
         """
-        Apply per-head QK-clipping based on captured attention logits.
-
-        This is the critical function for attention stability.
-        Works with fused QKV weights in NeoBERT.
+        Apply per-head QK-clipping using cached activations.
         """
-        if not self.hook_system or not self.hook_system.layer_stats:
-            logger.warning("QK-clipping enabled but no attention statistics captured")
+        if not self.hook_system:
             return
 
-        # Get global maximum logit
-        global_max = self.hook_system.get_global_max_logit()
+        self._last_metrics.clear()
+        max_attention_logit: Optional[float] = None
 
-        # Apply clipping to QKV weights
+        layer_entries: Dict[int, Dict[str, torch.nn.Parameter]] = {}
         for group in self.param_groups:
             if not group["use_muon"]:
                 continue
@@ -780,67 +651,176 @@ class MuonClipOptimizer(Optimizer):
                 if not info["is_qkv"] or info["layer_idx"] is None:
                     continue
 
-                layer_stats = self.hook_system.get_layer_stats(info["layer_idx"])
-                if layer_stats is None:
-                    continue
+                params = layer_entries.setdefault(info["layer_idx"], {})
+                proj_type = info.get("proj_type", "qkv") or "qkv"
+                params[proj_type] = info["param"]
 
-                # Get per-head max logits
-                max_logits = layer_stats["max_logits_per_head"]
-
-                # Move to device if needed
-                if max_logits.device != info["param"].device:
-                    max_logits = max_logits.to(info["param"].device)
-
-                # Compute per-head scaling factors
-                denom = torch.clamp(max_logits, min=1e-6)
-                eta_per_head = (self.config.clipping_threshold / denom).clamp(max=1.0)
-
-                proj_type = info.get("proj_type", "qkv")
-
-                if proj_type == "qkv":
-                    self._scale_qkv_weights(
-                        param=info["param"],
-                        eta_per_head=eta_per_head,
-                        alpha=self.config.clipping_alpha,
-                    )
-                elif proj_type in {"q", "k"}:
-                    self._scale_separate_projection(
-                        param=info["param"],
-                        eta_per_head=eta_per_head,
-                        alpha=self.config.clipping_alpha,
-                        proj_type=proj_type,
-                    )
-
-        # Store metrics
-        if self.config.log_max_logits:
-            self._metrics["train/max_attention_logit"] = global_max
-            self._metrics["train/qk_clipping_active"] = (
-                global_max > self.config.clipping_threshold
-            )
-
-        if self.config.monitor_attention_entropy:
-            self._metrics["train/attention_entropy"] = (
-                self.hook_system.get_mean_entropy()
-            )
-
-        # Clear for next forward pass
-        self.hook_system.clear()
-
-    def _collect_attention_metrics_only(self):
-        """Collect attention metrics without applying clipping (warmup period)."""
-        if not self.hook_system or not self.hook_system.layer_stats:
+        if not layer_entries:
+            self.hook_system.clear()
             return
 
-        global_max = self.hook_system.get_global_max_logit()
+        for layer_idx, param_dict in layer_entries.items():
+            inputs, pad_mask, freqs_cis = self.hook_system.get_layer_data(layer_idx)
+            if inputs is None:
+                continue
 
-        if self.config.log_max_logits:
-            self._metrics["train/max_attention_logit"] = global_max
-            self._metrics["train/warmup"] = True
+            if "qkv" in param_dict:
+                eta_per_head, layer_max = self._compute_eta_for_fused(
+                    inputs,
+                    param_dict["qkv"],
+                    pad_mask,
+                    freqs_cis,
+                )
+                if eta_per_head is not None:
+                    self._scale_qkv_weights(
+                        param=param_dict["qkv"],
+                        eta_per_head=eta_per_head,
+                        alpha=self.config.clipping_alpha,
+                    )
+                    if layer_max is not None:
+                        max_attention_logit = (
+                            layer_max
+                            if max_attention_logit is None
+                            else max(max_attention_logit, layer_max)
+                        )
+                continue
 
-        if self.config.monitor_attention_entropy:
-            self._metrics["train/attention_entropy"] = self.hook_system.get_mean_entropy()
+            q_param = param_dict.get("q")
+            k_param = param_dict.get("k")
+            if q_param is None or k_param is None:
+                continue
+
+            eta_per_head, layer_max = self._compute_eta_for_separate(
+                inputs,
+                q_param,
+                k_param,
+                pad_mask,
+                freqs_cis,
+            )
+            if eta_per_head is None:
+                continue
+
+            self._scale_separate_projection(
+                param=q_param,
+                eta_per_head=eta_per_head,
+                alpha=self.config.clipping_alpha,
+                proj_type="q",
+            )
+            self._scale_separate_projection(
+                param=k_param,
+                eta_per_head=eta_per_head,
+                alpha=self.config.clipping_alpha,
+                proj_type="k",
+            )
+            if layer_max is not None:
+                max_attention_logit = (
+                    layer_max
+                    if max_attention_logit is None
+                    else max(max_attention_logit, layer_max)
+                )
 
         self.hook_system.clear()
+        if max_attention_logit is not None:
+            self._last_metrics["train/max_attention_logit"] = max_attention_logit
+
+    def _compute_eta_for_fused(
+        self,
+        inputs: torch.Tensor,
+        param: torch.nn.Parameter,
+        pad_mask: Optional[torch.Tensor],
+        freqs_cis: Optional[torch.Tensor],
+    ) -> Tuple[Optional[torch.Tensor], Optional[float]]:
+        """Compute per-head scaling factors for fused QKV weights."""
+        try:
+            inputs = inputs.to(device=param.device, dtype=param.dtype)
+            projections = torch.matmul(inputs, param.transpose(0, 1))
+        except RuntimeError as exc:
+            logger.error(f"Failed to compute fused QKV projections: {exc}")
+            return None, None
+
+        batch, seq_len, _ = projections.shape
+        expected = 3 * self.model_config.hidden_size
+        if projections.shape[-1] != expected:
+            logger.error(
+                "Unexpected fused QKV projection shape %s (expected last dim %d)",
+                projections.shape,
+                expected,
+            )
+            return None, None
+
+        proj = projections.view(
+            batch,
+            seq_len,
+            3,
+            self.model_config.num_attention_heads,
+            self.model_config.dim_head,
+        )
+        xq = proj[:, :, 0]
+        xk = proj[:, :, 1]
+
+        return self._compute_eta_from_qk(xq, xk, pad_mask, freqs_cis)
+
+    def _compute_eta_for_separate(
+        self,
+        inputs: torch.Tensor,
+        q_param: torch.nn.Parameter,
+        k_param: torch.nn.Parameter,
+        pad_mask: Optional[torch.Tensor],
+        freqs_cis: Optional[torch.Tensor],
+    ) -> Tuple[Optional[torch.Tensor], Optional[float]]:
+        """Compute per-head scaling factors for separate Q/K projections."""
+        try:
+            inputs_q = inputs.to(device=q_param.device, dtype=q_param.dtype)
+            inputs_k = inputs.to(device=k_param.device, dtype=k_param.dtype)
+            q_proj = torch.matmul(inputs_q, q_param.transpose(0, 1))
+            k_proj = torch.matmul(inputs_k, k_param.transpose(0, 1))
+        except RuntimeError as exc:
+            logger.error(f"Failed to compute separate Q/K projections: {exc}")
+            return None, None
+
+        batch, seq_len, _ = q_proj.shape
+        head_dim = self.model_config.dim_head
+        q_proj = q_proj.view(
+            batch, seq_len, self.model_config.num_attention_heads, head_dim
+        )
+        k_proj = k_proj.view(
+            batch, seq_len, self.model_config.num_attention_heads, head_dim
+        )
+
+        return self._compute_eta_from_qk(q_proj, k_proj, pad_mask, freqs_cis)
+
+    def _compute_eta_from_qk(
+        self,
+        xq: torch.Tensor,
+        xk: torch.Tensor,
+        pad_mask: Optional[torch.Tensor],
+        freqs_cis: Optional[torch.Tensor],
+    ) -> Tuple[Optional[torch.Tensor], Optional[float]]:
+        """Derive per-head eta values from Q and K projections."""
+        if self.model_config.rope and freqs_cis is not None:
+            from ..model.rotary import apply_rotary_emb
+
+            freqs_cis = freqs_cis.to(device=xq.device)
+            xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
+
+        xq_heads = xq.transpose(1, 2)
+        xk_heads = xk.transpose(1, 2)
+
+        attn_logits = torch.matmul(xq_heads, xk_heads.transpose(-2, -1))
+        attn_logits = attn_logits / (self.model_config.dim_head**0.5)
+
+        if pad_mask is not None:
+            attn_logits = attn_logits + pad_mask.to(
+                device=attn_logits.device, dtype=attn_logits.dtype
+            )
+
+        per_step_max = attn_logits.amax(dim=(-2, -1))  # [batch, heads]
+        mean_per_head = per_step_max.mean(dim=0)
+        denom = torch.clamp(mean_per_head, min=1e-6)
+        eta_per_head = (self.config.clipping_threshold / denom).clamp(max=1.0)
+
+        global_max = per_step_max.max().item() if per_step_max.numel() > 0 else None
+        return eta_per_head, global_max
 
     def _scale_qkv_weights(
         self, param: torch.nn.Parameter, eta_per_head: torch.Tensor, alpha: float
@@ -917,33 +897,14 @@ class MuonClipOptimizer(Optimizer):
         param_view = param.view(num_heads, head_dim, -1)
         param_view.mul_(eta_power)
 
-    def _append_metrics(self, metrics: Dict):
-        """Append metrics to JSONL log if configured."""
-        if not metrics or self._metrics_log_path is None:
-            return
-
-        record = {"step": self._step}
-        for key, value in metrics.items():
-            if isinstance(value, torch.Tensor):
-                value = value.item()
-            if isinstance(value, (float, int, bool)):
-                record[key] = value
-
-        try:
-            with self._metrics_log_path.open("a") as fh:
-                fh.write(json.dumps(record) + "\n")
-        except OSError as exc:
-            logger.error(f"Failed to write MuonClip metrics: {exc}")
-
     def get_metrics(self) -> Dict:
         """
         Get metrics for logging.
 
         Returns metrics dict and clears internal storage.
         """
-        metrics = self._metrics.copy()
-        self._append_metrics(metrics)
-        self._metrics.clear()
+        metrics = dict(self._last_metrics)
+        self._last_metrics.clear()
         return metrics
 
     def zero_grad(self, set_to_none: bool = True):

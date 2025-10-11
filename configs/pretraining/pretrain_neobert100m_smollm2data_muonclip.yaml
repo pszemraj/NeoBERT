@@ -74,13 +74,8 @@ optimizer:
     clipping_alpha: 0.5  # Q/K scaling balance (0.5 = equal)
     clipping_warmup_steps: 0  # Steps before enabling clipping
 
-    # Monitoring and debugging (default to false)
-    monitor_attention_entropy: false  # Track attention diversity
+    # Debugging helpers
     detect_anomalies: false  # Enable for debugging (slow)
-    log_max_logits: false  # Log maximum attention logits
-    offload_hooks_to_cpu: false  # Save GPU memory
-    enable_profiling: false  # Detailed timing info
-    log_dir: "./logs/muonclip"  # JSONL metric dump (optional)
     clipping_layers_mapping: {}  # For non-fused attention blocks; keep empty for NeoBERT
 
 scheduler:

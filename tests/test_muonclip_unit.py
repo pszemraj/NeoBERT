@@ -62,17 +62,17 @@ class TestAttentionHooks:
         """Test hooks are registered correctly."""
         from neobert.optimizer.muon_clip import NeoBERTAttentionHooks
 
-        hook_system = NeoBERTAttentionHooks(model.config, offload_to_cpu=False)
+        hook_system = NeoBERTAttentionHooks(model.config)
 
         num_hooks = hook_system.register_hooks(model)
-        assert num_hooks == 2  # 2 layers
-        assert len(hook_system.hook_handles) == 2
+        assert num_hooks == 4  # 2 hooks per layer
+        assert len(hook_system.hook_handles) == 4
 
     def test_hook_captures_data(self, model):
         """Test hooks actually capture attention data."""
         from neobert.optimizer.muon_clip import NeoBERTAttentionHooks
 
-        hook_system = NeoBERTAttentionHooks(model.config, offload_to_cpu=False)
+        hook_system = NeoBERTAttentionHooks(model.config)
         hook_system.register_hooks(model)
 
         # Forward pass
@@ -80,14 +80,12 @@ class TestAttentionHooks:
         model(input_ids)
 
         # Check data captured
-        assert len(hook_system.layer_stats) == 2
-
         for layer_idx in range(2):
-            stats = hook_system.get_layer_stats(layer_idx)
-            assert stats is not None
-            assert "max_logits_per_head" in stats
-            assert "entropy_per_head" in stats
-            assert stats["max_logits_per_head"].shape == (4,)  # 4 heads
+            inputs, pad_mask, freqs = hook_system.get_layer_data(layer_idx)
+            assert inputs is not None
+            assert inputs.shape[-1] == model.config.hidden_size
+            assert pad_mask is None
+            assert freqs is None
 
 
 class TestMuonClipOptimizer:
@@ -239,6 +237,7 @@ class TestNewtonSchulz:
             hidden_size=128,
             num_hidden_layers=2,
             num_attention_heads=4,
+            flash_attention=False,
         )
         model = NeoBERT(config)
         muon_config = MuonClipConfig()
@@ -263,12 +262,12 @@ class TestMemoryLeaks:
             hidden_size=128,
             num_hidden_layers=2,
             num_attention_heads=4,
+            flash_attention=False,
         )
         model = NeoBERT(config)
 
         muon_config = MuonClipConfig(
             enable_clipping=True,
-            offload_hooks_to_cpu=True,
         )
 
         optimizer = MuonClipOptimizer(model, config, muon_config)
@@ -283,7 +282,7 @@ class TestMemoryLeaks:
             optimizer.zero_grad()
 
         # Hook stats should be cleared
-        assert len(optimizer.hook_system.layer_stats) == 0
+        assert len(optimizer.hook_system.layer_inputs) == 0
 
 
 if __name__ == "__main__":

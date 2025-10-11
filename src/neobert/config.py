@@ -78,13 +78,7 @@ class MuonConfig:
     clipping_threshold: float = 50.0
     clipping_alpha: float = 0.5
     clipping_warmup_steps: int = 0
-    monitor_attention_entropy: bool = False
     detect_anomalies: bool = False
-    log_max_logits: bool = False
-    offload_hooks_to_cpu: bool = False
-    enable_profiling: bool = False
-    log_interval: int = 100
-    log_dir: Optional[str] = None
     clipping_layers_mapping: Dict[str, str] = field(default_factory=dict)
 
 

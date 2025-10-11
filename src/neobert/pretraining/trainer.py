@@ -361,7 +361,6 @@ def trainer(cfg: Config):
         logger.info(f"QK-clipping: {muon_cfg.enable_clipping}")
         logger.info(f"Clipping threshold: {muon_cfg.clipping_threshold}")
         logger.info(f"Newton-Schulz iterations: {muon_cfg.ns_steps}")
-        logger.info(f"Monitoring entropy: {muon_cfg.monitor_attention_entropy}")
         logger.info(f"Clipping warmup steps: {muon_cfg.clipping_warmup_steps}")
         logger.info("=" * 60)
 

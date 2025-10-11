@@ -75,14 +75,9 @@ def validate_basic_functionality():
 
         # Get metrics
         metrics = optimizer2.get_metrics()
-        if "train/max_attention_logit" in metrics:
-            print(
-                f"✓ Captured max attention logit: {metrics['train/max_attention_logit']:.2f}"
-            )
-        if "train/attention_entropy" in metrics:
-            print(
-                f"✓ Captured attention entropy: {metrics['train/attention_entropy']:.2f}"
-            )
+        max_logit = metrics.get("train/max_attention_logit")
+        if max_logit is not None:
+            print(f"✓ Captured max attention logit: {max_logit:.2f}")
 
         print("\n✅ Basic validation passed!")
         return True
@@ -193,7 +188,7 @@ def validate_hook_system():
         model = NeoBERT(config)
 
         # Create and register hooks
-        hook_system = NeoBERTAttentionHooks(config, offload_to_cpu=False)
+        hook_system = NeoBERTAttentionHooks(config)
         num_hooks = hook_system.register_hooks(model)
         print(f"✓ Registered {num_hooks} hooks")
 
@@ -203,14 +198,13 @@ def validate_hook_system():
         _ = model(input_ids)
 
         # Check captured data
-        if len(hook_system.layer_stats) == 2:
-            print(f"✓ Captured stats from {len(hook_system.layer_stats)} layers")
-
-            # Check layer 0 stats
-            stats = hook_system.get_layer_stats(0)
-            if stats and "max_logits_per_head" in stats:
-                print(f"✓ Layer 0 max logit: {stats['max_logit_overall']:.2f}")
-                print(f"✓ Layer 0 per-head shape: {stats['max_logits_per_head'].shape}")
+        captured = [
+            idx
+            for idx in range(config.num_hidden_layers)
+            if hook_system.get_layer_data(idx)[0] is not None
+        ]
+        if captured:
+            print(f"✓ Captured activations for layers: {captured}")
 
         # Clean up
         hook_system.clear()

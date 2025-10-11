@@ -85,7 +85,9 @@ def get_optimizer(
                 elif isinstance(muon_config, dict):
                     muon_kwargs = dict(muon_config)
                 else:
-                    raise TypeError("optimizer.muon_config must be a mapping or dataclass")
+                    raise TypeError(
+                        "optimizer.muon_config must be a mapping or dataclass"
+                    )
 
             muon_clip_cfg = MuonClipConfig(
                 lr=lr,
@@ -101,8 +103,7 @@ def get_optimizer(
                 f"  - Clipping enabled: {muon_clip_cfg.enable_clipping}\n"
                 f"  - Clipping threshold: {muon_clip_cfg.clipping_threshold}\n"
                 f"  - Newton-Schulz steps: {muon_clip_cfg.ns_steps}\n"
-                f"  - Alpha (Q/K balance): {muon_clip_cfg.clipping_alpha}\n"
-                f"  - Metric log dir: {muon_clip_cfg.log_dir or 'disabled'}"
+                f"  - Alpha (Q/K balance): {muon_clip_cfg.clipping_alpha}"
             )
 
             return MuonClipOptimizer(model, model_config, muon_clip_cfg)

@@ -38,9 +38,7 @@ def test_training_loop():
         lr=1e-3,
         enable_clipping=True,
         clipping_threshold=50.0,
-        monitor_attention_entropy=True,
         detect_anomalies=False,
-        offload_hooks_to_cpu=True,
     )
 
     optimizer = MuonClipOptimizer(model, config, muon_config)
@@ -52,7 +50,6 @@ def test_training_loop():
 
     losses = []
     max_logits = []
-    entropies = []
 
     for step in range(20):
         # Create batch
@@ -76,8 +73,9 @@ def test_training_loop():
 
         metrics = optimizer.get_metrics()
         if metrics:
-            max_logits.append(metrics.get("train/max_attention_logit", 0))
-            entropies.append(metrics.get("train/attention_entropy", 0))
+            value = metrics.get("train/max_attention_logit")
+            if value is not None:
+                max_logits.append(value)
 
         if (step + 1) % 5 == 0:
             print(f"  Step {step + 1}/20: loss={loss.item():.4f}")
@@ -93,10 +91,6 @@ def test_training_loop():
             f"Max attention logit range: {min(max_logits):.1f} - {max(max_logits):.1f}"
         )
         print(f"Mean attention logit: {sum(max_logits) / len(max_logits):.1f}")
-
-    if entropies:
-        print(f"Attention entropy range: {min(entropies):.2f} - {max(entropies):.2f}")
-        print(f"Mean entropy: {sum(entropies) / len(entropies):.2f}")
 
     print("=" * 60)
     print("✅ Integration test passed!")
@@ -177,6 +171,7 @@ def test_distributed_compatibility():
         hidden_size=128,
         num_hidden_layers=2,
         num_attention_heads=4,
+        flash_attention=False,
     )
 
     model = NeoBERT(config)
@@ -186,7 +181,6 @@ def test_distributed_compatibility():
     muon_config = MuonClipConfig(
         lr=1e-3,
         enable_clipping=True,
-        offload_hooks_to_cpu=True,  # Important for multi-GPU
     )
 
     try:
