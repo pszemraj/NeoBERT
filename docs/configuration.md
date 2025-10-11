@@ -247,9 +247,11 @@ scheduler:
 
 ### MuonClip Optimizer Options
 
-MuonClip extends the standard optimizer block with additional knobs. Any of these
-can be specified under `optimizer:` in your YAML config (see
-`configs/pretraining/pretrain_neobert100m_smollm2data_muonclip.yaml`).
+MuonClip extends the standard optimizer block with an optional `muon_config`
+section. If the section is omitted the defaults below are applied; if it is
+present while `optimizer.name` is not `muonclip`, NeoBERT will warn and ignore
+it. See `configs/pretraining/pretrain_neobert100m_smollm2data_muonclip.yaml`
+for a full example.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -263,10 +265,12 @@ can be specified under `optimizer:` in your YAML config (see
 | `clipping_alpha` | `0.5` | Balance of scaling between Q (α) and K (1-α) |
 | `clipping_warmup_steps` | `0` | Delay clipping for the first *n* steps |
 | `clipping_layers_mapping` | `{}` | Optional mapping for models with separate `q_proj`/`k_proj` names |
-| `log_max_logits` / `monitor_attention_entropy` | `true` | Collect diagnostic statistics each step |
+| `monitor_attention_entropy` | `false` | Collect attention entropy statistics each step |
+| `log_max_logits` | `false` | Track maximum attention logits for logging |
+| `offload_hooks_to_cpu` | `false` | Move collected attention stats off GPU between steps |
+| `enable_profiling` | `false` | Emit per-step profiling diagnostics |
+| `log_interval` | `100` | Metric sampling interval during warmup-only logging |
 | `log_dir` | `null` | If set, metrics are appended to `<log_dir>/muonclip_metrics.jsonl` |
-| `offload_hooks_to_cpu` | `true` | Move collected attention stats off GPU between steps |
-| `cans_ortho`, `estimate_lower_bound` | `false` | Experimental switches (ignored in this integration) |
 
 > Note: Earlier MuonClip experiments used `betas=(0.9, 0.95)`, which can be too
 > aggressive for encoder pretraining. We default to β₂=0.98 and recommend

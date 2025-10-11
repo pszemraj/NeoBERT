@@ -33,7 +33,7 @@ datacollator:
   pad_to_multiple_of: 8
 
 trainer:
-  output_dir: "./outputs/neobert_100m_muonclip"
+  output_dir: "./outputs/neobert-100m-wordpc_msp_32k_tok-muonclip"
   run_name: "neobert-100m-muonclip"
   max_steps: 100000
   per_device_train_batch_size: 16
@@ -60,35 +60,36 @@ optimizer:
   betas: [0.9, 0.98]
   eps: 1e-8
 
-  # Muon-specific parameters
-  muon_beta: 0.95  # Momentum coefficient for Muon
-  muon_decay: 0.0  # Weight decay for 2D params (usually 0)
-  ns_steps: 5  # Newton-Schulz iterations (3-9 recommended)
+  # NOTE: if muon_config is omitted, MuonClip defaults are used.
+  # NOTE: if muon_config is provided while name != "muonclip", we emit a warning and ignore it.
+  muon_config:
+    # Muon-specific parameters
+    muon_beta: 0.95  # Momentum coefficient for Muon
+    muon_decay: 0.0  # Weight decay for 2D params (usually 0)
+    ns_steps: 5  # Newton-Schulz iterations (3-9 recommended)
 
-  # QK-Clipping parameters
-  enable_clipping: true  # Enable attention stability clipping
-  clipping_threshold: 50.0  # Conservative for encoders (decoder default: 100)
-  clipping_alpha: 0.5  # Q/K scaling balance (0.5 = equal)
-  clipping_warmup_steps: 0  # Steps before enabling clipping
+    # QK-Clipping parameters
+    enable_clipping: true  # Enable attention stability clipping
+    clipping_threshold: 50.0  # Conservative for encoders (decoder default: 100)
+    clipping_alpha: 0.5  # Q/K scaling balance (0.5 = equal)
+    clipping_warmup_steps: 0  # Steps before enabling clipping
 
-  # Monitoring and debugging
-  monitor_attention_entropy: true  # Track attention diversity
-  detect_anomalies: false  # Enable for debugging (slow)
-  log_max_logits: true  # Log maximum attention logits
-  offload_hooks_to_cpu: true  # Save GPU memory
-  enable_profiling: false  # Detailed timing info
-  log_dir: "./logs/muonclip"  # JSONL metric dump (optional)
-  clipping_layers_mapping: {}  # For non-fused attention blocks; keep empty for NeoBERT
-  cans_ortho: false  # Experimental / unsupported
-  estimate_lower_bound: false  # Experimental / unsupported
+    # Monitoring and debugging (default to false)
+    monitor_attention_entropy: false  # Track attention diversity
+    detect_anomalies: false  # Enable for debugging (slow)
+    log_max_logits: false  # Log maximum attention logits
+    offload_hooks_to_cpu: false  # Save GPU memory
+    enable_profiling: false  # Detailed timing info
+    log_dir: "./logs/muonclip"  # JSONL metric dump (optional)
+    clipping_layers_mapping: {}  # For non-fused attention blocks; keep empty for NeoBERT
 
 scheduler:
   name: "cosine"
   warmup_steps: 5000
 
 wandb:
-  project: "neobert-muonclip"
-  name: "neobert-100m-muonclip"
+  project: "neobert-pretraining"
+  name: "neobert-100m-wordpc_msp_32k_tok-muonclip"
   mode: "online"
 
 # Additional settings

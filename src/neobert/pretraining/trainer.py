@@ -22,7 +22,7 @@ from torch.nn import CrossEntropyLoss
 from tqdm import tqdm
 from transformers import BatchEncoding
 
-from ..config import Config, ConfigLoader
+from ..config import Config, ConfigLoader, MuonConfig
 from ..dataloader import get_dataloader
 from ..model import NeoBERTConfig, NeoBERTLMHead
 from ..optimizer import get_optimizer
@@ -353,22 +353,16 @@ def trainer(cfg: Config):
     # Optimizer and Scheduler
     # Log if using MuonClip optimizer
     if cfg.optimizer.name.lower() in ["muonclip", "muon-clip", "muon_clip"]:
+        muon_cfg = cfg.optimizer.muon_config or MuonConfig()
+
         logger.info("=" * 60)
         logger.info("MuonClip Optimizer Configuration")
         logger.info("=" * 60)
-        logger.info(f"QK-clipping: {getattr(cfg.optimizer, 'enable_clipping', True)}")
-        logger.info(
-            f"Clipping threshold: {getattr(cfg.optimizer, 'clipping_threshold', 50.0)}"
-        )
-        logger.info(
-            f"Newton-Schulz iterations: {getattr(cfg.optimizer, 'ns_steps', 5)}"
-        )
-        logger.info(
-            f"Monitoring entropy: {getattr(cfg.optimizer, 'monitor_attention_entropy', True)}"
-        )
-        logger.info(
-            f"Clipping warmup steps: {getattr(cfg.optimizer, 'clipping_warmup_steps', 0)}"
-        )
+        logger.info(f"QK-clipping: {muon_cfg.enable_clipping}")
+        logger.info(f"Clipping threshold: {muon_cfg.clipping_threshold}")
+        logger.info(f"Newton-Schulz iterations: {muon_cfg.ns_steps}")
+        logger.info(f"Monitoring entropy: {muon_cfg.monitor_attention_entropy}")
+        logger.info(f"Clipping warmup steps: {muon_cfg.clipping_warmup_steps}")
         logger.info("=" * 60)
 
     optimizer = get_optimizer(
@@ -378,28 +372,9 @@ def trainer(cfg: Config):
         name=cfg.optimizer.name,
         lr=cfg.optimizer.lr,
         weight_decay=cfg.optimizer.weight_decay,
-        betas=cfg.optimizer.betas,
+        betas=tuple(cfg.optimizer.betas),
         eps=cfg.optimizer.eps,
-        # MuonClip parameters (ignored by AdamW)
-        muon_beta=getattr(cfg.optimizer, "muon_beta", 0.95),
-        muon_decay=getattr(cfg.optimizer, "muon_decay", 0.0),
-        ns_steps=getattr(cfg.optimizer, "ns_steps", 5),
-        enable_clipping=getattr(cfg.optimizer, "enable_clipping", True),
-        clipping_threshold=getattr(cfg.optimizer, "clipping_threshold", 50.0),
-        clipping_alpha=getattr(cfg.optimizer, "clipping_alpha", 0.5),
-        clipping_warmup_steps=getattr(cfg.optimizer, "clipping_warmup_steps", 0),
-        monitor_attention_entropy=getattr(
-            cfg.optimizer, "monitor_attention_entropy", True
-        ),
-        detect_anomalies=getattr(cfg.optimizer, "detect_anomalies", False),
-        log_max_logits=getattr(cfg.optimizer, "log_max_logits", True),
-        log_interval=getattr(cfg.wandb, "log_interval", 100),
-        offload_hooks_to_cpu=getattr(cfg.optimizer, "offload_hooks_to_cpu", True),
-        enable_profiling=getattr(cfg.optimizer, "enable_profiling", False),
-        clipping_layers_mapping=getattr(cfg.optimizer, "clipping_layers_mapping", {}),
-        log_dir=getattr(cfg.optimizer, "log_dir", None),
-        cans_ortho=getattr(cfg.optimizer, "cans_ortho", False),
-        estimate_lower_bound=getattr(cfg.optimizer, "estimate_lower_bound", False),
+        muon_config=cfg.optimizer.muon_config,
     )
     scheduler = get_scheduler(
         optimizer=optimizer,

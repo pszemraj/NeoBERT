@@ -70,13 +70,7 @@ class TokenizerConfig:
 
 
 @dataclass
-class OptimizerConfig:
-    name: str = "adamw"
-    lr: float = 1e-4
-    weight_decay: float = 0.01
-    betas: List[float] = field(default_factory=lambda: [0.9, 0.999])
-    eps: float = 1e-8
-    # MuonClip-specific parameters (ignored by other optimizers)
+class MuonConfig:
     muon_beta: float = 0.95
     muon_decay: float = 0.0
     ns_steps: int = 5
@@ -84,15 +78,24 @@ class OptimizerConfig:
     clipping_threshold: float = 50.0
     clipping_alpha: float = 0.5
     clipping_warmup_steps: int = 0
-    monitor_attention_entropy: bool = True
+    monitor_attention_entropy: bool = False
     detect_anomalies: bool = False
-    log_max_logits: bool = True
-    offload_hooks_to_cpu: bool = True
+    log_max_logits: bool = False
+    offload_hooks_to_cpu: bool = False
     enable_profiling: bool = False
-    clipping_layers_mapping: Dict[str, str] = field(default_factory=dict)
+    log_interval: int = 100
     log_dir: Optional[str] = None
-    cans_ortho: bool = False
-    estimate_lower_bound: bool = False
+    clipping_layers_mapping: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class OptimizerConfig:
+    name: str = "adamw"
+    lr: float = 1e-4
+    weight_decay: float = 0.01
+    betas: List[float] = field(default_factory=lambda: [0.9, 0.999])
+    eps: float = 1e-8
+    muon_config: Optional[MuonConfig] = None
 
 
 @dataclass
@@ -290,12 +293,28 @@ class ConfigLoader:
 
         # Update optimizer config
         if "optimizer" in cfg_dict:
-            for k, v in cfg_dict["optimizer"].items():
+            optimizer_dict = dict(cfg_dict["optimizer"])
+            muon_cfg_dict = optimizer_dict.pop("muon_config", None)
+
+            for k, v in optimizer_dict.items():
                 if hasattr(config.optimizer, k):
-                    # Convert string lr/eps to float if needed
                     if k in ["lr", "eps"] and isinstance(v, str):
                         v = float(v)
                     setattr(config.optimizer, k, v)
+
+            if muon_cfg_dict is not None:
+                if isinstance(muon_cfg_dict, MuonConfig):
+                    config.optimizer.muon_config = muon_cfg_dict
+                elif isinstance(muon_cfg_dict, dict):
+                    muon_cfg = MuonConfig()
+                    for mk, mv in muon_cfg_dict.items():
+                        if hasattr(muon_cfg, mk):
+                            setattr(muon_cfg, mk, mv)
+                    config.optimizer.muon_config = muon_cfg
+                else:
+                    raise TypeError(
+                        "optimizer.muon_config must be a mapping or MuonConfig instance"
+                    )
 
         # Update scheduler config
         if "scheduler" in cfg_dict:

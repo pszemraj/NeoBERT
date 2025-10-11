@@ -1,43 +1,55 @@
 """
-MuonClip Training Test - 2-3 minute run to demonstrate stable training.
+MuonClip Training Test - ~2 minute run to demonstrate stable training.
 Run: python tests/test_muonclip_training.py
 """
 
+import itertools
 import time
+
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
+from datasets import load_dataset
+from transformers import AutoTokenizer
+
+from neobert.collator import get_collator
 from neobert.model import NeoBERT, NeoBERTConfig
 from neobert.optimizer import MuonClipOptimizer, MuonClipConfig
 from torch.optim import AdamW
 
 
-def create_dummy_mlm_data(vocab_size=5000, num_samples=10000, seq_len=128):
-    """Create dummy MLM data for testing."""
-    # Random input ids
-    input_ids = torch.randint(1, vocab_size, (num_samples, seq_len))
+def build_fineweb_stream(tokenizer: AutoTokenizer, seq_len: int = 128):
+    """Create a tokenized streaming FineWeb dataset ready for MLM dataloaders."""
 
-    # Create labels with 15% masking
-    labels = input_ids.clone()
-    mask_prob = 0.15
-    rand = torch.rand(num_samples, seq_len)
-    mask_indices = rand < mask_prob
+    dataset = load_dataset(
+        "HuggingFaceFW/fineweb",
+        split="train",
+        streaming=True,
+    )
 
-    # Set non-masked positions to -100 (ignore in loss)
-    labels[~mask_indices] = -100
+    def tokenize(sample):
+        text = sample.get("text") or sample.get("content") or ""
+        return tokenizer(
+            text,
+            truncation=True,
+            padding="max_length",
+            max_length=seq_len,
+        )
 
-    # Mask the input
-    input_ids[mask_indices] = 103  # [MASK] token id
+    dataset = dataset.map(
+        tokenize,
+        batched=False,
+        remove_columns=dataset.column_names,
+    )
 
-    return TensorDataset(input_ids, labels)
+    return dataset
 
 
 def train_model(
     model,
     optimizer,
-    dataloader,
+    batch_provider,
     device,
-    duration_seconds=120,
+    duration_seconds=75,
     optimizer_name="Optimizer",
 ):
     """Train model for specified duration and track metrics."""
@@ -48,71 +60,67 @@ def train_model(
     step_times = []
     start_time = time.time()
     step = 0
-    epoch = 0
 
     print(f"\nTraining with {optimizer_name} for {duration_seconds} seconds...")
     print("-" * 60)
 
     while time.time() - start_time < duration_seconds:
-        epoch += 1
-        for batch_idx, (input_ids, labels) in enumerate(dataloader):
-            # Check time limit
-            if time.time() - start_time >= duration_seconds:
-                break
+        step_start = time.time()
 
-            step_start = time.time()
+        batch = batch_provider()
+        input_ids = batch["input_ids"].to(device)
+        labels = batch["labels"].to(device)
+        pad_mask = batch.get("attention_mask")
+        if pad_mask is not None:
+            pad_mask = pad_mask.to(device)
 
-            # Move to device
-            input_ids = input_ids.to(device)
-            labels = labels.to(device)
+        # Forward pass
+        hidden_states = model(input_ids, pad_mask)
 
-            # Forward pass
-            hidden_states = model(input_ids)
+        # Simple MLM head (just a linear projection for testing)
+        if not hasattr(model, "_mlm_head"):
+            model._mlm_head = torch.nn.Linear(
+                model.config.hidden_size, model.config.vocab_size
+            ).to(device)
 
-            # Simple MLM head (just a linear projection for testing)
-            if not hasattr(model, "_mlm_head"):
-                model._mlm_head = torch.nn.Linear(
-                    model.config.hidden_size, model.config.vocab_size
-                ).to(device)
+        logits = model._mlm_head(hidden_states)
 
-            logits = model._mlm_head(hidden_states)
+        # Compute loss
+        loss = F.cross_entropy(
+            logits.reshape(-1, logits.size(-1)),
+            labels.reshape(-1),
+            ignore_index=-100,
+        )
 
-            # Compute loss
-            loss = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)),
-                labels.reshape(-1),
-                ignore_index=-100,
+        # Backward pass
+        loss.backward()
+
+        # Optimizer step
+        optimizer.step()
+        optimizer.zero_grad()
+
+        # Track metrics
+        losses.append(loss.item())
+        step_times.append(time.time() - step_start)
+        step += 1
+
+        # Log progress
+        if step % 50 == 0:
+            elapsed = time.time() - start_time
+            avg_loss = sum(losses[-50:]) / min(50, len(losses))
+
+            # Get MuonClip metrics if available
+            extra_info = ""
+            if hasattr(optimizer, "get_metrics"):
+                metrics = optimizer.get_metrics()
+                if metrics and "train/max_attention_logit" in metrics:
+                    extra_info = (
+                        f", max_logit={metrics['train/max_attention_logit']:.1f}"
+                    )
+
+            print(
+                f"  Step {step:4d} | Time: {elapsed:5.1f}s | Loss: {avg_loss:.4f}{extra_info}"
             )
-
-            # Backward pass
-            loss.backward()
-
-            # Optimizer step
-            optimizer.step()
-            optimizer.zero_grad()
-
-            # Track metrics
-            losses.append(loss.item())
-            step_times.append(time.time() - step_start)
-            step += 1
-
-            # Log progress
-            if step % 50 == 0:
-                elapsed = time.time() - start_time
-                avg_loss = sum(losses[-50:]) / min(50, len(losses))
-
-                # Get MuonClip metrics if available
-                extra_info = ""
-                if hasattr(optimizer, "get_metrics"):
-                    metrics = optimizer.get_metrics()
-                    if metrics and "train/max_attention_logit" in metrics:
-                        extra_info = (
-                            f", max_logit={metrics['train/max_attention_logit']:.1f}"
-                        )
-
-                print(
-                    f"  Step {step:4d} | Time: {elapsed:5.1f}s | Loss: {avg_loss:.4f}{extra_info}"
-                )
 
     training_time = time.time() - start_time
 
@@ -123,7 +131,7 @@ def train_model(
 
     return {
         "steps": step,
-        "epochs": epoch,
+        "epochs": None,
         "training_time": training_time,
         "initial_loss": initial_avg_loss,
         "final_loss": final_avg_loss,
@@ -136,7 +144,7 @@ def train_model(
 def main():
     """Main training comparison."""
     print("=" * 60)
-    print("MuonClip Training Test (2-3 minute run)")
+    print("MuonClip Training Test (~2 minute run)")
     print("=" * 60)
 
     # Check device
@@ -148,17 +156,21 @@ def main():
             f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB"
         )
 
-    # Create model config - small model for faster iteration
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+    seq_len = 128
+
+    # Create model config - compact model for faster iteration
     config = NeoBERTConfig(
-        hidden_size=512,
+        hidden_size=384,
         num_hidden_layers=6,
-        num_attention_heads=8,
-        intermediate_size=2048,
-        vocab_size=5000,
-        max_position_embeddings=512,
+        num_attention_heads=6,
+        intermediate_size=1536,
+        vocab_size=tokenizer.vocab_size,
+        max_position_embeddings=seq_len,
         flash_attention=False,  # Disable for compatibility
         hidden_act="gelu",
         rope=False,  # Disable for simplicity
+        pad_token_id=tokenizer.pad_token_id,
     )
 
     print("\nModel config:")
@@ -167,15 +179,40 @@ def main():
     print(f"  Attention heads: {config.num_attention_heads}")
 
     # Create dataset
-    print("\nCreating dummy MLM dataset...")
-    dataset = create_dummy_mlm_data(
-        vocab_size=config.vocab_size, num_samples=50000, seq_len=128
+    print("\nStreaming FineWeb to build MLM dataset...")
+    batch_size = 24 if device.type == "cuda" else 8
+    streaming_dataset = build_fineweb_stream(tokenizer, seq_len=seq_len)
+    collator = get_collator(
+        tokenizer=tokenizer,
+        dtype=torch.float32,
+        mlm_probability=0.15,
+        pad_to_multiple_of=8,
+        max_length=seq_len,
     )
-    dataloader = DataLoader(
-        dataset, batch_size=32 if device.type == "cuda" else 8, shuffle=True
-    )
-    print(f"  Dataset size: {len(dataset)} samples")
-    print(f"  Batch size: {dataloader.batch_size}")
+    base_seed = 42
+
+    def make_batch_provider(seed: int):
+        shuffled_stream = streaming_dataset.shuffle(buffer_size=8192, seed=seed)
+        stream_iterator = iter(shuffled_stream)
+
+        def provider():
+            nonlocal stream_iterator
+            samples = list(itertools.islice(stream_iterator, batch_size))
+            while len(samples) < batch_size:
+                new_seed = int(time.time())
+                stream_iterator = iter(
+                    streaming_dataset.shuffle(buffer_size=8192, seed=new_seed)
+                )
+                samples.extend(
+                    list(itertools.islice(stream_iterator, batch_size - len(samples)))
+                )
+                if not samples:
+                    raise StopIteration
+            return collator(samples)
+
+        return provider
+    print("  Dataset: HuggingFaceFW/fineweb (streaming)")
+    print(f"  Batch size: {batch_size}")
 
     # Test 1: AdamW baseline
     print("\n" + "=" * 60)
@@ -188,12 +225,14 @@ def main():
 
     optimizer_adamw = AdamW(model_adamw.parameters(), lr=5e-4)
 
+    adamw_batch_provider = make_batch_provider(base_seed)
+
     adamw_results = train_model(
         model_adamw,
         optimizer_adamw,
-        dataloader,
+        adamw_batch_provider,
         device,
-        duration_seconds=120,
+        duration_seconds=75,
         optimizer_name="AdamW",
     )
 
@@ -218,8 +257,9 @@ def main():
         enable_clipping=True,
         clipping_threshold=50.0,
         clipping_alpha=0.5,
-        monitor_attention_entropy=True,
-        offload_hooks_to_cpu=False,  # Keep on GPU for speed
+        monitor_attention_entropy=False,
+        log_max_logits=False,
+        offload_hooks_to_cpu=False,
         log_interval=50,
     )
 
@@ -231,12 +271,14 @@ def main():
 
     optimizer_muon = MuonClipOptimizer(model_muon, config, muon_config)
 
+    muon_batch_provider = make_batch_provider(base_seed + 1)
+
     muon_results = train_model(
         model_muon,
         optimizer_muon,
-        dataloader,
+        muon_batch_provider,
         device,
-        duration_seconds=120,
+        duration_seconds=75,
         optimizer_name="MuonClip",
     )
 

@@ -67,21 +67,17 @@ class MuonClipConfig:
     clipping_layers_mapping: Dict[str, str] = field(default_factory=dict)
 
     # Monitoring and debugging
-    monitor_attention_entropy: bool = True
+    monitor_attention_entropy: bool = False
     detect_anomalies: bool = False  # Enable gradient anomaly detection
-    log_max_logits: bool = True
+    log_max_logits: bool = False
     log_interval: int = 100
 
     # Performance optimization
-    offload_hooks_to_cpu: bool = True  # Save GPU memory
+    offload_hooks_to_cpu: bool = False  # Save GPU memory
     enable_profiling: bool = False  # Detailed timing info
 
     # Logging
     log_dir: Optional[Union[str, Path]] = None
-
-    # Experimental features (currently unsupported)
-    cans_ortho: bool = False
-    estimate_lower_bound: bool = False
 
     def __post_init__(self):
         """Validate configuration."""
@@ -134,13 +130,6 @@ class MuonClipConfig:
 
         if self.log_dir is not None:
             self.log_dir = Path(self.log_dir)
-
-        if self.cans_ortho or self.estimate_lower_bound:
-            warnings.warn(
-                "cans_ortho/estimate_lower_bound are experimental and currently "
-                "unsupported; setting these to True has no effect.",
-                RuntimeWarning,
-            )
 
         _, beta2 = self.adam_betas
         if beta2 < 0.98:
@@ -823,10 +812,11 @@ class MuonClipOptimizer(Optimizer):
                     )
 
         # Store metrics
-        self._metrics["train/max_attention_logit"] = global_max
-        self._metrics["train/qk_clipping_active"] = (
-            global_max > self.config.clipping_threshold
-        )
+        if self.config.log_max_logits:
+            self._metrics["train/max_attention_logit"] = global_max
+            self._metrics["train/qk_clipping_active"] = (
+                global_max > self.config.clipping_threshold
+            )
 
         if self.config.monitor_attention_entropy:
             self._metrics["train/attention_entropy"] = (
@@ -843,9 +833,12 @@ class MuonClipOptimizer(Optimizer):
 
         global_max = self.hook_system.get_global_max_logit()
 
-        self._metrics["train/max_attention_logit"] = global_max
-        self._metrics["train/attention_entropy"] = self.hook_system.get_mean_entropy()
-        self._metrics["train/warmup"] = True
+        if self.config.log_max_logits:
+            self._metrics["train/max_attention_logit"] = global_max
+            self._metrics["train/warmup"] = True
+
+        if self.config.monitor_attention_entropy:
+            self._metrics["train/attention_entropy"] = self.hook_system.get_mean_entropy()
 
         self.hook_system.clear()
 

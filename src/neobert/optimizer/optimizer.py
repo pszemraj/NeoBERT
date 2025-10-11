@@ -1,4 +1,7 @@
 import logging
+from dataclasses import asdict, is_dataclass
+from typing import Any, Dict, Optional
+
 import torch
 from accelerate.utils import DistributedType
 from torch.optim import Adam, AdamW
@@ -14,6 +17,7 @@ def get_optimizer(
     model: torch.nn.Module,
     distributed_type: DistributedType,
     model_config=None,
+    muon_config: Optional[Any] = None,
     **kwargs,
 ) -> torch.optim.Optimizer:
     """Optimizer.
@@ -35,37 +39,21 @@ def get_optimizer(
 
     logger.info(f"Initializing optimizer: {optimizer_name}")
 
-    muon_only_keys = {
-        "muon_beta",
-        "muon_decay",
-        "ns_steps",
-        "enable_clipping",
-        "clipping_threshold",
-        "clipping_alpha",
-        "clipping_warmup_steps",
-        "clipping_layers_mapping",
-        "monitor_attention_entropy",
-        "detect_anomalies",
-        "log_max_logits",
-        "log_interval",
-        "offload_hooks_to_cpu",
-        "enable_profiling",
-        "log_dir",
-        "cans_ortho",
-        "estimate_lower_bound",
-    }
-
     match optimizer_name:
         case "adamw":
-            for key in muon_only_keys:
-                kwargs.pop(key, None)
+            if muon_config is not None:
+                logger.warning(
+                    "optimizer.muon_config provided but optimizer is adamw; ignoring"
+                )
             optimizer = AdamW(model.parameters(), **kwargs)
             logger.info(f"AdamW initialized with lr={kwargs.get('lr', 'default')}")
             return optimizer
 
         case "adam":
-            for key in muon_only_keys:
-                kwargs.pop(key, None)
+            if muon_config is not None:
+                logger.warning(
+                    "optimizer.muon_config provided but optimizer is adam; ignoring"
+                )
             optimizer = Adam(model.parameters(), **kwargs)
             logger.info(f"Adam initialized with lr={kwargs.get('lr', 'default')}")
             return optimizer
@@ -78,42 +66,46 @@ def get_optimizer(
                 )
 
             # Build MuonClipConfig from kwargs
-            muon_config = MuonClipConfig(
-                lr=kwargs.pop("lr", 1e-4),
-                muon_beta=kwargs.pop("muon_beta", 0.95),
-                muon_decay=kwargs.pop("muon_decay", 0.0),
-                ns_steps=kwargs.pop("ns_steps", 5),
-                adam_betas=kwargs.pop("betas", (0.9, 0.98)),
-                adam_decay=kwargs.pop("weight_decay", 0.0),
-                adam_eps=kwargs.pop("eps", 1e-10),
-                enable_clipping=kwargs.pop("enable_clipping", True),
-                clipping_threshold=kwargs.pop("clipping_threshold", 50.0),
-                clipping_alpha=kwargs.pop("clipping_alpha", 0.5),
-                clipping_warmup_steps=kwargs.pop("clipping_warmup_steps", 0),
-                clipping_layers_mapping=kwargs.pop("clipping_layers_mapping", None)
-                or {},
-                monitor_attention_entropy=kwargs.pop("monitor_attention_entropy", True),
-                detect_anomalies=kwargs.pop("detect_anomalies", False),
-                log_max_logits=kwargs.pop("log_max_logits", True),
-                log_interval=kwargs.pop("log_interval", 100),
-                offload_hooks_to_cpu=kwargs.pop("offload_hooks_to_cpu", True),
-                enable_profiling=kwargs.pop("enable_profiling", False),
-                log_dir=kwargs.pop("log_dir", None),
-                cans_ortho=kwargs.pop("cans_ortho", False),
-                estimate_lower_bound=kwargs.pop("estimate_lower_bound", False),
+            lr = kwargs.pop("lr", 1e-4)
+            weight_decay = kwargs.pop("weight_decay", 0.0)
+            betas = kwargs.pop("betas", (0.9, 0.98))
+            eps = kwargs.pop("eps", 1e-10)
+
+            extra_args = {k: v for k, v in kwargs.items()}
+            if extra_args:
+                logger.warning(
+                    "Ignoring unused optimizer kwargs for MuonClip: %s",
+                    ", ".join(sorted(extra_args)),
+                )
+
+            muon_kwargs: Dict[str, Any] = {}
+            if muon_config is not None:
+                if is_dataclass(muon_config):
+                    muon_kwargs = asdict(muon_config)
+                elif isinstance(muon_config, dict):
+                    muon_kwargs = dict(muon_config)
+                else:
+                    raise TypeError("optimizer.muon_config must be a mapping or dataclass")
+
+            muon_clip_cfg = MuonClipConfig(
+                lr=lr,
+                adam_betas=betas,
+                adam_decay=weight_decay,
+                adam_eps=eps,
+                **muon_kwargs,
             )
 
             logger.info(
                 f"MuonClip configuration:\n"
-                f"  - Learning rate: {muon_config.lr}\n"
-                f"  - Clipping enabled: {muon_config.enable_clipping}\n"
-                f"  - Clipping threshold: {muon_config.clipping_threshold}\n"
-                f"  - Newton-Schulz steps: {muon_config.ns_steps}\n"
-                f"  - Alpha (Q/K balance): {muon_config.clipping_alpha}\n"
-                f"  - Metric log dir: {muon_config.log_dir or 'disabled'}"
+                f"  - Learning rate: {muon_clip_cfg.lr}\n"
+                f"  - Clipping enabled: {muon_clip_cfg.enable_clipping}\n"
+                f"  - Clipping threshold: {muon_clip_cfg.clipping_threshold}\n"
+                f"  - Newton-Schulz steps: {muon_clip_cfg.ns_steps}\n"
+                f"  - Alpha (Q/K balance): {muon_clip_cfg.clipping_alpha}\n"
+                f"  - Metric log dir: {muon_clip_cfg.log_dir or 'disabled'}"
             )
 
-            return MuonClipOptimizer(model, model_config, muon_config)
+            return MuonClipOptimizer(model, model_config, muon_clip_cfg)
 
         # case "SOAP":
         #     assert distributed_type is not DistributedType.DEEPSPEED, (
