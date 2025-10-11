@@ -12,6 +12,7 @@ This directory contains production YAML configuration files for the NeoBERT trai
 - **`pretrain_streaming.yaml`** - Streaming dataset configuration for large-scale training
 - **`pretrain_gpu_small.yaml`** - Small model config for GPU testing with SwiGLU activation
 - **`pretrain_smollm2_custom_tokenizer.yaml`** - Full 250M model on SmolLM2 with 32k tokenizer, 1024 context
+- **`pretrain_neobert100m_smollm2data_muonclip.yaml`** - 100M MuonClip pretraining recipe with SmolLM2 Stage-4 data
 
 ### Fine-tuning & Evaluation
 - **`evaluate_neobert.yaml`** - GLUE evaluation configuration

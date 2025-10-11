@@ -245,6 +245,36 @@ scheduler:
   warmup_steps: 10000
 ```
 
+### MuonClip Optimizer Options
+
+MuonClip extends the standard optimizer block with an optional `muon_config`
+section. If the section is omitted the defaults below are applied; if it is
+present while `optimizer.name` is not `muonclip`, NeoBERT will warn and ignore
+it. See `configs/pretraining/pretrain_neobert100m_smollm2data_muonclip.yaml`
+for a full example.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `lr` | `1e-4` | Shared learning rate for Muon + Adam sub-optimizers |
+| `muon_beta` | `0.95` | Momentum coefficient for 2D weight matrices |
+| `betas` | `[0.9, 0.98]` | Adam β values for non-matrix params (β₂=0.98 aligns with encoder baselines) |
+| `ns_steps` | `5` | Newton–Schulz iterations used to orthogonalize Muon updates |
+| `orthogonalization` | `polar_express` | Orthogonalization algorithm (`polar_express` or `newton_schulz`) |
+| `muon_decay` / `weight_decay` | `0.0` / `0.01` | Independent weight decay for Muon vs. Adam parameter sets |
+| `enable_clipping` | `true` | Toggle QK-clipping (attention logit rescaling) |
+| `clipping_threshold` | `50.0` | Maximum allowed attention logit before rescaling |
+| `clipping_alpha` | `0.5` | Balance of scaling between Q (α) and K (1-α) |
+| `clipping_warmup_steps` | `0` | Delay clipping for the first *n* steps |
+| `clipping_layers_mapping` | `{}` | Optional mapping for models with separate `q_proj`/`k_proj` names |
+| `detect_anomalies` | `false` | Enable PyTorch anomaly detection (debug only) |
+
+> Note: Earlier MuonClip experiments used `betas=(0.9, 0.95)`, which can be too
+> aggressive for encoder pretraining. We default to β₂=0.98 and recommend
+> adjusting only if you have calibration data to justify it.
+
+Tip: `polar_express: true` acts as a shorthand for `orthogonalization: polar_express`,
+while `polar_express: false` selects the legacy `newton_schulz` iteration.
+
 ### Example: GLUE Config
 
 ```yaml

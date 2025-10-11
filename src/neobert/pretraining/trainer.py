@@ -22,7 +22,7 @@ from torch.nn import CrossEntropyLoss
 from tqdm import tqdm
 from transformers import BatchEncoding
 
-from ..config import Config, ConfigLoader
+from ..config import Config, ConfigLoader, MuonConfig
 from ..dataloader import get_dataloader
 from ..model import NeoBERTConfig, NeoBERTLMHead
 from ..optimizer import get_optimizer
@@ -351,14 +351,30 @@ def trainer(cfg: Config):
         model_summary(model, max_depth=3, show_param_shapes=True)
 
     # Optimizer and Scheduler
+    # Log if using MuonClip optimizer
+    if cfg.optimizer.name.lower() in ["muonclip", "muon-clip", "muon_clip"]:
+        muon_cfg = cfg.optimizer.muon_config or MuonConfig()
+
+        logger.info("=" * 60)
+        logger.info("MuonClip Optimizer Configuration")
+        logger.info("=" * 60)
+        logger.info(f"QK-clipping: {muon_cfg.enable_clipping}")
+        logger.info(f"Clipping threshold: {muon_cfg.clipping_threshold}")
+        logger.info(f"Newton-Schulz iterations: {muon_cfg.ns_steps}")
+        logger.info(f"Orthogonalization: {muon_cfg.orthogonalization}")
+        logger.info(f"Clipping warmup steps: {muon_cfg.clipping_warmup_steps}")
+        logger.info("=" * 60)
+
     optimizer = get_optimizer(
         model,
         accelerator.distributed_type,
+        model_config=model_config,  # Pass model config for MuonClip
         name=cfg.optimizer.name,
         lr=cfg.optimizer.lr,
         weight_decay=cfg.optimizer.weight_decay,
-        betas=cfg.optimizer.betas,
+        betas=tuple(cfg.optimizer.betas),
         eps=cfg.optimizer.eps,
+        muon_config=cfg.optimizer.muon_config,
     )
     scheduler = get_scheduler(
         optimizer=optimizer,
@@ -529,6 +545,12 @@ def trainer(cfg: Config):
                         metrics["train/weight_norm"] = (
                             sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5
                         ).item()
+
+                    # Add MuonClip metrics if available
+                    if hasattr(optimizer, "get_metrics"):
+                        muonclip_metrics = optimizer.get_metrics()
+                        for key, value in muonclip_metrics.items():
+                            metrics[key] = value
 
                     metrics["train/learning_rate"] = optimizer.param_groups[0]["lr"]
                     metrics.log(accelerator)
