@@ -67,6 +67,11 @@ class MuonClipConfig:
     # Monitoring and debugging
     detect_anomalies: bool = False  # Enable gradient anomaly detection
 
+    # Orthogonalization control
+    orthogonalization: str = "polar_express"
+    algorithm: Optional[str] = None  # Alias for orthogonalization
+    polar_express: Optional[bool] = None  # Legacy toggle
+
     def __post_init__(self):
         """Validate configuration."""
         assert 0 < self.lr < 1, f"lr must be in (0, 1), got {self.lr}"
@@ -123,6 +128,35 @@ class MuonClipConfig:
                 "encoder pretraining typically uses >= 0.98.",
                 RuntimeWarning,
             )
+
+        # Resolve orthogonalization algorithm
+        algo_source = self.algorithm or self.orthogonalization
+        if self.polar_express is not None:
+            algo_source = "polar_express" if self.polar_express else "newton_schulz"
+
+        if not algo_source:
+            algo_source = "polar_express"
+
+        algo_normalized = str(algo_source).replace("-", "_").lower()
+        alias_map = {
+            "ns5": "newton_schulz",
+            "newton_schulz5": "newton_schulz",
+            "newton_schulz_5": "newton_schulz",
+            "polar": "polar_express",
+        }
+        algo = alias_map.get(algo_normalized, algo_normalized)
+
+        valid_algos = {"polar_express", "newton_schulz"}
+        if algo not in valid_algos:
+            raise ValueError(
+                f"Unsupported orthogonalization algorithm '{algo_source}'. "
+                f"Valid options: {', '.join(sorted(valid_algos))}"
+            )
+
+        self.orthogonalization = algo
+        self.algorithm = algo
+        # Reset explicit toggle to prevent downstream confusion
+        self.polar_express = None
 
 
 # ============================================================================
@@ -294,6 +328,14 @@ class MuonClipOptimizer(Optimizer):
         self._step = 0
         self._last_metrics: Dict[str, float] = {}
         self._layer_mapping = dict(self.config.clipping_layers_mapping)
+        self._polar_coeff_cache: Dict[int, List[Tuple[float, float, float]]] = {}
+        self._polar_work_dtype: Optional[torch.dtype] = None
+        if torch.cuda.is_available():
+            try:
+                # bfloat16 offers good perf/stability balance for polar iteration
+                self._polar_work_dtype = torch.bfloat16
+            except TypeError:
+                self._polar_work_dtype = None
 
         # Validate model architecture
         self._validate_model(model)
@@ -539,9 +581,7 @@ class MuonClipOptimizer(Optimizer):
             )
 
             # Orthogonalize 2D gradients using Newton-Schulz
-            update = self._newton_schulz_update(
-                state["momentum_buffer"], self.config.ns_steps
-            )
+            update = self._orthogonalize_update(state["momentum_buffer"])
 
             # Weight decay
             if group["weight_decay"] > 0:
@@ -631,6 +671,93 @@ class MuonClipOptimizer(Optimizer):
         X = scale_factor * X
 
         return X.T if is_transpose else X
+
+    def _orthogonalize_update(self, grad: torch.Tensor) -> torch.Tensor:
+        """Dispatch orthogonalization based on configuration."""
+        algo = getattr(self.config, "orthogonalization", "polar_express")
+        if algo == "polar_express":
+            return self._polar_express_update(grad, self.config.ns_steps)
+        return self._newton_schulz_update(grad, self.config.ns_steps)
+
+    def _polar_express_update(
+        self, grad: torch.Tensor, steps: int = 5, eps: float = 1e-7
+    ) -> torch.Tensor:
+        """
+        Apply Polar Express orthogonalization with adaptive coefficient schedule.
+        """
+        if grad.ndim != 2:
+            return grad
+
+        steps = max(1, steps)
+
+        is_transpose = grad.size(0) > grad.size(1)
+        working = grad.T if is_transpose else grad
+
+        original_dtype = working.dtype
+        if (
+            self._polar_work_dtype is not None
+            and working.is_cuda
+            and working.dtype != self._polar_work_dtype
+        ):
+            working = working.to(self._polar_work_dtype)
+
+        # Frobenius norm provides the needed scale control without expensive SVD
+        spectral_norm = torch.linalg.norm(working)
+        if spectral_norm == 0 or not torch.isfinite(spectral_norm):
+            return torch.zeros_like(grad)
+
+        working = working / (spectral_norm * 1.01 + eps)
+
+        coeffs = self._get_polar_coefficients(steps)
+        for a, b, c in coeffs:
+            A = working @ working.T
+            B = b * A + c * (A @ A)
+            working = a * working + B @ working
+
+        scale_factor = 0.4 * max(working.size(0), working.size(1)) ** 0.5
+        working = scale_factor * working
+
+        if working.dtype != original_dtype:
+            working = working.to(original_dtype)
+
+        return working.T if is_transpose else working
+
+    def _get_polar_coefficients(self, steps: int) -> List[Tuple[float, float, float]]:
+        """Return dampened coefficient schedule for Polar Express algorithm."""
+        cache = self._polar_coeff_cache
+        if steps in cache:
+            return cache[steps]
+
+        coeffs_base: List[Tuple[float, float, float]] = [
+            (8.28721201814563, -23.595886519098837, 17.300387312530933),
+            (4.107059111542203, -2.9478499167379106, 0.5448431082926601),
+            (3.948690853482295, -2.908902115962949, 0.5518191394370137),
+            (3.318419657370602, -2.488488024314874, 0.51004894012372),
+            (2.300652019954817, -1.668903984574749, 0.4188073119525673),
+            (1.891301407787398, -1.267995827194587, 0.3768040894852483),
+            (1.875001480853448, -1.250001645399949, 0.3750001645474248),
+            (1.875000000000000, -1.250000000000000, 0.375000000000000),
+        ]
+
+        dampening_factor = 1.01
+        coeffs = [
+            (
+                a / dampening_factor,
+                b / (dampening_factor**3),
+                c / (dampening_factor**5),
+            )
+            for (a, b, c) in coeffs_base[:-1]
+        ]
+        coeffs.append(coeffs_base[-1])
+
+        if steps <= len(coeffs):
+            result = coeffs[:steps]
+            cache[steps] = result
+            return result
+
+        coeffs.extend([coeffs[-1]] * (steps - len(coeffs)))
+        cache[steps] = coeffs
+        return coeffs
 
     def _apply_qk_clipping(self):
         """

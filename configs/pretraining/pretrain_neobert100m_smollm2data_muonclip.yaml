@@ -64,6 +64,7 @@ optimizer:
   # NOTE: if muon_config is provided while name != "muonclip", we emit a warning and ignore it.
   muon_config:
     # Muon-specific parameters
+    orthogonalization: polar_express  # Options: polar_express (default), newton_schulz
     muon_beta: 0.95  # Momentum coefficient for Muon
     muon_decay: 0.0  # Weight decay for 2D params (usually 0)
     ns_steps: 5  # Newton-Schulz iterations (3-9 recommended)

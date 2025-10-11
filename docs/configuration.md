@@ -259,6 +259,7 @@ for a full example.
 | `muon_beta` | `0.95` | Momentum coefficient for 2D weight matrices |
 | `betas` | `[0.9, 0.98]` | Adam β values for non-matrix params (β₂=0.98 aligns with encoder baselines) |
 | `ns_steps` | `5` | Newton–Schulz iterations used to orthogonalize Muon updates |
+| `orthogonalization` | `polar_express` | Orthogonalization algorithm (`polar_express` or `newton_schulz`) |
 | `muon_decay` / `weight_decay` | `0.0` / `0.01` | Independent weight decay for Muon vs. Adam parameter sets |
 | `enable_clipping` | `true` | Toggle QK-clipping (attention logit rescaling) |
 | `clipping_threshold` | `50.0` | Maximum allowed attention logit before rescaling |
@@ -270,6 +271,9 @@ for a full example.
 > Note: Earlier MuonClip experiments used `betas=(0.9, 0.95)`, which can be too
 > aggressive for encoder pretraining. We default to β₂=0.98 and recommend
 > adjusting only if you have calibration data to justify it.
+
+Tip: `polar_express: true` acts as a shorthand for `orthogonalization: polar_express`,
+while `polar_express: false` selects the legacy `newton_schulz` iteration.
 
 ### Example: GLUE Config
 

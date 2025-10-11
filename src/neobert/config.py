@@ -79,6 +79,9 @@ class MuonConfig:
     clipping_alpha: float = 0.5
     clipping_warmup_steps: int = 0
     detect_anomalies: bool = False
+    orthogonalization: str = "polar_express"
+    algorithm: Optional[str] = None  # Alias for orthogonalization
+    polar_express: Optional[bool] = None  # Legacy toggle
     clipping_layers_mapping: Dict[str, str] = field(default_factory=dict)
 
 

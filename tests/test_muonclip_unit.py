@@ -38,6 +38,20 @@ class TestMuonClipConfig:
         with pytest.warns(UserWarning):
             MuonClipConfig(ns_steps=2)  # Too few iterations
 
+    def test_algorithm_aliases(self):
+        """Test algorithm selection helpers."""
+        cfg = MuonClipConfig(algorithm="newton_schulz")
+        assert cfg.orthogonalization == "newton_schulz"
+
+        cfg = MuonClipConfig(polar_express=False)
+        assert cfg.orthogonalization == "newton_schulz"
+
+        cfg = MuonClipConfig(orthogonalization="polar_express")
+        assert cfg.orthogonalization == "polar_express"
+
+        with pytest.raises(ValueError):
+            MuonClipConfig(orthogonalization="unsupported")
+
 
 class TestAttentionHooks:
     """Test attention hook system."""
@@ -121,6 +135,7 @@ class TestMuonClipOptimizer:
 
         assert len(optimizer.param_groups) == 2  # Muon + Adam groups
         assert optimizer._step == 0
+        assert optimizer.config.orthogonalization == "polar_express"
 
     def test_parameter_grouping(self, model):
         """Test parameters are correctly grouped."""
@@ -147,6 +162,7 @@ class TestMuonClipOptimizer:
             lr=1e-3,
             enable_clipping=True,
             clipping_threshold=50.0,
+            orthogonalization="newton_schulz",
         )
 
         optimizer = MuonClipOptimizer(model_instance, config, muon_config)

@@ -103,7 +103,8 @@ def get_optimizer(
                 f"  - Clipping enabled: {muon_clip_cfg.enable_clipping}\n"
                 f"  - Clipping threshold: {muon_clip_cfg.clipping_threshold}\n"
                 f"  - Newton-Schulz steps: {muon_clip_cfg.ns_steps}\n"
-                f"  - Alpha (Q/K balance): {muon_clip_cfg.clipping_alpha}"
+                f"  - Alpha (Q/K balance): {muon_clip_cfg.clipping_alpha}\n"
+                f"  - Orthogonalization: {muon_clip_cfg.orthogonalization}"
             )
 
             return MuonClipOptimizer(model, model_config, muon_clip_cfg)
