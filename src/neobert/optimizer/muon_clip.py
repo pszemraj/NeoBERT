@@ -1,20 +1,21 @@
 """
 MuonClip Optimizer for NeoBERT Encoder Models
 
-Production implementation adapted for bidirectional encoders with:
+Adapted for bidirectional encoders with:
 - Fused QKV projection support
 - Memory-efficient attention hook system
 - Full distributed training support (DDP, DeepSpeed)
 - Comprehensive error handling and validation
 
-Author: NeoBERT Team
+Author: Peter Szemraj
 Date: 2025-01-10
-License: MIT
 
 References:
 - Kimi K2 Technical Report: https://moonshotai.github.io/Kimi-K2/
 - Original Muon: https://github.com/KellerJordan/Muon
 - MuonClip: https://github.com/GAD-cell/muon-clip
+- DISCO optimizer: https://github.com/SDLAML/disco
+- Polar Express: https://arxiv.org/abs/2505.16932
 """
 
 import logging
@@ -75,21 +76,21 @@ class MuonClipConfig:
     def __post_init__(self):
         """Validate configuration."""
         assert 0 < self.lr < 1, f"lr must be in (0, 1), got {self.lr}"
-        assert 0 <= self.muon_beta < 1, (
-            f"muon_beta must be in [0, 1), got {self.muon_beta}"
-        )
-        assert 0 <= self.muon_decay < 1, (
-            f"muon_decay must be in [0, 1), got {self.muon_decay}"
-        )
-        assert 1 <= self.ns_steps <= 20, (
-            f"ns_steps must be in [1, 20], got {self.ns_steps}"
-        )
-        assert 0 < self.clipping_threshold <= 1000, (
-            f"clipping_threshold must be in (0, 1000], got {self.clipping_threshold}"
-        )
-        assert 0 <= self.clipping_alpha <= 1, (
-            f"clipping_alpha must be in [0, 1], got {self.clipping_alpha}"
-        )
+        assert (
+            0 <= self.muon_beta < 1
+        ), f"muon_beta must be in [0, 1), got {self.muon_beta}"
+        assert (
+            0 <= self.muon_decay < 1
+        ), f"muon_decay must be in [0, 1), got {self.muon_decay}"
+        assert (
+            1 <= self.ns_steps <= 20
+        ), f"ns_steps must be in [1, 20], got {self.ns_steps}"
+        assert (
+            0 < self.clipping_threshold <= 1000
+        ), f"clipping_threshold must be in (0, 1000], got {self.clipping_threshold}"
+        assert (
+            0 <= self.clipping_alpha <= 1
+        ), f"clipping_alpha must be in [0, 1], got {self.clipping_alpha}"
 
         # Warnings for suboptimal settings
         if self.ns_steps < 3:
