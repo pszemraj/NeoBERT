@@ -83,7 +83,7 @@ The export handles weight conversion:
 
 - **Encoder weights**: Direct mapping with `model.` prefix
 - **Decoder weights**: Mapped for MLM head compatibility
-- **SwiGLU weights**: Properly formatted for xformers/native implementations
+- **SwiGLU weights**: Properly formatted for optimized SwiGLU kernels (liger-kernel or native)
 - **RoPE embeddings**: Precomputed and stored as buffers
 
 ## Validation

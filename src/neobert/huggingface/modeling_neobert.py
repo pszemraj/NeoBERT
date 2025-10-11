@@ -17,16 +17,22 @@ from typing import Dict, List, Optional, Union
 
 import numpy as np
 import torch
+import warnings
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from torch.nn.functional import scaled_dot_product_attention
 
 try:
-    from xformers.ops import SwiGLU
+    from liger_kernel.ops.rope import LigerRopeFunction
+    from liger_kernel.ops.swiglu import LigerSiLUMulFunction
+    from liger_kernel.transformers.rms_norm import LigerRMSNorm
 
-    XFORMERS_AVAILABLE = True
-except ImportError:
-    XFORMERS_AVAILABLE = False
+    LIGER_AVAILABLE = True
+except (ImportError, RuntimeError):
+    LIGER_AVAILABLE = False
+    LigerRopeFunction = None
+    LigerSiLUMulFunction = None
+    LigerRMSNorm = None
 
 try:
     from flash_attn.flash_attn_interface import flash_attn_varlen_func
@@ -47,6 +53,43 @@ from transformers.modeling_outputs import (
 )
 
 from .rotary import apply_rotary_emb, precompute_freqs_cis
+
+
+class LigerSwiGLU(nn.Module):
+    def __init__(self, hidden_size: int, intermediate_size: int, bias: bool = False) -> None:
+        if not (LIGER_AVAILABLE and LigerSiLUMulFunction is not None):
+            raise ImportError("Liger kernels not available for SwiGLU.")
+        super().__init__()
+        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=bias)
+        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=bias)
+        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate = self.gate_proj(x)
+        up = self.up_proj(x)
+        return self.down_proj(LigerSiLUMulFunction.apply(gate, up))
+
+
+def maybe_apply_liger_rope(
+    xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor, use_liger: bool
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if (
+        not use_liger
+        or not LIGER_AVAILABLE
+        or LigerRopeFunction is None
+        or freqs_cis is None
+    ):
+        return apply_rotary_emb(xq, xk, freqs_cis) if freqs_cis is not None else (xq, xk)
+
+    cos = freqs_cis.real.to(dtype=xq.dtype, device=xq.device)
+    sin = freqs_cis.imag.to(dtype=xq.dtype, device=xq.device)
+    if cos.dim() == 2:
+        cos = cos.unsqueeze(0)
+        sin = sin.unsqueeze(0)
+    q = xq.transpose(1, 2).contiguous()
+    k = xk.transpose(1, 2).contiguous()
+    q, k = LigerRopeFunction.apply(q, k, cos, sin)
+    return q.transpose(1, 2), k.transpose(1, 2)
 
 
 class DataCollatorWithPacking(DataCollatorForLanguageModeling):
@@ -146,6 +189,9 @@ class NeoBERTConfig(PretrainedConfig):
         vocab_size: int = 30522,
         pad_token_id: int = 0,
         max_length: int = 1024,
+        liger_kernels: bool = True,
+        apple_ce: bool = False,
+        apple_ce_impl: Optional[str] = None,
         **kwargs,
     ) -> None:
         """Initialize the NeoBERT configuration."""
@@ -167,6 +213,9 @@ class NeoBERTConfig(PretrainedConfig):
         self.vocab_size = vocab_size
         self.pad_token_id = pad_token_id
         self.max_length = max_length
+        self.liger_kernels = liger_kernels
+        self.apple_ce = apple_ce
+        self.apple_ce_impl = apple_ce_impl
         self.kwargs = kwargs
 
 
@@ -259,16 +308,28 @@ class EncoderBlock(nn.Module):
         intermediate_size = multiple_of * (
             (intermediate_size + multiple_of - 1) // multiple_of
         )
-        if XFORMERS_AVAILABLE:
-            self.ffn = SwiGLU(
-                config.hidden_size, intermediate_size, config.hidden_size, bias=False
-            )
+        if config.liger_kernels and LIGER_AVAILABLE and LigerSiLUMulFunction is not None:
+            self.ffn = LigerSwiGLU(config.hidden_size, intermediate_size, bias=False)
         else:
+            if config.liger_kernels and not LIGER_AVAILABLE:
+                warnings.warn(
+                    "Liger kernels requested for SwiGLU but liger-kernel is not available; "
+                    "falling back to PyTorch implementation."
+                )
             self.ffn = NeobertMLP(config.hidden_size, intermediate_size, bias=False)
 
         # Layer norms (Pre-norm architecture)
-        self.attention_norm = nn.RMSNorm(config.hidden_size, config.norm_eps)
-        self.ffn_norm = nn.RMSNorm(config.hidden_size, config.norm_eps)
+        if config.liger_kernels and LIGER_AVAILABLE and LigerRMSNorm is not None:
+            self.attention_norm = LigerRMSNorm(config.hidden_size, config.norm_eps)
+            self.ffn_norm = LigerRMSNorm(config.hidden_size, config.norm_eps)
+        else:
+            if config.liger_kernels and not LIGER_AVAILABLE:
+                warnings.warn(
+                    "Liger kernels requested for RMSNorm but liger-kernel is not available; "
+                    "falling back to PyTorch implementation."
+                )
+            self.attention_norm = nn.RMSNorm(config.hidden_size, config.norm_eps)
+            self.ffn_norm = nn.RMSNorm(config.hidden_size, config.norm_eps)
 
     def forward(
         self,
@@ -352,7 +413,7 @@ class EncoderBlock(nn.Module):
         )
 
         # Apply rotary position embeddings to Q and K
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
+        xq, xk = maybe_apply_liger_rope(xq, xk, freqs_cis, self.config.liger_kernels)
 
         # Attention computation
         attn_weights = None
@@ -470,7 +531,15 @@ class NeoBERT(NeoBERTPreTrainedModel):
             self.transformer_encoder.append(EncoderBlock(config))
 
         # Final layer normalization
-        self.layer_norm = nn.RMSNorm(config.hidden_size, config.norm_eps)
+        if config.liger_kernels and LIGER_AVAILABLE and LigerRMSNorm is not None:
+            self.layer_norm = LigerRMSNorm(config.hidden_size, config.norm_eps)
+        else:
+            if config.liger_kernels and not LIGER_AVAILABLE:
+                warnings.warn(
+                    "Liger kernels requested for RMSNorm but liger-kernel is not available; "
+                    "falling back to PyTorch implementation."
+                )
+            self.layer_norm = nn.RMSNorm(config.hidden_size, config.norm_eps)
 
         # Initialize weights and apply final processing
         self.post_init()

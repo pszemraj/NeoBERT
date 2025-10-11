@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import warnings
 
 # PyTorch
 import torch
@@ -21,6 +22,14 @@ from deepspeed.utils import safe_get_full_fp32_param
 from torch.nn import CrossEntropyLoss
 from tqdm import tqdm
 from transformers import BatchEncoding
+
+try:
+    from cut_cross_entropy import linear_cross_entropy
+
+    APPLE_CE_AVAILABLE = True
+except ImportError:
+    linear_cross_entropy = None
+    APPLE_CE_AVAILABLE = False
 
 from ..config import Config, ConfigLoader, MuonConfig
 from ..dataloader import get_dataloader
@@ -83,6 +92,45 @@ def to_target_batch_size(
                 stored_batch[key] = None
 
     return batch, stored_batch
+
+
+IGNORE_INDEX = -100
+
+
+def compute_language_model_loss(
+    model,
+    batch,
+    loss_fn,
+    use_apple_ce: bool,
+    apple_ce_impl: str,
+):
+    attention_mask = batch.get("attention_mask", None)
+    labels = batch["labels"]
+
+    if use_apple_ce:
+        hidden_states = model.forward_hidden(batch["input_ids"], attention_mask)
+        flat_hidden = hidden_states.reshape(-1, hidden_states.size(-1)).contiguous()
+        flat_labels = labels.view(-1)
+
+        if flat_labels.numel() == 0 or not torch.any(flat_labels != IGNORE_INDEX):
+            loss = flat_hidden.sum() * 0.0
+        else:
+            loss = linear_cross_entropy(
+                flat_hidden,
+                model.decoder.weight,
+                flat_labels,
+                bias=model.decoder.bias,
+                ignore_index=IGNORE_INDEX,
+                reduction="mean",
+                impl=apple_ce_impl,
+            )
+        return loss, None
+
+    outputs = model(batch["input_ids"], attention_mask)
+    logits = outputs["logits"]
+    vocab_size = logits.size(-1)
+    loss = loss_fn(logits.view(-1, vocab_size), labels.view(-1))
+    return loss, logits
 
 
 def trainer(cfg: Config):
@@ -343,6 +391,9 @@ def trainer(cfg: Config):
         classifier_init_range=cfg.model.classifier_init_range,
         pad_token_id=tokenizer.pad_token_id,
         flash_attention=cfg.model.flash_attention,
+        liger_kernels=cfg.model.liger_kernels,
+        apple_ce=cfg.model.apple_ce,
+        apple_ce_impl=cfg.model.apple_ce_impl,
     )
     model = NeoBERTLMHead(model_config)
 
@@ -395,8 +446,24 @@ def trainer(cfg: Config):
         scheduler,
     )
 
-    # Loss function
-    train_loss_fn = CrossEntropyLoss()
+    use_apple_ce = bool(getattr(cfg.model, "apple_ce", False))
+    apple_ce_impl = getattr(cfg.model, "apple_ce_impl", None)
+    if apple_ce_impl is None:
+        apple_ce_impl = "cce"
+    else:
+        apple_ce_impl = str(apple_ce_impl).lower()
+
+    if use_apple_ce and not APPLE_CE_AVAILABLE:
+        warnings.warn(
+            "Apple Linear Cross Entropy requested but cut-cross-entropy is not installed. "
+            "Falling back to torch.nn.CrossEntropyLoss."
+        )
+        use_apple_ce = False
+
+    if accelerator.is_main_process and use_apple_ce:
+        logger.info(f"Using Apple Linear Cross Entropy (impl={apple_ce_impl}).")
+
+    train_loss_fn = None if use_apple_ce else CrossEntropyLoss()
 
     # Resume from the latest checkpoint
     skipped_train_dataloader = None
@@ -456,12 +523,12 @@ def trainer(cfg: Config):
             if metrics["train/batches"] % cfg.trainer.gradient_accumulation_steps != 0:
                 with accelerator.no_sync(model):
                     # Forward pass
-                    logits = model(
-                        batch["input_ids"], batch.get("attention_mask", None)
-                    )["logits"]
-                    train_loss = train_loss_fn(
-                        logits.view(-1, model_config.vocab_size),
-                        batch["labels"].view(-1),
+                    train_loss, logits = compute_language_model_loss(
+                        model,
+                        batch,
+                        train_loss_fn,
+                        use_apple_ce,
+                        apple_ce_impl,
                     )
 
                     # Compute gradient
@@ -475,23 +542,27 @@ def trainer(cfg: Config):
                         )
                     else:
                         metrics["train/local_tokens"] += batch["input_ids"].shape[1]
-                    metrics["train/local_num_pred"] += (
-                        (batch["labels"] != -100).sum().item()
-                    )
+                    valid_tokens = (batch["labels"] != -100).sum().item()
+                    metrics["train/local_num_pred"] += valid_tokens
                     metrics["train/local_sum_loss"] += (
-                        train_loss.item() * (batch["labels"] != -100).sum().item()
+                        train_loss.item() * valid_tokens
                     )
-                    metrics["train/local_num_correct"] += (
-                        (logits.argmax(dim=-1) == batch["labels"]).sum().item()
-                    )
+                    if logits is not None:
+                        metrics["train/local_accuracy_tokens"] += valid_tokens
+                        metrics["train/local_num_correct"] += (
+                            (logits.argmax(dim=-1) == batch["labels"]).sum().item()
+                        )
+                    else:
+                        metrics["train/local_accuracy_tokens"] += 0
 
             else:
                 # Forward pass
-                logits = model(batch["input_ids"], batch.get("attention_mask", None))[
-                    "logits"
-                ]
-                train_loss = train_loss_fn(
-                    logits.view(-1, model_config.vocab_size), batch["labels"].view(-1)
+                train_loss, logits = compute_language_model_loss(
+                    model,
+                    batch,
+                    train_loss_fn,
+                    use_apple_ce,
+                    apple_ce_impl,
                 )
 
                 # Compute gradient and apply clipping
@@ -509,15 +580,16 @@ def trainer(cfg: Config):
                     )
                 else:
                     metrics["train/local_tokens"] += batch["input_ids"].shape[1]
-                metrics["train/local_num_pred"] += (
-                    (batch["labels"] != -100).sum().item()
-                )
-                metrics["train/local_sum_loss"] += (
-                    train_loss.item() * (batch["labels"] != -100).sum().item()
-                )
-                metrics["train/local_num_correct"] += (
-                    (logits.argmax(dim=-1) == batch["labels"]).sum().item()
-                )
+                valid_tokens = (batch["labels"] != -100).sum().item()
+                metrics["train/local_num_pred"] += valid_tokens
+                metrics["train/local_sum_loss"] += train_loss.item() * valid_tokens
+                if logits is not None:
+                    metrics["train/local_accuracy_tokens"] += valid_tokens
+                    metrics["train/local_num_correct"] += (
+                        (logits.argmax(dim=-1) == batch["labels"]).sum().item()
+                    )
+                else:
+                    metrics["train/local_accuracy_tokens"] += 0
 
                 # Update the parameters and the scheduler
                 optimizer.step()

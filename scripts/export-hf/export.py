@@ -137,7 +137,7 @@ def map_weights(
     """Map weights from our training format to HF model format.
 
     Our training format has "model." prefix and uses SwiGLU with w12 (concatenated w1+w2).
-    HF format expects w12 (xformers.SwiGLU expects the concatenated format).
+    HF format expects the same concatenated layout used by optimized SwiGLU kernels.
 
     Export structure for HF compatibility:
     - Base model weights with "model." prefix for NeoBERTLMHead

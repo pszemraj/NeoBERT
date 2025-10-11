@@ -216,13 +216,13 @@ def requires_gpu(test_func):
         reason="Test requires GPU"
     )(test_func)
 
-def requires_xformers(test_func):
-    """Skip test if xformers is not installed."""
+def requires_flash_attn(test_func):
+    """Skip test if flash-attn is not installed."""
     try:
-        import xformers
+        import flash_attn
         return test_func
     except ImportError:
-        return pytest.mark.skip(reason="xformers not installed")(test_func)
+        return pytest.mark.skip(reason="flash-attn not installed")(test_func)
 ```
 
 ## Testing Best Practices

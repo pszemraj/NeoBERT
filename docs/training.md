@@ -280,7 +280,8 @@ model:
 
 ```yaml
 model:
-  hidden_act: swiglu  # Optimized via xformers if available
+  hidden_act: swiglu  # Optimized via liger-kernel if available
+  apple_ce: true      # Enable Apple fused cross-entropy (requires cut-cross-entropy)
 ```
 
 3. **Efficient Data Loading**:

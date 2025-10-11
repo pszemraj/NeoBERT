@@ -22,7 +22,8 @@ dependencies = [
     "tqdm",
     "transformers",
     "wandb",
-    "xformers",
+    "flash-attn",
+    "liger-kernel",
 ]
 authors = [
     { name = "Lola Le Breton", email = "lola.lebreton@mila.quebec" },

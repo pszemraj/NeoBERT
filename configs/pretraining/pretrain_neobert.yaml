@@ -10,7 +10,7 @@ model:
   max_position_embeddings: 4096  # Extended context length
   flash_attention: true  # Now available with flash-attn 2.7.3
   ngpt: false
-  hidden_act: "swiglu"  # Default activation (requires xformers)
+  hidden_act: "swiglu"  # Default activation; liger-kernel accelerates if installed
   rope: true
   rms_norm: true
 

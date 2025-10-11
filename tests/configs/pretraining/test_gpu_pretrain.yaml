@@ -10,7 +10,7 @@ model:
   max_position_embeddings: 512
   flash_attention: false  # Disabled due to version mismatch
   ngpt: false
-  hidden_act: "gelu"  # Use GELU to avoid xformers issues
+  hidden_act: "gelu"  # Keep test config independent of optional kernels
 
 dataset:
   name: "pszemraj/simple_wikipedia_LM"

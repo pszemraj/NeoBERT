@@ -9,10 +9,13 @@ model:
   vocab_size: 31999
   max_position_embeddings: 4096
   flash_attention: true
+  liger_kernels: true
   ngpt: false
-  hidden_act: "swiglu"  # Requires xformers
+  hidden_act: "swiglu"  # Uses SwiGLU; liger-kernel accelerates if installed
   rope: true
   rms_norm: true
+  apple_ce: true
+  apple_ce_impl: cce
 
 dataset:
   name: "EleutherAI/SmolLM2-1.7B-stage-4-100B"
@@ -66,8 +69,8 @@ optimizer:
     # Muon-specific parameters
     orthogonalization: polar_express  # Options: polar_express (default), newton_schulz
     muon_beta: 0.95  # Momentum coefficient for Muon
-    muon_decay: 0.0  # Weight decay for 2D params (usually 0)
-    ns_steps: 5  # Newton-Schulz iterations (3-9 recommended)
+    muon_decay: 0.01  # Weight decay for 2D params (usually 0)
+    ns_steps: 4  # Newton-Schulz iterations (3-9 recommended)
 
     # QK-Clipping parameters
     enable_clipping: true  # Enable attention stability clipping

@@ -38,18 +38,22 @@ Ensure you have the following dependencies installed:
 
 ```bash
 pip install transformers torch  # Core dependencies
-# For GPU optimization (build from source for latest GPUs):
+# Optional GPU optimizations (build from source for latest GPUs):
 # pip install flash-attn --no-build-isolation
-# pip install -v --no-build-isolation git+https://github.com/facebookresearch/xformers.git@main
+# pip install liger-kernel --no-build-isolation
+# pip install git+https://github.com/apple/ml-cross-entropy.git
 ```
+
+Set `model.apple_ce: true` in your training config to switch the language-modeling loss to Apple’s fused cross-entropy. You can optionally pick an implementation via `model.apple_ce_impl` (e.g. `cce`, `cce_kahan_full`, or `torch_compile`).
 
 If you would like to use sequence packing (un-padding), you will need to also install flash-attention:
 
 ```bash
 pip install transformers torch  # Core dependencies
-# For GPU optimization (build from source for latest GPUs):
+# Optional GPU optimizations (build from source for latest GPUs):
 # pip install flash-attn --no-build-isolation
-# pip install -v --no-build-isolation git+https://github.com/facebookresearch/xformers.git@main flash_attn
+# pip install liger-kernel --no-build-isolation
+# pip install git+https://github.com/apple/ml-cross-entropy.git
 ```
 
 It is **much safer** to first install as stated above. Then, you can clone this repo and install it in editable mode:

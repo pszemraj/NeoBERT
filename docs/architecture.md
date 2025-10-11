@@ -8,7 +8,7 @@ NeoBERT is a transformer encoder architecture that incorporates several modern i
 
 - **RoPE (Rotary Position Embeddings)**: More flexible positional encoding
 - **RMSNorm**: More efficient normalization
-- **SwiGLU Activation**: Better activation function (requires xformers)
+- **SwiGLU Activation**: Better activation function (liger-kernel accelerates if installed)
 - **Flash Attention**: Faster and more memory-efficient attention
 - **Optional nGPT-style normalization**: Experimental normalized transformer variant
 
@@ -216,8 +216,8 @@ model:
 
 **SwiGLU Requirements:**
 
-- Install xformers for optimal performance: `pip install xformers==0.0.28.post3`
-- Falls back to native PyTorch implementation if xformers unavailable
+- Install liger-kernel for optimal performance: `pip install liger-kernel --no-build-isolation`
+- Falls back to native PyTorch implementation if optimized kernels are unavailable
 - ~5-10% performance improvement over GELU
 
 ### Attention Variants

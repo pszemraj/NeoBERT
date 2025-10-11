@@ -163,8 +163,9 @@ dataset:
 model:
   hidden_size: 64
   num_hidden_layers: 2
-  hidden_act: GELU  # Instead of SwiGLU to avoid xformers
+  hidden_act: GELU  # Simpler activation to keep test environment dependency-free
   flash_attention: false
+  liger_kernels: false  # Disable optional GPU kernels for CPU-only tests
 
 trainer:
   per_device_train_batch_size: 2

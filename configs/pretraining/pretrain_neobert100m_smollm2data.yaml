@@ -10,7 +10,7 @@ model:
   max_position_embeddings: 4096
   flash_attention: true
   ngpt: false
-  hidden_act: "swiglu"  # Requires xformers
+  hidden_act: "swiglu"  # Uses SwiGLU; liger-kernel accelerates if installed
   rope: true
   rms_norm: true
 

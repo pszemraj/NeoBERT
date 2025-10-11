@@ -31,6 +31,9 @@ class ModelConfig:
     decoder_init_range: float = 0.02
     classifier_init_range: float = 0.02
     flash_attention: bool = True
+    liger_kernels: bool = True
+    apple_ce: bool = False
+    apple_ce_impl: Optional[str] = None
     ngpt: bool = False
     base_scale: float = 1.0 / (960.0**0.5)
     pad_token_id: int = 0

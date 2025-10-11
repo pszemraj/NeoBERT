@@ -86,7 +86,7 @@ The test suite uses three tiny model configurations optimized for CPU testing:
 - **Model**: 64 hidden, 2 layers, 2 heads, vocab_size=1000
 - **Features**: MLM collator, cosine scheduler, GELU activation
 - **Dataset**: Small wikibook subset
-- **Optimizations**: No flash attention, no xformers dependencies
+- **Optimizations**: No flash attention, no optional GPU kernels
 
 ### `test_tiny_glue.yaml`
 - **Purpose**: GLUE evaluation testing
@@ -114,7 +114,7 @@ All test configs use CPU-friendly settings:
 ## Skipped Tests
 
 Some tests may be skipped on CPU-only systems due to:
-- Missing `xformers` dependency
+- Missing optional GPU kernels (e.g., `flash-attn`, `liger-kernel`)
 - Network/dataset access limitations
 - HuggingFace API restrictions
 

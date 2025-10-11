@@ -111,7 +111,8 @@ class TestPretrainPipeline(unittest.TestCase):
             max_position_embeddings=config.model.max_position_embeddings,
             flash_attention=config.model.flash_attention,
             ngpt=config.model.ngpt,
-            hidden_act="gelu",  # Use GELU to avoid xformers requirement
+            liger_kernels=False,
+            hidden_act="gelu",  # Keep tests independent of optional acceleration kernels
         )
 
         # Test that model can be created
@@ -240,6 +241,7 @@ class TestPretrainComponents(unittest.TestCase):
             vocab_size=100,
             flash_attention=False,
             hidden_act="gelu",
+            liger_kernels=False,
         )
         model = NeoBERT(model_config)
 
@@ -278,6 +280,7 @@ class TestPretrainComponents(unittest.TestCase):
             vocab_size=100,
             flash_attention=False,
             hidden_act="gelu",
+            liger_kernels=False,
         )
         model = NeoBERT(model_config)
 

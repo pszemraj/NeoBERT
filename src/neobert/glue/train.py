@@ -495,8 +495,7 @@ def trainer(cfg: Config):
     accelerator.wait_for_everyone()
 
     # Override flash attention setting for GLUE - always use eager attention
-    # Flash attention has memory alignment issues with variable-length sequences in GLUE tasks
-    # xformers requires sequences to be aligned to multiples of 8, which is incompatible
+    # Flash attention kernels expect sequences aligned to specific widths, which conflicts
     # with GLUE's dynamic batching and variable sequence lengths
     if hasattr(cfg.model, "flash_attention") and cfg.model.flash_attention:
         logger.warning(

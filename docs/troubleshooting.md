@@ -123,14 +123,14 @@ attn_mask=attention_mask.bool() if attention_mask is not None else None
 pip install flash-attn --no-build-isolation
 ```
 
-### XFormers Compatibility
+### Liger Kernel Compatibility
 
-**Problem**: XFormers not working with your PyTorch version.
+**Problem**: Liger kernels fail to build or import with your current setup.
 
 **Solution**:
 ```bash
 # Build from source
-pip install -v --no-build-isolation git+https://github.com/facebookresearch/xformers.git@main
+pip install liger-kernel --no-build-isolation
 ```
 
 ## Validation Tools

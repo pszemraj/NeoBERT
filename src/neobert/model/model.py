@@ -3,6 +3,7 @@
 # From https://github.com/facebookresearch/llama/blob/main/llama/model.py
 
 import math
+import warnings
 from functools import partial
 from typing import Any, Dict, List, Optional
 
@@ -23,31 +24,154 @@ from transformers import (
 from transformers.modeling_outputs import SequenceClassifierOutput
 
 try:
-    from xformers.ops import SwiGLU, memory_efficient_attention
+    from flash_attn.flash_attn_interface import (
+        flash_attn_func,
+        flash_attn_varlen_func,
+    )
 
-    XFORMERS_AVAILABLE = True
+    FLASH_ATTN_AVAILABLE = True
+    FLASH_ATTN_ERROR: Optional[Exception] = None
 except (ImportError, RuntimeError) as e:
-    # xformers might be installed but have version conflicts
-    XFORMERS_AVAILABLE = False
-    XFORMERS_ERROR = str(e)
-    memory_efficient_attention = None
+    FLASH_ATTN_AVAILABLE = False
+    FLASH_ATTN_ERROR = e
+    flash_attn_func = None
+    flash_attn_varlen_func = None
 
-    # Native PyTorch SwiGLU implementation as fallback
-    class SwiGLU(nn.Module):
-        def __init__(
-            self, in_features, hidden_features=None, out_features=None, bias=True
-        ):
-            super().__init__()
-            self.w1 = nn.Linear(in_features, hidden_features, bias=bias)
-            self.w2 = nn.Linear(in_features, hidden_features, bias=bias)
-            self.w3 = nn.Linear(hidden_features, out_features, bias=bias)
+try:
+    from liger_kernel.ops.rope import LigerRopeFunction
+    from liger_kernel.ops.swiglu import LigerSiLUMulFunction
+    from liger_kernel.transformers.rms_norm import LigerRMSNorm
 
-        def forward(self, x):
-            return self.w3(nn.functional.silu(self.w1(x)) * self.w2(x))
+    LIGER_AVAILABLE = True
+except (ImportError, RuntimeError):
+    LIGER_AVAILABLE = False
+    LigerRopeFunction = None
+    LigerSiLUMulFunction = None
+    LigerRMSNorm = None
 
 
 from .rmsnorm import RMSNorm
 from .rotary import apply_rotary_emb, precompute_freqs_cis
+
+
+class TorchSwiGLU(nn.Module):
+    def __init__(
+        self, in_features: int, hidden_features: int, out_features: int, bias: bool = False
+    ):
+        super().__init__()
+        self.w1 = nn.Linear(in_features, hidden_features, bias=bias)
+        self.w2 = nn.Linear(in_features, hidden_features, bias=bias)
+        self.w3 = nn.Linear(hidden_features, out_features, bias=bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.w3(nn.functional.silu(self.w1(x)) * self.w2(x))
+
+
+class LigerSwiGLU(nn.Module):
+    def __init__(
+        self, in_features: int, hidden_features: int, out_features: int, bias: bool = False
+    ):
+        if not (LIGER_AVAILABLE and LigerSiLUMulFunction is not None):
+            raise ImportError("Liger kernels not available for SwiGLU.")
+        super().__init__()
+        self.w1 = nn.Linear(in_features, hidden_features, bias=bias)
+        self.w2 = nn.Linear(in_features, hidden_features, bias=bias)
+        self.w3 = nn.Linear(hidden_features, out_features, bias=bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate = self.w1(x)
+        up = self.w2(x)
+        return self.w3(LigerSiLUMulFunction.apply(gate, up))
+
+
+def maybe_apply_liger_rope(
+    xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor, use_liger: bool
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if (
+        use_liger
+        and LIGER_AVAILABLE
+        and LigerRopeFunction is not None
+        and freqs_cis is not None
+    ):
+        cos = freqs_cis.real.to(dtype=xq.dtype, device=xq.device).unsqueeze(0)
+        sin = freqs_cis.imag.to(dtype=xq.dtype, device=xq.device).unsqueeze(0)
+        q = xq.transpose(1, 2).contiguous()
+        k = xk.transpose(1, 2).contiguous()
+        q, k = LigerRopeFunction.apply(q, k, cos, sin)
+        return q.transpose(1, 2), k.transpose(1, 2)
+    return apply_rotary_emb(xq, xk, freqs_cis) if freqs_cis is not None else (xq, xk)
+
+
+def flash_attention_forward(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    pad_mask: Optional[torch.Tensor],
+    dropout_p: float = 0.0,
+    softmax_scale: Optional[float] = None,
+    causal: bool = False,
+) -> torch.Tensor:
+    if not FLASH_ATTN_AVAILABLE or flash_attn_func is None or flash_attn_varlen_func is None:
+        raise ImportError(
+            "Flash attention requires the flash-attn package with working CUDA kernels. "
+            f"{FLASH_ATTN_ERROR if 'FLASH_ATTN_ERROR' in globals() else ''}"
+        )
+
+    if pad_mask is None:
+        return flash_attn_func(
+            q,
+            k,
+            v,
+            dropout_p=dropout_p,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            return_attn_probs=False,
+        )
+
+    mask = torch.isfinite(pad_mask)
+    if bool(mask.all().item()):
+        return flash_attn_func(
+            q,
+            k,
+            v,
+            dropout_p=dropout_p,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            return_attn_probs=False,
+        )
+
+    seqlens = mask.sum(dim=1).to(dtype=torch.int32)
+    if torch.any(seqlens == 0):
+        raise ValueError(
+            "Flash attention requires at least one valid token per sequence when padding is present."
+        )
+    cu_seqlens = torch.zeros(
+        seqlens.size(0) + 1, dtype=torch.int32, device=q.device
+    )
+    cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
+    max_seqlen = int(seqlens.max().item())
+
+    q_unpadded = q[mask].contiguous()
+    k_unpadded = k[mask].contiguous()
+    v_unpadded = v[mask].contiguous()
+
+    attn_unpadded = flash_attn_varlen_func(
+        q_unpadded,
+        k_unpadded,
+        v_unpadded,
+        cu_seqlens,
+        cu_seqlens,
+        max_seqlen,
+        max_seqlen,
+        dropout_p=dropout_p,
+        softmax_scale=softmax_scale,
+        causal=causal,
+        return_attn_probs=False,
+    )
+
+    attn = torch.zeros_like(q)
+    attn[mask] = attn_unpadded
+    return attn
 
 
 class NeoBERTConfig(PretrainedConfig):
@@ -71,6 +195,9 @@ class NeoBERTConfig(PretrainedConfig):
         pad_token_id: int = 0,
         max_length: int = 1024,
         flash_attention: bool = True,
+        liger_kernels: bool = True,
+        apple_ce: bool = False,
+        apple_ce_impl: Optional[str] = None,
         base_scale: float = 1.0 / (960.0**0.5),
         ngpt: bool = False,
         **kwargs,
@@ -110,6 +237,9 @@ class NeoBERTConfig(PretrainedConfig):
             self.max_length = max_length
 
         self.flash_attention = flash_attention
+        self.liger_kernels = liger_kernels
+        self.apple_ce = apple_ce
+        self.apple_ce_impl = apple_ce_impl
         self.base_scale = base_scale
         self.ngpt = ngpt
 
@@ -139,14 +269,6 @@ class EncoderBlock(nn.Module):
         # Feedforward network
         match config.hidden_act.lower():
             case "swiglu":
-                if not XFORMERS_AVAILABLE:
-                    import warnings
-
-                    warnings.warn(
-                        f"xformers not available, using native PyTorch SwiGLU implementation. "
-                        f"For better performance, install xformers: pip install xformers. "
-                        f"Error was: {XFORMERS_ERROR if 'XFORMERS_ERROR' in globals() else 'Import failed'}"
-                    )
                 # To keep the number of parameters and the amount of computation constant, we reduce the number of
                 # hidden units by a factor of 2/3 (https://arxiv.org/pdf/2002.05202.pdf) and make it a multiple of 8 to
                 # avoid RuntimeError due to misaligned operand
@@ -155,39 +277,63 @@ class EncoderBlock(nn.Module):
                 intermediate_size = multiple_of * (
                     (intermediate_size + multiple_of - 1) // multiple_of
                 )
-                self.ffn = SwiGLU(
-                    config.hidden_size,
-                    intermediate_size,
-                    config.hidden_size,
-                    bias=False,
-                )
+                if config.liger_kernels and LIGER_AVAILABLE and LigerSiLUMulFunction is not None:
+                    self.ffn = LigerSwiGLU(
+                        config.hidden_size,
+                        intermediate_size,
+                        config.hidden_size,
+                        bias=False,
+                    )
+                else:
+                    if config.liger_kernels and not LIGER_AVAILABLE:
+                        warnings.warn(
+                            "Liger kernels requested for SwiGLU but liger-kernel is not available; "
+                            "falling back to PyTorch implementation."
+                        )
+                    self.ffn = TorchSwiGLU(
+                        config.hidden_size,
+                        intermediate_size,
+                        config.hidden_size,
+                        bias=False,
+                    )
             case "gelu":
                 self.ffn = nn.Sequential(
                     nn.Linear(config.hidden_size, config.intermediate_size, bias=False),
                     nn.GELU(),
                     nn.Linear(config.intermediate_size, config.hidden_size, bias=False),
                 )
+            case _:
+                raise ValueError(f"Unsupported activation {config.hidden_act}")
 
+        rms_factory = None
+        if config.rms_norm:
+            if config.liger_kernels and LIGER_AVAILABLE and LigerRMSNorm is not None:
+                rms_factory = lambda: LigerRMSNorm(config.hidden_size, config.norm_eps)
+            else:
+                if config.liger_kernels and not LIGER_AVAILABLE:
+                    warnings.warn(
+                        "Liger kernels requested for RMSNorm but liger-kernel is not available; "
+                        "falling back to PyTorch implementation."
+                    )
+                rms_factory = lambda: RMSNorm(config.hidden_size, config.norm_eps)
         self.attention_norm = (
-            RMSNorm(config.hidden_size, config.norm_eps)
-            if config.rms_norm
-            else nn.LayerNorm(config.hidden_size, config.norm_eps)
+            rms_factory() if rms_factory is not None else nn.LayerNorm(config.hidden_size, config.norm_eps)
         )
         self.ffn_norm = (
-            RMSNorm(config.hidden_size, config.norm_eps)
-            if config.rms_norm
-            else nn.LayerNorm(config.hidden_size, config.norm_eps)
+            rms_factory() if rms_factory is not None else nn.LayerNorm(config.hidden_size, config.norm_eps)
         )
 
         self.ffn_dropout = nn.Dropout(config.dropout)
 
-    def forward(self, x: torch.Tensor, pad_mask: torch.Tensor, freqs_cis: torch.Tensor):
+    def forward(
+        self, x: torch.Tensor, pad_mask: Optional[torch.Tensor], freqs_cis: Optional[torch.Tensor]
+    ):
         x = x + self._att_block(self.attention_norm(x), pad_mask, freqs_cis)
         x = x + self._ff_block(self.ffn_norm(x))
         return x
 
     def _att_block(
-        self, x: torch.Tensor, pad_mask: torch.Tensor, freqs_cis: torch.Tensor
+        self, x: torch.Tensor, pad_mask: Optional[torch.Tensor], freqs_cis: Optional[torch.Tensor]
     ):
         batch_size, seq_len, _ = x.shape
 
@@ -203,23 +349,43 @@ class EncoderBlock(nn.Module):
         )
 
         if self.config.rope:
-            xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
+            xq, xk = maybe_apply_liger_rope(xq, xk, freqs_cis, self.config.liger_kernels)
+
+        pad_mask_2d: Optional[torch.Tensor] = None
+        if pad_mask is not None:
+            if pad_mask.dim() == 4:
+                pad_mask_2d = pad_mask[:, 0, 0, :]
+            elif pad_mask.dim() == 2:
+                pad_mask_2d = pad_mask
+            else:
+                raise ValueError("Unsupported pad_mask shape for attention block.")
 
         if self.config.flash_attention:
-            if not XFORMERS_AVAILABLE:
-                raise ImportError(
-                    "Flash attention requires xformers. Install with: pip install xformers"
-                )
-            attn = memory_efficient_attention(
-                query=xq, key=xk, value=xv, attn_bias=pad_mask, p=0
+            attn = flash_attention_forward(
+                xq,
+                xk,
+                xv,
+                pad_mask_2d,
+                dropout_p=0.0,
+                softmax_scale=None,
+                causal=False,
             )
         else:
-            # Input and output are of dimension (B, H, M, K)
+            attn_mask = None
+            if pad_mask is not None:
+                if pad_mask.dim() == 2:
+                    attn_mask = (
+                        pad_mask.unsqueeze(1)
+                        .unsqueeze(1)
+                        .to(dtype=xq.dtype, device=xq.device)
+                    )
+                else:
+                    attn_mask = pad_mask.to(dtype=xq.dtype, device=xq.device)
             attn = scaled_dot_product_attention(
                 query=xq.transpose(1, 2),
                 key=xk.transpose(1, 2),
                 value=xv.transpose(1, 2),
-                attn_mask=pad_mask,
+                attn_mask=attn_mask,
                 dropout_p=self.config.dropout if self.training else 0,
             ).transpose(1, 2)
 
@@ -294,7 +460,9 @@ class NormEncoderBlock(nn.Module):
         res = x / x.norm(p=2, dim=-1, keepdim=True)
         return res
 
-    def forward(self, x: torch.Tensor, pad_mask: torch.Tensor, freqs_cis: torch.Tensor):
+    def forward(
+        self, x: torch.Tensor, pad_mask: Optional[torch.Tensor], freqs_cis: Optional[torch.Tensor]
+    ):
         x_attn = self._att_block(x, pad_mask, freqs_cis)
 
         lr = self.attn_alpha * (
@@ -318,7 +486,7 @@ class NormEncoderBlock(nn.Module):
         return x
 
     def _att_block(
-        self, x: torch.Tensor, pad_mask: torch.Tensor, freqs_cis: torch.Tensor
+        self, x: torch.Tensor, pad_mask: Optional[torch.Tensor], freqs_cis: Optional[torch.Tensor]
     ):
         batch_size, seq_len, _ = x.shape
 
@@ -334,7 +502,7 @@ class NormEncoderBlock(nn.Module):
         )
 
         if self.config.rope:
-            xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
+            xq, xk = maybe_apply_liger_rope(xq, xk, freqs_cis, self.config.liger_kernels)
 
         sqk = (self.sqk * (self.sqk_init_value / self.sqk_init_scaling)).view(
             1,
@@ -349,21 +517,41 @@ class NormEncoderBlock(nn.Module):
             self.config.hidden_size / self.config.num_attention_heads
         ) ** 0.5
 
+        pad_mask_2d: Optional[torch.Tensor] = None
+        if pad_mask is not None:
+            if pad_mask.dim() == 4:
+                pad_mask_2d = pad_mask[:, 0, 0, :]
+            elif pad_mask.dim() == 2:
+                pad_mask_2d = pad_mask
+            else:
+                raise ValueError("Unsupported pad_mask shape for attention block.")
+
         if self.config.flash_attention:
-            if not XFORMERS_AVAILABLE:
-                raise ImportError(
-                    "Flash attention requires xformers. Install with: pip install xformers"
-                )
-            attn = memory_efficient_attention(
-                query=xq, key=xk, value=xv, attn_bias=pad_mask, p=0, scale=softmax_scale
+            attn = flash_attention_forward(
+                xq,
+                xk,
+                xv,
+                pad_mask_2d,
+                dropout_p=0.0,
+                softmax_scale=softmax_scale,
+                causal=False,
             )
         else:
-            # Input and output are of dimension (B, H, M, K)
+            attn_mask = None
+            if pad_mask is not None:
+                if pad_mask.dim() == 2:
+                    attn_mask = (
+                        pad_mask.unsqueeze(1)
+                        .unsqueeze(1)
+                        .to(dtype=xq.dtype, device=xq.device)
+                    )
+                else:
+                    attn_mask = pad_mask.to(dtype=xq.dtype, device=xq.device)
             attn = scaled_dot_product_attention(
                 query=xq.transpose(1, 2),
                 key=xk.transpose(1, 2),
                 value=xv.transpose(1, 2),
-                attn_mask=pad_mask,
+                attn_mask=attn_mask,
                 dropout_p=self.config.dropout if self.training else 0,
                 scale=softmax_scale,
             ).transpose(1, 2)
@@ -412,6 +600,18 @@ class NeoBERT(NeoBERTPreTrainedModel):
 
         self.config = config
 
+        if self.config.flash_attention and (
+            not FLASH_ATTN_AVAILABLE or not torch.cuda.is_available()
+        ):
+            details = (
+                f" ({FLASH_ATTN_ERROR})" if "FLASH_ATTN_ERROR" in globals() and FLASH_ATTN_ERROR else ""
+            )
+            warnings.warn(
+                "Flash attention requested but flash-attn kernels are unavailable or CUDA is disabled."
+                f"{details} Falling back to scaled_dot_product_attention."
+            )
+            self.config.flash_attention = False
+
         self.encoder = nn.Embedding(
             config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id
         )
@@ -431,26 +631,29 @@ class NeoBERT(NeoBERTPreTrainedModel):
         for _ in range(config.num_hidden_layers):
             self.transformer_encoder.append(EncoderBlock(config))
 
-        self.layer_norm = (
-            RMSNorm(config.hidden_size, config.norm_eps)
-            if config.rms_norm
-            else nn.LayerNorm(config.hidden_size, config.norm_eps)
-        )
+        if config.rms_norm:
+            if config.liger_kernels and LIGER_AVAILABLE and LigerRMSNorm is not None:
+                self.layer_norm = LigerRMSNorm(config.hidden_size, config.norm_eps)
+            else:
+                if config.liger_kernels and not LIGER_AVAILABLE:
+                    warnings.warn(
+                        "Liger kernels requested for RMSNorm but liger-kernel is not available; "
+                        "falling back to PyTorch implementation."
+                    )
+                self.layer_norm = RMSNorm(config.hidden_size, config.norm_eps)
+        else:
+            self.layer_norm = nn.LayerNorm(config.hidden_size, config.norm_eps)
 
         # Initialize weights and apply final processing
         self.post_init()
 
     def forward(self, src, pad_mask=None):
-        # Expand and repeat: (Batch, Length) -> (Batch, Heads, Length, Length)
+        additive_mask = None
         if pad_mask is not None:
             assert pad_mask.dtype != torch.bool and 1.0 not in pad_mask, (
                 "NeoBERT expects an additive pad_mask"
             )
-            pad_mask = (
-                pad_mask.unsqueeze(1)
-                .unsqueeze(1)
-                .repeat(1, self.config.num_attention_heads, pad_mask.size(-1), 1)
-            )
+            additive_mask = pad_mask.to(device=src.device)
 
         # RoPE
         freqs_cis = None
@@ -470,7 +673,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
 
         # Transformer encoder
         for layer in self.transformer_encoder:
-            x = layer(x, pad_mask, freqs_cis)
+            x = layer(x, additive_mask, freqs_cis)
 
         # Final normalization layer
         x = self.layer_norm(x)
@@ -486,6 +689,18 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
         super().__init__(config)
 
         self.config = config
+
+        if self.config.flash_attention and (
+            not FLASH_ATTN_AVAILABLE or not torch.cuda.is_available()
+        ):
+            details = (
+                f" ({FLASH_ATTN_ERROR})" if "FLASH_ATTN_ERROR" in globals() and FLASH_ATTN_ERROR else ""
+            )
+            warnings.warn(
+                "Flash attention requested but flash-attn kernels are unavailable or CUDA is disabled."
+                f"{details} Falling back to scaled_dot_product_attention."
+            )
+            self.config.flash_attention = False
 
         self.encoder = nn.Embedding(
             config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id
@@ -506,11 +721,18 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
         for _ in range(config.num_hidden_layers):
             self.transformer_encoder.append(NormEncoderBlock(config))
 
-        self.layer_norm = (
-            RMSNorm(config.hidden_size, config.norm_eps)
-            if config.rms_norm
-            else nn.LayerNorm(config.hidden_size, config.norm_eps)
-        )
+        if config.rms_norm:
+            if config.liger_kernels and LIGER_AVAILABLE and LigerRMSNorm is not None:
+                self.layer_norm = LigerRMSNorm(config.hidden_size, config.norm_eps)
+            else:
+                if config.liger_kernels and not LIGER_AVAILABLE:
+                    warnings.warn(
+                        "Liger kernels requested for RMSNorm but liger-kernel is not available; "
+                        "falling back to PyTorch implementation."
+                    )
+                self.layer_norm = RMSNorm(config.hidden_size, config.norm_eps)
+        else:
+            self.layer_norm = nn.LayerNorm(config.hidden_size, config.norm_eps)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -530,16 +752,12 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
         )
 
     def forward(self, src, pad_mask=None):
-        # Expand and repeat: (Batch, Length) -> (Batch, Heads, Length, Length)
+        additive_mask = None
         if pad_mask is not None:
             assert pad_mask.dtype != torch.bool and 1.0 not in pad_mask, (
                 "NeoBERT expects an additive pad_mask"
             )
-            pad_mask = (
-                pad_mask.unsqueeze(1)
-                .unsqueeze(1)
-                .repeat(1, self.config.num_attention_heads, pad_mask.size(-1), 1)
-            )
+            additive_mask = pad_mask.to(device=src.device)
 
         # RoPE
         freqs_cis = None
@@ -559,7 +777,7 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
 
         # Transformer encoder
         for layer in self.transformer_encoder:
-            x = layer(x, pad_mask, freqs_cis)
+            x = layer(x, additive_mask, freqs_cis)
 
         # Return the output of the last hidden layer
         return x
@@ -583,6 +801,9 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
         logits = self.decoder(hidden_representation)
 
         return {"hidden_representation": hidden_representation, "logits": logits}
+
+    def forward_hidden(self, src, pad_mask=None):
+        return self.model.forward(src, pad_mask)
 
 
 class NeoBERTForSequenceClassification(NeoBERTPreTrainedModel):
@@ -835,11 +1056,12 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
             input_ids = batch["input_ids"].to(device)
 
             pad_mask = batch["attention_mask"].to(device)
-            xformers_mask = torch.where(pad_mask == 1, float(0.0), float("-inf")).type(
-                torch.bfloat16
+            additive_mask = torch.full_like(
+                pad_mask, fill_value=float("-inf"), dtype=torch.float32, device=device
             )
+            additive_mask = additive_mask.masked_fill(pad_mask.bool(), 0.0)
 
-            outputs = self.model(input_ids, xformers_mask)
+            outputs = self.model(input_ids, additive_mask)
 
             if self.pooling == "avg":
                 outputs = outputs * pad_mask.unsqueeze(-1).expand(

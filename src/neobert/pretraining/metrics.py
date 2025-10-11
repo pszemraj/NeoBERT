@@ -46,10 +46,14 @@ class Metrics(defaultdict):
                 / metrics_agg["train/local_num_pred"]
             )
             metrics_log["train/perplexity"] = math.exp(metrics_log["train/loss"])
-            metrics_log["train/accuracy"] = (
-                metrics_agg["train/local_num_correct"]
-                / metrics_agg["train/local_num_pred"]
+            accuracy_denom = metrics_agg.get(
+                "train/local_accuracy_tokens",
+                metrics_agg["train/local_num_pred"],
             )
+            if accuracy_denom > 0:
+                metrics_log["train/accuracy"] = (
+                    metrics_agg["train/local_num_correct"] / accuracy_denom
+                )
 
         # Log the metrics with the current step
         # Extract the step value to pass separately to accelerator.log

@@ -938,9 +938,16 @@ class MuonClipOptimizer(Optimizer):
         attn_logits = attn_logits / (self.model_config.dim_head**0.5)
 
         if pad_mask is not None:
-            attn_logits = attn_logits + pad_mask.to(
-                device=attn_logits.device, dtype=attn_logits.dtype
-            )
+            mask = pad_mask.to(device=attn_logits.device, dtype=attn_logits.dtype)
+            if mask.dim() == 2:
+                mask = mask.unsqueeze(1).unsqueeze(2)
+            elif mask.dim() == 3:
+                mask = mask.unsqueeze(1)
+            elif mask.dim() != 4:
+                raise ValueError(
+                    f"Unsupported pad_mask rank {mask.dim()} for MuonClip attention clipping."
+                )
+            attn_logits = attn_logits + mask
 
         per_step_max = attn_logits.amax(dim=(-2, -1))  # [batch, heads]
         mean_per_head = per_step_max.mean(dim=0)
