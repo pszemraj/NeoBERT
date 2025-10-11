@@ -33,7 +33,7 @@ datacollator:
   pad_to_multiple_of: 8
 
 trainer:
-  output_dir: "./outputs/neobert_100m_100k"
+  output_dir: "./outputs/neobert-100m-wordpc_msp_32k_tok-adamw"
   run_name: "neobert-100m-100k"
   max_steps: 100000
   per_device_train_batch_size: 16
@@ -63,7 +63,7 @@ scheduler:
 
 wandb:
   project: "neobert-pretraining"
-  name: "neobert-100m-100k"
+  name: "neobert-100m-wordpc_msp_32k_tok-adamw"
   mode: "online"
 
 # Additional settings
