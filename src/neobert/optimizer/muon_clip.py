@@ -22,11 +22,11 @@ import logging
 import re
 import warnings
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
-from torch.utils.hooks import RemovableHandle
 from torch.optim import Optimizer
+from torch.utils.hooks import RemovableHandle
 
 logger = logging.getLogger(__name__)
 
@@ -38,10 +38,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class MuonClipConfig:
-    """Configuration for MuonClip optimizer.
-
-    All parameters validated on initialization.
-    """
+    """Configuration container for the MuonClip optimizer."""
 
     # Learning rates
     lr: float = 1e-4
@@ -76,21 +73,21 @@ class MuonClipConfig:
     def __post_init__(self):
         """Validate configuration."""
         assert 0 < self.lr < 1, f"lr must be in (0, 1), got {self.lr}"
-        assert (
-            0 <= self.muon_beta < 1
-        ), f"muon_beta must be in [0, 1), got {self.muon_beta}"
-        assert (
-            0 <= self.muon_decay < 1
-        ), f"muon_decay must be in [0, 1), got {self.muon_decay}"
-        assert (
-            1 <= self.ns_steps <= 20
-        ), f"ns_steps must be in [1, 20], got {self.ns_steps}"
-        assert (
-            0 < self.clipping_threshold <= 1000
-        ), f"clipping_threshold must be in (0, 1000], got {self.clipping_threshold}"
-        assert (
-            0 <= self.clipping_alpha <= 1
-        ), f"clipping_alpha must be in [0, 1], got {self.clipping_alpha}"
+        assert 0 <= self.muon_beta < 1, (
+            f"muon_beta must be in [0, 1), got {self.muon_beta}"
+        )
+        assert 0 <= self.muon_decay < 1, (
+            f"muon_decay must be in [0, 1), got {self.muon_decay}"
+        )
+        assert 1 <= self.ns_steps <= 20, (
+            f"ns_steps must be in [1, 20], got {self.ns_steps}"
+        )
+        assert 0 < self.clipping_threshold <= 1000, (
+            f"clipping_threshold must be in (0, 1000], got {self.clipping_threshold}"
+        )
+        assert 0 <= self.clipping_alpha <= 1, (
+            f"clipping_alpha must be in [0, 1], got {self.clipping_alpha}"
+        )
 
         # Warnings for suboptimal settings
         if self.ns_steps < 3:
@@ -198,8 +195,14 @@ class NeoBERTAttentionHooks:
                 f"num_attention_heads ({self.config.num_attention_heads})"
             )
 
-    def register_hooks(self, model) -> int:
-        """Register hooks across all transformer encoder layers."""
+    def register_hooks(self, model: torch.nn.Module) -> int:
+        """Register hooks across all transformer encoder layers.
+
+        Returns
+        -------
+        int
+            Number of hook handles that were successfully registered.
+        """
         layers = self._resolve_transformer_layers(model)
         if not layers:
             raise RuntimeError("No transformer layers found for MuonClip hooks")
@@ -241,7 +244,10 @@ class NeoBERTAttentionHooks:
         logger.info(f"Registered {num_hooks} MuonClip hooks")
         return num_hooks
 
-    def _resolve_transformer_layers(self, model):
+    def _resolve_transformer_layers(
+        self, model: torch.nn.Module
+    ) -> Optional[Sequence[torch.nn.Module]]:
+        """Return the sequence of encoder layers exposed by ``model``."""
         if hasattr(model, "transformer_encoder"):
             return model.transformer_encoder
 
@@ -323,7 +329,10 @@ class MuonClipOptimizer(Optimizer):
     - transformer_encoder layer structure
     """
 
-    def __init__(self, model: torch.nn.Module, model_config, config: MuonClipConfig):
+    def __init__(
+        self, model: torch.nn.Module, model_config: Any, config: MuonClipConfig
+    ):
+        """Initialize the optimizer and attach attention hooks as needed."""
         self.config = config
         self.model_config = model_config
         self._step = 0
@@ -501,11 +510,10 @@ class MuonClipOptimizer(Optimizer):
 
         return groups
 
-    def _resolve_transformer_stack(self, model):
-        """
-        Discover the underlying NeoBERT encoder stack, accounting for wrappers like
-        NeoBERTLMHead.
-        """
+    def _resolve_transformer_stack(
+        self, model: torch.nn.Module
+    ) -> Tuple[Optional[torch.nn.Module], Optional[Sequence[torch.nn.Module]]]:
+        """Discover the base encoder module and its layers inside ``model``."""
         if hasattr(model, "transformer_encoder"):
             return model, model.transformer_encoder
 

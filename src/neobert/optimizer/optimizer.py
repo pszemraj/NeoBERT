@@ -1,3 +1,5 @@
+"""Factory helpers for constructing optimizers used in NeoBERT training."""
+
 import logging
 from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, Optional
@@ -16,24 +18,36 @@ logger = logging.getLogger(__name__)
 def get_optimizer(
     model: torch.nn.Module,
     distributed_type: DistributedType,
-    model_config=None,
+    model_config: Optional[Any] = None,
     muon_config: Optional[Any] = None,
     **kwargs,
 ) -> torch.optim.Optimizer:
-    """Optimizer.
+    """Construct an optimizer configured for the current training run.
 
-    Args:
-        model (torch.nn.Module): Model.
-        distributed_type (DistributedType): Type of distributed training.
-        model_config: Model configuration (REQUIRED for MuonClip).
-        **kwargs: Optimizer-specific arguments.
+    Parameters
+    ----------
+    model:
+        The model whose parameters will be optimized.
+    distributed_type:
+        Distributed execution mode reported by Accelerate.
+    model_config:
+        Optional model configuration. Required when instantiating MuonClip.
+    muon_config:
+        Dataclass or mapping containing MuonClip overrides.
+    **kwargs:
+        Additional optimizer-specific keyword arguments (e.g. ``lr``).
 
-    Returns:
-        torch.optim.Optimizer: Initialized optimizer.
+    Returns
+    -------
+    torch.optim.Optimizer
+        An initialized optimizer instance.
 
-    Raises:
-        ValueError: If model_config not provided for MuonClip.
-        ValueError: If unknown optimizer name.
+    Raises
+    ------
+    ValueError
+        If the MuonClip optimizer is requested without ``model_config``.
+    ValueError
+        If an unsupported optimizer name is provided.
     """
     optimizer_name = kwargs.pop("name").lower()
 
