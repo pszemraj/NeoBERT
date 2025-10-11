@@ -39,9 +39,9 @@ trainer:
   output_dir: "./outputs/neobert-100m-wordpc_msp_32k_tok-muonclip"
   run_name: "neobert-100m-muonclip"
   max_steps: 100000
-  per_device_train_batch_size: 16
-  per_device_eval_batch_size: 16
-  gradient_accumulation_steps: 4
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 2
   warmup_steps: 5000
   logging_steps: 25
   eval_steps: 5000

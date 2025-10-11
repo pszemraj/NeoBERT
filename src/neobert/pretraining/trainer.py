@@ -465,6 +465,16 @@ def trainer(cfg: Config):
 
     train_loss_fn = None if use_apple_ce else CrossEntropyLoss()
 
+    def forward_step(batch):
+        with accelerator.autocast():
+            return compute_language_model_loss(
+                model,
+                batch,
+                train_loss_fn,
+                use_apple_ce,
+                apple_ce_impl,
+            )
+
     # Resume from the latest checkpoint
     skipped_train_dataloader = None
     if (
@@ -523,13 +533,7 @@ def trainer(cfg: Config):
             if metrics["train/batches"] % cfg.trainer.gradient_accumulation_steps != 0:
                 with accelerator.no_sync(model):
                     # Forward pass
-                    train_loss, logits = compute_language_model_loss(
-                        model,
-                        batch,
-                        train_loss_fn,
-                        use_apple_ce,
-                        apple_ce_impl,
-                    )
+                    train_loss, logits = forward_step(batch)
 
                     # Compute gradient
                     accelerator.backward(train_loss)
@@ -557,13 +561,7 @@ def trainer(cfg: Config):
 
             else:
                 # Forward pass
-                train_loss, logits = compute_language_model_loss(
-                    model,
-                    batch,
-                    train_loss_fn,
-                    use_apple_ce,
-                    apple_ce_impl,
-                )
+                train_loss, logits = forward_step(batch)
 
                 # Compute gradient and apply clipping
                 accelerator.backward(train_loss)
