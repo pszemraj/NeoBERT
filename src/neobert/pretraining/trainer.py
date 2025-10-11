@@ -396,6 +396,10 @@ def trainer(cfg: Config):
         log_interval=getattr(cfg.wandb, "log_interval", 100),
         offload_hooks_to_cpu=getattr(cfg.optimizer, "offload_hooks_to_cpu", True),
         enable_profiling=getattr(cfg.optimizer, "enable_profiling", False),
+        clipping_layers_mapping=getattr(cfg.optimizer, "clipping_layers_mapping", {}),
+        log_dir=getattr(cfg.optimizer, "log_dir", None),
+        cans_ortho=getattr(cfg.optimizer, "cans_ortho", False),
+        estimate_lower_bound=getattr(cfg.optimizer, "estimate_lower_bound", False),
     )
     scheduler = get_scheduler(
         optimizer=optimizer,

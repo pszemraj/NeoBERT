@@ -77,6 +77,10 @@ optimizer:
   log_max_logits: true  # Log maximum attention logits
   offload_hooks_to_cpu: true  # Save GPU memory
   enable_profiling: false  # Detailed timing info
+  log_dir: "./logs/muonclip"  # JSONL metric dump (optional)
+  clipping_layers_mapping: {}  # For non-fused attention blocks; keep empty for NeoBERT
+  cans_ortho: false  # Experimental / unsupported
+  estimate_lower_bound: false  # Experimental / unsupported
 
 scheduler:
   name: "cosine"

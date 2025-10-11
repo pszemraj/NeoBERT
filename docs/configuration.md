@@ -245,6 +245,33 @@ scheduler:
   warmup_steps: 10000
 ```
 
+### MuonClip Optimizer Options
+
+MuonClip extends the standard optimizer block with additional knobs. Any of these
+can be specified under `optimizer:` in your YAML config (see
+`configs/pretraining/pretrain_neobert100m_smollm2data_muonclip.yaml`).
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `lr` | `1e-4` | Shared learning rate for Muon + Adam sub-optimizers |
+| `muon_beta` | `0.95` | Momentum coefficient for 2D weight matrices |
+| `betas` | `[0.9, 0.98]` | Adam β values for non-matrix params (β₂=0.98 aligns with encoder baselines) |
+| `ns_steps` | `5` | Newton–Schulz iterations used to orthogonalize Muon updates |
+| `muon_decay` / `weight_decay` | `0.0` / `0.01` | Independent weight decay for Muon vs. Adam parameter sets |
+| `enable_clipping` | `true` | Toggle QK-clipping (attention logit rescaling) |
+| `clipping_threshold` | `50.0` | Maximum allowed attention logit before rescaling |
+| `clipping_alpha` | `0.5` | Balance of scaling between Q (α) and K (1-α) |
+| `clipping_warmup_steps` | `0` | Delay clipping for the first *n* steps |
+| `clipping_layers_mapping` | `{}` | Optional mapping for models with separate `q_proj`/`k_proj` names |
+| `log_max_logits` / `monitor_attention_entropy` | `true` | Collect diagnostic statistics each step |
+| `log_dir` | `null` | If set, metrics are appended to `<log_dir>/muonclip_metrics.jsonl` |
+| `offload_hooks_to_cpu` | `true` | Move collected attention stats off GPU between steps |
+| `cans_ortho`, `estimate_lower_bound` | `false` | Experimental switches (ignored in this integration) |
+
+> Note: Earlier MuonClip experiments used `betas=(0.9, 0.95)`, which can be too
+> aggressive for encoder pretraining. We default to β₂=0.98 and recommend
+> adjusting only if you have calibration data to justify it.
+
 ### Example: GLUE Config
 
 ```yaml

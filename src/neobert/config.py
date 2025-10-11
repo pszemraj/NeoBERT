@@ -89,6 +89,10 @@ class OptimizerConfig:
     log_max_logits: bool = True
     offload_hooks_to_cpu: bool = True
     enable_profiling: bool = False
+    clipping_layers_mapping: Dict[str, str] = field(default_factory=dict)
+    log_dir: Optional[str] = None
+    cans_ortho: bool = False
+    estimate_lower_bound: bool = False
 
 
 @dataclass

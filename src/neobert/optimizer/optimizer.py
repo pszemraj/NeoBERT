@@ -35,13 +35,37 @@ def get_optimizer(
 
     logger.info(f"Initializing optimizer: {optimizer_name}")
 
+    muon_only_keys = {
+        "muon_beta",
+        "muon_decay",
+        "ns_steps",
+        "enable_clipping",
+        "clipping_threshold",
+        "clipping_alpha",
+        "clipping_warmup_steps",
+        "clipping_layers_mapping",
+        "monitor_attention_entropy",
+        "detect_anomalies",
+        "log_max_logits",
+        "log_interval",
+        "offload_hooks_to_cpu",
+        "enable_profiling",
+        "log_dir",
+        "cans_ortho",
+        "estimate_lower_bound",
+    }
+
     match optimizer_name:
         case "adamw":
+            for key in muon_only_keys:
+                kwargs.pop(key, None)
             optimizer = AdamW(model.parameters(), **kwargs)
             logger.info(f"AdamW initialized with lr={kwargs.get('lr', 'default')}")
             return optimizer
 
         case "adam":
+            for key in muon_only_keys:
+                kwargs.pop(key, None)
             optimizer = Adam(model.parameters(), **kwargs)
             logger.info(f"Adam initialized with lr={kwargs.get('lr', 'default')}")
             return optimizer
@@ -59,19 +83,24 @@ def get_optimizer(
                 muon_beta=kwargs.pop("muon_beta", 0.95),
                 muon_decay=kwargs.pop("muon_decay", 0.0),
                 ns_steps=kwargs.pop("ns_steps", 5),
-                adam_betas=kwargs.pop("betas", (0.9, 0.95)),
+                adam_betas=kwargs.pop("betas", (0.9, 0.98)),
                 adam_decay=kwargs.pop("weight_decay", 0.0),
                 adam_eps=kwargs.pop("eps", 1e-10),
                 enable_clipping=kwargs.pop("enable_clipping", True),
                 clipping_threshold=kwargs.pop("clipping_threshold", 50.0),
                 clipping_alpha=kwargs.pop("clipping_alpha", 0.5),
                 clipping_warmup_steps=kwargs.pop("clipping_warmup_steps", 0),
+                clipping_layers_mapping=kwargs.pop("clipping_layers_mapping", None)
+                or {},
                 monitor_attention_entropy=kwargs.pop("monitor_attention_entropy", True),
                 detect_anomalies=kwargs.pop("detect_anomalies", False),
                 log_max_logits=kwargs.pop("log_max_logits", True),
                 log_interval=kwargs.pop("log_interval", 100),
                 offload_hooks_to_cpu=kwargs.pop("offload_hooks_to_cpu", True),
                 enable_profiling=kwargs.pop("enable_profiling", False),
+                log_dir=kwargs.pop("log_dir", None),
+                cans_ortho=kwargs.pop("cans_ortho", False),
+                estimate_lower_bound=kwargs.pop("estimate_lower_bound", False),
             )
 
             logger.info(
@@ -80,7 +109,8 @@ def get_optimizer(
                 f"  - Clipping enabled: {muon_config.enable_clipping}\n"
                 f"  - Clipping threshold: {muon_config.clipping_threshold}\n"
                 f"  - Newton-Schulz steps: {muon_config.ns_steps}\n"
-                f"  - Alpha (Q/K balance): {muon_config.clipping_alpha}"
+                f"  - Alpha (Q/K balance): {muon_config.clipping_alpha}\n"
+                f"  - Metric log dir: {muon_config.log_dir or 'disabled'}"
             )
 
             return MuonClipOptimizer(model, model_config, muon_config)

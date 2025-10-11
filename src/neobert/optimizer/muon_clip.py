@@ -17,11 +17,13 @@ References:
 - MuonClip: https://github.com/GAD-cell/muon-clip
 """
 
+import json
 import logging
 import re
 import warnings
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -51,7 +53,7 @@ class MuonClipConfig:
     ns_steps: int = 5  # Newton-Schulz iterations (3-9 recommended)
 
     # Adam parameters (for 1D params: biases, LayerNorm)
-    adam_betas: Tuple[float, float] = (0.9, 0.95)
+    adam_betas: Tuple[float, float] = (0.9, 0.98)
     adam_decay: float = 0.0  # Weight decay for Adam params
     adam_eps: float = 1e-10
 
@@ -60,6 +62,9 @@ class MuonClipConfig:
     clipping_threshold: float = 50.0  # Conservative for encoders
     clipping_alpha: float = 0.5  # Q/K scaling balance (0.5 = equal)
     clipping_warmup_steps: int = 0  # Disable clipping for N steps
+
+    # Architecture adaptation
+    clipping_layers_mapping: Dict[str, str] = field(default_factory=dict)
 
     # Monitoring and debugging
     monitor_attention_entropy: bool = True
@@ -70,6 +75,13 @@ class MuonClipConfig:
     # Performance optimization
     offload_hooks_to_cpu: bool = True  # Save GPU memory
     enable_profiling: bool = False  # Detailed timing info
+
+    # Logging
+    log_dir: Optional[Union[str, Path]] = None
+
+    # Experimental features (currently unsupported)
+    cans_ortho: bool = False
+    estimate_lower_bound: bool = False
 
     def __post_init__(self):
         """Validate configuration."""
@@ -104,6 +116,40 @@ class MuonClipConfig:
                 f"clipping_threshold={self.clipping_threshold} is very low. Risk of over-constraining attention."
             )
 
+        if self.clipping_layers_mapping is None:
+            self.clipping_layers_mapping = {}
+        elif not isinstance(self.clipping_layers_mapping, dict):
+            raise TypeError("clipping_layers_mapping must be a dict[str, str]")
+        else:
+            normalised_mapping: Dict[str, str] = {}
+            for key, value in self.clipping_layers_mapping.items():
+                normalised_mapping[str(key).lower()] = str(value)
+            unsupported = set(normalised_mapping) - {"q_proj", "k_proj", "v_proj"}
+            if unsupported:
+                warnings.warn(
+                    "Unsupported keys in clipping_layers_mapping: "
+                    + ", ".join(sorted(unsupported)),
+                )
+            self.clipping_layers_mapping = normalised_mapping
+
+        if self.log_dir is not None:
+            self.log_dir = Path(self.log_dir)
+
+        if self.cans_ortho or self.estimate_lower_bound:
+            warnings.warn(
+                "cans_ortho/estimate_lower_bound are experimental and currently "
+                "unsupported; setting these to True has no effect.",
+                RuntimeWarning,
+            )
+
+        _, beta2 = self.adam_betas
+        if beta2 < 0.98:
+            warnings.warn(
+                f"adam_betas second moment {beta2} is unusually low; "
+                "encoder pretraining typically uses >= 0.98.",
+                RuntimeWarning,
+            )
+
 
 # ============================================================================
 # Attention Hook System for NeoBERT
@@ -121,11 +167,17 @@ class NeoBERTAttentionHooks:
     4. Tracking max logits per head for clipping
     """
 
-    def __init__(self, model_config, offload_to_cpu: bool = True):
+    def __init__(
+        self,
+        model_config,
+        offload_to_cpu: bool = True,
+        layer_mapping: Optional[Dict[str, str]] = None,
+    ):
         self.config = model_config
         self.num_heads = model_config.num_attention_heads
         self.head_dim = model_config.hidden_size // model_config.num_attention_heads
         self.offload_to_cpu = offload_to_cpu
+        self.layer_mapping = layer_mapping or {}
 
         # Storage for captured data
         self.layer_stats: Dict[int, Dict] = {}
@@ -235,11 +287,31 @@ class NeoBERTAttentionHooks:
         x_norm = encoder_block.attention_norm(x)
 
         # QKV projection
-        qkv = encoder_block.qkv(x_norm)
+        if hasattr(encoder_block, "qkv"):
+            qkv = encoder_block.qkv(x_norm)
+            qkv_reshaped = qkv.view(
+                batch_size, seq_len, self.num_heads, self.head_dim * 3
+            )
+            xq, xk, _ = qkv_reshaped.chunk(3, dim=-1)
+        else:
+            q_proj_name = self.layer_mapping.get("q_proj")
+            k_proj_name = self.layer_mapping.get("k_proj")
+            if not q_proj_name or not k_proj_name:
+                raise AttributeError(
+                    "Encoder block missing fused qkv and no q/k projection "
+                    "mapping provided via 'clipping_layers_mapping'."
+                )
 
-        # Reshape and split into Q, K, V
-        qkv_reshaped = qkv.view(batch_size, seq_len, self.num_heads, self.head_dim * 3)
-        xq, xk, xv = qkv_reshaped.chunk(3, dim=-1)
+            q_proj = getattr(encoder_block, q_proj_name, None)
+            k_proj = getattr(encoder_block, k_proj_name, None)
+            if q_proj is None or k_proj is None:
+                raise AttributeError(
+                    f"Encoder block missing projections: "
+                    f"q_proj={q_proj_name}, k_proj={k_proj_name}"
+                )
+
+            xq = q_proj(x_norm).view(batch_size, seq_len, self.num_heads, self.head_dim)
+            xk = k_proj(x_norm).view(batch_size, seq_len, self.num_heads, self.head_dim)
 
         # Apply RoPE if enabled
         if self.config.rope and freqs_cis is not None:
@@ -347,6 +419,8 @@ class MuonClipOptimizer(Optimizer):
         self.model_config = model_config
         self._step = 0
         self._metrics = {}
+        self._layer_mapping = dict(self.config.clipping_layers_mapping)
+        self._metrics_log_path: Optional[Path] = None
 
         # Validate model architecture
         self._validate_model(model)
@@ -355,13 +429,20 @@ class MuonClipOptimizer(Optimizer):
         if config.enable_clipping:
             logger.info("Initializing attention hook system...")
             self.hook_system = NeoBERTAttentionHooks(
-                model_config, offload_to_cpu=config.offload_hooks_to_cpu
+                model_config,
+                offload_to_cpu=config.offload_hooks_to_cpu,
+                layer_mapping=self._layer_mapping,
             )
             num_hooks = self.hook_system.register_hooks(self.model_base)
             logger.info(f"Hook system ready: {num_hooks} hooks registered")
         else:
             self.hook_system = None
             logger.info("QK-clipping disabled, no hooks registered")
+
+        if self.config.log_dir is not None:
+            log_dir = Path(self.config.log_dir)
+            log_dir.mkdir(parents=True, exist_ok=True)
+            self._metrics_log_path = log_dir / "muonclip_metrics.jsonl"
 
         # Build parameter groups
         param_groups = self._build_param_groups(model)
@@ -392,15 +473,34 @@ class MuonClipOptimizer(Optimizer):
         self.model_base = base_model
         self.transformer_layers = transformer_layers
 
-        # Check first layer has fused QKV
+        # Check first layer projections
         if len(self.transformer_layers) == 0:
             raise ValueError("Model has no transformer layers")
 
         first_layer = self.transformer_layers[0]
-        if not hasattr(first_layer, "qkv"):
-            raise ValueError(
-                "EncoderBlock must have 'qkv' attribute (fused QKV projection). "
-                "This implementation requires NeoBERT's fused QKV architecture."
+        if hasattr(first_layer, "qkv"):
+            logger.debug("Detected fused QKV attention block")
+        else:
+            q_proj = self._layer_mapping.get("q_proj")
+            k_proj = self._layer_mapping.get("k_proj")
+            if not q_proj or not k_proj:
+                raise ValueError(
+                    "EncoderBlock lacks fused 'qkv' projection and no "
+                    "'clipping_layers_mapping' overrides were provided."
+                )
+            missing = [
+                name
+                for name, attr in (("q_proj", q_proj), ("k_proj", k_proj))
+                if not hasattr(first_layer, attr)
+            ]
+            if missing:
+                raise ValueError(
+                    "EncoderBlock missing required projection(s): "
+                    + ", ".join(missing)
+                )
+            logger.debug(
+                "Detected separate attention projections using mapping %s",
+                self._layer_mapping,
             )
 
         logger.debug("Model architecture validation passed")
@@ -426,14 +526,31 @@ class MuonClipOptimizer(Optimizer):
                 if match:
                     layer_idx = int(match.group(1))
 
-            # Check if this is QKV projection
-            is_qkv = "qkv" in name
+            proj_type = None
+            if "qkv" in name:
+                proj_type = "qkv"
+            else:
+                for canonical, pattern in self._layer_mapping.items():
+                    if not pattern or pattern not in name:
+                        continue
+                    if canonical.lower().startswith("q"):
+                        proj_type = "q"
+                    elif canonical.lower().startswith("k"):
+                        proj_type = "k"
+                    elif canonical.lower().startswith("v"):
+                        proj_type = "v"
+                    if proj_type is not None:
+                        break
+
+            # Track parameters that participate in Q/K scaling
+            is_qkv = proj_type in {"qkv", "q", "k"}
 
             param_info = {
                 "param": param,
                 "name": name,
                 "layer_idx": layer_idx,
                 "is_qkv": is_qkv,
+                "proj_type": proj_type,
             }
 
             # 2D parameters -> Muon, 1D parameters -> Adam
@@ -548,7 +665,9 @@ class MuonClipOptimizer(Optimizer):
                 state["step"] = 0
 
             state["step"] += 1
-            grad = param.grad.data
+            grad = param.grad
+            if grad is None:
+                continue
 
             # Apply momentum
             state["momentum_buffer"].mul_(group["beta"]).add_(
@@ -587,7 +706,9 @@ class MuonClipOptimizer(Optimizer):
                 state["step"] = 0
 
             state["step"] += 1
-            grad = param.grad.data
+            grad = param.grad
+            if grad is None:
+                continue
 
             beta1, beta2 = group["betas"]
 
@@ -625,12 +746,15 @@ class MuonClipOptimizer(Optimizer):
 
         # Handle matrix orientation
         is_transpose = grad.size(0) > grad.size(1)
-        if is_transpose:
-            grad = grad.T
+        working = grad.T if is_transpose else grad
+
+        norm = torch.linalg.norm(working)
+        if norm == 0:
+            return torch.zeros_like(grad)
 
         # Newton-Schulz iteration
         a, b, c = (3.4445, -4.7750, 2.0315)
-        X = grad / (grad.norm() + 1e-7)
+        X = working / (norm + 1e-7)
 
         for _ in range(steps):
             A = X @ X.T
@@ -639,13 +763,10 @@ class MuonClipOptimizer(Optimizer):
 
         # RMS scaling for Adam lr compatibility
         # Factor: 0.4 * sqrt(max_dim)
-        scale_factor = 0.4 * max(grad.size(0), grad.size(1)) ** 0.5
+        scale_factor = 0.4 * max(working.size(0), working.size(1)) ** 0.5
         X = scale_factor * X
 
-        if is_transpose:
-            X = X.T
-
-        return X
+        return X.T if is_transpose else X
 
     def _apply_qk_clipping(self):
         """
@@ -682,16 +803,24 @@ class MuonClipOptimizer(Optimizer):
                     max_logits = max_logits.to(info["param"].device)
 
                 # Compute per-head scaling factors
-                eta_per_head = (self.config.clipping_threshold / max_logits).clamp(
-                    max=1.0
-                )
+                denom = torch.clamp(max_logits, min=1e-6)
+                eta_per_head = (self.config.clipping_threshold / denom).clamp(max=1.0)
 
-                # Apply scaling to fused QKV weights
-                self._scale_qkv_weights(
-                    param=info["param"],
-                    eta_per_head=eta_per_head,
-                    alpha=self.config.clipping_alpha,
-                )
+                proj_type = info.get("proj_type", "qkv")
+
+                if proj_type == "qkv":
+                    self._scale_qkv_weights(
+                        param=info["param"],
+                        eta_per_head=eta_per_head,
+                        alpha=self.config.clipping_alpha,
+                    )
+                elif proj_type in {"q", "k"}:
+                    self._scale_separate_projection(
+                        param=info["param"],
+                        eta_per_head=eta_per_head,
+                        alpha=self.config.clipping_alpha,
+                        proj_type=proj_type,
+                    )
 
         # Store metrics
         self._metrics["train/max_attention_logit"] = global_max
@@ -760,6 +889,59 @@ class MuonClipOptimizer(Optimizer):
         param_view[1].mul_(eta_k)  # Key rows
         # Value rows remain unchanged (param_view[2])
 
+    def _scale_separate_projection(
+        self,
+        param: torch.nn.Parameter,
+        eta_per_head: torch.Tensor,
+        alpha: float,
+        proj_type: str,
+    ):
+        """
+        Scale separate Q or K projection weights when architectures do not use fused QKV.
+
+        Args:
+            param: Projection weight parameter
+            eta_per_head: Scaling factors per head [num_heads]
+            alpha: Q/K scaling balance (0.5 = equal)
+            proj_type: 'q' or 'k'
+        """
+        hidden_size = self.model_config.hidden_size
+        num_heads = self.model_config.num_attention_heads
+        head_dim = hidden_size // num_heads
+
+        if param.shape[0] != hidden_size:
+            raise RuntimeError(
+                f"Unexpected {proj_type}-projection shape {tuple(param.shape)}; "
+                f"expected first dimension {hidden_size}"
+            )
+
+        eta = eta_per_head.to(device=param.device, dtype=param.dtype)
+        eta = torch.clamp(eta, min=1e-6, max=1.0)
+
+        power = alpha if proj_type == "q" else (1 - alpha)
+        eta_power = eta.pow(power).view(num_heads, 1, 1)
+
+        param_view = param.view(num_heads, head_dim, -1)
+        param_view.mul_(eta_power)
+
+    def _append_metrics(self, metrics: Dict):
+        """Append metrics to JSONL log if configured."""
+        if not metrics or self._metrics_log_path is None:
+            return
+
+        record = {"step": self._step}
+        for key, value in metrics.items():
+            if isinstance(value, torch.Tensor):
+                value = value.item()
+            if isinstance(value, (float, int, bool)):
+                record[key] = value
+
+        try:
+            with self._metrics_log_path.open("a") as fh:
+                fh.write(json.dumps(record) + "\n")
+        except OSError as exc:
+            logger.error(f"Failed to write MuonClip metrics: {exc}")
+
     def get_metrics(self) -> Dict:
         """
         Get metrics for logging.
@@ -767,6 +949,7 @@ class MuonClipOptimizer(Optimizer):
         Returns metrics dict and clears internal storage.
         """
         metrics = self._metrics.copy()
+        self._append_metrics(metrics)
         self._metrics.clear()
         return metrics
 
