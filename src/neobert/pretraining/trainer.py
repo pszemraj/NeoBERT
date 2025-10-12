@@ -494,10 +494,20 @@ def trainer(cfg: Config):
                     logits.view(-1, model_config.vocab_size), batch["labels"].view(-1)
                 )
 
-                # Compute gradient and apply clipping
+                # Compute gradient
                 accelerator.backward(train_loss)
-                if cfg.trainer.gradient_checkpointing:
-                    accelerator.clip_grad_norm_(model.parameters(), 1.0)
+
+                max_grad_norm = (
+                    cfg.trainer.gradient_clipping
+                    if cfg.trainer.gradient_clipping is not None
+                    else (1.0 if cfg.trainer.gradient_checkpointing else None)
+                )
+
+                grad_norm_pre_clip = None
+                if max_grad_norm is not None and max_grad_norm > 0:
+                    grad_norm_pre_clip = accelerator.clip_grad_norm_(
+                        model.parameters(), max_grad_norm
+                    )
 
                 # Log metrics
                 pbar.update(1)
@@ -524,9 +534,14 @@ def trainer(cfg: Config):
                 scheduler.step()
 
                 if metrics["train/steps"] % cfg.wandb.log_interval == 0:
-                    # https://deepspeed.readthedocs.io/en/latest/zero3.html#deepspeed.utils.safe_get_full_grad
+                    if grad_norm_pre_clip is not None:
+                        metrics["train/grad_norm"] = float(
+                            grad_norm_pre_clip.item()
+                            if isinstance(grad_norm_pre_clip, torch.Tensor)
+                            else grad_norm_pre_clip
+                        )
+
                     if accelerator.distributed_type is DistributedType.DEEPSPEED:
-                        metrics["train/grad_norm"] = model.get_global_grad_norm()
                         metrics["train/weight_norm"] = (
                             sum(
                                 [
@@ -536,12 +551,7 @@ def trainer(cfg: Config):
                             )
                             ** 0.5
                         ).item()
-                    # DDP
                     else:
-                        metrics["train/grad_norm"] = (
-                            sum([p.grad.norm(2) ** 2 for p in model.parameters()])
-                            ** 0.5
-                        ).item()
                         metrics["train/weight_norm"] = (
                             sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5
                         ).item()
