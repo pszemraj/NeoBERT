@@ -22,14 +22,50 @@ GLUE evaluation requires a pretrained NeoBERT model. You can:
 python scripts/evaluation/run_glue.py --config configs/glue/cola.yaml
 
 # Using alternate config directories
-python scripts/evaluation/run_quick_glue.sh local-scratch/glue-for-muon
-python scripts/evaluation/run_all_glue.sh local-scratch/glue-for-muon
+python scripts/evaluation/run_quick_glue.sh configs/glue
+python scripts/evaluation/run_all_glue.sh configs/glue
+
+### Muon-pretrained checkpoints _(optional)_
+
+If your checkpoint was pretrained with Muon, keep the optimizer/tokenizer consistent during fine-tuning by editing the task config. The following snippet shows the key changes relative to the stock GLUE configs:
+
+```yaml
+model:
+  pretrained_checkpoint_dir: ./outputs/neobert-100m-wordpc_msp_32k_tok-muonclip
+  pretrained_checkpoint: 100000
+  pretrained_config_path: ./outputs/neobert-100m-wordpc_msp_32k_tok-muonclip/model_checkpoints/100000/config.yaml
+  vocab_size: 31999
+  max_position_embeddings: 1024
+
+tokenizer:
+  name: BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp
+
+trainer:
+  gradient_clipping: 1.0
+
+optimizer:
+  name: muonclip
+  betas: [0.9, 0.98]
+  muon_config:
+    muon_beta: 0.95
+    muon_decay: 0.0
+    ns_steps: 5
+    orthogonalization: polar_express
+    enable_clipping: true
+    clipping_threshold: 50.0
+    clipping_alpha: 0.5
+    clipping_warmup_steps: 0
+```
+
+Save the edited YAML (or copy to a new directory) and pass that location to the quick/all GLUE helper scripts, e.g. `bash scripts/evaluation/run_all_glue.sh path/to/muon-configs`. This mirrors the Muon pretraining setup and follows [Amsel et al., 2025](https://arxiv.org/abs/2502.16982), which reports improved downstream performance when Muon is reused during fine-tuning.
 
 # Override checkpoint path
+
 python scripts/evaluation/run_glue.py \
     --config configs/glue/cola.yaml \
     --glue.pretrained_checkpoint_dir ./outputs/your_checkpoint \
     --glue.pretrained_checkpoint 50000
+
 ```
 
 ### Running All GLUE Tasks
@@ -355,6 +391,7 @@ python scripts/export-hf/export.py outputs/neobert_100m_100k/model_checkpoints/1
 ```
 
 The export script:
+
 - Converts model weights to HuggingFace format
 - Maps configuration parameters
 - Copies tokenizer files with corrected settings
@@ -410,6 +447,7 @@ huggingface-cli upload your-username/model-name \
 ### Export Configuration
 
 The export process handles:
+
 - **Weight mapping**: Converts training format to HuggingFace format
 - **Config translation**: Maps NeoBERT config to HuggingFace config
 - **Tokenizer setup**: Ensures correct max_length and special tokens
