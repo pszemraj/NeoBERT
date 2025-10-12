@@ -66,7 +66,7 @@ optimizer:
     # Muon-specific parameters
     orthogonalization: polar_express  # Options: polar_express (default), newton_schulz
     muon_beta: 0.95  # Momentum coefficient for Muon
-    muon_decay: 0.0  # Weight decay for 2D params (usually 0)
+    muon_decay: 0.01  # Weight decay for 2D params
     ns_steps: 5  # Newton-Schulz iterations (3-9 recommended)
 
     # QK-Clipping parameters
