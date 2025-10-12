@@ -5,6 +5,7 @@ import math
 import os
 import random
 import shutil
+from contextlib import nullcontext
 from functools import partial
 
 import evaluate
@@ -16,6 +17,7 @@ from accelerate.utils import DistributedType, ProjectConfiguration, set_seed
 from datasets import ClassLabel, load_dataset
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
 from torch.nn import CrossEntropyLoss, MSELoss
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from transformers import (
@@ -77,14 +79,11 @@ def get_evaluation(
     eval_metric = None
     progress_bar = tqdm(range(len(dataloader)), desc="Running evaluation...")
 
-    # Ensure Flash Attention is properly disabled for GLUE
-    with (
-        torch.backends.cuda.sdp_kernel(
-            enable_flash=False, enable_math=True, enable_mem_efficient=False
-        )
-        if torch.cuda.is_available()
-        else torch.no_grad()
-    ):
+    # Ensure Flash Attention is disabled when running GLUE evaluations
+    sdp_context = (
+        sdpa_kernel(SDPBackend.MATH) if torch.cuda.is_available() else nullcontext()
+    )
+    with sdp_context:
         for step, batch in tqdm(enumerate(dataloader)):
             progress_bar.update(1)
             with torch.no_grad(), torch.inference_mode():
