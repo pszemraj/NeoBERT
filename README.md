@@ -34,6 +34,9 @@ NeoBERT is a **next-generation encoder** model for English text representation, 
 
 ## Get started
 
+> [!NOTE]
+> See the [comprehensive quickstart doc](/docs/quickstart.md) in `docs/`
+
 Ensure you have the following dependencies installed:
 
 ```bash
