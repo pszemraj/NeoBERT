@@ -1,12 +1,14 @@
 #!/bin/bash
 # Run all GLUE evaluations for NeoBERT
-# Usage: bash scripts/run_all_glue.sh [optional_model_path_override]
-# 
-# By default uses the model paths specified in each config file.
-# Pass a model path as first argument to override all configs.
+# Usage: bash scripts/evaluation/run_all_glue.sh [config_dir]
+#        config_dir defaults to configs/glue
 
-# Optional model path override
-MODEL_PATH_OVERRIDE="$1"
+CONFIG_DIR="${1:-configs/glue}"
+echo "Using config directory: ${CONFIG_DIR}"
+echo "---"
+
+# Optional model path override (future use)
+MODEL_PATH_OVERRIDE="$2"
 
 # Colors for output
 RED='\033[0;31m'
@@ -32,7 +34,12 @@ for task in "${TASKS[@]}"; do
     echo -e "${YELLOW}Running $task...${NC}"
     
     # Build command
-    CMD="python scripts/evaluation/run_glue.py --config configs/glue/${task}.yaml"
+    CONFIG_PATH="${CONFIG_DIR}/${task}.yaml"
+    if [ ! -f "$CONFIG_PATH" ]; then
+        echo "Config not found for $task at $CONFIG_PATH. Skipping."
+        continue
+    fi
+    CMD="python scripts/evaluation/run_glue.py --config ${CONFIG_PATH}"
     
     # Add model override if provided
     if [ -n "$MODEL_PATH_OVERRIDE" ]; then

@@ -21,6 +21,10 @@ GLUE evaluation requires a pretrained NeoBERT model. You can:
 # Run a specific GLUE task (e.g., CoLA)
 python scripts/evaluation/run_glue.py --config configs/glue/cola.yaml
 
+# Using alternate config directories
+python scripts/evaluation/run_quick_glue.sh local-scratch/glue-for-muon
+python scripts/evaluation/run_all_glue.sh local-scratch/glue-for-muon
+
 # Override checkpoint path
 python scripts/evaluation/run_glue.py \
     --config configs/glue/cola.yaml \
