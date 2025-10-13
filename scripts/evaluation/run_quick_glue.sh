@@ -8,6 +8,7 @@ set -e  # Exit on error
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
+RED='\033[0;31m'
 
 # Small GLUE tasks only (in order of dataset size)
 SMALL_TASKS=(
@@ -21,43 +22,77 @@ CONFIG_DIR="${1:-configs/glue}"
 echo "Using config directory: ${CONFIG_DIR}"
 echo ""
 
+CONFIG_BASENAME="$(basename "${CONFIG_DIR}")"
+LOG_DIR="logs/${CONFIG_BASENAME}"
+mkdir -p "${LOG_DIR}"
+
 echo -e "${YELLOW}=========================================="
-echo "NeoBERT-100m Quick GLUE Evaluation"
+echo "NeoBERT Quick GLUE Evaluation"
 echo "Running small tasks only for quick validation"
 echo "==========================================${NC}"
 echo ""
 
-# Create output directory
-mkdir -p outputs/glue/neobert-100m
-mkdir -p logs
-
 # Track results
 PASSED=()
 FAILED=()
+declare -A OUTPUT_DIRS
+declare -A LOG_PATHS
 
 # Run each small task
 for task in "${SMALL_TASKS[@]}"; do
     CONFIG_PATH="${CONFIG_DIR}/${task}.yaml"
     if [ ! -f "$CONFIG_PATH" ]; then
         echo "Config not found for $task at $CONFIG_PATH. Skipping."
+        OUTPUT_DIRS["$task"]="(config missing)"
+        LOG_PATHS["$task"]="(config missing)"
         continue
     fi
 
     echo -e "${YELLOW}Running $task...${NC}"
+
+    OUTPUT_PATH="$(python - <<PY
+import re
+from pathlib import Path
+config_path = Path(r"""${CONFIG_PATH}""")
+text = config_path.read_text()
+try:
+    import yaml  # type: ignore
+except ImportError:
+    match = re.search(r'^\\s*output_dir:\\s*["\\\']?(.*?)["\\\']?\\s*$', text, flags=re.MULTILINE)
+    print(match.group(1) if match else \"\")
+else:
+    data = yaml.safe_load(text)
+    trainer = data.get('trainer', {}) if isinstance(data, dict) else {}
+    print(trainer.get('output_dir', '') or '')
+PY
+)"
+    if [ -z "${OUTPUT_PATH}" ]; then
+        OUTPUT_PATH="(output_dir not found in config)"
+    fi
+    OUTPUT_DIRS["$task"]="${OUTPUT_PATH}"
+
+    LOG_PATH="${LOG_DIR}/${task}_quick.log"
+    LOG_PATHS["$task"]="${LOG_PATH}"
     
     # Run the evaluation
-    if python scripts/evaluation/run_glue.py --config "$CONFIG_PATH" 2>&1 | tee logs/glue_${task}_quick.log; then
+    if python scripts/evaluation/run_glue.py --config "$CONFIG_PATH" 2>&1 | tee "${LOG_PATH}"; then
         echo -e "${GREEN}✓ $task completed successfully${NC}"
         PASSED+=("$task")
         
         # Show the results immediately
-        RESULTS_FILE="outputs/glue/neobert-100m/${task}/all_results.json"
-        if [ -f "$RESULTS_FILE" ]; then
+        if [ -d "${OUTPUT_PATH}" ]; then
+            RESULTS_FILE="${OUTPUT_PATH}/all_results.json"
+        else
+            RESULTS_FILE=""
+        fi
+        if [ -n "$RESULTS_FILE" ] && [ -f "$RESULTS_FILE" ]; then
             echo "Results:"
             python -m json.tool "$RESULTS_FILE" | head -20
+        else
+            echo -e "${YELLOW}No all_results.json found at ${OUTPUT_PATH}${NC}"
         fi
     else
-        echo "✗ $task failed"
+        echo -e "${RED}✗ $task failed${NC}"
         FAILED+=("$task")
     fi
     echo "---"
@@ -74,15 +109,35 @@ fi
 echo ""
 echo "Results saved to:"
 for task in "${SMALL_TASKS[@]}"; do
-echo "  - outputs/glue/neobert-100m/$task/"
+    output="${OUTPUT_DIRS[$task]}"
+    if [ -z "$output" ]; then
+        output="(not available)"
+    fi
+    echo "  - ${output}"
+done
+echo ""
+echo "Logs saved to:"
+for task in "${SMALL_TASKS[@]}"; do
+    log_path="${LOG_PATHS[$task]}"
+    if [ -z "$log_path" ]; then
+        log_path="(not available)"
+    fi
+    echo "  - ${log_path}"
 done
 
 # Check if any model checkpoints were incorrectly saved
 echo ""
 echo "Checking for unwanted model checkpoints..."
-if find outputs/glue/neobert-100m -name "state_dict.pt" -o -name "*.safetensors" 2>/dev/null | grep -q .; then
+CHECK_DIRS=()
+for task in "${SMALL_TASKS[@]}"; do
+    output="${OUTPUT_DIRS[$task]}"
+    if [ -d "$output" ]; then
+        CHECK_DIRS+=("$output")
+    fi
+done
+if [ ${#CHECK_DIRS[@]} -gt 0 ] && find "${CHECK_DIRS[@]}" -name "state_dict.pt" -o -name "*.safetensors" 2>/dev/null | grep -q .; then
     echo "WARNING: Found model checkpoints that shouldn't be saved!"
-    find outputs/glue/neobert-100m -name "state_dict.pt" -o -name "*.safetensors"
+    find "${CHECK_DIRS[@]}" -name "state_dict.pt" -o -name "*.safetensors"
 else
     echo -e "${GREEN}✓ No model checkpoints found (correct behavior)${NC}"
 fi
