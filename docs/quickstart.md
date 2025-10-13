@@ -52,7 +52,7 @@ python scripts/evaluation/run_glue.py --config configs/glue/cola.yaml
 bash scripts/run_full_glue.sh
 
 # Summarize results
-python scripts/summarize_glue.py outputs/glue/neobert-100m
+python scripts/evaluation/summarize_glue.py outputs/glue/neobert-100m
 ```
 
 ### Use Custom Tokenizer
@@ -72,7 +72,7 @@ python scripts/pretraining/pretrain.py \
 | Pretrain       | `python scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml` |
 | GLUE eval      | `python scripts/evaluation/run_glue.py --config configs/glue/{task}.yaml`       |
 | Run tests      | `python tests/run_tests.py`                                                     |
-| Summarize GLUE | `python scripts/summarize_glue.py {results_path}`                               |
+| Summarize GLUE | `python scripts/evaluation/summarize_glue.py {results_path}`                    |
 
 ## Configuration
 

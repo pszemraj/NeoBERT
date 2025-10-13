@@ -146,15 +146,15 @@ After running GLUE evaluation, use the summary script:
 
 ```bash
 # Summarize results from a specific path
-python scripts/summarize_glue.py outputs/glue/neobert-100m
+python scripts/evaluation/summarize_glue.py outputs/glue/neobert-100m
 
 # Compare against different baselines
-python scripts/summarize_glue.py outputs/glue/neobert-100m --baseline roberta-base
-python scripts/summarize_glue.py outputs/glue/neobert-100m --baseline bert-large
-python scripts/summarize_glue.py outputs/glue/neobert-100m --baseline none
+python scripts/evaluation/summarize_glue.py outputs/glue/neobert-100m --baseline roberta-base
+python scripts/evaluation/summarize_glue.py outputs/glue/neobert-100m --baseline bert-large
+python scripts/evaluation/summarize_glue.py outputs/glue/neobert-100m --baseline none
 
 # Works with any output directory structure
-python scripts/summarize_glue.py ./experiments/test_123/glue_results
+python scripts/evaluation/summarize_glue.py ./experiments/test_123/glue_results
 ```
 
 ### Output Structure
