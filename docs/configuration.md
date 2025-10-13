@@ -3,7 +3,7 @@
 NeoBERT uses a hierarchical configuration system based on dataclasses, YAML files, and command-line overrides.
 
 > [!TIP]
-> For available configuration files see [`configs/README.md`](../configs/README.md). Use [`scripts/README.md`](../scripts/README.md) when you need to locate the appropriate CLI entry point; usage examples live in this guide.
+> For available configuration files see [`configs/README.md`](/configs/README.md). Use [`scripts/README.md`](/scripts/README.md) when you need to locate the appropriate CLI entry point; usage examples live in this guide.
 
 ## Overview
 
@@ -461,6 +461,6 @@ grep "Configuration:" logs/training.log
 
 ## Next Steps
 
-- See [Training Guide](training.md) for pretraining configurations
-- See [Evaluation Guide](evaluation.md) for GLUE/MTEB configurations
+- See [Training Guide](/docs/training.md) for pretraining configurations
+- See [Evaluation Guide](/docs/evaluation.md) for GLUE/MTEB configurations
 - Check example configs in `configs/` directory

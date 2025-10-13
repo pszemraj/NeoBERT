@@ -30,7 +30,7 @@ NeoBERT is a **next-generation encoder** model for English text representation, 
 
 - Paper: [paper](https://arxiv.org/abs/2502.19587)
 - Model: [huggingface](https://huggingface.co/chandar-lab/NeoBERT)
-- **Documentation: [docs/](docs/README.md)**
+- **Documentation: [docs/](/docs/README.md)**
 
 ## Get started
 
@@ -67,11 +67,11 @@ python tests/run_tests.py
 
 ### Next steps
 
-- Train or fine-tune: see `docs/training.md`
-- Evaluate on GLUE or MTEB: see `docs/evaluation.md`
-- Tune configs and overrides: see `docs/configuration.md`
-- Export checkpoints to Hugging Face: see `docs/export.md`
-- Troubleshoot common issues: see `docs/troubleshooting.md`
+- Train or fine-tune: see [/docs/training.md](/docs/training.md)
+- Evaluate on GLUE or MTEB: see [/docs/evaluation.md](/docs/evaluation.md)
+- Tune configs and overrides: see [/docs/configuration.md](/docs/configuration.md)
+- Export checkpoints to Hugging Face: see [/docs/export.md](/docs/export.md)
+- Troubleshoot common issues: see [/docs/troubleshooting.md](/docs/troubleshooting.md)
 
 ## How to use
 
@@ -118,15 +118,15 @@ print(tokenizer.decode(predicted_token_id))
 
 ## Documentation
 
-For detailed guides and documentation, see the **[Documentation](docs/README.md)**:
+For detailed guides and documentation, see the **[Documentation](/docs/README.md)**:
 
-- [Training Guide](docs/training.md) - Pretraining, contrastive learning, and monitoring runs
-- [Evaluation Guide](docs/evaluation.md) - GLUE, MTEB, and result analysis
-- [Configuration System](docs/configuration.md) - YAML hierarchy and CLI overrides
-- [Export Guide](docs/export.md) - Convert checkpoints to Hugging Face format
-- [Architecture Details](docs/architecture.md) - Model internals
-- [Testing Guide](docs/testing.md) - Regression suite and coverage
-- [Troubleshooting](docs/troubleshooting.md) - Common failure modes and fixes
+- [Training Guide](/docs/training.md) - Pretraining, contrastive learning, and monitoring runs
+- [Evaluation Guide](/docs/evaluation.md) - GLUE, MTEB, and result analysis
+- [Configuration System](/docs/configuration.md) - YAML hierarchy and CLI overrides
+- [Export Guide](/docs/export.md) - Convert checkpoints to Hugging Face format
+- [Architecture Details](/docs/architecture.md) - Model internals
+- [Testing Guide](/docs/testing.md) - Regression suite and coverage
+- [Troubleshooting](/docs/troubleshooting.md) - Common failure modes and fixes
 
 ## Features
 
@@ -181,10 +181,10 @@ This repository includes the complete training and evaluation codebase for NeoBE
 
 Additional guidance lives in:
 
-- `docs/training.md` for full training workflows
-- `docs/evaluation.md` for benchmark recipes
-- `docs/testing.md` for extending the test suite
-- `docs/export.md` for Hugging Face conversion
-- `docs/troubleshooting.md` for debugging tips
+- [`docs/training.md`](/docs/training.md) for full training workflows
+- [`docs/evaluation.md`](/docs/evaluation.md) for benchmark recipes
+- [`docs/testing.md`](/docs/testing.md) for extending the test suite
+- [`docs/export.md`](/docs/export.md) for Hugging Face conversion
+- [`docs/troubleshooting.md`](/docs/troubleshooting.md) for debugging tips
 
 ---

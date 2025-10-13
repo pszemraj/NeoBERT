@@ -3,7 +3,7 @@
 This guide covers pretraining and fine-tuning NeoBERT models.
 
 > [!TIP]
-> Use [`scripts/README.md`](../scripts/README.md) as the directory map for CLI entry points. The sections below describe how to run the key scripts and how they relate to the configuration system.
+> Use [`scripts/README.md`](/scripts/README.md) as the directory map for CLI entry points. The sections below describe how to run the key scripts and how they relate to the configuration system.
 
 ## Script Entry Points
 
@@ -15,8 +15,8 @@ This guide covers pretraining and fine-tuning NeoBERT models.
 | `scripts/contrastive/download.py`                                  | Fetch contrastive datasets used in SimCSE-style workflows.                                                             | Contrastive Learning                                         |
 | `scripts/contrastive/preprocess.py`                                | Normalize and tokenize downloaded contrastive corpora.                                                                 | Contrastive Learning                                         |
 | `scripts/contrastive/finetune.py`                                  | Run contrastive fine-tuning on top of pretrained checkpoints.                                                          | Contrastive Learning                                         |
-| `scripts/evaluation/run_glue.py`, `scripts/evaluation/run_mteb.py` | Evaluation entry points once training is complete.                                                                     | [Evaluation Guide](evaluation.md)                            |
-| `scripts/export-hf/export.py`, `scripts/export-hf/validate.py`     | Export checkpoints to Hugging Face format and validate the outputs.                                                    | [Export Guide](export.md)                                    |
+| `scripts/evaluation/run_glue.py`, `scripts/evaluation/run_mteb.py` | Evaluation entry points once training is complete.                                                                     | [Evaluation Guide](/docs/evaluation.md)                     |
+| `scripts/export-hf/export.py`, `scripts/export-hf/validate.py`     | Export checkpoints to Hugging Face format and validate the outputs.                                                    | [Export Guide](/docs/export.md)                             |
 
 ## Pretraining
 
@@ -255,12 +255,12 @@ glue:
   pretrained_checkpoint: 100000  # or "latest"
 ```
 
-See [Evaluation Guide](evaluation.md) for detailed GLUE instructions.
+See [Evaluation Guide](/docs/evaluation.md) for detailed GLUE instructions.
 
 ### Contrastive Learning (SimCSE)
 
 ```bash
-python scripts/training/contrastive_learning.py \
+python scripts/contrastive/finetune.py \
     --config configs/contrastive_neobert.yaml \
     --model.pretrained_checkpoint_dir outputs/neobert_100m \
     --model.pretrained_checkpoint 100000
@@ -494,6 +494,6 @@ When adding new automation in `scripts/`, follow these guidelines:
 
 ## Next Steps
 
-- Learn about [Evaluation](evaluation.md) for GLUE and MTEB
-- Read [Architecture Guide](architecture.md) for model details
-- See [Configuration Guide](configuration.md) for config system
+- Learn about [Evaluation](/docs/evaluation.md) for GLUE and MTEB
+- Read [Architecture Guide](/docs/architecture.md) for model details
+- See [Configuration Guide](/docs/configuration.md) for config system

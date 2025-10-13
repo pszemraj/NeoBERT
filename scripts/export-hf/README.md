@@ -24,7 +24,7 @@ python scripts/export-hf/validate.py outputs/neobert_100m_100k/hf/neobert_100m_1
 
 ### Metaspace Tokenizer Handling
 
-Some of the default configs for pretraining use [a Metaspace tokenizer](https://huggingface.co/BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp) with `prepend_scheme="always"`. The export script emits guidance for cleaning up the extra space token (▁, ID 454) that appears before `[MASK]`. Refer to [MLM always predicts the same token](../../docs/troubleshooting.md#mlm-always-predicts-same-token) for the canonical workaround.
+Some of the default configs for pretraining use [a Metaspace tokenizer](https://huggingface.co/BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp) with `prepend_scheme="always"`. The export script emits guidance for cleaning up the extra space token (▁, ID 454) that appears before `[MASK]`. Refer to [MLM always predicts the same token](/docs/troubleshooting.md#mlm-always-predicts-same-token) for the canonical workaround.
 
 ### Validation Test Details
 
@@ -55,7 +55,7 @@ The validation script (`validate.py`) performs these checks:
 
 **MLM Always Predicting Same Token:**
 
-- Follow the mitigation steps in [docs/troubleshooting.md](../../docs/troubleshooting.md#mlm-always-predicts-same-token) (accelerator unwrap, Metaspace cleanup, attention-mask guard)
+- Follow the mitigation steps in [docs/troubleshooting.md](/docs/troubleshooting.md#mlm-always-predicts-same-token) (accelerator unwrap, Metaspace cleanup, attention-mask guard)
 
 **Initialization Warnings:**
 Check missing weights with validation script, verify architecture match between training and export.

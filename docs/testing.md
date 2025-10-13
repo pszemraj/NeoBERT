@@ -493,6 +493,6 @@ def set_seed(seed=42):
 
 ## Next Steps
 
-- Review the [Configuration Guide](configuration.md) for advanced settings
-- See the [Training Guide](training.md) for model training
-- Check the [Architecture Documentation](architecture.md) for technical details
+- Review the [Configuration Guide](/docs/configuration.md) for advanced settings
+- See the [Training Guide](/docs/training.md) for model training
+- Check the [Architecture Documentation](/docs/architecture.md) for technical details

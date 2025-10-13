@@ -341,6 +341,6 @@ model_int8.save_pretrained("my_exported_model_int8")
 
 ## Next Steps
 
-- [Evaluation Guide](evaluation.md) - Run benchmarks on exported models
-- [Training Guide](training.md) - Train custom NeoBERT models
-- [Configuration Guide](configuration.md) - Understand configuration options
+- [Evaluation Guide](/docs/evaluation.md) - Run benchmarks on exported models
+- [Training Guide](/docs/training.md) - Train custom NeoBERT models
+- [Configuration Guide](/docs/configuration.md) - Understand configuration options

@@ -3,7 +3,7 @@
 Production-ready YAML configurations for NeoBERT training, evaluation, and contrastive learning live here. Lightweight smoke-test variants are under `tests/configs/`.
 
 > [!TIP]
-> For schema details, validation rules, and override examples, read [docs/configuration.md](../docs/configuration.md). End-to-end recipes live in [docs/training.md](../docs/training.md) and [docs/evaluation.md](../docs/evaluation.md).
+> For schema details, validation rules, and override examples, read [docs/configuration.md](/docs/configuration.md). End-to-end recipes live in [docs/training.md](/docs/training.md) and [docs/evaluation.md](/docs/evaluation.md).
 
 ## Production Configurations
 
@@ -35,7 +35,7 @@ Tiny configs meant for smoke tests live in `tests/configs/`:
 
 ## Related Documentation
 
-- [Configuration Guide](../docs/configuration.md)
-- [Training Guide](../docs/training.md)
-- [Evaluation Guide](../docs/evaluation.md)
-- [Testing Guide](../docs/testing.md)
+- [Configuration Guide](/docs/configuration.md)
+- [Training Guide](/docs/training.md)
+- [Evaluation Guide](/docs/evaluation.md)
+- [Testing Guide](/docs/testing.md)

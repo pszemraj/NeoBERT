@@ -382,6 +382,6 @@ class NeoBERTWithAdapter(NeoBERT):
 
 ## Next Steps
 
-- Learn about [Training](training.md) NeoBERT models
-- Explore [Configuration](configuration.md) options
-- Review [Evaluation](evaluation.md) guide
+- Learn about [Training](/docs/training.md) NeoBERT models
+- Explore [Configuration](/docs/configuration.md) options
+- Review [Evaluation](/docs/evaluation.md) guide
