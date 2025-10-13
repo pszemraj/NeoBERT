@@ -33,8 +33,8 @@ datacollator:
   pad_to_multiple_of: 8
 
 trainer:
-  output_dir: "./outputs/neobert-100m-wordpc_msp_32k_tok-adamw"
-  run_name: "neobert-100m-100k"
+  output_dir: "./outputs/neobert-100m-wordpc_msp_32k_tok-muonclip"
+  run_name: "neobert-100m-muonclip"
   max_steps: 100000
   per_device_train_batch_size: 16
   per_device_eval_batch_size: 16
@@ -50,12 +50,34 @@ trainer:
   gradient_checkpointing: false
   resume_from_checkpoint: false
 
+# MuonClip optimizer configuration
 optimizer:
-  name: "adamw"
+  name: "muonclip"
   lr: 1e-4
+
+  # Standard parameters (also used by Adam for 1D params)
   weight_decay: 0.01
   betas: [0.9, 0.98]
   eps: 1e-8
+
+  # NOTE: if muon_config is omitted, MuonClip defaults are used.
+  # NOTE: if muon_config is provided while name != "muonclip", we emit a warning and ignore it.
+  muon_config:
+    # Muon-specific parameters
+    orthogonalization: polar_express  # Options: polar_express (default), newton_schulz
+    muon_beta: 0.95  # Momentum coefficient for Muon
+    muon_decay: 0.01  # Weight decay for 2D params
+    ns_steps: 5  # Newton-Schulz iterations (3-9 recommended)
+
+    # QK-Clipping parameters
+    enable_clipping: true  # Enable attention stability clipping
+    clipping_threshold: 50.0  # Conservative for encoders (decoder default: 100)
+    clipping_alpha: 0.5  # Q/K scaling balance (0.5 = equal)
+    clipping_warmup_steps: 0  # Steps before enabling clipping
+
+    # Debugging helpers
+    detect_anomalies: false  # Enable for debugging (slow)
+    clipping_layers_mapping: {}  # For non-fused attention blocks; keep empty for NeoBERT
 
 scheduler:
   name: "cosine"
@@ -63,7 +85,7 @@ scheduler:
 
 wandb:
   project: "neobert-pretraining"
-  name: "neobert-100m-wordpc_msp_32k_tok-adamw"
+  name: "neobert-100m-wordpc_msp_32k_tok-muonclip"
   mode: "online"
 
 # Additional settings

@@ -21,11 +21,51 @@ GLUE evaluation requires a pretrained NeoBERT model. You can:
 # Run a specific GLUE task (e.g., CoLA)
 python scripts/evaluation/run_glue.py --config configs/glue/cola.yaml
 
+# Using alternate config directories
+python scripts/evaluation/run_quick_glue.sh configs/glue
+python scripts/evaluation/run_all_glue.sh configs/glue
+
+### Muon-pretrained checkpoints _(optional)_
+
+If your checkpoint was pretrained with Muon, keep the optimizer/tokenizer consistent during fine-tuning by editing the task config. The following snippet shows the key changes relative to the stock GLUE configs:
+
+```yaml
+model:
+  pretrained_checkpoint_dir: ./outputs/neobert-100m-wordpc_msp_32k_tok-muonclip
+  pretrained_checkpoint: 100000
+  pretrained_config_path: ./outputs/neobert-100m-wordpc_msp_32k_tok-muonclip/model_checkpoints/100000/config.yaml
+  vocab_size: 31999
+  max_position_embeddings: 1024
+
+tokenizer:
+  name: BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp
+
+trainer:
+  gradient_clipping: 1.0
+
+optimizer:
+  name: muonclip
+  betas: [0.9, 0.98]
+  muon_config:
+    muon_beta: 0.95
+    muon_decay: 0.0
+    ns_steps: 5
+    orthogonalization: polar_express
+    enable_clipping: true
+    clipping_threshold: 50.0
+    clipping_alpha: 0.5
+    clipping_warmup_steps: 0
+```
+
+Save the edited YAML (or copy to a new directory) and pass that location to the quick/all GLUE helper scripts, e.g. `bash scripts/evaluation/run_all_glue.sh path/to/muon-configs`. This mirrors the Muon pretraining setup and follows [Amsel et al., 2025](https://arxiv.org/abs/2502.16982), which reports improved downstream performance when Muon is reused during fine-tuning.
+
 # Override checkpoint path
+
 python scripts/evaluation/run_glue.py \
     --config configs/glue/cola.yaml \
     --glue.pretrained_checkpoint_dir ./outputs/your_checkpoint \
     --glue.pretrained_checkpoint 50000
+
 ```
 
 ### Running All GLUE Tasks
@@ -331,88 +371,13 @@ All GLUE runs are tracked in WandB:
 
 View results at: <https://wandb.ai/your-username/neobert-glue>
 
-## Exporting to HuggingFace Format
+## Exporting Checkpoints
 
-After training or fine-tuning your NeoBERT model, you can export it to HuggingFace format for easy sharing and deployment.
-
-> [!NOTE]
-> See [/docs/export.md](/docs/export.md) for comprehensive export documentation and [/scripts/export-hf/README.md](/scripts/export-hf/README.md) for script implementation details.
-
-### Export Checkpoint
-
-Convert a training checkpoint to HuggingFace format:
-
-```bash
-# Export a specific checkpoint
-python scripts/export-hf/export.py outputs/neobert_100m_100k/model_checkpoints/100000
-
-# The exported model will be saved to:
-# outputs/neobert_100m_100k/hf/neobert_100m_100k_100000/
-```
-
-The export script:
-- Converts model weights to HuggingFace format
-- Maps configuration parameters
-- Copies tokenizer files with corrected settings
-- Creates both SafeTensors and PyTorch formats
-- Generates a README with usage instructions
-
-### Validate Exported Model
-
-Verify the exported model works correctly:
-
-```bash
-# Validate the exported model
-python scripts/export-hf/validate.py outputs/neobert_100m_100k/hf/neobert_100m_100k_100000
-
-# This will:
-# - Load the model with HuggingFace transformers
-# - Run inference on sample text
-# - Verify outputs are reasonable
-```
-
-### Using Exported Models
-
-Once exported, use your model with standard HuggingFace code:
-
-```python
-from transformers import AutoModel, AutoTokenizer
-
-# Load from local path
-model_path = "outputs/neobert_100m_100k/hf/neobert_100m_100k_100000"
-tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-model = AutoModel.from_pretrained(model_path, trust_remote_code=True)
-
-# Or after uploading to HuggingFace Hub
-model_id = "your-username/neobert-custom"
-tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-model = AutoModel.from_pretrained(model_id, trust_remote_code=True)
-```
-
-### Upload to HuggingFace Hub
-
-Share your model on the HuggingFace Hub:
-
-```bash
-# Login to HuggingFace
-huggingface-cli login
-
-# Upload the model
-huggingface-cli upload your-username/model-name \
-    outputs/neobert_100m_100k/hf/neobert_100m_100k_100000 \
-    --repo-type model
-```
-
-### Export Configuration
-
-The export process handles:
-- **Weight mapping**: Converts training format to HuggingFace format
-- **Config translation**: Maps NeoBERT config to HuggingFace config
-- **Tokenizer setup**: Ensures correct max_length and special tokens
-- **Model files**: Includes custom modeling code for full compatibility
+Need to convert a NeoBERT checkpoint to HuggingFace format? Follow the dedicated export guide: [/docs/export.md](/docs/export.md). The export scripts are documented separately in [/scripts/export-hf/README.md](/scripts/export-hf/README.md).
 
 ## Next Steps
 
 - Review [Training Guide](training.md) for pretraining details
 - Check [Configuration Guide](configuration.md) for config system
+- Visit [Export Guide](export.md) for HuggingFace conversion
 - See [Testing Guide](testing.md) for running tests

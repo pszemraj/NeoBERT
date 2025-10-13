@@ -5,6 +5,7 @@ import math
 import os
 import random
 import shutil
+from contextlib import nullcontext
 from functools import partial
 
 import evaluate
@@ -16,6 +17,7 @@ from accelerate.utils import DistributedType, ProjectConfiguration, set_seed
 from datasets import ClassLabel, load_dataset
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
 from torch.nn import CrossEntropyLoss, MSELoss
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from transformers import (
@@ -29,6 +31,7 @@ from neobert.model import NeoBERTConfig, NeoBERTForSequenceClassification
 from neobert.tokenizer import get_tokenizer
 
 from ..config import Config
+from ..optimizer import get_optimizer
 from ..scheduler import get_scheduler
 from ..validation import ValidationError, validate_glue_config
 from .process import process_function
@@ -76,14 +79,11 @@ def get_evaluation(
     eval_metric = None
     progress_bar = tqdm(range(len(dataloader)), desc="Running evaluation...")
 
-    # Ensure Flash Attention is properly disabled for GLUE
-    with (
-        torch.backends.cuda.sdp_kernel(
-            enable_flash=False, enable_math=True, enable_mem_efficient=False
-        )
-        if torch.cuda.is_available()
-        else torch.no_grad()
-    ):
+    # Ensure Flash Attention is disabled when running GLUE evaluations
+    sdp_context = (
+        sdpa_kernel(SDPBackend.MATH) if torch.cuda.is_available() else nullcontext()
+    )
+    with sdp_context:
         for step, batch in tqdm(enumerate(dataloader)):
             progress_bar.update(1)
             with torch.no_grad(), torch.inference_mode():
@@ -882,41 +882,55 @@ def trainer(cfg: Config):
         )
 
     # Optimizer
-    # Split weights in two groups, one with weight decay and the other not.
-    no_decay = ["bias", "LayerNorm.weight"]
-
-    # Handle both config styles (with and without hparams)
-    if hasattr(cfg.optimizer, "hparams"):
-        weight_decay = cfg.optimizer.hparams.weight_decay
-        optimizer_params = cfg.optimizer.hparams
+    optimizer_name = cfg.optimizer.name.lower()
+    optimizer_params = {"lr": cfg.optimizer.lr}
+    if optimizer_name in {"muonclip", "muon_clip", "muon-clip"}:
+        optimizer = get_optimizer(
+            model,
+            accelerator.distributed_type,
+            model_config=model.config,
+            name=cfg.optimizer.name,
+            lr=cfg.optimizer.lr,
+            weight_decay=cfg.optimizer.weight_decay,
+            betas=tuple(getattr(cfg.optimizer, "betas", [0.9, 0.999])),
+            eps=getattr(cfg.optimizer, "eps", 1e-8),
+            muon_config=getattr(cfg.optimizer, "muon_config", None),
+        )
     else:
-        weight_decay = cfg.optimizer.weight_decay
-        optimizer_params = {
-            "lr": cfg.optimizer.lr,
-            "weight_decay": cfg.optimizer.weight_decay,
-            "betas": getattr(cfg.optimizer, "betas", [0.9, 0.999]),
-            "eps": getattr(cfg.optimizer, "eps", 1e-8),
-        }
+        # Split weights in two groups, one with weight decay and the other not.
+        no_decay = ["bias", "LayerNorm.weight"]
 
-    optimizer_grouped_parameters = [
-        {
-            "params": [
-                p
-                for n, p in model.named_parameters()
-                if not any(nd in n for nd in no_decay)
-            ],
-            "weight_decay": weight_decay,
-        },
-        {
-            "params": [
-                p
-                for n, p in model.named_parameters()
-                if any(nd in n for nd in no_decay)
-            ],
-            "weight_decay": 0.0,
-        },
-    ]
-    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, **optimizer_params)
+        if hasattr(cfg.optimizer, "hparams"):
+            weight_decay = cfg.optimizer.hparams.weight_decay
+            optimizer_params = cfg.optimizer.hparams
+        else:
+            weight_decay = cfg.optimizer.weight_decay
+            optimizer_params = {
+                "lr": cfg.optimizer.lr,
+                "weight_decay": cfg.optimizer.weight_decay,
+                "betas": tuple(getattr(cfg.optimizer, "betas", [0.9, 0.999])),
+                "eps": getattr(cfg.optimizer, "eps", 1e-8),
+            }
+
+        optimizer_grouped_parameters = [
+            {
+                "params": [
+                    p
+                    for n, p in model.named_parameters()
+                    if not any(nd in n for nd in no_decay)
+                ],
+                "weight_decay": weight_decay,
+            },
+            {
+                "params": [
+                    p
+                    for n, p in model.named_parameters()
+                    if any(nd in n for nd in no_decay)
+                ],
+                "weight_decay": 0.0,
+            },
+        ]
+        optimizer = torch.optim.AdamW(optimizer_grouped_parameters, **optimizer_params)
 
     # Calculate training steps consistently
     num_update_steps_per_epoch = math.ceil(
@@ -951,12 +965,10 @@ def trainer(cfg: Config):
         cfg.scheduler.decay_steps = cfg.trainer.max_steps
 
     # Get learning rate from optimizer config
-    lr = optimizer_params.get(
-        "lr",
-        optimizer_params["lr"]
-        if isinstance(optimizer_params, dict)
-        else cfg.optimizer.lr,
-    )
+    if isinstance(optimizer_params, dict):
+        lr = optimizer_params.get("lr", cfg.optimizer.lr)
+    else:
+        lr = getattr(optimizer_params, "lr", cfg.optimizer.lr)
 
     # Convert scheduler config to dict if needed
     scheduler_params = (

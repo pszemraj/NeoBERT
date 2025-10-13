@@ -22,7 +22,7 @@ from torch.nn import CrossEntropyLoss
 from tqdm import tqdm
 from transformers import BatchEncoding
 
-from ..config import Config, ConfigLoader
+from ..config import Config, ConfigLoader, MuonConfig
 from ..dataloader import get_dataloader
 from ..model import NeoBERTConfig, NeoBERTLMHead
 from ..optimizer import get_optimizer
@@ -351,14 +351,30 @@ def trainer(cfg: Config):
         model_summary(model, max_depth=3, show_param_shapes=True)
 
     # Optimizer and Scheduler
+    # Log if using MuonClip optimizer
+    if cfg.optimizer.name.lower() in ["muonclip", "muon-clip", "muon_clip"]:
+        muon_cfg = cfg.optimizer.muon_config or MuonConfig()
+
+        logger.info("=" * 60)
+        logger.info("MuonClip Optimizer Configuration")
+        logger.info("=" * 60)
+        logger.info(f"QK-clipping: {muon_cfg.enable_clipping}")
+        logger.info(f"Clipping threshold: {muon_cfg.clipping_threshold}")
+        logger.info(f"Newton-Schulz iterations: {muon_cfg.ns_steps}")
+        logger.info(f"Orthogonalization: {muon_cfg.orthogonalization}")
+        logger.info(f"Clipping warmup steps: {muon_cfg.clipping_warmup_steps}")
+        logger.info("=" * 60)
+
     optimizer = get_optimizer(
         model,
         accelerator.distributed_type,
+        model_config=model_config,  # Pass model config for MuonClip
         name=cfg.optimizer.name,
         lr=cfg.optimizer.lr,
         weight_decay=cfg.optimizer.weight_decay,
-        betas=cfg.optimizer.betas,
+        betas=tuple(cfg.optimizer.betas),
         eps=cfg.optimizer.eps,
+        muon_config=cfg.optimizer.muon_config,
     )
     scheduler = get_scheduler(
         optimizer=optimizer,
@@ -478,10 +494,20 @@ def trainer(cfg: Config):
                     logits.view(-1, model_config.vocab_size), batch["labels"].view(-1)
                 )
 
-                # Compute gradient and apply clipping
+                # Compute gradient
                 accelerator.backward(train_loss)
-                if cfg.trainer.gradient_checkpointing:
-                    accelerator.clip_grad_norm_(model.parameters(), 1.0)
+
+                max_grad_norm = (
+                    cfg.trainer.gradient_clipping
+                    if cfg.trainer.gradient_clipping is not None
+                    else (1.0 if cfg.trainer.gradient_checkpointing else None)
+                )
+
+                grad_norm_pre_clip = None
+                if max_grad_norm is not None and max_grad_norm > 0:
+                    grad_norm_pre_clip = accelerator.clip_grad_norm_(
+                        model.parameters(), max_grad_norm
+                    )
 
                 # Log metrics
                 pbar.update(1)
@@ -508,9 +534,14 @@ def trainer(cfg: Config):
                 scheduler.step()
 
                 if metrics["train/steps"] % cfg.wandb.log_interval == 0:
-                    # https://deepspeed.readthedocs.io/en/latest/zero3.html#deepspeed.utils.safe_get_full_grad
+                    if grad_norm_pre_clip is not None:
+                        metrics["train/grad_norm"] = float(
+                            grad_norm_pre_clip.item()
+                            if isinstance(grad_norm_pre_clip, torch.Tensor)
+                            else grad_norm_pre_clip
+                        )
+
                     if accelerator.distributed_type is DistributedType.DEEPSPEED:
-                        metrics["train/grad_norm"] = model.get_global_grad_norm()
                         metrics["train/weight_norm"] = (
                             sum(
                                 [
@@ -520,15 +551,16 @@ def trainer(cfg: Config):
                             )
                             ** 0.5
                         ).item()
-                    # DDP
                     else:
-                        metrics["train/grad_norm"] = (
-                            sum([p.grad.norm(2) ** 2 for p in model.parameters()])
-                            ** 0.5
-                        ).item()
                         metrics["train/weight_norm"] = (
                             sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5
                         ).item()
+
+                    # Add MuonClip metrics if available
+                    if hasattr(optimizer, "get_metrics"):
+                        muonclip_metrics = optimizer.get_metrics()
+                        for key, value in muonclip_metrics.items():
+                            metrics[key] = value
 
                     metrics["train/learning_rate"] = optimizer.param_groups[0]["lr"]
                     metrics.log(accelerator)

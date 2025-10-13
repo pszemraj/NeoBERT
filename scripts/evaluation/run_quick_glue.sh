@@ -11,11 +11,15 @@ NC='\033[0m' # No Color
 
 # Small GLUE tasks only (in order of dataset size)
 SMALL_TASKS=(
-    "rte"     # ~2.5k train examples  
-    "mrpc"    # ~3.7k train examples
-    "stsb"    # ~5.7k train examples
-    "cola"    # ~8.5k train examples
+    "rte"
+    "mrpc"
+    "stsb"
+    "cola"
 )
+
+CONFIG_DIR="${1:-configs/glue}"
+echo "Using config directory: ${CONFIG_DIR}"
+echo ""
 
 echo -e "${YELLOW}=========================================="
 echo "NeoBERT-100m Quick GLUE Evaluation"
@@ -33,10 +37,16 @@ FAILED=()
 
 # Run each small task
 for task in "${SMALL_TASKS[@]}"; do
+    CONFIG_PATH="${CONFIG_DIR}/${task}.yaml"
+    if [ ! -f "$CONFIG_PATH" ]; then
+        echo "Config not found for $task at $CONFIG_PATH. Skipping."
+        continue
+    fi
+
     echo -e "${YELLOW}Running $task...${NC}"
     
     # Run the evaluation
-    if python scripts/evaluation/run_glue.py --config configs/glue/${task}.yaml 2>&1 | tee logs/glue_${task}_quick.log; then
+    if python scripts/evaluation/run_glue.py --config "$CONFIG_PATH" 2>&1 | tee logs/glue_${task}_quick.log; then
         echo -e "${GREEN}✓ $task completed successfully${NC}"
         PASSED+=("$task")
         
@@ -64,7 +74,7 @@ fi
 echo ""
 echo "Results saved to:"
 for task in "${SMALL_TASKS[@]}"; do
-    echo "  - outputs/glue/neobert-100m/$task/"
+echo "  - outputs/glue/neobert-100m/$task/"
 done
 
 # Check if any model checkpoints were incorrectly saved
