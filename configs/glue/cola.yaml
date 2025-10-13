@@ -24,12 +24,12 @@ model:
 glue:
   task_name: "cola"
   num_labels: 2
-  max_seq_length: 128  # Standard for CoLA/SST-2
+  max_seq_length: 512  # Standard for CoLA/SST-2
 
 # Tokenizer
 tokenizer:
   name: "bert-base-uncased"
-  max_length: 128
+  max_length: 512
 
 # Training configuration - following best practices for GLUE
 trainer:
@@ -40,7 +40,7 @@ trainer:
   per_device_eval_batch_size: 32
   gradient_accumulation_steps: 1
   # Evaluation and saving
-  eval_strategy: "steps"
+  eval_strategy: "epoch"
   eval_steps: 200  # Reasonable for CoLA dataset size
   save_model: false  # Disable model checkpoint saving for GLUE evaluation
   save_strategy: "no"  # Don't save checkpoints
