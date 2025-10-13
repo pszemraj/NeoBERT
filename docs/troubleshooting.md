@@ -11,6 +11,12 @@ Common issues and their solutions when training and using NeoBERT.
 
 ## Training Issues
 
+### Configuration & CLI Issues
+
+- **Config validation errors**: verify YAML indentation, required fields, and value types. Run with `--debug` to print the resolved config and validation warnings.
+- **Import errors**: ensure your virtual environment has `pip install -e .[dev]` applied and that you are inside the project root before invoking scripts.
+- **Slow data loading**: increase `trainer.dataloader_num_workers`, place datasets on faster storage, or enable streaming mode for giant corpora.
+
 ### Model Checkpoint Corruption
 
 **Problem**: Model checkpoints appear to train well (good metrics) but fail during inference after export.
