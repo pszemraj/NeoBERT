@@ -56,20 +56,22 @@ for task in "${TASKS[@]}"; do
     fi
 
     # Determine expected output directory from config
-    OUTPUT_PATH="$(python - <<PY
+    OUTPUT_PATH="$(python - "$CONFIG_PATH" <<'PY'
 import re
+import sys
 from pathlib import Path
-config_path = Path(r"""${CONFIG_PATH}""")
+
+config_path = Path(sys.argv[1])
 text = config_path.read_text()
 try:
     import yaml  # type: ignore
 except ImportError:
-    match = re.search(r'^\\s*output_dir:\\s*["\\\']?(.*?)["\\\']?\\s*$', text, flags=re.MULTILINE)
-    print(match.group(1) if match else \"\")
+    match = re.search(r'^\s*output_dir:\s*["\']?(.*?)["\']?\s*$', text, flags=re.MULTILINE)
+    print(match.group(1) if match else '', end='')
 else:
     data = yaml.safe_load(text)
     trainer = data.get('trainer', {}) if isinstance(data, dict) else {}
-    print(trainer.get('output_dir', '') or '')
+    print(trainer.get('output_dir', '') or '', end='')
 PY
 )"
     if [ -z "${OUTPUT_PATH}" ]; then
