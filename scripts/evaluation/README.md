@@ -31,7 +31,7 @@ bash scripts/run_all_glue.sh
 
 ### Flash Attention Compatibility
 
-⚠️ **Flash attention is NOT supported for GLUE evaluation** due to memory alignment issues with variable-length sequences. The GLUE trainer automatically disables flash attention and uses eager attention instead. This is expected behavior and does not affect accuracy.
+⚠️ GLUE evaluation always runs with eager attention. See [Flash Attention issues during GLUE evaluation](../../docs/troubleshooting.md#flash-attention-issues-during-glue-evaluation) for background and mitigation steps.
 
 ### Model Checkpoint Saving
 
@@ -46,6 +46,7 @@ trainer:
 ### Pretrained Model Requirements
 
 GLUE evaluation **requires** a pretrained model. The trainer includes safety checks to prevent accidentally running with random weights:
+
 - Validates `pretrained_config_path` exists
 - Checks checkpoint directory and files
 - Verifies weights loaded properly
@@ -53,21 +54,25 @@ GLUE evaluation **requires** a pretrained model. The trainer includes safety che
 ### Script-Specific Details
 
 **`run_glue.py`:**
+
 - Automatically handles task-specific metrics (Matthews correlation for CoLA, F1 for MRPC, etc.)
 - Supports epoch-based or step-based evaluation strategies
 - Saves results as `all_results_step_*.json`
 
 **`run_mteb.py`:**
+
 - Evaluates across 56+ tasks in 8 categories
 - Requires sentence-transformers package
 - Outputs results in MTEB leaderboard format
 
 **`pseudo_perplexity.py`:**
+
 - Calculates MLM perplexity using dynamic masking
 - Useful for comparing pretraining quality
 - Supports both validation and test sets
 
 **`avg_mteb.py`:**
+
 - Aggregates MTEB results across multiple runs
 - Calculates mean and std deviation
 - Outputs LaTeX-formatted tables

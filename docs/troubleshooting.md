@@ -17,6 +17,15 @@ Common issues and their solutions when training and using NeoBERT.
 - **Import errors**: ensure your virtual environment has `pip install -e .[dev]` applied and that you are inside the project root before invoking scripts.
 - **Slow data loading**: increase `trainer.dataloader_num_workers`, place datasets on faster storage, or enable streaming mode for giant corpora.
 
+### Flash Attention Issues During GLUE Evaluation
+
+- **Symptom**: Launching GLUE evaluation with Flash Attention enabled produces runtime errors or crashes.
+- **Cause**: GLUE tasks use variable-length batches that are currently incompatible with Flash Attention's alignment requirements.
+- **Solution**:
+  1. When using the provided GLUE scripts/configs, no action is needed—Flash Attention is automatically disabled for you.
+  2. If you author custom launchers, set `model.flash_attention: false` (or pass `--model.flash_attention false`) before evaluation.
+  3. Restart the run after toggling the setting; mixed Flash Attention/eager runs in the same process can leave partially initialized CUDA kernels.
+
 ### Model Checkpoint Corruption
 
 **Problem**: Model checkpoints appear to train well (good metrics) but fail during inference after export.
@@ -40,6 +49,7 @@ This issue was fixed in `trainer.py` and `trainer_phase_2.py`.
 **Problem**: Out of memory errors during training.
 
 **Solutions**:
+
 1. Enable gradient checkpointing: `--model.gradient_checkpointing true`
 2. Reduce batch size: `--trainer.per_device_train_batch_size 16`
 3. Use gradient accumulation: `--trainer.gradient_accumulation_steps 4`
@@ -63,6 +73,7 @@ attn_mask=attention_mask.bool() if attention_mask is not None else None
 **Problem**: MLM head weights not found after export.
 
 **Solution**: Check that the export script correctly maps weights:
+
 - Training format: `decoder.weight`, `decoder.bias`
 - These should be preserved at the top level in HF format
 
@@ -75,7 +86,7 @@ attn_mask=attention_mask.bool() if attention_mask is not None else None
 **Causes and Solutions**:
 
 1. **Metaspace Tokenizer Issue**: The tokenizer adds extra space tokens before `[MASK]`
-   
+
    ```python
    # Remove extra space tokens (ID 454) before mask tokens
    cleaned_ids = []
@@ -94,6 +105,7 @@ attn_mask=attention_mask.bool() if attention_mask is not None else None
 **Problem**: Model predictions are random or nonsensical.
 
 **Checks**:
+
 1. Verify training completed successfully with good metrics
 2. Check that decoder weights are non-zero and have reasonable statistics
 3. Ensure proper tokenizer is being used (should match training)
@@ -104,6 +116,7 @@ attn_mask=attention_mask.bool() if attention_mask is not None else None
 ### Slow Inference
 
 **Solutions**:
+
 1. Use batch processing for multiple inputs
 2. Enable CUDA if available: `model.cuda()`
 3. Use half precision: `model.half()` or `torch.autocast`
@@ -112,6 +125,7 @@ attn_mask=attention_mask.bool() if attention_mask is not None else None
 ### High Memory Usage
 
 **Solutions**:
+
 1. Use gradient checkpointing during fine-tuning
 2. Clear cache between batches: `torch.cuda.empty_cache()`
 3. Reduce max sequence length if possible
@@ -124,6 +138,7 @@ attn_mask=attention_mask.bool() if attention_mask is not None else None
 **Problem**: Flash Attention fails to install or isn't detected.
 
 **Solution**:
+
 ```bash
 # Build from source for latest GPUs
 pip install flash-attn --no-build-isolation
@@ -134,6 +149,7 @@ pip install flash-attn --no-build-isolation
 **Problem**: XFormers not working with your PyTorch version.
 
 **Solution**:
+
 ```bash
 # Build from source
 pip install -v --no-build-isolation git+https://github.com/facebookresearch/xformers.git@main

@@ -24,16 +24,12 @@ python scripts/export-hf/validate.py outputs/neobert_100m_100k/hf/neobert_100m_1
 
 ### Metaspace Tokenizer Handling
 
-NeoBERT uses a Metaspace tokenizer with `prepend_scheme="always"`. When using `[MASK]` directly in text (vs. masking existing tokens during training), an extra space token (▁, ID 454) is inserted that needs special handling:
-
-```python
-# The export script automatically generates code to handle this in the README
-# See the exported model's README for the complete implementation
-```
+Some of the default configs for pretraining use [a Metaspace tokenizer](https://huggingface.co/BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp) with `prepend_scheme="always"`. The export script emits guidance for cleaning up the extra space token (▁, ID 454) that appears before `[MASK]`. Refer to [MLM always predicts the same token](../../docs/troubleshooting.md#mlm-always-predicts-same-token) for the canonical workaround.
 
 ### Validation Test Details
 
 The validation script (`validate.py`) performs these checks:
+
 - File presence validation
 - Model loading without initialization warnings
 - Tokenizer functionality
@@ -44,11 +40,13 @@ The validation script (`validate.py`) performs these checks:
 ### Technical Implementation Details
 
 **Weight Mapping Logic:**
+
 - Training checkpoints with `model.*` prefix are preserved for HuggingFace compatibility
 - LM head weights (`model.decoder.*`) are mapped to top-level `decoder.*`
 - SwiGLU concatenated `w12` weights are preserved without splitting
 
 **Config Field Mappings:**
+
 - `max_position_embeddings` → `max_length`
 - `layer_norm_eps` → `norm_eps`
 - Training metadata preserved in `training_info` field
@@ -56,9 +54,8 @@ The validation script (`validate.py`) performs these checks:
 ### Known Issues & Solutions
 
 **MLM Always Predicting Same Token:**
-- Ensure model unwrapped from accelerator before saving: `accelerator.unwrap_model(model).state_dict()`
-- Handle Metaspace tokenizer space tokens (ID 454) before [MASK]
-- Verify attention_mask None checking in HF model forward pass
+
+- Follow the mitigation steps in [docs/troubleshooting.md](../../docs/troubleshooting.md#mlm-always-predicts-same-token) (accelerator unwrap, Metaspace cleanup, attention-mask guard)
 
 **Initialization Warnings:**
 Check missing weights with validation script, verify architecture match between training and export.

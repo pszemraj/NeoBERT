@@ -4,7 +4,6 @@ Core documentation for training, evaluating, and using NeoBERT models.
 
 ## Essential Guides
 
-- **[Quick Start](quickstart.md)** - Get up and running in 5 minutes
 - **[Training](training.md)** - Pretraining and fine-tuning models
 - **[Evaluation](evaluation.md)** - Running GLUE and MTEB benchmarks
 - **[Export](export.md)** - Exporting models to HuggingFace format
