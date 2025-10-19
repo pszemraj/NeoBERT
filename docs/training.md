@@ -2,8 +2,21 @@
 
 This guide covers pretraining and fine-tuning NeoBERT models.
 
-> [!NOTE]
-> See [/scripts/README.md](/scripts/README.md) for script usage details and [/scripts/pretraining/](/scripts/pretraining/) for training script implementations.
+> [!TIP]
+> Use [`scripts/README.md`](/scripts/README.md) as the directory map for CLI entry points. The sections below describe how to run the key scripts and how they relate to the configuration system.
+
+## Script Entry Points
+
+| Script                                                             | Purpose                                                                                                                | Primary Reference                                            |
+| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `scripts/pretraining/pretrain.py`                                  | Full NeoBERT pretraining loop with DeepSpeed, FlashAttention, optional streaming datasets, and dot-notation overrides. | This guide (Pretraining, Monitoring Training, Training Tips) |
+| `scripts/pretraining/preprocess.py`                                | Tokenize raw corpora into training-ready shards that match your config’s tokenizer choices.                            | Dataset Preparation                                          |
+| `scripts/pretraining/longer_seq.py`                                | Continue pretraining with longer context lengths without starting from scratch.                                        | Pretraining → Vocabulary & Sequence Extensions               |
+| `scripts/contrastive/download.py`                                  | Fetch contrastive datasets used in SimCSE-style workflows.                                                             | Contrastive Learning                                         |
+| `scripts/contrastive/preprocess.py`                                | Normalize and tokenize downloaded contrastive corpora.                                                                 | Contrastive Learning                                         |
+| `scripts/contrastive/finetune.py`                                  | Run contrastive fine-tuning on top of pretrained checkpoints.                                                          | Contrastive Learning                                         |
+| `scripts/evaluation/run_glue.py`, `scripts/evaluation/run_mteb.py` | Evaluation entry points once training is complete.                                                                     | [Evaluation Guide](/docs/evaluation.md)                     |
+| `scripts/export-hf/export.py`, `scripts/export-hf/validate.py`     | Export checkpoints to Hugging Face format and validate the outputs.                                                    | [Export Guide](/docs/export.md)                             |
 
 ## Pretraining
 
@@ -105,6 +118,7 @@ When training from scratch, NeoBERT automatically rounds the vocabulary size to 
    - HuggingFace exports
 
 Example with ModernBERT tokenizer:
+
 - Base vocab_size: 50280
 - With special tokens: 50373
 - Optimized (rounded): 50432
@@ -159,6 +173,44 @@ Key metrics tracked:
 - `eval/loss`: Validation loss (if eval enabled)
 - GPU memory usage and throughput
 
+### Experiment Tooling
+
+**Accelerate (multi-GPU launch)**
+Use `accelerate launch` when you need distributed training without writing bespoke launcher scripts:
+
+```bash
+accelerate launch scripts/pretraining/pretrain.py \
+    --config configs/pretrain_neobert.yaml \
+    --trainer.per_device_train_batch_size 16 \
+    --trainer.gradient_accumulation_steps 4
+```
+
+Create your accelerate config with `accelerate config` before launching to capture cluster-specific defaults.
+
+**Environment variables for secrets and caches**
+Keep API tokens and paths out of configs:
+
+```bash
+export WANDB_PROJECT=neobert-pretraining
+export WANDB_API_KEY=...  # optional if already stored by wandb login
+export HF_TOKEN=...       # for private model download/push
+export HF_DATASETS_CACHE=/fast/cache/datasets
+
+python scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml
+```
+
+Most scripts also read `NEOBERT_DEBUG=1` to force verbose logging regardless of CLI flags.
+
+**Hugging Face Hub publishing**
+After training, you can push directly from the Trainer or custom code:
+
+```python
+model.push_to_hub("my-username/my-neobert-model")
+tokenizer.push_to_hub("my-username/my-neobert-model")
+```
+
+For full export with metadata and validation, use the dedicated workflow in `docs/export.md`.
+
 ### Checkpointing
 
 Checkpoints are saved in DeepSpeed format:
@@ -203,12 +255,12 @@ glue:
   pretrained_checkpoint: 100000  # or "latest"
 ```
 
-See [Evaluation Guide](evaluation.md) for detailed GLUE instructions.
+See [Evaluation Guide](/docs/evaluation.md) for detailed GLUE instructions.
 
 ### Contrastive Learning (SimCSE)
 
 ```bash
-python scripts/training/contrastive_learning.py \
+python scripts/contrastive/finetune.py \
     --config configs/contrastive_neobert.yaml \
     --model.pretrained_checkpoint_dir outputs/neobert_100m \
     --model.pretrained_checkpoint 100000
@@ -307,6 +359,10 @@ scheduler:
 ### Enable Debug Logging
 
 ```bash
+# Preferred: enable verbose mode per invocation
+python scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml --debug
+
+# Or set the environment variable to keep debug logging on for multiple runs
 export NEOBERT_DEBUG=1
 python scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml
 ```
@@ -340,21 +396,6 @@ with torch.profiler.profile(
 ) as prof:
     output = model(**batch)
 print(prof.key_averages().table(sort_by="cuda_time_total"))
-```
-
-## Testing Your Setup
-
-Before full training, test with a tiny model:
-
-```bash
-# Quick test run (5 minutes)
-python scripts/pretraining/pretrain.py \
-    --config tests/configs/pretraining/test_tiny_pretrain.yaml
-
-# This uses:
-# - Tiny model (2 layers, 128 hidden size)
-# - Small dataset sample
-# - 100 training steps
 ```
 
 ## Dataset Preparation
@@ -441,8 +482,18 @@ torchrun --nproc_per_node=8 \
          scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml
 ```
 
+## Developing New Scripts
+
+When adding new automation in `scripts/`, follow these guidelines:
+
+- **Reuse the configuration loader**: accept `--config` plus `argparse` passthrough for dot-notation overrides (`parser.parse_known_args()`).
+- **Support `--debug`**: toggle verbose logging and surface extra assertions when enabled.
+- **Document usage**: include docstrings and example CLI invocations; if the script has multiple modes, add a short section to the relevant documentation page.
+- **Handle errors cleanly**: validate inputs, print actionable messages, and exit with non-zero codes on failure.
+- **Add regression coverage**: prefer adding or updating tests under `tests/` (or tiny configs in `tests/configs/`) to keep the workflow reproducible.
+
 ## Next Steps
 
-- Learn about [Evaluation](evaluation.md) for GLUE and MTEB
-- Read [Architecture Guide](architecture.md) for model details
-- See [Configuration Guide](configuration.md) for config system
+- Learn about [Evaluation](/docs/evaluation.md) for GLUE and MTEB
+- Read [Architecture Guide](/docs/architecture.md) for model details
+- See [Configuration Guide](/docs/configuration.md) for config system

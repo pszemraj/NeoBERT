@@ -57,7 +57,7 @@ optimizer:
 
   # Standard parameters (also used by Adam for 1D params)
   weight_decay: 0.01
-  betas: [0.9, 0.98]
+  betas: [0.9, 0.95] # follow beta2 in NeoBERT
   eps: 1e-8
 
   # NOTE: if muon_config is omitted, MuonClip defaults are used.

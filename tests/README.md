@@ -1,37 +1,9 @@
 # NeoBERT Test Suite
 
-This directory houses the automated regression suite for NeoBERT.
+Automated regression tests for NeoBERT live here—unit, integration, and pipeline coverage.
 
-> [!NOTE]
-> For the complete testing guide—including workflow details, writing new tests, and troubleshooting—visit [/docs/testing.md](/docs/testing.md). Configuration-specific documentation lives in [/tests/configs/README.md](/tests/configs/README.md).
+> [!TIP]
+> For setup, CLI options, and authoring guidance, see [docs/testing.md](/docs/testing.md). Tiny smoke-test configs live in `tests/configs/`.
 
-## Layout
-
-```
-tests/
-├── config/          # Configuration system tests
-├── model/           # Model functionality tests
-├── training/        # Training pipeline tests
-├── evaluation/      # Evaluation pipeline tests
-├── integration/     # End-to-end integration tests
-└── run_tests.py     # Unified test runner
-```
-
-## Quick Commands
-
-```bash
-# Run the full suite (CPU-friendly defaults)
-python tests/run_tests.py
-
-# Target a specific area
-python tests/run_tests.py --test-dir config
-
-# Increase or decrease verbosity
-python tests/run_tests.py --verbose
-python tests/run_tests.py --quiet
-```
-
-## Notes
-
-- Tiny configs in `tests/configs/` keep runtimes short and avoid GPU requirements.
-- Some scenarios skip automatically when optional deps (e.g., `xformers`) are absent.
+- Main entry point: `python tests/run_tests.py`
+- Target specific areas with `--test-dir`, or adjust verbosity with `--verbose/--quiet`

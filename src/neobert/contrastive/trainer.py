@@ -1,13 +1,16 @@
+import logging
 import os
 import re
 import shutil
 import signal
 import sys
+from dataclasses import asdict
 
 import numpy
 
 # PyTorch
 import torch
+import wandb
 from accelerate import Accelerator
 from accelerate.utils import DistributedType, ProjectConfiguration, set_seed
 from datasets import load_from_disk
@@ -29,6 +32,8 @@ from ..model import NeoBERT, NeoBERTConfig
 from ..tokenizer import get_tokenizer
 from .datasets import get_bsz
 from .loss import SupConLoss
+
+logger = logging.getLogger(__name__)
 
 # Our metric object and model
 from .metrics import Metrics
@@ -129,13 +134,14 @@ def trainer(cfg: Config):
     # Initialise the wandb run and pass wandb parameters
     if cfg.wandb.mode != "disabled":
         os.makedirs(cfg.wandb.dir, exist_ok=True)
+        config_dict = asdict(cfg)
         accelerator.init_trackers(
             project_name=cfg.wandb.project,
             init_kwargs={
                 "wandb": {
                     "name": cfg.wandb.name,
                     "entity": cfg.wandb.entity,
-                    "config": cfg.__dict__,
+                    "config": config_dict,
                     "tags": cfg.wandb.tags,
                     "dir": cfg.wandb.dir,
                     "mode": cfg.wandb.mode,
@@ -143,6 +149,24 @@ def trainer(cfg: Config):
                 }
             },
         )
+        if accelerator.is_main_process and wandb.run is not None:
+            wandb.run.config.update(config_dict, allow_val_change=True)
+            config_path = getattr(cfg, "config_path", None)
+            if config_path:
+                abs_config_path = os.path.abspath(config_path)
+                if os.path.isfile(abs_config_path):
+                    artifact = wandb.Artifact(
+                        name=f"{wandb.run.id}-config",
+                        type="config",
+                        metadata={"source": abs_config_path},
+                    )
+                    artifact.add_file(abs_config_path)
+                    wandb.run.log_artifact(artifact)
+                else:
+                    logger.warning(
+                        "Configured config_path '%s' not found; skipping wandb artifact upload",
+                        config_path,
+                    )
 
     # Set the seed
     set_seed(cfg.seed)
@@ -263,6 +287,27 @@ def trainer(cfg: Config):
 
     for key in keys[1:]:
         dataloaders[key] = accelerator.prepare(dataloaders[key])
+
+    if cfg.wandb.mode != "disabled" and accelerator.is_main_process:
+        wandb_watch = os.environ.get("WANDB_WATCH")
+        if wandb_watch is not None:
+            watch_mode = wandb_watch.strip().lower()
+            if watch_mode in {"", "false", "0", "none", "off"}:
+                watch_mode = None
+            elif watch_mode == "weights":
+                watch_mode = "parameters"
+            elif watch_mode not in {"gradients", "parameters", "all"}:
+                accelerator.print(
+                    f"Unrecognized WANDB_WATCH value '{wandb_watch}'; skipping wandb.watch()"
+                )
+                watch_mode = None
+
+            if watch_mode:
+                wandb.watch(
+                    accelerator.unwrap_model(model),
+                    log=watch_mode,
+                    log_freq=getattr(cfg.wandb, "log_interval", 100),
+                )
 
     # Loss function
     train_loss_fn = SupConLoss()

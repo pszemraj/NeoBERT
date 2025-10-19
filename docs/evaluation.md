@@ -12,7 +12,7 @@ This guide covers evaluating NeoBERT models on various benchmarks.
 GLUE evaluation requires a pretrained NeoBERT model. You can:
 
 1. Use an existing checkpoint from pretraining
-2. Train a new model (see [Training Guide](training.md))
+2. Train a new model (see [Training Guide](/docs/training.md))
 3. Test with random weights using `--glue.allow_random_weights true`
 
 ### Running Single GLUE Task
@@ -22,8 +22,9 @@ GLUE evaluation requires a pretrained NeoBERT model. You can:
 python scripts/evaluation/run_glue.py --config configs/glue/cola.yaml
 
 # Using alternate config directories
-python scripts/evaluation/run_quick_glue.sh configs/glue
-python scripts/evaluation/run_all_glue.sh configs/glue
+bash scripts/evaluation/run_quick_glue.sh configs/glue
+bash scripts/evaluation/run_all_glue.sh configs/glue
+```
 
 ### Muon-pretrained checkpoints _(optional)_
 
@@ -59,20 +60,19 @@ optimizer:
 
 Save the edited YAML (or copy to a new directory) and pass that location to the quick/all GLUE helper scripts, e.g. `bash scripts/evaluation/run_all_glue.sh path/to/muon-configs`. This mirrors the Muon pretraining setup and follows [Amsel et al., 2025](https://arxiv.org/abs/2502.16982), which reports improved downstream performance when Muon is reused during fine-tuning.
 
+```bash
 # Override checkpoint path
-
 python scripts/evaluation/run_glue.py \
     --config configs/glue/cola.yaml \
     --glue.pretrained_checkpoint_dir ./outputs/your_checkpoint \
     --glue.pretrained_checkpoint 50000
-
 ```
 
 ### Running All GLUE Tasks
 
 ```bash
 # Run full GLUE evaluation suite
-bash scripts/run_full_glue.sh
+bash scripts/evaluation/run_all_glue.sh
 
 # Tasks run in order from smallest to largest for quick feedback:
 # WNLI, RTE, MRPC, STS-B, CoLA, SST-2, QNLI, QQP, MNLI
@@ -146,15 +146,15 @@ After running GLUE evaluation, use the summary script:
 
 ```bash
 # Summarize results from a specific path
-python scripts/summarize_glue.py outputs/glue/neobert-100m
+python scripts/evaluation/summarize_glue.py outputs/glue/neobert-100m
 
 # Compare against different baselines
-python scripts/summarize_glue.py outputs/glue/neobert-100m --baseline roberta-base
-python scripts/summarize_glue.py outputs/glue/neobert-100m --baseline bert-large
-python scripts/summarize_glue.py outputs/glue/neobert-100m --baseline none
+python scripts/evaluation/summarize_glue.py outputs/glue/neobert-100m --baseline roberta-base
+python scripts/evaluation/summarize_glue.py outputs/glue/neobert-100m --baseline bert-large
+python scripts/evaluation/summarize_glue.py outputs/glue/neobert-100m --baseline none
 
 # Works with any output directory structure
-python scripts/summarize_glue.py ./experiments/test_123/glue_results
+python scripts/evaluation/summarize_glue.py ./experiments/test_123/glue_results
 ```
 
 ### Output Structure
@@ -377,7 +377,7 @@ Need to convert a NeoBERT checkpoint to HuggingFace format? Follow the dedicated
 
 ## Next Steps
 
-- Review [Training Guide](training.md) for pretraining details
-- Check [Configuration Guide](configuration.md) for config system
-- Visit [Export Guide](export.md) for HuggingFace conversion
-- See [Testing Guide](testing.md) for running tests
+- Review [Training Guide](/docs/training.md) for pretraining details
+- Check [Configuration Guide](/docs/configuration.md) for config system
+- Visit [Export Guide](/docs/export.md) for HuggingFace conversion
+- See [Testing Guide](/docs/testing.md) for running tests

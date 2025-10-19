@@ -2,10 +2,10 @@
 """Summarize GLUE results from output directories.
 
 Usage:
-    python scripts/summarize_glue.py outputs/glue/neobert-100m
-    python scripts/summarize_glue.py ./outputs/experiment_xyz/glue_results
-    python scripts/summarize_glue.py outputs/glue/neobert-100m --baseline roberta-base
-    python scripts/summarize_glue.py  # Default: outputs/glue/neobert-100m
+    python scripts/evaluation/summarize_glue.py outputs/glue/neobert-100m
+    python scripts/evaluation/summarize_glue.py ./outputs/experiment_xyz/glue_results
+    python scripts/evaluation/summarize_glue.py outputs/glue/neobert-100m --baseline roberta-base
+    python scripts/evaluation/summarize_glue.py  # Default: outputs/glue/neobert-100m
 """
 
 import argparse

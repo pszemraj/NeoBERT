@@ -2,9 +2,11 @@ import json
 import logging
 import os
 import re
+from dataclasses import asdict
 
 # PyTorch
 import torch
+import wandb
 from accelerate import Accelerator
 from accelerate.utils import (
     DistributedDataParallelKwargs,
@@ -126,13 +128,14 @@ def trainer(cfg: Config):
     # Initialise the wandb run and pass wandb parameters
     if cfg.wandb.mode != "disabled":
         os.makedirs(cfg.wandb.dir, exist_ok=True)
+        config_dict = asdict(cfg)
         accelerator.init_trackers(
             project_name=cfg.wandb.project,
             init_kwargs={
                 "wandb": {
                     "name": cfg.wandb.name,
                     "entity": cfg.wandb.entity,
-                    "config": cfg.__dict__,
+                    "config": config_dict,
                     "tags": cfg.wandb.tags,
                     "dir": cfg.wandb.dir,
                     "mode": cfg.wandb.mode,
@@ -140,6 +143,24 @@ def trainer(cfg: Config):
                 }
             },
         )
+        if accelerator.is_main_process and wandb.run is not None:
+            wandb.run.config.update(config_dict, allow_val_change=True)
+            config_path = getattr(cfg, "config_path", None)
+            if config_path:
+                abs_config_path = os.path.abspath(config_path)
+                if os.path.isfile(abs_config_path):
+                    artifact = wandb.Artifact(
+                        name=f"{wandb.run.id}-config",
+                        type="config",
+                        metadata={"source": abs_config_path},
+                    )
+                    artifact.add_file(abs_config_path)
+                    wandb.run.log_artifact(artifact)
+                else:
+                    logger.warning(
+                        "Configured config_path '%s' not found; skipping wandb artifact upload",
+                        config_path,
+                    )
 
     # Set the seed
     set_seed(cfg.seed)
@@ -395,6 +416,28 @@ def trainer(cfg: Config):
         scheduler,
     )
 
+    if cfg.wandb.mode != "disabled" and accelerator.is_main_process:
+        wandb_watch = os.environ.get("WANDB_WATCH")
+        if wandb_watch is not None:
+            watch_mode = wandb_watch.strip().lower()
+            if watch_mode in {"", "false", "0", "none", "off"}:
+                watch_mode = None
+            elif watch_mode == "weights":
+                watch_mode = "parameters"
+            elif watch_mode not in {"gradients", "parameters", "all"}:
+                logger.warning(
+                    "Unrecognized WANDB_WATCH value '%s'; skipping wandb.watch()",
+                    wandb_watch,
+                )
+                watch_mode = None
+
+            if watch_mode:
+                wandb.watch(
+                    accelerator.unwrap_model(model),
+                    log=watch_mode,
+                    log_freq=getattr(cfg.wandb, "log_interval", 100),
+                )
+
     # Loss function
     train_loss_fn = CrossEntropyLoss()
 
@@ -497,17 +540,46 @@ def trainer(cfg: Config):
                 # Compute gradient
                 accelerator.backward(train_loss)
 
+                # Measure gradient norm prior to optional clipping so we always log it
+                grad_norm_value = None
+                if accelerator.distributed_type is DistributedType.DEEPSPEED:
+                    get_global_grad = getattr(model, "get_global_grad_norm", None)
+                    if callable(get_global_grad):
+                        grad_norm = get_global_grad()
+                        if isinstance(grad_norm, torch.Tensor):
+                            grad_norm_value = float(grad_norm.item())
+                        elif grad_norm is not None:
+                            grad_norm_value = float(grad_norm)
+                else:
+                    grad_norm_sq = None
+                    for param in model.parameters():
+                        if param.grad is None:
+                            continue
+                        param_norm = param.grad.norm(2)
+                        grad_norm_sq = (
+                            param_norm**2
+                            if grad_norm_sq is None
+                            else grad_norm_sq + param_norm**2
+                        )
+                    if grad_norm_sq is not None:
+                        grad_norm_value = float(torch.sqrt(grad_norm_sq).item())
+
                 max_grad_norm = (
                     cfg.trainer.gradient_clipping
                     if cfg.trainer.gradient_clipping is not None
                     else (1.0 if cfg.trainer.gradient_checkpointing else None)
                 )
 
-                grad_norm_pre_clip = None
                 if max_grad_norm is not None and max_grad_norm > 0:
                     grad_norm_pre_clip = accelerator.clip_grad_norm_(
                         model.parameters(), max_grad_norm
                     )
+                    if grad_norm_value is None and grad_norm_pre_clip is not None:
+                        grad_norm_value = float(
+                            grad_norm_pre_clip.item()
+                            if isinstance(grad_norm_pre_clip, torch.Tensor)
+                            else grad_norm_pre_clip
+                        )
 
                 # Log metrics
                 pbar.update(1)
@@ -534,12 +606,8 @@ def trainer(cfg: Config):
                 scheduler.step()
 
                 if metrics["train/steps"] % cfg.wandb.log_interval == 0:
-                    if grad_norm_pre_clip is not None:
-                        metrics["train/grad_norm"] = float(
-                            grad_norm_pre_clip.item()
-                            if isinstance(grad_norm_pre_clip, torch.Tensor)
-                            else grad_norm_pre_clip
-                        )
+                    if grad_norm_value is not None:
+                        metrics["train/grad_norm"] = grad_norm_value
 
                     if accelerator.distributed_type is DistributedType.DEEPSPEED:
                         metrics["train/weight_norm"] = (

@@ -8,6 +8,10 @@
 - [NeoBERT](#neobert)
   - [Description](#description)
   - [Get started](#get-started)
+    - [Install](#install)
+    - [Verify your setup](#verify-your-setup)
+    - [Quick commands](#quick-commands)
+    - [Next steps](#next-steps)
   - [How to use](#how-to-use)
     - [For Text Embeddings](#for-text-embeddings)
     - [For Masked Language Modeling](#for-masked-language-modeling)
@@ -16,11 +20,7 @@
   - [License](#license)
   - [Citation](#citation)
   - [Training and Development](#training-and-development)
-    - [Configuration System](#configuration-system)
     - [Repository Structure](#repository-structure)
-    - [Quick Start for Training](#quick-start-for-training)
-    - [Testing](#testing)
-    - [Exporting Models to HuggingFace](#exporting-models-to-huggingface)
 
 ---
 
@@ -30,45 +30,48 @@ NeoBERT is a **next-generation encoder** model for English text representation, 
 
 - Paper: [paper](https://arxiv.org/abs/2502.19587)
 - Model: [huggingface](https://huggingface.co/chandar-lab/NeoBERT)
-- **Documentation: [docs/](docs/README.md)**
+- **Documentation: [docs/](/docs/README.md)**
 
 ## Get started
 
-> [!NOTE]
-> See the [comprehensive quickstart doc](/docs/quickstart.md) in `docs/`
-
-Ensure you have the following dependencies installed:
-
-```bash
-pip install transformers torch  # Core dependencies
-# For GPU optimization (build from source for latest GPUs):
-# pip install flash-attn --no-build-isolation
-# pip install -v --no-build-isolation git+https://github.com/facebookresearch/xformers.git@main
-```
-
-If you would like to use sequence packing (un-padding), you will need to also install flash-attention:
-
-```bash
-pip install transformers torch  # Core dependencies
-# For GPU optimization (build from source for latest GPUs):
-# pip install flash-attn --no-build-isolation
-# pip install -v --no-build-isolation git+https://github.com/facebookresearch/xformers.git@main flash_attn
-```
-
-It is **much safer** to first install as stated above. Then, you can clone this repo and install it in editable mode:
+### Install
 
 ```bash
 git clone https://github.com/pszemraj/NeoBERT.git
 cd NeoBERT
-pip install -e .
+pip install -e .[dev]  # drop [dev] if you only need runtime deps
 ```
 
-This will install the `neobert` package and all remaining dependencies[^1].
+> [!TIP]
+> For faster training on supported GPUs, add `flash-attn` (and optionally `xformers`) with `pip install flash-attn --no-build-isolation`.
 
-[^1]: Technically, this command installs everything, but package order/resolution is not guaranteed, so it is better to install the core dependencies first.
+### Verify your setup
 
-> [!NOTE]
-> If you want to install the development dependencies (for testing, linting, etc.), use `pip install -e .[dev]`.
+```bash
+# 5-minute smoke test (tiny model, CPU-friendly)
+python scripts/pretraining/pretrain.py \
+    --config tests/configs/pretraining/test_tiny_pretrain.yaml
+
+# Optional: run the full regression suite
+python tests/run_tests.py
+```
+
+### Quick commands
+
+| Task           | Command                                                                         |
+| -------------- | ------------------------------------------------------------------------------- |
+| Pretrain       | `python scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml` |
+| GLUE eval      | `python scripts/evaluation/run_glue.py --config configs/glue/{task}.yaml`       |
+| Summarize GLUE | `python scripts/evaluation/summarize_glue.py {results_path}`                    |
+| Run tests      | `python tests/run_tests.py`                                                     |
+
+### Next steps
+
+- Train or fine-tune: see [/docs/training.md](/docs/training.md)
+- Evaluate on GLUE or MTEB: see [/docs/evaluation.md](/docs/evaluation.md)
+- Tune configs and overrides: see [/docs/configuration.md](/docs/configuration.md)
+- Export checkpoints to Hugging Face: see [/docs/export.md](/docs/export.md)
+- Troubleshoot common issues: see [/docs/troubleshooting.md](/docs/troubleshooting.md)
 
 ## How to use
 
@@ -115,13 +118,15 @@ print(tokenizer.decode(predicted_token_id))
 
 ## Documentation
 
-For detailed guides and documentation, see the **[Documentation](docs/README.md)**:
+For detailed guides and documentation, see the **[Documentation](/docs/README.md)**:
 
-- [Quick Start Guide](docs/quickstart.md) - Get up and running in 5 minutes
-- [Training Guide](docs/training.md) - Pretraining and fine-tuning
-- [Evaluation Guide](docs/evaluation.md) - GLUE and MTEB benchmarks
-- [Configuration System](docs/configuration.md) - Understanding configs
-- [Architecture Details](docs/architecture.md) - Technical model details
+- [Training Guide](/docs/training.md) - Pretraining, contrastive learning, and monitoring runs
+- [Evaluation Guide](/docs/evaluation.md) - GLUE, MTEB, and result analysis
+- [Configuration System](/docs/configuration.md) - YAML hierarchy and CLI overrides
+- [Export Guide](/docs/export.md) - Convert checkpoints to Hugging Face format
+- [Architecture Details](/docs/architecture.md) - Model internals
+- [Testing Guide](/docs/testing.md) - Regression suite and coverage
+- [Troubleshooting](/docs/troubleshooting.md) - Common failure modes and fixes
 
 ## Features
 
@@ -166,68 +171,20 @@ If you use this model in your research, please cite:
 
 This repository includes the complete training and evaluation codebase for NeoBERT, featuring:
 
-### Configuration System
-
-- **Hierarchical YAML configs** with command-line overrides
-- **Task-specific configurations** for pretraining, GLUE, contrastive learning, and MTEB evaluation
-- **CPU-friendly test configs** for development and validation
-
-```bash
-# Basic training with config file
-python scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml
-
-# Override specific parameters
-python scripts/pretraining/pretrain.py \
-    --config configs/pretrain_neobert.yaml \
-    --trainer.per_device_train_batch_size 32 \
-    --optimizer.lr 2e-4
-```
-
 ### Repository Structure
 
-- **`configs/`** - YAML configuration files ([README](configs/README.md))
-- **`scripts/`** - Training and evaluation scripts ([README](scripts/README.md))
-- **`jobs/`** - Shell scripts for running experiments ([README](jobs/README.md))
-- **`tests/`** - Comprehensive test suite ([README](tests/README.md))
-- **`src/neobert/`** - Core model and training code
+- **`configs/`** - YAML configuration files for training, evaluation, and contrastive learning
+- **`scripts/`** - CLI entry points for pretraining, evaluation, contrastive learning, and exporting
+- **`jobs/`** - Example shell launchers for clusters or batch systems
+- **`tests/`** - Automated regression suite and tiny configs
+- **`src/neobert/`** - Core model, trainer, and utilities
 
-### Quick Start for Training
+Additional guidance lives in:
 
-1. **Install dependencies:**
-
-   ```bash
-   pip install -e .
-   ```
-
-2. **Run tests to validate setup:**
-
-   ```bash
-   python tests/run_tests.py
-   ```
-
-3. **Start with a small test run:**
-
-   ```bash
-   python scripts/pretraining/pretrain.py --config tests/configs/pretraining/test_tiny_pretrain.yaml
-   ```
-
-4. **Scale up to full training:**
-
-   ```bash
-   python scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml
-   ```
-
-### Testing
-
-The repository includes a comprehensive test suite that verifies:
-
-- Configuration system functionality
-- Model architecture and forward passes
-- Training pipeline integration
-- CPU-only compatibility (no GPU required for tests)
-
-### Exporting Models to HuggingFace
-
-Use the export workflow documented in [/docs/export.md](/docs/export.md) for checkpoint conversion and validation. Script-level usage lives in [/scripts/export-hf/README.md](/scripts/export-hf/README.md).
+- [`docs/training.md`](/docs/training.md) for full training workflows
+- [`docs/evaluation.md`](/docs/evaluation.md) for benchmark recipes
+- [`docs/testing.md`](/docs/testing.md) for extending the test suite
+- [`docs/export.md`](/docs/export.md) for Hugging Face conversion
+- [`docs/troubleshooting.md`](/docs/troubleshooting.md) for debugging tips
 
 ---

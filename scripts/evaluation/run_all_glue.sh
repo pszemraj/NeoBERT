@@ -16,6 +16,13 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+CONFIG_BASENAME="$(basename "${CONFIG_DIR}")"
+LOG_DIR="logs/${CONFIG_BASENAME}"
+mkdir -p "${LOG_DIR}"
+
+declare -A OUTPUT_DIRS
+declare -A LOG_PATHS
+
 echo -e "${YELLOW}Starting GLUE evaluation suite${NC}"
 if [ -n "$MODEL_PATH_OVERRIDE" ]; then
     echo "Model override: $MODEL_PATH_OVERRIDE"
@@ -37,6 +44,8 @@ for task in "${TASKS[@]}"; do
     CONFIG_PATH="${CONFIG_DIR}/${task}.yaml"
     if [ ! -f "$CONFIG_PATH" ]; then
         echo "Config not found for $task at $CONFIG_PATH. Skipping."
+        OUTPUT_DIRS["$task"]="(config missing)"
+        LOG_PATHS["$task"]="(config missing)"
         continue
     fi
     CMD="python scripts/evaluation/run_glue.py --config ${CONFIG_PATH}"
@@ -45,9 +54,35 @@ for task in "${TASKS[@]}"; do
     if [ -n "$MODEL_PATH_OVERRIDE" ]; then
         CMD="$CMD --model_name_or_path $MODEL_PATH_OVERRIDE"
     fi
+
+    # Determine expected output directory from config
+    OUTPUT_PATH="$(python - "$CONFIG_PATH" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+config_path = Path(sys.argv[1])
+text = config_path.read_text()
+try:
+    import yaml  # type: ignore
+except ImportError:
+    match = re.search(r'^\s*output_dir:\s*["\']?(.*?)["\']?\s*$', text, flags=re.MULTILINE)
+    print(match.group(1) if match else '', end='')
+else:
+    data = yaml.safe_load(text)
+    trainer = data.get('trainer', {}) if isinstance(data, dict) else {}
+    print(trainer.get('output_dir', '') or '', end='')
+PY
+)"
+    if [ -z "${OUTPUT_PATH}" ]; then
+        OUTPUT_PATH="(output_dir not found in config)"
+    fi
+    OUTPUT_DIRS["$task"]="${OUTPUT_PATH}"
     
     # Run the evaluation
-    $CMD 2>&1 | tee logs/glue_${task}.log
+    LOG_PATH="${LOG_DIR}/${task}.log"
+    LOG_PATHS["$task"]="${LOG_PATH}"
+    $CMD 2>&1 | tee "${LOG_PATH}"
     
     # Check if successful
     if [ ${PIPESTATUS[0]} -eq 0 ]; then
@@ -73,10 +108,18 @@ fi
 echo ""
 echo "Results saved to:"
 for task in "${TASKS[@]}"; do
-    echo "  - outputs/glue/neobert-100m/$task/"
+    output="${OUTPUT_DIRS[$task]}"
+    if [ -z "$output" ]; then
+        output="(not available)"
+    fi
+    echo "  - ${output}"
 done
 echo ""
 echo "Logs saved to:"
 for task in "${TASKS[@]}"; do
-    echo "  - logs/glue_${task}.log"
+    log_path="${LOG_PATHS[$task]}"
+    if [ -z "$log_path" ]; then
+        log_path="(not available)"
+    fi
+    echo "  - ${log_path}"
 done
