@@ -30,6 +30,8 @@ from ..scheduler import get_scheduler
 from ..tokenizer import get_tokenizer
 from ..utils import configure_tf32, model_summary
 
+import wandb
+
 # Our metric object and model
 from .metrics import Metrics
 
@@ -394,6 +396,28 @@ def trainer(cfg: Config):
         optimizer,
         scheduler,
     )
+
+    if cfg.wandb.mode != "disabled" and accelerator.is_main_process:
+        wandb_watch = os.environ.get("WANDB_WATCH")
+        if wandb_watch is not None:
+            watch_mode = wandb_watch.strip().lower()
+            if watch_mode in {"", "false", "0", "none", "off"}:
+                watch_mode = None
+            elif watch_mode == "weights":
+                watch_mode = "parameters"
+            elif watch_mode not in {"gradients", "parameters", "all"}:
+                logger.warning(
+                    "Unrecognized WANDB_WATCH value '%s'; skipping wandb.watch()",
+                    wandb_watch,
+                )
+                watch_mode = None
+
+            if watch_mode:
+                wandb.watch(
+                    accelerator.unwrap_model(model),
+                    log=watch_mode,
+                    log_freq=getattr(cfg.wandb, "log_interval", 100),
+                )
 
     # Loss function
     train_loss_fn = CrossEntropyLoss()

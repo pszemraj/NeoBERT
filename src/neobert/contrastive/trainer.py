@@ -30,6 +30,8 @@ from ..tokenizer import get_tokenizer
 from .datasets import get_bsz
 from .loss import SupConLoss
 
+import wandb
+
 # Our metric object and model
 from .metrics import Metrics
 
@@ -263,6 +265,27 @@ def trainer(cfg: Config):
 
     for key in keys[1:]:
         dataloaders[key] = accelerator.prepare(dataloaders[key])
+
+    if cfg.wandb.mode != "disabled" and accelerator.is_main_process:
+        wandb_watch = os.environ.get("WANDB_WATCH")
+        if wandb_watch is not None:
+            watch_mode = wandb_watch.strip().lower()
+            if watch_mode in {"", "false", "0", "none", "off"}:
+                watch_mode = None
+            elif watch_mode == "weights":
+                watch_mode = "parameters"
+            elif watch_mode not in {"gradients", "parameters", "all"}:
+                accelerator.print(
+                    f"Unrecognized WANDB_WATCH value '{wandb_watch}'; skipping wandb.watch()"
+                )
+                watch_mode = None
+
+            if watch_mode:
+                wandb.watch(
+                    accelerator.unwrap_model(model),
+                    log=watch_mode,
+                    log_freq=getattr(cfg.wandb, "log_interval", 100),
+                )
 
     # Loss function
     train_loss_fn = SupConLoss()
