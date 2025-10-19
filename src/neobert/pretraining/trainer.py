@@ -497,17 +497,46 @@ def trainer(cfg: Config):
                 # Compute gradient
                 accelerator.backward(train_loss)
 
+                # Measure gradient norm prior to optional clipping so we always log it
+                grad_norm_value = None
+                if accelerator.distributed_type is DistributedType.DEEPSPEED:
+                    get_global_grad = getattr(model, "get_global_grad_norm", None)
+                    if callable(get_global_grad):
+                        grad_norm = get_global_grad()
+                        if isinstance(grad_norm, torch.Tensor):
+                            grad_norm_value = float(grad_norm.item())
+                        elif grad_norm is not None:
+                            grad_norm_value = float(grad_norm)
+                else:
+                    grad_norm_sq = None
+                    for param in model.parameters():
+                        if param.grad is None:
+                            continue
+                        param_norm = param.grad.norm(2)
+                        grad_norm_sq = (
+                            param_norm**2
+                            if grad_norm_sq is None
+                            else grad_norm_sq + param_norm**2
+                        )
+                    if grad_norm_sq is not None:
+                        grad_norm_value = float(torch.sqrt(grad_norm_sq).item())
+
                 max_grad_norm = (
                     cfg.trainer.gradient_clipping
                     if cfg.trainer.gradient_clipping is not None
                     else (1.0 if cfg.trainer.gradient_checkpointing else None)
                 )
 
-                grad_norm_pre_clip = None
                 if max_grad_norm is not None and max_grad_norm > 0:
                     grad_norm_pre_clip = accelerator.clip_grad_norm_(
                         model.parameters(), max_grad_norm
                     )
+                    if grad_norm_value is None and grad_norm_pre_clip is not None:
+                        grad_norm_value = float(
+                            grad_norm_pre_clip.item()
+                            if isinstance(grad_norm_pre_clip, torch.Tensor)
+                            else grad_norm_pre_clip
+                        )
 
                 # Log metrics
                 pbar.update(1)
@@ -534,12 +563,8 @@ def trainer(cfg: Config):
                 scheduler.step()
 
                 if metrics["train/steps"] % cfg.wandb.log_interval == 0:
-                    if grad_norm_pre_clip is not None:
-                        metrics["train/grad_norm"] = float(
-                            grad_norm_pre_clip.item()
-                            if isinstance(grad_norm_pre_clip, torch.Tensor)
-                            else grad_norm_pre_clip
-                        )
+                    if grad_norm_value is not None:
+                        metrics["train/grad_norm"] = grad_norm_value
 
                     if accelerator.distributed_type is DistributedType.DEEPSPEED:
                         metrics["train/weight_norm"] = (
