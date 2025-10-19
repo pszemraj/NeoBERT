@@ -10,6 +10,7 @@ import numpy as np
 
 # PyTorch
 import torch
+import wandb
 from accelerate import Accelerator
 from accelerate.utils import DistributedType, ProjectConfiguration, set_seed
 
@@ -27,8 +28,6 @@ from transformers import DataCollatorForLanguageModeling
 
 from ..model import NeoBERTConfig, NeoBERTLMHead
 from ..tokenizer import get_tokenizer
-
-import wandb
 
 # Our metric object and model
 from .metrics import Metrics
@@ -72,14 +71,15 @@ def trainer(cfg):
 
     # Initialise the wandb run and pass wandb parameters
     os.makedirs(cfg.wandb.dir, exist_ok=True)
+    config_dict = asdict(cfg)
+    tracker_config = config_dict | {"distributed_type": accelerator.distributed_type}
     accelerator.init_trackers(
         project_name=cfg.wandb.project,
         init_kwargs={
             "wandb": {
                 "name": cfg.wandb.name,
                 "entity": cfg.wandb.entity,
-                "config": asdict(cfg)
-                | {"distributed_type": accelerator.distributed_type},
+                "config": tracker_config,
                 "tags": cfg.wandb.tags,
                 "dir": cfg.wandb.dir,
                 "mode": cfg.wandb.mode,
@@ -87,6 +87,24 @@ def trainer(cfg):
             }
         },
     )
+    if accelerator.is_main_process and wandb.run is not None:
+        wandb.run.config.update(tracker_config, allow_val_change=True)
+        config_path = getattr(cfg, "config_path", None)
+        if config_path:
+            abs_config_path = os.path.abspath(config_path)
+            if os.path.isfile(abs_config_path):
+                artifact = wandb.Artifact(
+                    name=f"{wandb.run.id}-config",
+                    type="config",
+                    metadata={"source": abs_config_path},
+                )
+                artifact.add_file(abs_config_path)
+                wandb.run.log_artifact(artifact)
+            else:
+                logging.warning(
+                    "Configured config_path '%s' not found; skipping wandb artifact upload",
+                    config_path,
+                )
 
     # Set the seed
     set_seed(cfg.seed)

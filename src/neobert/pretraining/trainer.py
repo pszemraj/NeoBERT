@@ -2,9 +2,11 @@ import json
 import logging
 import os
 import re
+from dataclasses import asdict
 
 # PyTorch
 import torch
+import wandb
 from accelerate import Accelerator
 from accelerate.utils import (
     DistributedDataParallelKwargs,
@@ -29,8 +31,6 @@ from ..optimizer import get_optimizer
 from ..scheduler import get_scheduler
 from ..tokenizer import get_tokenizer
 from ..utils import configure_tf32, model_summary
-
-import wandb
 
 # Our metric object and model
 from .metrics import Metrics
@@ -128,13 +128,14 @@ def trainer(cfg: Config):
     # Initialise the wandb run and pass wandb parameters
     if cfg.wandb.mode != "disabled":
         os.makedirs(cfg.wandb.dir, exist_ok=True)
+        config_dict = asdict(cfg)
         accelerator.init_trackers(
             project_name=cfg.wandb.project,
             init_kwargs={
                 "wandb": {
                     "name": cfg.wandb.name,
                     "entity": cfg.wandb.entity,
-                    "config": cfg.__dict__,
+                    "config": config_dict,
                     "tags": cfg.wandb.tags,
                     "dir": cfg.wandb.dir,
                     "mode": cfg.wandb.mode,
@@ -142,6 +143,24 @@ def trainer(cfg: Config):
                 }
             },
         )
+        if accelerator.is_main_process and wandb.run is not None:
+            wandb.run.config.update(config_dict, allow_val_change=True)
+            config_path = getattr(cfg, "config_path", None)
+            if config_path:
+                abs_config_path = os.path.abspath(config_path)
+                if os.path.isfile(abs_config_path):
+                    artifact = wandb.Artifact(
+                        name=f"{wandb.run.id}-config",
+                        type="config",
+                        metadata={"source": abs_config_path},
+                    )
+                    artifact.add_file(abs_config_path)
+                    wandb.run.log_artifact(artifact)
+                else:
+                    logger.warning(
+                        "Configured config_path '%s' not found; skipping wandb artifact upload",
+                        config_path,
+                    )
 
     # Set the seed
     set_seed(cfg.seed)

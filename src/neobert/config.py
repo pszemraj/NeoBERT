@@ -231,6 +231,7 @@ class Config:
     # Misc
     seed: int = 0
     debug: bool = False
+    config_path: Optional[str] = None
 
 
 class ConfigLoader:
@@ -639,6 +640,7 @@ def load_config_from_args() -> Config:
         config_dict = ConfigLoader.merge_configs(config_dict, overrides)
 
     config = ConfigLoader.dict_to_config(config_dict)
+    config.config_path = args.config
 
     # Preprocess config to resolve dynamic values
     config = ConfigLoader.preprocess_config(config)
