@@ -135,6 +135,8 @@ def trainer(cfg: Config):
     if cfg.wandb.mode != "disabled":
         os.makedirs(cfg.wandb.dir, exist_ok=True)
         config_dict = asdict(cfg)
+        if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict is not None:
+            config_dict["_raw_model_dict"] = cfg._raw_model_dict
         accelerator.init_trackers(
             project_name=cfg.wandb.project,
             init_kwargs={
