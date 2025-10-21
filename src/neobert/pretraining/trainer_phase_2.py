@@ -4,7 +4,6 @@ import re
 import shutil
 import signal
 import sys
-from dataclasses import asdict
 
 import numpy as np
 
@@ -28,6 +27,7 @@ from transformers import DataCollatorForLanguageModeling
 
 from ..model import NeoBERTConfig, NeoBERTLMHead
 from ..tokenizer import get_tokenizer
+from ..utils import prepare_wandb_config
 
 # Our metric object and model
 from .metrics import Metrics
@@ -71,9 +71,7 @@ def trainer(cfg):
 
     # Initialise the wandb run and pass wandb parameters
     os.makedirs(cfg.wandb.dir, exist_ok=True)
-    config_dict = asdict(cfg)
-    if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict is not None:
-        config_dict["_raw_model_dict"] = cfg._raw_model_dict
+    config_dict = prepare_wandb_config(cfg)
     tracker_config = config_dict | {"distributed_type": accelerator.distributed_type}
     accelerator.init_trackers(
         project_name=cfg.wandb.project,

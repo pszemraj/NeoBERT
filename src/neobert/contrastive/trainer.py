@@ -4,7 +4,6 @@ import re
 import shutil
 import signal
 import sys
-from dataclasses import asdict
 
 import numpy
 
@@ -30,6 +29,7 @@ from transformers import DataCollatorWithPadding
 from ..config import Config
 from ..model import NeoBERT, NeoBERTConfig
 from ..tokenizer import get_tokenizer
+from ..utils import prepare_wandb_config
 from .datasets import get_bsz
 from .loss import SupConLoss
 
@@ -134,9 +134,7 @@ def trainer(cfg: Config):
     # Initialise the wandb run and pass wandb parameters
     if cfg.wandb.mode != "disabled":
         os.makedirs(cfg.wandb.dir, exist_ok=True)
-        config_dict = asdict(cfg)
-        if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict is not None:
-            config_dict["_raw_model_dict"] = cfg._raw_model_dict
+        config_dict = prepare_wandb_config(cfg)
         accelerator.init_trackers(
             project_name=cfg.wandb.project,
             init_kwargs={
