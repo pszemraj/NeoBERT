@@ -1,9 +1,38 @@
 import logging
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Set, Tuple
+from dataclasses import asdict, dataclass, is_dataclass
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
+
+
+def prepare_wandb_config(cfg: Any) -> Dict[str, Any]:
+    """
+    Flatten config dataclass for logging while preserving dynamically attached fields.
+
+    Parameters
+    ----------
+    cfg:
+        Configuration object (typically a dataclass) to be serialized.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Dictionary ready for tracker ingestion.
+    """
+
+    if is_dataclass(cfg):
+        config_dict = asdict(cfg)
+    elif hasattr(cfg, "__dict__"):
+        config_dict = dict(cfg.__dict__)
+    else:
+        raise TypeError("Unsupported config type for wandb logging")
+
+    # Preserve dynamically attached metadata (e.g., original model YAML)
+    if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict is not None:
+        config_dict["_raw_model_dict"] = cfg._raw_model_dict
+
+    return config_dict
 
 
 def configure_tf32(print_fn=None) -> bool:

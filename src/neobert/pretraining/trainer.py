@@ -2,7 +2,6 @@ import json
 import logging
 import os
 import re
-from dataclasses import asdict
 
 # PyTorch
 import torch
@@ -30,7 +29,7 @@ from ..model import NeoBERTConfig, NeoBERTLMHead
 from ..optimizer import get_optimizer
 from ..scheduler import get_scheduler
 from ..tokenizer import get_tokenizer
-from ..utils import configure_tf32, model_summary
+from ..utils import configure_tf32, model_summary, prepare_wandb_config
 
 # Our metric object and model
 from .metrics import Metrics
@@ -128,7 +127,7 @@ def trainer(cfg: Config):
     # Initialise the wandb run and pass wandb parameters
     if cfg.wandb.mode != "disabled":
         os.makedirs(cfg.wandb.dir, exist_ok=True)
-        config_dict = asdict(cfg)
+        config_dict = prepare_wandb_config(cfg)
         accelerator.init_trackers(
             project_name=cfg.wandb.project,
             init_kwargs={

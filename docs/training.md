@@ -484,6 +484,9 @@ torchrun --nproc_per_node=8 \
 
 ## Developing New Scripts
 
+> [!NOTE]
+> **Config logging safety**: whenever you touch the tracking setup (e.g., how configs are sent to Weights & Biases), stick with `cfg.__dict__` or explicitly merge any attributes that are attached post-instantiation such as `_raw_model_dict`. Missing this drops core model metadata from dashboards.
+
 When adding new automation in `scripts/`, follow these guidelines:
 
 - **Reuse the configuration loader**: accept `--config` plus `argparse` passthrough for dot-notation overrides (`parser.parse_known_args()`).
