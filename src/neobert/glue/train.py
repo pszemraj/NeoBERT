@@ -5,6 +5,7 @@ import math
 import os
 import random
 import shutil
+from pathlib import Path
 from contextlib import nullcontext
 from functools import partial
 
@@ -60,6 +61,43 @@ TASK_TO_TRANSFER_FROM = {
     "mrpc": "mnli",
     "rte": "mnli",
 }
+
+
+def _to_serializable(value):
+    if isinstance(value, (np.floating, np.integer)):
+        return float(value)
+    if torch.is_tensor(value):
+        return value.item()
+    return value
+
+
+def _configure_wandb_metrics(accelerator):
+    for tracker in getattr(accelerator, "trackers", []):
+        if tracker.__class__.__name__ != "WandBTracker":
+            continue
+        run = getattr(tracker, "run", None)
+        if run is None:
+            continue
+        try:
+            run.define_metric("train/step")
+            run.define_metric("train/*", step_metric="train/step")
+            run.define_metric("val/epoch")
+            run.define_metric("val/*", step_metric="val/epoch")
+            run.define_metric("final/step")
+            run.define_metric("final/*", step_metric="final/step")
+        except Exception as exc:  # pragma: no cover - best-effort safety
+            logger.warning(f"Failed to configure W&B metric definitions: {exc}")
+        break
+
+
+def _save_metrics(output_dir: str, split: str, metrics: dict):
+    if not metrics:
+        return
+    path = Path(output_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    serializable = {k: _to_serializable(v) for k, v in metrics.items()}
+    with (path / f"{split}_results.json").open("w") as fp:
+        json.dump(serializable, fp, indent=2, sort_keys=True)
 
 
 def get_evaluation(
@@ -471,6 +509,8 @@ def trainer(cfg: Config):
             }
         },
     )
+
+    _configure_wandb_metrics(accelerator)
 
     set_seed(int(cfg.seed))
 
@@ -1120,6 +1160,9 @@ def trainer(cfg: Config):
     eval_metric = {}
     epoch = starting_epoch
     completed_steps = completed_steps  # Ensure it's in scope
+    last_train_metrics = {}
+    last_val_metrics = {}
+    evaluation_round = 0
 
     for epoch in range(starting_epoch, cfg.trainer.num_train_epochs):
         for batch in train_dataloader:
@@ -1233,32 +1276,62 @@ def trainer(cfg: Config):
                         f"step {completed_steps} eval metric mismatched: {res_mm}"
                     )
 
-                # Flatten eval metrics for proper wandb logging
-                metrics_to_log = {
-                    "train_loss": total_loss / completed_steps,
-                    "epoch": epoch,
-                    "step": completed_steps,
-                    "learning_rate": optimizer.param_groups[0]["lr"],
+                train_epoch_pos = completed_steps / max(1, num_update_steps_per_epoch)
+                train_avg_loss = (
+                    total_loss / completed_steps if completed_steps > 0 else loss.item()
+                )
+
+                log_payload = {
+                    "train/step": completed_steps,
+                    "train/epoch": train_epoch_pos,
+                    "train/loss": train_avg_loss,
+                    "train/lr": optimizer.param_groups[0]["lr"],
                 }
 
-                # Add evaluation metrics with proper names
-                if cfg.task != "mnli":
-                    for key, value in eval_metric.items():
-                        metrics_to_log[f"eval_{key}"] = value
-                else:
-                    for key, value in results.items():
-                        metrics_to_log[f"eval_{key}"] = value
-
-                # Add training metrics
                 if train_metric:
                     for key, value in train_metric.items():
-                        metrics_to_log[f"train_{key}"] = value
+                        log_payload[f"train/{key}"] = value
 
-                accelerator.log(metrics_to_log, step=completed_steps)
+                val_metrics = eval_metric if cfg.task != "mnli" else results
+                val_epoch = train_epoch_pos
+                log_payload["val/epoch"] = val_epoch
+                for key, value in val_metrics.items():
+                    log_payload[f"val/{key}"] = value
 
-                all_results = {f"eval_{k}": v for k, v in eval_metric.items()}
+                log_payload = {k: _to_serializable(v) for k, v in log_payload.items()}
+
+                evaluation_round += 1
+                accelerator.log(log_payload, step=completed_steps)
+
+                last_train_metrics = {
+                    "step": completed_steps,
+                    "epoch": train_epoch_pos,
+                    "loss": train_avg_loss,
+                    "lr": optimizer.param_groups[0]["lr"],
+                }
+                if train_metric:
+                    last_train_metrics.update(
+                        {k: _to_serializable(v) for k, v in train_metric.items()}
+                    )
+
+                last_val_metrics = {
+                    "step": completed_steps,
+                    "epoch": val_epoch,
+                }
+                last_val_metrics.update(
+                    {k: _to_serializable(v) for k, v in val_metrics.items()}
+                )
+
+                _save_metrics(cfg.trainer.output_dir, "train", last_train_metrics)
+                _save_metrics(cfg.trainer.output_dir, "val", last_val_metrics)
+
+                all_results = {
+                    f"eval_{k}": _to_serializable(v) for k, v in eval_metric.items()
+                }
                 if cfg.task == "mnli":
-                    all_results = {f"eval_{k}": v for k, v in results.items()}
+                    all_results = {
+                        f"eval_{k}": _to_serializable(v) for k, v in results.items()
+                    }
 
                 with open(
                     os.path.join(
@@ -1335,14 +1408,21 @@ def trainer(cfg: Config):
         if completed_steps >= cfg.trainer.max_steps or early_stop:
             break
 
-    # Log final metrics to wandb before ending training
-    if eval_metric:  # Only create final metrics if we have evaluation results
-        final_metrics = {f"eval_{k}": v for k, v in eval_metric.items()}
+    # Prepare final metrics for logging and persistence
+    if last_val_metrics:
+        final_metrics = {
+            key: _to_serializable(value)
+            for key, value in last_val_metrics.items()
+            if key not in {"epoch", "step"}
+        }
+        final_epoch_value = _to_serializable(last_val_metrics.get("epoch", epoch))
+    elif eval_metric:
+        source = eval_metric if cfg.task != "mnli" else results
+        final_metrics = {key: _to_serializable(value) for key, value in source.items()}
+        final_epoch_value = epoch
     else:
         final_metrics = {}
-
-    if cfg.task == "mnli":
-        final_metrics = {f"eval_{k}": v for k, v in results.items()}
+        final_epoch_value = epoch
 
     # Print final metrics to console (both logger and print for visibility)
     if accelerator.is_main_process:
@@ -1362,16 +1442,17 @@ def trainer(cfg: Config):
         logger.info("=" * 60)
 
     # Add final metrics to wandb
+    final_train_loss = total_loss / completed_steps if completed_steps > 0 else 0.0
+    final_payload = {
+        "final/step": completed_steps,
+        "final/train_loss": final_train_loss,
+        "final/epoch": final_epoch_value,
+    }
+    for key, value in final_metrics.items():
+        final_payload[f"final/{key}"] = value
+
     accelerator.log(
-        {
-            **final_metrics,
-            "final_train_loss": total_loss / completed_steps
-            if completed_steps > 0
-            else 0,
-            "final_epoch": epoch,
-            "final_step": completed_steps,
-        },
-        step=completed_steps,
+        {k: _to_serializable(v) for k, v in final_payload.items()}, step=completed_steps
     )
 
     # Fix: Update W&B summary with final metrics
@@ -1383,12 +1464,11 @@ def trainer(cfg: Config):
                     if hasattr(tracker, "run") and tracker.run:
                         # Update summary with final metrics
                         summary_metrics = {
-                            f"summary/{k}": v for k, v in final_metrics.items()
+                            f"summary/final_{k}": v for k, v in final_metrics.items()
                         }
-                        summary_metrics["summary/final_train_loss"] = (
-                            total_loss / completed_steps if completed_steps > 0 else 0
-                        )
+                        summary_metrics["summary/final_train_loss"] = final_train_loss
                         summary_metrics["summary/final_step"] = completed_steps
+                        summary_metrics["summary/final_epoch"] = final_epoch_value
                         tracker.run.summary.update(summary_metrics)
                         logger.info("Updated W&B run summary with final metrics")
         except Exception as e:
@@ -1396,9 +1476,19 @@ def trainer(cfg: Config):
 
     accelerator.end_training()
 
-    # Save final results to JSON
+    # Save final results to disk
+    _save_metrics(
+        cfg.trainer.output_dir,
+        "final",
+        {**final_metrics, "train_loss": final_train_loss, "epoch": final_epoch_value},
+    )
+
+    final_eval_dump = {
+        f"eval_{k}": _to_serializable(v) for k, v in final_metrics.items()
+    }
+
     with open(os.path.join(cfg.trainer.output_dir, "all_results.json"), "w") as f:
-        json.dump(final_metrics, f)
+        json.dump(final_eval_dump, f)
 
     # Also save to timestamped file for clarity
     with open(
@@ -1407,7 +1497,7 @@ def trainer(cfg: Config):
         ),
         "w",
     ) as f:
-        json.dump(final_metrics, f)
+        json.dump(final_eval_dump, f)
         logger.info(
             f"Final results saved to {cfg.trainer.output_dir}/all_results_step_{completed_steps}.json"
         )
