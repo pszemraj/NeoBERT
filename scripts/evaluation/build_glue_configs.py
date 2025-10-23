@@ -256,16 +256,16 @@ def build_configs(args: BuildArgs) -> Dict[str, Dict[str, object]]:
     )
 
     model_section = {
-        "pretrained_checkpoint_dir": str(
-            relpath(args.checkpoint_dir, REPO_ROOT)
-        ),
+        "pretrained_checkpoint_dir": str(relpath(args.checkpoint_dir, REPO_ROOT)),
         "pretrained_checkpoint": checkpoint_value,
         "pretrained_config_path": str(relpath(args.pretrain_config_path, REPO_ROOT)),
     }
     if args.model_name:
         model_section["name_or_path"] = args.model_name
 
-    output_dir_root = args.results_root / f"{args.run_prefix}-ckpt{args.checkpoint_step}"
+    output_dir_root = (
+        args.results_root / f"{args.run_prefix}-ckpt{args.checkpoint_step}"
+    )
 
     configs: Dict[str, Dict[str, object]] = {}
     for task in args.tasks:
@@ -380,10 +380,7 @@ def main() -> None:
     pretrain_config_path = (
         args.pretrain_config.resolve()
         if args.pretrain_config
-        else checkpoint_dir
-        / "model_checkpoints"
-        / checkpoint_step
-        / "config.yaml"
+        else checkpoint_dir / "model_checkpoints" / checkpoint_step / "config.yaml"
     )
     if not pretrain_config_path.exists():
         raise FileNotFoundError(
