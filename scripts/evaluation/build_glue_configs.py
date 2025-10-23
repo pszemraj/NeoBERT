@@ -125,6 +125,50 @@ BASE_SCHEDULER = {
 }
 
 
+def parse_override_value(value: str):
+    try:
+        parsed = yaml.safe_load(value)
+    except yaml.YAMLError:
+        return value
+    return parsed
+
+
+def parse_overrides(entries: Iterable[str]) -> Dict[str, object]:
+    overrides: Dict[str, object] = {}
+    for entry in entries or []:
+        if "=" not in entry:
+            raise ValueError(f"Override must be in key=value form: '{entry}'")
+        key_path, raw_value = entry.split("=", 1)
+        keys = [part.strip() for part in key_path.split(".") if part.strip()]
+        if not keys:
+            raise ValueError(f"Invalid override key path: '{entry}'")
+        value = parse_override_value(raw_value)
+
+        current = overrides
+        for key in keys[:-1]:
+            current = current.setdefault(key, {})  # type: ignore[assignment]
+            if not isinstance(current, dict):
+                raise ValueError(
+                    f"Override path '{key_path}' collides with non-dict value"
+                )
+        current[keys[-1]] = value
+    return overrides
+
+
+def apply_overrides(config: Dict[str, object], overrides: Dict[str, object]) -> None:
+    for key, value in overrides.items():
+        if isinstance(value, dict):
+            if key not in config or not isinstance(config[key], dict):
+                config[key] = {}
+            if not isinstance(config[key], dict):
+                raise ValueError(
+                    f"Cannot merge override for '{key}' into non-dict value"
+                )
+            apply_overrides(config[key], value)  # type: ignore[arg-type]
+        else:
+            config[key] = value
+
+
 def slugify(value: str) -> str:
     """Return a filesystem-friendly slug."""
 
@@ -229,6 +273,7 @@ class BuildArgs:
     tasks: Iterable[str]
     run_prefix: str
     model_name: Optional[str]
+    overrides: Dict[str, object]
 
 
 def build_configs(args: BuildArgs) -> Dict[str, Dict[str, object]]:
@@ -294,6 +339,17 @@ def build_configs(args: BuildArgs) -> Dict[str, Dict[str, object]]:
 
         if tokenizer_block:
             config_dict["tokenizer"] = tokenizer_block
+
+        overrides = (
+            args.overrides.get("__global__", {})
+            if "__global__" in args.overrides
+            else {}
+        )
+        apply_overrides(config_dict, overrides)
+
+        task_specific_override = args.overrides.get(task, {})
+        if isinstance(task_specific_override, dict):
+            apply_overrides(config_dict, task_specific_override)
 
         configs[task] = config_dict
 
@@ -364,6 +420,16 @@ def parse_args() -> argparse.Namespace:
         choices=sorted(TASK_SETTINGS.keys()),
         help="Subset of GLUE tasks to generate (default: all)",
     )
+    parser.add_argument(
+        "--override",
+        action="append",
+        default=[],
+        metavar="PATH=VALUE",
+        help=(
+            "Override a config value (supports dotted paths like 'optimizer.lr=1e-4'. "
+            "For task-specific overrides, prefix with '<task>:' e.g. 'cola:trainer.num_train_epochs=5'."
+        ),
+    )
 
     return parser.parse_args()
 
@@ -396,6 +462,23 @@ def main() -> None:
     results_root = args.results_root.expanduser()
     final_output_dir = output_root / f"{run_prefix}-ckpt{checkpoint_step}"
 
+    base_overrides: Dict[str, object] = {}
+    task_overrides: Dict[str, object] = {}
+
+    for override in args.override:
+        target = base_overrides
+        entry = override
+        if ":" in override:
+            prefix, rest = override.split(":", 1)
+            if prefix in TASK_SETTINGS:
+                target = task_overrides.setdefault(prefix, {})  # type: ignore[assignment]
+                entry = rest
+        parsed = parse_overrides([entry])
+        apply_overrides(target, parsed)
+
+    combined_overrides = {"__global__": base_overrides}
+    combined_overrides.update(task_overrides)
+
     build_args = BuildArgs(
         checkpoint_dir=checkpoint_dir,
         checkpoint_step=checkpoint_step,
@@ -406,6 +489,7 @@ def main() -> None:
         tasks=args.tasks,
         run_prefix=run_prefix,
         model_name=args.model_name or run_prefix,
+        overrides=combined_overrides,
     )
 
     configs = build_configs(build_args)

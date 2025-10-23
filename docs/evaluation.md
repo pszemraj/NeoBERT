@@ -187,6 +187,8 @@ conda run -n neobert python scripts/evaluation/build_glue_configs.py \
 - Generated configs land in `configs/glue/generated/<run>-ckpt<step>/` and point to the specified checkpoint.
 - Fine-tune outputs default to `outputs/glue/<run>-ckpt<step>/<task>/`; override with `--results-root` if needed.
 - Every config records `pretraining_metadata` (trainer run name, W&B ids, checkpoint paths) so the linkage from GLUE runs back to pretraining is visible in W&B configs.
+- Use `--override SECTION.key=value` to tweak common hyper‑parameters for every task (e.g. `--override optimizer.lr=1e-4`, `--override trainer.per_device_train_batch_size=64`).
+- Task-specific overrides are supported via `task:SECTION.key=value`, e.g. `--override stsb:trainer.num_train_epochs=5`.
 
 Kick off the evaluation with the new directory:
 
