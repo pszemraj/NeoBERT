@@ -90,6 +90,37 @@ def _configure_wandb_metrics(accelerator):
         break
 
 
+def _update_wandb_config(accelerator, cfg: Config):
+    metadata = getattr(cfg, "pretraining_metadata", {}) or {}
+    glue_task = getattr(cfg.glue, "task_name", getattr(cfg, "task", "glue"))
+    glue_max_len = getattr(cfg.glue, "max_seq_length", None)
+    glue_labels = getattr(cfg.glue, "num_labels", None)
+
+    to_update = {
+        "glue_task": glue_task,
+        "glue_max_seq_length": glue_max_len,
+        "glue_num_labels": glue_labels,
+    }
+
+    for key, value in metadata.items():
+        to_update[f"pretraining_{key}"] = value
+
+    for tracker in getattr(accelerator, "trackers", []):
+        if tracker.__class__.__name__ != "WandBTracker":
+            continue
+        run = getattr(tracker, "run", None)
+        if run is None:
+            continue
+        try:
+            run.config.update(
+                {k: v for k, v in to_update.items() if v is not None},
+                allow_val_change=True,
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.warning(f"Failed to update W&B config: {exc}")
+        break
+
+
 def _save_metrics(output_dir: str, split: str, metrics: dict):
     if not metrics:
         return
@@ -511,6 +542,7 @@ def trainer(cfg: Config):
     )
 
     _configure_wandb_metrics(accelerator)
+    _update_wandb_config(accelerator, cfg)
 
     set_seed(int(cfg.seed))
 
