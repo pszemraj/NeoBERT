@@ -28,9 +28,9 @@
 
 NeoBERT is a **next-generation encoder** model for English text representation, pre-trained from scratch on the RefinedWeb dataset. NeoBERT integrates state-of-the-art advancements in architecture, modern data, and optimized pre-training methodologies. It is designed for seamless adoption: it serves as a plug-and-play replacement for existing base models, relies on an **optimal depth-to-width ratio**, and leverages an extended context length of **4,096 tokens**. Despite its compact 250M parameter footprint, it is the most efficient model of its kind and achieves **state-of-the-art results** on the massive MTEB benchmark, outperforming BERT large, RoBERTa large, NomicBERT, and ModernBERT under identical fine-tuning conditions.
 
-- Paper: [paper](https://arxiv.org/abs/2502.19587)
-- Model: [huggingface](https://huggingface.co/chandar-lab/NeoBERT)
-- **Documentation: [docs/](/docs/README.md)**
+- Paper (_original_): [paper](https://arxiv.org/abs/2502.19587)
+- Model (_original_): [huggingface](https://huggingface.co/chandar-lab/NeoBERT)
+- Documentation (_this repo_): [docs/](/docs/README.md)
 
 ## Get started
 
@@ -39,11 +39,14 @@ NeoBERT is a **next-generation encoder** model for English text representation, 
 ```bash
 git clone https://github.com/pszemraj/NeoBERT.git
 cd NeoBERT
+# activate virtual environment (if not already active)
 pip install -e .[dev]  # drop [dev] if you only need runtime deps
 ```
 
-> [!TIP]
-> For faster training on supported GPUs, add `flash-attn` (and optionally `xformers`) with `pip install flash-attn --no-build-isolation`.
+See [docs/troubleshooting.md](/docs/troubleshooting.md) for help with common installation issues.
+
+<!-- > [!TIP]
+> For faster training on supported GPUs, add `flash-attn` (and optionally `xformers`) with `pip install flash-attn --no-build-isolation`. -->
 
 ### Verify your setup
 
@@ -75,7 +78,12 @@ python tests/run_tests.py
 
 ## How to use
 
-Load [the official model](https://huggingface.co/chandar-lab/NeoBERT) using Hugging Face Transformers:
+Load [the official model](https://huggingface.co/chandar-lab/NeoBERT) using Hugging Face Transformers and use it for text embeddings or fill-mask predictions[^1].
+
+[^1]: Encoder models are usually meant to be [fine-tuned for specific tasks](https://github.com/huggingface/transformers/tree/81b4f9882c8a46c8274084503d297874bb372260/examples/pytorch) rather than used directly after pretraining. this is analogous to instruction tuning for decoder-only models: the base model is a good starting point, but fine-tuning is necessary for practical applications.
+
+<details>
+<summary><b>Click to Expand:</b> MLM & Embedding Examples</summary>
 
 ### For Text Embeddings
 
@@ -116,7 +124,11 @@ predicted_token_id = outputs.logits[0, mask_token_index].argmax(axis=-1)
 print(tokenizer.decode(predicted_token_id))
 ```
 
+</details>
+
 ## Documentation
+
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/pszemraj/NeoBERT)
 
 For detailed guides and documentation, see the **[Documentation](/docs/README.md)**:
 
