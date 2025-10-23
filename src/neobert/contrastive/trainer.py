@@ -32,11 +32,9 @@ from ..tokenizer import get_tokenizer
 from ..utils import prepare_wandb_config
 from .datasets import get_bsz
 from .loss import SupConLoss
+from .metrics import Metrics
 
 logger = logging.getLogger(__name__)
-
-# Our metric object and model
-from .metrics import Metrics
 
 
 class CustomDataCollatorWithPadding(DataCollatorWithPadding):

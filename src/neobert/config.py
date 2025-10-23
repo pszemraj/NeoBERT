@@ -228,6 +228,9 @@ class Config:
     pretrained_checkpoint: str = "latest"
     use_deepspeed: bool = True
 
+    # Metadata for downstream evaluations (e.g., GLUE linkage)
+    pretraining_metadata: Dict[str, Any] = field(default_factory=dict)
+
     # Misc
     seed: int = 0
     debug: bool = False
@@ -457,6 +460,7 @@ class ConfigLoader:
             "use_deepspeed": config.use_deepspeed,
             "seed": config.seed,
             "debug": config.debug,
+            "pretraining_metadata": config.pretraining_metadata,
         }
 
         with open(path, "w") as f:

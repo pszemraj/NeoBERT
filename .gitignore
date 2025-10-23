@@ -6,6 +6,7 @@ tokenized_data/
 mergekit
 outputs/
 output/
+configs/glue/generated/
 training_log*.txt
 *.pt
 *.bin

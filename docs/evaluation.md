@@ -174,6 +174,26 @@ outputs/
         └── ...
 ```
 
+### Automating GLUE Config Generation
+
+When you have many pretraining runs (e.g., in `outputs/muon-smallscale/`), use the helper below to materialize per-task configs instead of editing nine YAML files per checkpoint:
+
+```bash
+conda run -n neobert python scripts/evaluation/build_glue_configs.py \
+  --checkpoint-dir outputs/muon-smallscale/your-run \
+  --checkpoint-step 100000
+```
+
+- Generated configs land in `configs/glue/generated/<run>-ckpt<step>/` and point to the specified checkpoint.
+- Fine-tune outputs default to `outputs/glue/<run>-ckpt<step>/<task>/`; override with `--results-root` if needed.
+- Every config records `pretraining_metadata` (trainer run name, W&B ids, checkpoint paths) so the linkage from GLUE runs back to pretraining is visible in W&B configs.
+
+Kick off the evaluation with the new directory:
+
+```bash
+bash scripts/evaluation/run_all_glue.sh configs/glue/generated/<run>-ckpt<step>
+```
+
 ## MTEB Benchmark
 
 ### Running MTEB Evaluation
