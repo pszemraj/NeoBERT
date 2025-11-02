@@ -4,6 +4,8 @@
 
 set -e  # Exit on error
 
+SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+
 # Colors for output
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -77,7 +79,12 @@ PY
     LOG_PATHS["$task"]="${LOG_PATH}"
     
     # Run the evaluation
-    if python scripts/evaluation/run_glue.py --config "$CONFIG_PATH" 2>&1 | tee "${LOG_PATH}"; then
+    cmd=(
+        python "${SCRIPT_DIR}/../run_glue.py"
+        --config "${CONFIG_PATH}"
+    )
+
+    if "${cmd[@]}" 2>&1 | tee "${LOG_PATH}"; then
         echo -e "${GREEN}✓ $task completed successfully${NC}"
         PASSED+=("$task")
         

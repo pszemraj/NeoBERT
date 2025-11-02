@@ -65,7 +65,7 @@ python tests/run_tests.py
 | -------------- | ------------------------------------------------------------------------------- |
 | Pretrain       | `python scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml` |
 | GLUE eval      | `python scripts/evaluation/run_glue.py --config configs/glue/{task}.yaml`       |
-| Summarize GLUE | `python scripts/evaluation/summarize_glue.py {results_path}`                    |
+| Summarize GLUE | `python scripts/evaluation/glue/summarize_glue.py {results_path}`               |
 | Run tests      | `python tests/run_tests.py`                                                     |
 
 ### Next steps

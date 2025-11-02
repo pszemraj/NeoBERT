@@ -22,8 +22,8 @@ GLUE evaluation requires a pretrained NeoBERT model. You can:
 python scripts/evaluation/run_glue.py --config configs/glue/cola.yaml
 
 # Using alternate config directories
-bash scripts/evaluation/run_quick_glue.sh configs/glue
-bash scripts/evaluation/run_all_glue.sh configs/glue
+bash scripts/evaluation/glue/run_quick_glue.sh configs/glue
+bash scripts/evaluation/glue/run_all_glue.sh configs/glue
 ```
 
 ### Muon-pretrained checkpoints _(optional)_
@@ -58,7 +58,7 @@ optimizer:
     clipping_warmup_steps: 0
 ```
 
-Save the edited YAML (or copy to a new directory) and pass that location to the quick/all GLUE helper scripts, e.g. `bash scripts/evaluation/run_all_glue.sh path/to/muon-configs`. This mirrors the Muon pretraining setup and follows [Amsel et al., 2025](https://arxiv.org/abs/2502.16982), which reports improved downstream performance when Muon is reused during fine-tuning.
+Save the edited YAML (or copy to a new directory) and pass that location to the quick/all GLUE helper scripts, e.g. `bash scripts/evaluation/glue/run_all_glue.sh path/to/muon-configs`. This mirrors the Muon pretraining setup and follows [Amsel et al., 2025](https://arxiv.org/abs/2502.16982), which reports improved downstream performance when Muon is reused during fine-tuning.
 
 ```bash
 # Override checkpoint path
@@ -72,7 +72,7 @@ python scripts/evaluation/run_glue.py \
 
 ```bash
 # Run full GLUE evaluation suite
-bash scripts/evaluation/run_all_glue.sh
+bash scripts/evaluation/glue/run_all_glue.sh
 
 # Tasks run in order from smallest to largest for quick feedback:
 # WNLI, RTE, MRPC, STS-B, CoLA, SST-2, QNLI, QQP, MNLI
@@ -146,15 +146,15 @@ After running GLUE evaluation, use the summary script:
 
 ```bash
 # Summarize results from a specific path
-python scripts/evaluation/summarize_glue.py outputs/glue/neobert-100m
+python scripts/evaluation/glue/summarize_glue.py outputs/glue/neobert-100m
 
 # Compare against different baselines
-python scripts/evaluation/summarize_glue.py outputs/glue/neobert-100m --baseline roberta-base
-python scripts/evaluation/summarize_glue.py outputs/glue/neobert-100m --baseline bert-large
-python scripts/evaluation/summarize_glue.py outputs/glue/neobert-100m --baseline none
+python scripts/evaluation/glue/summarize_glue.py outputs/glue/neobert-100m --baseline roberta-base
+python scripts/evaluation/glue/summarize_glue.py outputs/glue/neobert-100m --baseline bert-large
+python scripts/evaluation/glue/summarize_glue.py outputs/glue/neobert-100m --baseline none
 
 # Works with any output directory structure
-python scripts/evaluation/summarize_glue.py ./experiments/test_123/glue_results
+python scripts/evaluation/glue/summarize_glue.py ./experiments/test_123/glue_results
 ```
 
 ### Output Structure
@@ -179,21 +179,22 @@ outputs/
 When you have many pretraining runs (e.g., in `outputs/muon-smallscale/`), use the helper below to materialize per-task configs instead of editing nine YAML files per checkpoint:
 
 ```bash
-conda run -n neobert python scripts/evaluation/build_glue_configs.py \
-  --checkpoint-dir outputs/muon-smallscale/your-run \
-  --checkpoint-step 100000
+bash scripts/evaluation/glue/build_configs.sh outputs/muon-smallscale neobert/glue \
+  --config-output-dir configs/glue/generated \
+  --tasks cola,qnli
 ```
 
+- The launcher dispatches `scripts/evaluation/glue/build_glue_configs.py` for each sweep run with a `model_checkpoints/` directory.
 - Generated configs land in `configs/glue/generated/<run>-ckpt<step>/` and point to the specified checkpoint.
 - Fine-tune outputs default to `outputs/glue/<run>-ckpt<step>/<task>/`; override with `--results-root` if needed.
 - Every config records `pretraining_metadata` (trainer run name, W&B ids, checkpoint paths) so the linkage from GLUE runs back to pretraining is visible in W&B configs.
-- Use `--override SECTION.key=value` to tweak common hyper‑parameters for every task (e.g. `--override optimizer.lr=1e-4`, `--override trainer.per_device_train_batch_size=64`).
+- Use `--override SECTION.key=value` to tweak common hyper-parameters for every task (e.g. `--override optimizer.lr=1e-4`, `--override trainer.per_device_train_batch_size=64`).
 - Task-specific overrides are supported via `task:SECTION.key=value`, e.g. `--override stsb:trainer.num_train_epochs=5`.
 
 Kick off the evaluation with the new directory:
 
 ```bash
-bash scripts/evaluation/run_all_glue.sh configs/glue/generated/<run>-ckpt<step>
+bash scripts/evaluation/glue/run_all_glue.sh configs/glue/generated/<run>-ckpt<step>
 ```
 
 ## MTEB Benchmark

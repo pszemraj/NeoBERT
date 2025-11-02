@@ -7,15 +7,17 @@ Scripts for evaluating NeoBERT models on benchmarks.
 
 ## Scripts Overview
 
-- **`run_glue.py`** – GLUE benchmark evaluation
-- **`run_mteb.py`** – MTEB benchmark evaluation
-- **`run_quick_glue.sh`** – Helper launcher for fast per-task evaluation
-- **`run_all_glue.sh`** – Bash wrapper that runs the full GLUE suite
-- **`summarize_glue.py`** – Aggregate GLUE metrics across runs
-- **`pseudo_perplexity.py`** – Calculate pseudo-perplexity for masked language models
-- **`avg_mteb.py`** – Average MTEB results across tasks
-- **`validate_glue_config.py`** – Sanity-check GLUE configs before launching jobs
-- **`wrappers.py`** – Shared helpers for evaluation scripts
+- **`run_glue.py`** - GLUE benchmark evaluation
+- **`run_mteb.py`** - MTEB benchmark evaluation
+- **`pseudo_perplexity.py`** - Calculate pseudo-perplexity for masked language models
+- **`avg_mteb.py`** - Average MTEB results across tasks
+- **`wrappers.py`** - Shared helpers for evaluation scripts
+- **`glue/build_configs.sh`** - Batch-generate config folders from sweep checkpoints
+- **`glue/build_glue_configs.py`** - Python entry point used by the shell launcher
+- **`glue/run_quick_glue.sh`** - Helper launcher for fast per-task evaluation
+- **`glue/run_all_glue.sh`** - Bash wrapper that runs the full GLUE suite
+- **`glue/summarize_glue.py`** - Aggregate GLUE metrics across runs
+- **`glue/validate_glue_config.py`** - Sanity-check GLUE configs before launching jobs
 
 ## Quick Start
 
@@ -27,14 +29,17 @@ python scripts/evaluation/run_glue.py --config configs/glue/cola.yaml
 python scripts/evaluation/run_mteb.py --config configs/evaluate_neobert.yaml
 
 # Run all GLUE tasks
-bash scripts/evaluation/run_all_glue.sh
+bash scripts/evaluation/glue/run_all_glue.sh
+
+# Generate GLUE configs from a sweep directory
+bash scripts/evaluation/glue/build_configs.sh /checkpoints/sweep neobert/glue
 ```
 
 ## Implementation Notes
 
 ### Flash Attention Compatibility
 
-⚠️ GLUE evaluation always runs with eager attention. See [Flash Attention issues during GLUE evaluation](/docs/troubleshooting.md#flash-attention-issues-during-glue-evaluation) for background and mitigation steps.
+ GLUE evaluation always runs with eager attention. See [Flash Attention issues during GLUE evaluation](/docs/troubleshooting.md#flash-attention-issues-during-glue-evaluation) for background and mitigation steps.
 
 ### Model Checkpoint Saving
 

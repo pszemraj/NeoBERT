@@ -9,7 +9,7 @@ python scripts/evaluation/run_glue.py \
     --trainer.output_dir ./output/glue/cola
 
 # GLUE evaluation - all tasks
-# bash scripts/evaluation/run_all_glue.sh
+# bash scripts/evaluation/glue/run_all_glue.sh
 
 # MTEB evaluation - all tasks
 python scripts/evaluation/run_mteb_new.py \
