@@ -53,6 +53,19 @@ TASK_TO_METRIC = {
     "allnli": "eval_accuracy",
 }
 
+# Official GLUE scoring rules (average across metrics when multiple are reported)
+GLUE_SCORE_SPECS = {
+    "cola": ("matthews_correlation",),
+    "sst2": ("accuracy",),
+    "mrpc": ("accuracy", "f1"),
+    "stsb": ("pearson", "spearmanr"),
+    "qqp": ("accuracy", "f1"),
+    "mnli": ("accuracy", "accuracy_mm"),
+    "qnli": ("accuracy",),
+    "rte": ("accuracy",),
+    "wnli": ("accuracy",),
+}
+
 TASK_TO_TRANSFER_FROM = {
     "mnli": "snli",
     "qnli": "mnli",
@@ -88,6 +101,42 @@ def _configure_wandb_metrics(accelerator):
         except Exception as exc:  # pragma: no cover - best-effort safety
             logger.warning(f"Failed to configure W&B metric definitions: {exc}")
         break
+
+
+def _normalize_metrics_for_scoring(raw_metrics: dict) -> dict[str, float]:
+    normalized: dict[str, float] = {}
+    for key, value in (raw_metrics or {}).items():
+        if not isinstance(key, str) or not isinstance(value, (int, float)):
+            continue
+        metric_key = key[len("eval_") :] if key.startswith("eval_") else key
+        normalized[metric_key] = float(value)
+    return normalized
+
+
+def compute_glue_score(task: str, metrics: dict[str, float]) -> float | None:
+    """Return official GLUE score (averaged where required) for a task."""
+
+    metric_keys = GLUE_SCORE_SPECS.get(task)
+    if not metric_keys:
+        return None
+
+    normalized = _normalize_metrics_for_scoring(metrics)
+    values = []
+    for key in metric_keys:
+        if key in normalized:
+            values.append(normalized[key])
+            continue
+        if task == "mnli" and key == "accuracy_mm":
+            for alias in ("accuracy_mismatched", "mnli_mm", "accuracy-mm"):
+                if alias in normalized:
+                    values.append(normalized[alias])
+                    break
+
+    if not values:
+        combined = normalized.get("combined_score")
+        return float(combined) if combined is not None else None
+
+    return float(sum(values) / len(values))
 
 
 def _update_wandb_config(accelerator, cfg: Config):
@@ -294,12 +343,19 @@ def run_evaluation_and_save(
     }
 
     # Add evaluation metrics
+    metrics_for_score = eval_metric if cfg.task != "mnli" else results
     if cfg.task != "mnli":
         for key, value in eval_metric.items():
             metrics_to_log[f"eval_{key}"] = value
     else:
         for key, value in results.items():
             metrics_to_log[f"eval_{key}"] = value
+
+    score_for_early_stop = compute_glue_score(
+        cfg.task, metrics_for_score or eval_metric
+    )
+    if score_for_early_stop is not None:
+        metrics_to_log["eval_score"] = score_for_early_stop
 
     # Add training metrics
     if train_metric:
@@ -321,8 +377,12 @@ def run_evaluation_and_save(
         json.dump(all_results, f)
     logger.info(f"Saved evaluation results to {output_file}")
 
-    # Return current accuracy for early stopping
-    curr_accuracy = list(eval_metric.values())[0]
+    # Return current accuracy for early stopping (use official GLUE score when available)
+    curr_accuracy = (
+        score_for_early_stop
+        if score_for_early_stop is not None
+        else list(eval_metric.values())[0]
+    )
 
     model.train()
     return eval_metric, curr_accuracy, False  # Last value is early_stop flag
@@ -349,7 +409,9 @@ def get_best_checkpoint_path(base_dir, task, num_checkpoints_to_merge=1):
                 # Read the eval accuracy from the JSON file
                 with open(json_path, "r") as f:
                     results = json.load(f)
-                    eval_accuracy = results.get(TASK_TO_METRIC[task], 0)
+                    eval_accuracy = compute_glue_score(task, results) or results.get(
+                        TASK_TO_METRIC.get(task, ""), 0
+                    )
 
                     # Extract step number from the file name (e.g., all_results_step_{i}.json)
                     step_number = int(json_file.split("_")[3].split(".")[0])
