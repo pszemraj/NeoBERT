@@ -125,7 +125,7 @@ BASE_SCHEDULER = {
 }
 
 
-def parse_override_value(value: str):
+def parse_override_value(value: str) -> object:
     try:
         parsed = yaml.safe_load(value)
     except yaml.YAMLError:
@@ -181,12 +181,13 @@ def slugify(value: str) -> str:
 
 
 def relpath(path: Path, base: Path) -> str:
-    """Convert path to POSIX relative path when possible."""
+    """Return a POSIX path, relative to base when possible."""
 
     try:
-        return Path(".") / Path(path).resolve().relative_to(base)
+        resolved = Path(path).resolve()
+        return resolved.relative_to(base).as_posix()
     except ValueError:
-        return path.resolve()
+        return Path(path).resolve().as_posix()
 
 
 def find_checkpoint_step(checkpoint_dir: Path, requested_step: Optional[str]) -> str:
@@ -209,7 +210,12 @@ def find_checkpoint_step(checkpoint_dir: Path, requested_step: Optional[str]) ->
 
 def load_pretraining_config(config_path: Path) -> Dict[str, object]:
     with config_path.open("r") as handle:
-        return yaml.safe_load(handle) or {}
+        loaded = yaml.safe_load(handle) or {}
+    if not isinstance(loaded, dict):
+        raise TypeError(
+            f"Expected mapping at '{config_path}', got {type(loaded).__name__}"
+        )
+    return loaded
 
 
 def build_trainer_section(
@@ -238,8 +244,13 @@ def build_pretraining_metadata(
     config_path: Path,
     pretrain_config: Dict[str, object],
 ) -> Dict[str, object]:
-    trainer_cfg = pretrain_config.get("trainer", {}) or {}
-    wandb_cfg = pretrain_config.get("wandb", {}) or {}
+    trainer_cfg = pretrain_config.get("trainer") or {}
+    if not isinstance(trainer_cfg, dict):
+        trainer_cfg = {}
+
+    wandb_cfg = pretrain_config.get("wandb") or {}
+    if not isinstance(wandb_cfg, dict):
+        wandb_cfg = {}
 
     metadata = {
         "checkpoint_dir": str(relpath(checkpoint_dir, REPO_ROOT)),
@@ -267,7 +278,6 @@ class BuildArgs:
     checkpoint_dir: Path
     checkpoint_step: str
     pretrain_config_path: Path
-    output_root: Path
     results_root: Path
     wandb_project: str
     tasks: Iterable[str]
@@ -278,7 +288,9 @@ class BuildArgs:
 
 def build_configs(args: BuildArgs) -> Dict[str, Dict[str, object]]:
     pretrain_cfg = load_pretraining_config(args.pretrain_config_path)
-    tokenizer_cfg = pretrain_cfg.get("tokenizer", {}) or {}
+    tokenizer_cfg = pretrain_cfg.get("tokenizer") or {}
+    if not isinstance(tokenizer_cfg, dict):
+        tokenizer_cfg = {}
 
     tokenizer_block = {}
     if tokenizer_cfg.get("name"):
@@ -388,10 +400,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir",
+        "--output-root",
+        dest="output_dir",
         type=Path,
         default=None,
         help=(
-            "Directory to write generated configs (default: configs/glue/generated/<run>-ckpt<step>)"
+            "Root directory to write generated configs under (default: configs/glue/generated)"
         ),
     )
     parser.add_argument(
@@ -455,10 +469,15 @@ def main() -> None:
         )
 
     pretrain_cfg = load_pretraining_config(pretrain_config_path)
-    run_source = pretrain_cfg.get("wandb", {}).get("name") or checkpoint_dir.name
+    wandb_cfg = pretrain_cfg.get("wandb") or {}
+    if not isinstance(wandb_cfg, dict):
+        wandb_cfg = {}
+    run_source = wandb_cfg.get("name") or checkpoint_dir.name
     run_prefix = slugify(run_source)
 
-    output_root = args.output_dir.resolve() if args.output_dir else DEFAULT_OUTPUT_ROOT
+    output_root = (
+        args.output_dir.expanduser() if args.output_dir else DEFAULT_OUTPUT_ROOT
+    )
     results_root = args.results_root.expanduser()
     final_output_dir = output_root / f"{run_prefix}-ckpt{checkpoint_step}"
 
@@ -483,7 +502,6 @@ def main() -> None:
         checkpoint_dir=checkpoint_dir,
         checkpoint_step=checkpoint_step,
         pretrain_config_path=pretrain_config_path,
-        output_root=output_root,
         results_root=results_root,
         wandb_project=args.wandb_project,
         tasks=args.tasks,

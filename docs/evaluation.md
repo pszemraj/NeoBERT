@@ -13,7 +13,7 @@ GLUE evaluation requires a pretrained NeoBERT model. You can:
 
 1. Use an existing checkpoint from pretraining
 2. Train a new model (see [Training Guide](/docs/training.md))
-3. Test with random weights using `--glue.allow_random_weights true`
+3. Test with random weights by setting `model.allow_random_weights: true` (or `glue.allow_random_weights: true`) in the config YAML.
 
 ### Running Single GLUE Task
 
@@ -60,13 +60,7 @@ optimizer:
 
 Save the edited YAML (or copy to a new directory) and pass that location to the quick/all GLUE helper scripts, e.g. `bash scripts/evaluation/glue/run_all_glue.sh path/to/muon-configs`. This mirrors the Muon pretraining setup and follows [Amsel et al., 2025](https://arxiv.org/abs/2502.16982), which reports improved downstream performance when Muon is reused during fine-tuning.
 
-```bash
-# Override checkpoint path
-python scripts/evaluation/run_glue.py \
-    --config configs/glue/cola.yaml \
-    --glue.pretrained_checkpoint_dir ./outputs/your_checkpoint \
-    --glue.pretrained_checkpoint 50000
-```
+To evaluate a different checkpoint, edit the `model:` block in a copy of your task config (or use the config generation helpers below).
 
 ### Running All GLUE Tasks
 
@@ -204,17 +198,14 @@ bash scripts/evaluation/glue/run_all_glue.sh configs/glue/generated/<run>-ckpt<s
 ```bash
 # Run full MTEB evaluation
 python scripts/evaluation/run_mteb.py \
-    --config configs/evaluate_neobert.yaml
+    --config outputs/<pretrain_run>/model_checkpoints/<step>/config.yaml \
+    --model_name_or_path outputs/<pretrain_run>
 
 # Run specific task types
 python scripts/evaluation/run_mteb.py \
-    --config configs/evaluate_neobert.yaml \
+    --config outputs/<pretrain_run>/model_checkpoints/<step>/config.yaml \
+    --model_name_or_path outputs/<pretrain_run> \
     --task_types retrieval,sts
-
-# Run specific tasks
-python scripts/evaluation/run_mteb.py \
-    --config configs/evaluate_neobert.yaml \
-    --tasks "MSMARCO,NQ,HotpotQA"
 ```
 
 ### MTEB Task Types

@@ -80,7 +80,7 @@ python tests/run_tests.py
 
 Load [the official model](https://huggingface.co/chandar-lab/NeoBERT) using Hugging Face Transformers and use it for text embeddings or fill-mask predictions[^1].
 
-[^1]: Encoder models are usually meant to be [fine-tuned for specific tasks](https://github.com/huggingface/transformers/tree/81b4f9882c8a46c8274084503d297874bb372260/examples/pytorch) rather than used directly after pretraining. this is analogous to instruction tuning for decoder-only models: the base model is a good starting point, but fine-tuning is necessary for practical applications.
+[^1]: Encoder models are usually meant to be [fine-tuned for specific tasks](https://github.com/huggingface/transformers/tree/81b4f9882c8a46c8274084503d297874bb372260/examples/pytorch) rather than used directly after pretraining. This is analogous to instruction-tuning for decoder-only models: the base model is a strong starting point, but fine-tuning is typically needed for practical applications.
 
 <details>
 <summary><b>Click to Expand:</b> MLM & Embedding Examples</summary>
@@ -120,7 +120,7 @@ inputs = tokenizer(text, return_tensors="pt")
 # Get predictions
 outputs = model(**inputs)
 mask_token_index = (inputs["input_ids"] == tokenizer.mask_token_id).nonzero(as_tuple=True)[1]
-predicted_token_id = outputs.logits[0, mask_token_index].argmax(axis=-1)
+predicted_token_id = outputs.logits[0, mask_token_index].argmax(dim=-1).item()
 print(tokenizer.decode(predicted_token_id))
 ```
 

@@ -6,7 +6,7 @@
 #   --config-output-dir <path>   (default: configs/glue/generated)
 #   --results-root <path>        (default: outputs/glue)
 #   --tasks <space-or-comma-list> (restrict tasks to generate)
-# Environment overrides still respected: CONFIG_OUTPUT_DIR, RESULTS_ROOT
+# Environment overrides still respected: CONFIG_OUTPUT_DIR, RESULTS_ROOT, PYTHON_EXEC
 
 set -euo pipefail
 
@@ -23,6 +23,7 @@ shift 2
 
 CONFIG_OUTPUT_DIR=${CONFIG_OUTPUT_DIR:-configs/glue/generated}
 RESULTS_ROOT=${RESULTS_ROOT:-outputs/glue}
+PYTHON_EXEC=${PYTHON_EXEC:-python}
 TASK_LIST=()
 
 while [[ $# -gt 0 ]]; do
@@ -77,7 +78,7 @@ for run_dir in "${CHECKPOINT_ROOT}"/*; do
   echo "Processing $(basename "${run_dir}")" >&2
 
   cmd=(
-    conda run -n neobert --no-capture-output python "${SCRIPT_DIR}/build_glue_configs.py"
+    "${PYTHON_EXEC}" "${SCRIPT_DIR}/build_glue_configs.py"
     --checkpoint-dir "${run_dir}"
     --wandb-project "${WANDB_PROJECT}"
     --results-root "${RESULTS_ROOT}"

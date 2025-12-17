@@ -26,7 +26,7 @@ Scripts for evaluating NeoBERT models on benchmarks.
 python scripts/evaluation/run_glue.py --config configs/glue/cola.yaml
 
 # Run MTEB evaluation
-python scripts/evaluation/run_mteb.py --config configs/evaluate_neobert.yaml
+python scripts/evaluation/run_mteb.py --config outputs/<pretrain_run>/model_checkpoints/<step>/config.yaml --model_name_or_path outputs/<pretrain_run>
 
 # Run all GLUE tasks
 bash scripts/evaluation/glue/run_all_glue.sh
@@ -39,7 +39,7 @@ bash scripts/evaluation/glue/build_configs.sh /checkpoints/sweep neobert/glue
 
 ### Flash Attention Compatibility
 
- GLUE evaluation always runs with eager attention. See [Flash Attention issues during GLUE evaluation](/docs/troubleshooting.md#flash-attention-issues-during-glue-evaluation) for background and mitigation steps.
+GLUE evaluation always runs with eager attention. See [Flash Attention issues during GLUE evaluation](/docs/troubleshooting.md#flash-attention-issues-during-glue-evaluation) for background and mitigation steps.
 
 ### Model Checkpoint Saving
 

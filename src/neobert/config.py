@@ -377,8 +377,9 @@ class ConfigLoader:
         Preprocess and validate config, resolving any dynamic values.
         This should be called after config loading but before any downstream consumers.
         """
-        # Resolve vocab_size for GPU efficiency
-        if hasattr(config.tokenizer, "name") and config.tokenizer.name:
+        # Resolve vocab_size for GPU efficiency (skip CPU-only runs/tests).
+        use_cpu = getattr(config.trainer, "use_cpu", False)
+        if not use_cpu and hasattr(config.tokenizer, "name") and config.tokenizer.name:
             # Import tokenizer here to avoid circular imports
             from .tokenizer import get_tokenizer
 

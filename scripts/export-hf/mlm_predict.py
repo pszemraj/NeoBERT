@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
+"""Fill mask tokens with predictions from a Hugging Face masked language model."""
+
+from __future__ import annotations
+
 import argparse
 
 import torch
 from transformers import AutoModelForMaskedLM, AutoTokenizer
 
 
-def get_parser() -> argparse.ArgumentParser:
-    """Get command-line parser."""
-
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Predict masked tokens with a Hugging Face Masked LM.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -16,31 +18,85 @@ def get_parser() -> argparse.ArgumentParser:
         "model_name_or_path",
         nargs="?",
         default="chandar-lab/NeoBERT",
-        help="Model model_name_or_path on Hugging Face Hub.",
+        help="Model name or path on the Hugging Face Hub (or local directory).",
     )
     parser.add_argument(
         "--text",
         default="NeoBERT is the most [MASK] model of its kind!",
         help="Input sentence; you may use literal [MASK] which will be mapped to the tokenizer's mask token.",
     )
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=5,
+        help="Number of candidates to show per mask token.",
+    )
+    parser.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda"),
+        default="auto",
+        help="Where to run the model.",
+    )
+    parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Allow custom modeling code from the Hub (only enable for trusted repos).",
+    )
     return parser
 
 
-def main():
-    """Main entry point."""
+def _resolve_device(device: str) -> torch.device:
+    if device == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(device)
 
-    args = get_parser().parse_args()
+
+def _clean_metaspace_before_mask(inputs: dict, tokenizer) -> dict:
+    """Remove SentencePiece metaspace tokens that appear directly before a mask token."""
+
+    metaspace = "▁"
+    metaspace_id = tokenizer.convert_tokens_to_ids(metaspace)
+    if tokenizer.convert_ids_to_tokens(metaspace_id) != metaspace:
+        return inputs
+
+    input_ids = inputs["input_ids"][0].tolist()
+    keep_indices = []
+    for idx, token_id in enumerate(input_ids):
+        if (
+            token_id == metaspace_id
+            and idx < len(input_ids) - 1
+            and input_ids[idx + 1] == tokenizer.mask_token_id
+        ):
+            continue
+        keep_indices.append(idx)
+
+    if len(keep_indices) == len(input_ids):
+        return inputs
+
+    keep = torch.tensor(keep_indices, dtype=torch.long)
+    cleaned = {}
+    for key, value in inputs.items():
+        if not torch.is_tensor(value) or value.ndim != 2 or value.shape[0] != 1:
+            cleaned[key] = value
+            continue
+        cleaned[key] = value[:, keep]
+    return cleaned
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    device = _resolve_device(args.device)
 
     print(f"Loading model and tokenizer from {args.model_name_or_path}...")
     tokenizer = AutoTokenizer.from_pretrained(
-        args.model_name_or_path, trust_remote_code=True
+        args.model_name_or_path, trust_remote_code=args.trust_remote_code
     )
     model = AutoModelForMaskedLM.from_pretrained(
         args.model_name_or_path,
-        torch_dtype="auto",
-        device_map="cpu",  # for simplicity; change as needed
-        trust_remote_code=True,
+        trust_remote_code=args.trust_remote_code,
     )
+    model.to(device)
+    model.eval()
 
     # Validate mask token
     mask_token = tokenizer.mask_token
@@ -58,30 +114,10 @@ def main():
 
     # Tokenize & forward
     inputs = tokenizer(text_norm, return_tensors="pt")
+    inputs = _clean_metaspace_before_mask(inputs, tokenizer)
+    inputs = {k: v.to(device) if torch.is_tensor(v) else v for k, v in inputs.items()}
 
-    # Handle Metaspace tokenizer issue: remove extra space tokens before [MASK]
-    # Get the space token ID dynamically instead of hardcoding 454
-    space_token_id = tokenizer.convert_tokens_to_ids("▁")
-
-    input_ids = inputs["input_ids"][0].tolist()
-    cleaned_ids = []
-    for i, token_id in enumerate(input_ids):
-        # Skip space token if it's immediately before [MASK]
-        if (
-            token_id == space_token_id
-            and i < len(input_ids) - 1
-            and input_ids[i + 1] == tokenizer.mask_token_id
-        ):
-            continue
-        cleaned_ids.append(token_id)
-
-    # Update inputs if we removed any tokens
-    if len(cleaned_ids) != len(input_ids):
-        inputs["input_ids"] = torch.tensor([cleaned_ids])
-        if "attention_mask" in inputs:
-            inputs["attention_mask"] = torch.ones_like(inputs["input_ids"])
-
-    with torch.no_grad():
+    with torch.inference_mode():
         outputs = model(**inputs)
 
     # Find mask positions
@@ -93,13 +129,13 @@ def main():
 
     # Predict each mask independently (single forward pass)
     predicted_tokens = []
-    top_k = 5
+    top_k = max(1, args.top_k)
 
     for mask_num, (b_idx, t_idx) in enumerate(mask_positions.tolist(), 1):
         logits = outputs.logits[b_idx, t_idx]
 
         # Get top-k predictions
-        scores, indices = torch.topk(logits, k=top_k)
+        scores, indices = torch.topk(logits, k=min(top_k, logits.shape[-1]))
         probs = torch.softmax(scores, dim=0)  # Convert to probabilities
 
         # Store top prediction for filling

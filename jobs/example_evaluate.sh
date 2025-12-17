@@ -1,28 +1,26 @@
-#!/bin/bash
-# Example evaluation scripts using new configuration system
+#!/usr/bin/env bash
+# Example evaluation commands.
+#
+# Run from the repository root.
+
+set -euo pipefail
 
 # GLUE evaluation - single task example
-python scripts/evaluation/run_glue.py \
-    --config configs/evaluate_neobert.yaml \
-    --task glue \
-    --dataset.name cola \
-    --trainer.output_dir ./output/glue/cola
+python scripts/evaluation/run_glue.py --config configs/glue/cola.yaml
 
-# GLUE evaluation - all tasks
-# bash scripts/evaluation/glue/run_all_glue.sh
+# GLUE evaluation - quick smoke test (small tasks only)
+bash scripts/evaluation/glue/run_quick_glue.sh configs/glue
 
-# MTEB evaluation - all tasks
-python scripts/evaluation/run_mteb_new.py \
-    --config configs/evaluate_neobert.yaml \
-    --task mteb \
-    --mteb_task_type all \
-    --trainer.output_dir ./output/pretrain
+# GLUE evaluation - full suite
+bash scripts/evaluation/glue/run_all_glue.sh configs/glue
 
-# MTEB evaluation - only STS tasks
-python scripts/evaluation/run_mteb_new.py \
-    --config configs/evaluate_neobert.yaml \
-    --task mteb \
-    --mteb_task_type sts \
-    --mteb_batch_size 64 \
-    --pretrained_checkpoint 100000 \
-    --trainer.output_dir ./output/pretrain
+# GLUE config generation - from a sweep directory of pretrained runs
+# CHECKPOINT_ROOT="outputs/my-sweep"
+# WANDB_PROJECT="neobert/glue"
+# bash scripts/evaluation/glue/build_configs.sh "${CHECKPOINT_ROOT}" "${WANDB_PROJECT}" \
+#   --config-output-dir configs/glue/generated \
+#   --results-root outputs/glue \
+#   --tasks cola,qnli
+#
+# Then run:
+# bash scripts/evaluation/glue/run_all_glue.sh configs/glue/generated/<run>-ckpt<step>
