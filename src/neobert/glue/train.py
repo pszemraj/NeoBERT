@@ -1396,6 +1396,10 @@ def trainer(cfg: Config):
                 for key, value in val_metrics.items():
                     log_payload[f"val/{key}"] = value
 
+                score_for_early_stop = compute_glue_score(cfg.task, val_metrics)
+                if score_for_early_stop is not None:
+                    log_payload["val/score"] = score_for_early_stop
+
                 log_payload = {k: _to_serializable(v) for k, v in log_payload.items()}
 
                 evaluation_round += 1
@@ -1419,6 +1423,8 @@ def trainer(cfg: Config):
                 last_val_metrics.update(
                     {k: _to_serializable(v) for k, v in val_metrics.items()}
                 )
+                if score_for_early_stop is not None:
+                    last_val_metrics["score"] = _to_serializable(score_for_early_stop)
 
                 _save_metrics(cfg.trainer.output_dir, "train", last_train_metrics)
                 _save_metrics(cfg.trainer.output_dir, "val", last_val_metrics)
@@ -1447,10 +1453,16 @@ def trainer(cfg: Config):
                     )
                     json.dump(all_results, f)
 
-                curr_accuracy = list(eval_metric.values())[0]
+                fallback_metric = next(iter(val_metrics.values()), 0.0)
+                curr_accuracy = (
+                    score_for_early_stop
+                    if score_for_early_stop is not None
+                    else fallback_metric
+                )
+                metric_improved = curr_accuracy > prev_accuracy
 
                 # Update early stopping counter
-                if curr_accuracy > prev_accuracy:
+                if metric_improved:
                     prev_accuracy = curr_accuracy
                     early_stopping_counter = 0
 
@@ -1477,7 +1489,7 @@ def trainer(cfg: Config):
                         should_save = True
                 elif save_strategy == "best":
                     # Save only if this is the best model so far
-                    if curr_accuracy > prev_accuracy:
+                    if metric_improved:
                         should_save = True
                 elif save_strategy != "no":
                     # Default to saving at eval steps if strategy is not 'no'
