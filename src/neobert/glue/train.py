@@ -906,6 +906,10 @@ def trainer(cfg: Config):
             model_config_dict.pop("pretrained_checkpoint_dir")
         if "pretrained_checkpoint" in model_config_dict:
             model_config_dict.pop("pretrained_checkpoint")
+        if "name_or_path" in model_config_dict:
+            model_config_dict.pop("name_or_path")
+        if "name" in model_config_dict:
+            model_config_dict.pop("name")
 
         # Use model config directly - don't merge with tokenizer config
         # The tokenizer's vocab_size should match the model's anyway

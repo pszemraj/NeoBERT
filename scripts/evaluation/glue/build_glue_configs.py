@@ -317,8 +317,6 @@ def build_configs(args: BuildArgs) -> Dict[str, Dict[str, object]]:
         "pretrained_checkpoint": checkpoint_value,
         "pretrained_config_path": str(relpath(args.pretrain_config_path, REPO_ROOT)),
     }
-    if args.model_name:
-        model_section["name_or_path"] = args.model_name
 
     output_dir_root = (
         args.results_root / f"{args.run_prefix}-ckpt{args.checkpoint_step}"
