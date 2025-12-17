@@ -84,7 +84,7 @@ PY
         --config "${CONFIG_PATH}"
     )
 
-    if "${cmd[@]}" 2>&1 | tee "${LOG_PATH}"; then
+    if ( set -o pipefail; "${cmd[@]}" 2>&1 | tee "${LOG_PATH}" ); then
         echo -e "${GREEN}✓ $task completed successfully${NC}"
         PASSED+=("$task")
         
