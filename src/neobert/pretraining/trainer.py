@@ -366,6 +366,11 @@ def trainer(cfg: Config):
     )
     model = NeoBERTLMHead(model_config)
 
+    if cfg.trainer.gradient_checkpointing:
+        model.gradient_checkpointing_enable()
+        # Track flag on config for downstream logging/debug, mirroring HF behaviour.
+        setattr(model.config, "gradient_checkpointing", True)
+
     # Print model summary with hierarchical parameter counts
     if accelerator.is_main_process:
         model_summary(model, max_depth=3, show_param_shapes=True)

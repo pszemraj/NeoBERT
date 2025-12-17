@@ -12,6 +12,7 @@ from datasets import Dataset
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from torch.nn.functional import scaled_dot_product_attention
+from torch.utils.checkpoint import checkpoint
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import (
@@ -390,6 +391,7 @@ class NormEncoderBlock(nn.Module):
 class NeoBERTPreTrainedModel(PreTrainedModel):
     config_class = NeoBERTConfig
     _supports_cache_class = True
+    supports_gradient_checkpointing = True
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -439,6 +441,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
+        self.gradient_checkpointing = False
 
     def forward(self, src, pad_mask=None):
         # Expand and repeat: (Batch, Length) -> (Batch, Heads, Length, Length)
@@ -470,7 +473,19 @@ class NeoBERT(NeoBERTPreTrainedModel):
 
         # Transformer encoder
         for layer in self.transformer_encoder:
-            x = layer(x, pad_mask, freqs_cis)
+            if self.gradient_checkpointing and self.training:
+                # Capture mask + rotary frequencies in closure so checkpoint only sees Tensor inputs.
+                def custom_forward(hidden_states):
+                    return layer(hidden_states, pad_mask, freqs_cis)
+
+                x = checkpoint(
+                    custom_forward,
+                    x,
+                    preserve_rng_state=False,
+                    use_reentrant=False,
+                )
+            else:
+                x = layer(x, pad_mask, freqs_cis)
 
         # Final normalization layer
         x = self.layer_norm(x)
@@ -514,6 +529,7 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
+        self.gradient_checkpointing = False
 
         for pn, p in self.named_parameters():
             if pn.endswith("c_proj.weight"):
@@ -559,7 +575,19 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
 
         # Transformer encoder
         for layer in self.transformer_encoder:
-            x = layer(x, pad_mask, freqs_cis)
+            if self.gradient_checkpointing and self.training:
+
+                def custom_forward(hidden_states):
+                    return layer(hidden_states, pad_mask, freqs_cis)
+
+                x = checkpoint(
+                    custom_forward,
+                    x,
+                    preserve_rng_state=False,
+                    use_reentrant=False,
+                )
+            else:
+                x = layer(x, pad_mask, freqs_cis)
 
         # Return the output of the last hidden layer
         return x

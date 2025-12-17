@@ -1,6 +1,6 @@
 #!/bin/bash
 # Run all GLUE evaluations for NeoBERT
-# Usage: bash scripts/evaluation/run_all_glue.sh [config_dir]
+# Usage: bash scripts/evaluation/glue/run_all_glue.sh [config_dir]
 #        config_dir defaults to configs/glue
 
 CONFIG_DIR="${1:-configs/glue}"
@@ -19,6 +19,8 @@ NC='\033[0m' # No Color
 CONFIG_BASENAME="$(basename "${CONFIG_DIR}")"
 LOG_DIR="logs/${CONFIG_BASENAME}"
 mkdir -p "${LOG_DIR}"
+
+SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 
 declare -A OUTPUT_DIRS
 declare -A LOG_PATHS
@@ -48,11 +50,14 @@ for task in "${TASKS[@]}"; do
         LOG_PATHS["$task"]="(config missing)"
         continue
     fi
-    CMD="python scripts/evaluation/run_glue.py --config ${CONFIG_PATH}"
-    
+    cmd=(
+        python "${SCRIPT_DIR}/../run_glue.py"
+        --config "${CONFIG_PATH}"
+    )
+
     # Add model override if provided
     if [ -n "$MODEL_PATH_OVERRIDE" ]; then
-        CMD="$CMD --model_name_or_path $MODEL_PATH_OVERRIDE"
+        cmd+=(--model_name_or_path "${MODEL_PATH_OVERRIDE}")
     fi
 
     # Determine expected output directory from config
@@ -82,7 +87,7 @@ PY
     # Run the evaluation
     LOG_PATH="${LOG_DIR}/${task}.log"
     LOG_PATHS["$task"]="${LOG_PATH}"
-    $CMD 2>&1 | tee "${LOG_PATH}"
+    "${cmd[@]}" 2>&1 | tee "${LOG_PATH}"
     
     # Check if successful
     if [ ${PIPESTATUS[0]} -eq 0 ]; then

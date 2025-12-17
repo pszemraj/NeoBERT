@@ -2,10 +2,10 @@
 """Summarize GLUE results from output directories.
 
 Usage:
-    python scripts/evaluation/summarize_glue.py outputs/glue/neobert-100m
-    python scripts/evaluation/summarize_glue.py ./outputs/experiment_xyz/glue_results
-    python scripts/evaluation/summarize_glue.py outputs/glue/neobert-100m --baseline roberta-base
-    python scripts/evaluation/summarize_glue.py  # Default: outputs/glue/neobert-100m
+    python scripts/evaluation/glue/summarize_glue.py outputs/glue/neobert-100m
+    python scripts/evaluation/glue/summarize_glue.py ./outputs/experiment_xyz/glue_results
+    python scripts/evaluation/glue/summarize_glue.py outputs/glue/neobert-100m --baseline roberta-base
+    python scripts/evaluation/glue/summarize_glue.py  # Default: outputs/glue/neobert-100m
 """
 
 import argparse
@@ -14,35 +14,87 @@ from pathlib import Path
 
 import pandas as pd
 
-# Expected metrics for each task
-TASK_METRICS = {
-    "cola": ("matthews_correlation", 100),
-    "sst2": ("accuracy", 100),
-    "mrpc": ("f1", 100),
-    "stsb": ("pearson", 100),
-    "qqp": ("f1", 100),
-    "mnli": ("accuracy", 100),
-    "qnli": ("accuracy", 100),
-    "rte": ("accuracy", 100),
-    "wnli": ("accuracy", 100),
+# Official GLUE task scoring definitions.
+# For tasks with multiple metrics, GLUE uses the unweighted average.
+TASK_SCORES = {
+    "cola": {
+        "metrics": ("matthews_correlation",),
+        "label": "Matthews Corr",
+        "scale": 100,
+    },
+    "sst2": {"metrics": ("accuracy",), "label": "Accuracy", "scale": 100},
+    "mrpc": {"metrics": ("accuracy", "f1"), "label": "Acc/F1 (avg)", "scale": 100},
+    "stsb": {
+        "metrics": ("pearson", "spearmanr"),
+        "label": "Pearson/Spearman (avg)",
+        "scale": 100,
+    },
+    "qqp": {"metrics": ("accuracy", "f1"), "label": "Acc/F1 (avg)", "scale": 100},
+    "mnli": {
+        "metrics": ("accuracy", "accuracy_mm"),
+        "label": "MNLI-m/mm (avg)",
+        "scale": 100,
+    },
+    "qnli": {"metrics": ("accuracy",), "label": "Accuracy", "scale": 100},
+    "rte": {"metrics": ("accuracy",), "label": "Accuracy", "scale": 100},
+    "wnli": {"metrics": ("accuracy",), "label": "Accuracy", "scale": 100},
 }
 
 # Baseline scores for reference (BERT-base scores from literature)
 BERT_BASE_SCORES = {
     "cola": 52.1,
     "sst2": 93.5,
-    "mrpc": 88.9,  # F1 score
-    "stsb": 85.8,  # Pearson
-    "qqp": 71.2,  # F1
-    "mnli": 84.6,
+    "mrpc": 86.9,  # Avg(F1=88.9, Acc=84.8)
+    "stsb": 85.4,  # Avg(Pearson=85.8, Spearman=84.9)
+    "qqp": 80.2,  # Avg(F1=71.2, Acc=89.2)
+    "mnli": 84.0,  # Avg(m=84.6, mm=83.4)
     "qnli": 90.5,
     "rte": 66.4,
     "wnli": 65.1,
 }
 
 
-def get_task_results(task_dir):
-    """Extract best results from a task directory."""
+def _normalize_metrics(data: dict) -> dict[str, float]:
+    normalized: dict[str, float] = {}
+    for key, value in (data or {}).items():
+        if not isinstance(key, str) or not isinstance(value, (int, float)):
+            continue
+        metric_key = key[len("eval_") :] if key.startswith("eval_") else key
+        normalized[metric_key] = float(value)
+    return normalized
+
+
+def _compute_task_score(task: str, metrics: dict[str, float]) -> float | None:
+    spec = TASK_SCORES.get(task)
+    if spec is None:
+        return None
+
+    required = list(spec["metrics"])
+    values: list[float] = []
+
+    for metric in required:
+        if metric in metrics:
+            values.append(metrics[metric])
+            continue
+        if task == "mnli" and metric == "accuracy_mm":
+            for alias in ("accuracy_mismatched", "mnli_mm", "accuracy-mm"):
+                if alias in metrics:
+                    values.append(metrics[alias])
+                    break
+
+    if not values:
+        return None
+
+    if len(values) != len(required):
+        combined = metrics.get("combined_score")
+        if combined is not None and isinstance(combined, (int, float)):
+            return float(combined)
+
+    return sum(values) / len(values)
+
+
+def get_task_results(task_dir: Path, task: str) -> float | None:
+    """Extract the best (max) official GLUE score from a task directory."""
     results_files = list(task_dir.glob("all_results_step_*.json"))
     if not results_files:
         results_file = task_dir / "all_results.json"
@@ -51,24 +103,24 @@ def get_task_results(task_dir):
         else:
             return None
 
-    best_score = -1
+    best_score: float | None = None
     for f in results_files:
         try:
             with open(f) as fp:
                 data = json.load(fp)
-                if data:  # Check if dict is not empty
-                    # Find the relevant metric
-                    for key, value in data.items():
-                        if any(
-                            metric in key
-                            for metric in ["matthews", "accuracy", "f1", "pearson"]
-                        ):
-                            if value > best_score:
-                                best_score = value
         except (json.JSONDecodeError, FileNotFoundError):
             continue
+        if not isinstance(data, dict):
+            continue
 
-    return best_score if best_score > -1 else None
+        metrics = _normalize_metrics(data)
+        score = _compute_task_score(task, metrics)
+        if score is None:
+            continue
+        if best_score is None or score > best_score:
+            best_score = score
+
+    return best_score
 
 
 def main():
@@ -118,10 +170,10 @@ def main():
         baseline_scores = {
             "cola": 60.5,
             "sst2": 94.9,
-            "mrpc": 89.3,
-            "stsb": 86.5,
-            "qqp": 72.1,
-            "mnli": 86.7,
+            "mrpc": 87.4,  # Avg(F1=89.3, Acc=85.4)
+            "stsb": 86.2,  # Avg(Pearson=86.5, Spearman=85.9)
+            "qqp": 80.7,  # Avg(F1=72.1, Acc=89.3)
+            "mnli": 86.3,  # Avg(m=86.7, mm=85.9)
             "qnli": 92.7,
             "rte": 70.1,
             "wnli": 65.1,
@@ -131,26 +183,31 @@ def main():
         baseline_scores = {
             "cola": 63.6,
             "sst2": 94.8,
-            "mrpc": 90.2,
-            "stsb": 91.2,
-            "qqp": 91.9,
-            "mnli": 87.6,
+            "mrpc": 88.4,  # Avg(F1=90.2, Acc=86.7)
+            "stsb": 91.0,  # Avg(Pearson=91.2, Spearman=90.9)
+            "qqp": 90.2,  # Avg(F1=88.4, Acc=91.9)
+            "mnli": 87.6,  # Avg(m=87.6, mm=87.5)
             "qnli": 92.8,
             "rte": 78.7,
             "wnli": 65.1,
         }
         baseline_name = "RoBERTa-base"
+    elif args.baseline == "roberta-large":
+        baseline_scores = {}
+        baseline_name = "RoBERTa-large"
     elif args.baseline == "none":
         baseline_scores = {}
         baseline_name = None
 
     results = []
-    for task, (metric_name, scale) in TASK_METRICS.items():
+    for task, spec in TASK_SCORES.items():
+        metric_name = spec["label"]
+        scale = spec["scale"]
         task_dir = base_dir / task
         if not task_dir.exists():
             result_dict = {
                 "Task": task.upper(),
-                "Metric": metric_name.replace("_", " ").title(),
+                "Metric": metric_name,
                 "Score": "Not run",
                 "Status": "❌",
             }
@@ -163,11 +220,11 @@ def main():
             results.append(result_dict)
             continue
 
-        score = get_task_results(task_dir)
+        score = get_task_results(task_dir, task)
         if score is None:
             result_dict = {
                 "Task": task.upper(),
-                "Metric": metric_name.replace("_", " ").title(),
+                "Metric": metric_name,
                 "Score": "In progress",
                 "Status": "⏳",
             }
@@ -185,7 +242,7 @@ def main():
 
             result_dict = {
                 "Task": task.upper(),
-                "Metric": metric_name.replace("_", " ").title(),
+                "Metric": metric_name,
                 "Score": f"{score_pct:.1f}",
                 "Status": "✅",
             }

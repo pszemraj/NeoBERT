@@ -47,3 +47,18 @@ include = ["neobert*"]
 write_to = "src/neobert/_version.py"
 version_scheme = "no-guess-dev"
 local_scheme = "dirty-tag"
+
+[tool.pytest.ini_options]
+# Keep default `pytest -q` runs focused on the curated test suite.
+testpaths = ["tests"]
+# Prevent accidental collection of scratch data/scripts and large artifacts.
+norecursedirs = [
+    "local-scratch",
+    "outputs",
+    "logs",
+    "dist",
+    "tokenized_data",
+    ".git",
+    ".venv",
+    "build",
+]
