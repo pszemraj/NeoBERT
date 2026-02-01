@@ -56,3 +56,25 @@ class TestToTargetBatchSizeDevice(unittest.TestCase):
         self.assertEqual(out["input_ids"].shape[0], 2)
         self.assertEqual(out["input_ids"].device.type, "cuda")
         self.assertIsNone(stored["input_ids"])
+
+    def test_gpu_batch_appends_to_cpu_buffer(self):
+        """Ensure CPU buffers can append GPU leftovers without device errors."""
+        device = torch.device("cuda")
+        batch = {
+            "input_ids": torch.zeros((4, 4), dtype=torch.long, device=device),
+            "attention_mask": torch.ones((4, 4), dtype=torch.long, device=device),
+            "labels": torch.zeros((4, 4), dtype=torch.long, device=device),
+        }
+        stored_batch = {
+            "input_ids": torch.zeros((1, 4), dtype=torch.long),
+            "attention_mask": torch.ones((1, 4), dtype=torch.long),
+            "labels": torch.zeros((1, 4), dtype=torch.long),
+        }
+
+        out, stored = to_target_batch_size(batch, stored_batch, target_size=2)
+
+        self.assertEqual(out["input_ids"].shape[0], 2)
+        self.assertEqual(out["input_ids"].device.type, "cuda")
+        self.assertIsNotNone(stored["input_ids"])
+        self.assertEqual(stored["input_ids"].device.type, "cpu")
+        self.assertEqual(stored["input_ids"].shape[0], 3)

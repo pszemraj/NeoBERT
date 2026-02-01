@@ -80,11 +80,17 @@ def to_target_batch_size(
                 batch[key], [target_size, batch_size - target_size], dim=0
             )
             batch[key] = tmp[key][0]
-            stored_batch[key] = (
-                tmp[key][1]
-                if stored_batch[key] is None
-                else torch.cat([stored_batch[key], tmp[key][1]], dim=0)
-            )
+            if stored_batch[key] is None:
+                stored_batch[key] = tmp[key][1]
+            else:
+                # Keep stored batches on a single device (often CPU) to avoid device mismatches.
+                if stored_batch[key].device != tmp[key][1].device:
+                    leftover = tmp[key][1].to(
+                        stored_batch[key].device, non_blocking=True
+                    )
+                else:
+                    leftover = tmp[key][1]
+                stored_batch[key] = torch.cat([stored_batch[key], leftover], dim=0)
 
     # If the batch is too small, we had some stored_batch
     elif batch_size < target_size:
