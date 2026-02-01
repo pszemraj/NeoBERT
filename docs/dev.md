@@ -4,21 +4,21 @@ This page tracks known limitations and TODOs that need follow-up work.
 
 ## Pretraining: `datacollator.pack_sequences`
 
-Status: **not supported**. The pretraining trainer now errors fast if enabled.
+Status: **experimental**. Pretraining uses a block-diagonal attention mask.
 
-Why: The current NeoBERT pretraining model uses standard attention with padded
-sequences. Packing requires either:
+Why: Packed sequences must prevent cross-sequence attention. Today we use a
+block-diagonal mask on the standard attention path. For efficiency, we may
+want to switch to FlashAttention varlen kernels in the future.
 
-- a block-diagonal attention mask that prevents cross-sequence attention, or
-- FlashAttention varlen kernels (cu_seqlens + max_seqlen) with a packed layout.
+Options:
+- block-diagonal attention mask (current implementation)
+- FlashAttention varlen kernels (cu_seqlens + max_seqlen) with a packed layout
 
 TODO scope:
-- Decide on the packed representation (block-diagonal mask vs. varlen kernels).
 - If varlen: add collator support for `cu_seqlens`/`max_seqlen` and route through
   a model that supports FlashAttention varlen (similar to the HF export model).
-- If block-diagonal: build a banded mask inside the collator and validate memory
-  footprint for long sequences.
-- Add end-to-end tests for packed batches with correct masking.
+- Validate memory footprint for long sequences and document limits.
+- Add end-to-end tests for packed batches with correct masking and training loss.
 
 ## Contrastive Training
 

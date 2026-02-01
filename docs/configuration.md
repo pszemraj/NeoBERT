@@ -130,7 +130,7 @@ datacollator.pack_sequences: bool = False
 datacollator.max_length: int | None = None
 ```
 
-Note: `pack_sequences` is not supported in pretraining yet. See `docs/dev.md` for the current roadmap.
+Note: `pack_sequences` uses block-diagonal attention in pretraining and is considered experimental. See `docs/dev.md`.
 
 ### Trainer (`trainer`)
 

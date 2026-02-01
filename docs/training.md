@@ -48,7 +48,7 @@ See [docs/configuration.md](configuration.md) for the full schema. Key knobs use
 - `optimizer.*` / `scheduler.*`: learning rate and scheduling
 - `wandb.*`: tracking controls
 
-Note: `datacollator.pack_sequences` is not supported in pretraining yet. See `docs/dev.md`.
+Note: `datacollator.pack_sequences` uses block-diagonal attention in pretraining and is experimental. See `docs/dev.md`.
 
 > [!NOTE]
 > Pretraining uses the **top-level** `mixed_precision` field. Other training scripts read `trainer.mixed_precision`. To keep behavior consistent across scripts, set both.
