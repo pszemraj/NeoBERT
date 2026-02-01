@@ -1,43 +1,36 @@
 # Test Configuration Files
 
-This directory contains test configuration files organized by training pipeline type. These configs are optimized for quick testing and development without requiring GPUs.
+Test configs live here and are optimized for quick runs and regression coverage.
 
 ## Directory Structure
 
-- `pretraining/` - Test configs for pretraining pipeline
-  - `test_tiny_pretrain.yaml` - Minimal CPU-friendly pretraining config
-  - `test_streaming*.yaml` - Configs for testing streaming dataset support
-  - `test_gpu*.yaml` - GPU-optimized test configs
-  - `test_pretokenized.yaml` - Config for pre-tokenized datasets
+- `pretraining/`
+  - `test_tiny_pretrain.yaml` - Minimal CPU-friendly pretraining
+  - `test_streaming*.yaml` - Streaming dataset coverage
+  - `test_gpu*.yaml` - GPU-oriented smoke tests
+  - `test_pretokenized.yaml` / `test_tiny_pretrain_tokenized.yaml` - Pretokenized pipeline
+  - `test_smollm2_*.yaml` - SmolLM2 dataset variants
 
-- `evaluation/` - Test configs for evaluation pipelines
-  - `test_tiny_glue.yaml` - Minimal GLUE evaluation config
+- `evaluation/`
+  - `test_tiny_glue.yaml` / `test_tiny_glue_random.yaml` - Minimal GLUE runs
 
-- `contrastive/` - Test configs for contrastive training
-  - `test_tiny_contrastive.yaml` - Minimal contrastive training config
+- `contrastive/`
+  - `test_tiny_contrastive.yaml` - Minimal contrastive fine-tuning
 
 ## Usage
 
-These test configs are designed for:
-1. Quick functionality testing during development
-2. CI/CD pipeline testing
-3. Debugging without requiring large compute resources
-
-Example:
 ```bash
-# Test pretraining pipeline
+# Pretraining smoke test
 python scripts/pretraining/pretrain.py --config tests/configs/pretraining/test_tiny_pretrain.yaml
 
-# Test GLUE evaluation
+# GLUE evaluation smoke test
 python scripts/evaluation/run_glue.py --config tests/configs/evaluation/test_tiny_glue.yaml
 
-# Test contrastive training
+# Contrastive fine-tuning smoke test
 python scripts/contrastive/finetune.py --config tests/configs/contrastive/test_tiny_contrastive.yaml
 ```
 
-## Key Features
+## Notes
 
-- **CPU-friendly**: Small model sizes and batch sizes
-- **Fast execution**: Limited training steps for quick testing
-- **No external dependencies**: Use small synthetic or cached datasets
-- **Comprehensive coverage**: Test all major code paths
+- These configs are intentionally small and may use CPU-friendly settings.
+- For full training runs, use configs under `configs/`.

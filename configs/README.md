@@ -1,41 +1,41 @@
 # Configuration Files
 
-Production-ready YAML configurations for NeoBERT training, evaluation, and contrastive learning live here. Lightweight smoke-test variants are under `tests/configs/`.
+Production-ready YAML configurations for NeoBERT training and evaluation live here. Tiny smoke-test variants are under `tests/configs/`.
 
 > [!TIP]
-> For schema details, validation rules, and override examples, read [docs/configuration.md](/docs/configuration.md). End-to-end recipes live in [docs/training.md](/docs/training.md) and [docs/evaluation.md](/docs/evaluation.md).
+> For schema details and overrides, read [docs/configuration.md](../docs/configuration.md). End-to-end recipes live in [docs/training.md](../docs/training.md) and [docs/evaluation.md](../docs/evaluation.md).
 
-## Production Configurations
+## Directory Layout
 
-### Pretraining
+```
+configs/
+├── pretraining/
+├── glue/
+├── contrastive/
+└── README.md
+```
+
+## Pretraining (`configs/pretraining/`)
 
 - `pretrain_neobert.yaml` – Standard 768×12 recipe
-- `pretrain_streaming.yaml` – Streaming dataset pipeline for large-scale runs
-- `pretrain_gpu_small.yaml` – Compact GPU-friendly config (SwiGLU)
-- `pretrain_smollm2_custom_tokenizer.yaml` – 250M recipe with SmolLM2 tokenizer (32k, 1024 context)
-- `pretrain_neobert100m_smollm2data_muonclip.yaml` – 100M MuonClip pretraining with SmolLM2 Stage-4 data
+- `pretrain_streaming.yaml` – Streaming dataset example
+- `pretrain_gpu_small.yaml` – Smaller GPU-friendly config
+- `pretrain_neobert100m_smollm2data.yaml` – 100M SmolLM2 dataset variant
+- `pretrain_neobert250m_smollm2data.yaml` – 250M SmolLM2 dataset variant
+- `pretrain_neobert100m_smollm2data_muonclip.yaml` – MuonClip variant
+- `train_small_custom_tokenizer.yaml` – Custom tokenizer training example
 
-### Fine-tuning & Evaluation
+## GLUE (`configs/glue/`)
 
-- `evaluate_neobert.yaml` – GLUE/MTEB evaluation template
-- `contrastive_neobert.yaml` – SimCSE-style contrastive training
+Task-specific GLUE configs:
 
-### Custom Tokenizer
+- `cola.yaml`, `sst2.yaml`, `mrpc.yaml`, `stsb.yaml`, `qqp.yaml`, `mnli.yaml`, `qnli.yaml`, `rte.yaml`, `wnli.yaml`
+- Generated configs land under `configs/glue/generated/`
 
-- `train_small_custom_tokenizer.yaml` – Example tokenizer training config
-- `pretrain_smollm2_custom_tokenizer.yaml` – Reused for custom tokenizer pretraining
+## Contrastive (`configs/contrastive/`)
 
-## Test Configurations
+- `contrastive_neobert.yaml` – SimCSE-style contrastive fine-tuning
 
-Tiny configs meant for smoke tests live in `tests/configs/`:
+## Test Configs
 
-- `tests/configs/pretraining/test_tiny_pretrain.yaml`
-- `tests/configs/evaluation/test_tiny_glue.yaml`
-- `tests/configs/contrastive/test_tiny_contrastive.yaml`
-
-## Related Documentation
-
-- [Configuration Guide](/docs/configuration.md)
-- [Training Guide](/docs/training.md)
-- [Evaluation Guide](/docs/evaluation.md)
-- [Testing Guide](/docs/testing.md)
+Tiny configs meant for smoke tests live in `tests/configs/` (see [tests/configs/README.md](../tests/configs/README.md)).

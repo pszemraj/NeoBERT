@@ -3,7 +3,7 @@
 Scripts for evaluating NeoBERT models on benchmarks.
 
 > [!NOTE]
-> See [/docs/evaluation.md](/docs/evaluation.md) for comprehensive evaluation guide and benchmark documentation.
+> See [docs/evaluation.md](../../docs/evaluation.md) for the full evaluation guide.
 
 ## Scripts Overview
 
@@ -39,7 +39,7 @@ bash scripts/evaluation/glue/build_configs.sh /checkpoints/sweep neobert/glue
 
 ### Flash Attention Compatibility
 
-GLUE evaluation always runs with eager attention. See [Flash Attention issues during GLUE evaluation](/docs/troubleshooting.md#flash-attention-issues-during-glue-evaluation) for background and mitigation steps.
+GLUE evaluation always runs with eager attention. See [Flash Attention issues during GLUE evaluation](../../docs/troubleshooting.md#flash-attention-issues-during-glue-evaluation) for background and mitigation steps.
 
 ### Model Checkpoint Saving
 
@@ -69,9 +69,9 @@ GLUE evaluation **requires** a pretrained model. The trainer includes safety che
 
 **`run_mteb.py`:**
 
-- Evaluates across 56+ tasks in 8 categories
-- Requires sentence-transformers package
-- Outputs results in MTEB leaderboard format
+- Evaluates tasks via the `mteb` package
+- Uses DeepSpeed utilities when `use_deepspeed: true`
+- Outputs results under `outputs/<run>/mteb/<step>/<max_length>/`
 
 **`pseudo_perplexity.py`:**
 

@@ -3,7 +3,7 @@
 Scripts for exporting NeoBERT checkpoints to HuggingFace format.
 
 > [!NOTE]
-> See [/docs/export.md](/docs/export.md) for comprehensive usage documentation and export guide.
+> See [docs/export.md](../../docs/export.md) for the full export guide.
 
 ## Quick Start
 
@@ -24,7 +24,7 @@ python scripts/export-hf/validate.py outputs/neobert_100m_100k/hf/neobert_100m_1
 
 ### Metaspace Tokenizer Handling
 
-Some of the default configs for pretraining use [a Metaspace tokenizer](https://huggingface.co/BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp) with `prepend_scheme="always"`. The export script emits guidance for cleaning up the extra space token (▁, ID 454) that appears before `[MASK]`. Refer to [MLM always predicts the same token](/docs/troubleshooting.md#mlm-always-predicts-same-token) for the canonical workaround.
+Some of the default configs for pretraining use [a Metaspace tokenizer](https://huggingface.co/BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp) with `prepend_scheme=\"always\"`. The export script emits guidance for cleaning up the extra space token (▁, ID 454) that appears before `[MASK]`. Refer to [MLM always predicts the same token](../../docs/troubleshooting.md#mlm-always-predicts-same-token) for the canonical workaround.
 
 ### Validation Test Details
 
@@ -35,7 +35,7 @@ The validation script (`validate.py`) performs these checks:
 - Tokenizer functionality
 - MaskedLM variant compatibility
 - End-to-end pipeline test
-- Cosine similarity sanity check (similar sentences > 0.7, different < 0.5)
+- Cosine similarity sanity check (similar pairs >= 0.5, dissimilar <= 0.95)
 
 ### Technical Implementation Details
 
@@ -48,14 +48,13 @@ The validation script (`validate.py`) performs these checks:
 **Config Field Mappings:**
 
 - `max_position_embeddings` → `max_length`
-- `layer_norm_eps` → `norm_eps`
-- Training metadata preserved in `training_info` field
+- `norm_eps` preserved in HF config
 
 ### Known Issues & Solutions
 
 **MLM Always Predicting Same Token:**
 
-- Follow the mitigation steps in [docs/troubleshooting.md](/docs/troubleshooting.md#mlm-always-predicts-same-token) (accelerator unwrap, Metaspace cleanup, attention-mask guard)
+- Follow the mitigation steps in [docs/troubleshooting.md](../../docs/troubleshooting.md#mlm-always-predicts-same-token) (accelerator unwrap, Metaspace cleanup, attention-mask guard)
 
 **Initialization Warnings:**
 Check missing weights with validation script, verify architecture match between training and export.

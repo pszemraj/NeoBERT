@@ -69,7 +69,7 @@ chmod +x jobs/example_pretrain.sh
 # Basic pretraining with config file
 
 python scripts/pretraining/pretrain.py \
-    --config configs/pretrain_neobert.yaml \
+    --config configs/pretraining/pretrain_neobert.yaml \
     --trainer.output_dir ./output/my_model \
     --wandb.project my-project \
     --wandb.name my-run-name
@@ -82,9 +82,10 @@ python scripts/pretraining/pretrain.py \
 # Multi-GPU training with accelerate
 
 accelerate launch \
-    --config_file configs/accelerate_ddp.yaml \
+    # Use an accelerate config generated via: accelerate config
+    --config_file path/to/accelerate.yaml \
     scripts/pretraining/pretrain.py \
-    --config configs/pretrain_neobert.yaml \
+    --config configs/pretraining/pretrain_neobert.yaml \
     --trainer.per_device_train_batch_size 16 \
     --trainer.gradient_accumulation_steps 4
 ```
@@ -110,7 +111,7 @@ accelerate launch \
     --multi_gpu \
     --num_processes=4 \
     scripts/pretraining/pretrain.py \
-    --config configs/pretrain_neobert.yaml \
+    --config configs/pretraining/pretrain_neobert.yaml \
     --trainer.output_dir $SLURM_TMPDIR/output
 ```
 
@@ -118,17 +119,15 @@ accelerate launch \
 
 ```bash
 #!/bin/bash
-# Evaluate trained model on GLUE
+# Evaluate a trained model on GLUE
 
-CHECKPOINT_PATH="./output/pretrain/checkpoint-100000"
-CONFIG_PATH="configs/evaluate_neobert.yaml"
+CONFIG_DIR="configs/glue"
 
-# Run GLUE evaluation
-python scripts/evaluation/run_glue.py \
-    --config $CONFIG_PATH \
-    --model.checkpoint_path $CHECKPOINT_PATH \
-    --evaluation.tasks "cola,sst2,mrpc,qqp,mnli,qnli,rte,wnli" \
-    --trainer.output_dir ./output/glue_results
+# Run the full GLUE suite
+bash scripts/evaluation/glue/run_all_glue.sh "$CONFIG_DIR"
+
+# Or run a single task
+python scripts/evaluation/run_glue.py --config "$CONFIG_DIR/cola.yaml"
 ```
 
 ## Directory-Specific Jobs
@@ -212,7 +211,7 @@ CHECKPOINT_DIR="./checkpoints/$(date +%Y%m%d_%H%M%S)"
 mkdir -p $CHECKPOINT_DIR
 
 # Save config alongside checkpoints
-cp configs/pretrain_neobert.yaml $CHECKPOINT_DIR/config.yaml
+cp configs/pretraining/pretrain_neobert.yaml $CHECKPOINT_DIR/config.yaml
 ```
 
 ## Common Use Cases
@@ -223,7 +222,7 @@ cp configs/pretrain_neobert.yaml $CHECKPOINT_DIR/config.yaml
 # Quick test on CPU with tiny model
 
 python scripts/pretraining/pretrain.py \
-    --config configs/test_tiny_pretrain.yaml \
+    --config tests/configs/pretraining/test_tiny_pretrain.yaml \
     --trainer.max_steps 10 \
     --trainer.save_steps 5 \
     --wandb.mode disabled \
@@ -235,10 +234,10 @@ python scripts/pretraining/pretrain.py \
 #!/bin/bash
 # Resume training from checkpoint
 
-CHECKPOINT="./output/pretrain/checkpoint-50000"
+CHECKPOINT="./output/pretrain/model_checkpoints/50000"
 
 python scripts/pretraining/pretrain.py \
-    --config configs/pretrain_neobert.yaml \
+    --config configs/pretraining/pretrain_neobert.yaml \
     --trainer.resume_from_checkpoint $CHECKPOINT \
     --trainer.output_dir ./output/pretrain_continued
 ```
@@ -251,7 +250,7 @@ python scripts/pretraining/pretrain.py \
 for lr in 1e-4 2e-4 5e-4; do
     for batch_size in 16 32 64; do
         python scripts/pretraining/pretrain.py \
-            --config configs/pretrain_neobert.yaml \
+            --config configs/pretraining/pretrain_neobert.yaml \
             --optimizer.lr $lr \
             --trainer.per_device_train_batch_size $batch_size \
             --trainer.output_dir ./output/sweep_lr${lr}_bs${batch_size} \

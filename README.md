@@ -30,7 +30,7 @@ NeoBERT is a **next-generation encoder** model for English text representation, 
 
 - Paper (_original_): [paper](https://arxiv.org/abs/2502.19587)
 - Model (_original_): [huggingface](https://huggingface.co/chandar-lab/NeoBERT)
-- Documentation (_this repo_): [docs/](/docs/README.md)
+- Documentation (_this repo_): [docs/](docs/README.md)
 
 ## Get started
 
@@ -43,7 +43,7 @@ cd NeoBERT
 pip install -e .[dev]  # drop [dev] if you only need runtime deps
 ```
 
-See [docs/troubleshooting.md](/docs/troubleshooting.md) for help with common installation issues.
+See [docs/troubleshooting.md](docs/troubleshooting.md) for help with common installation issues.
 
 <!-- > [!TIP]
 > For faster training on supported GPUs, add `flash-attn` (and optionally `xformers`) with `pip install flash-attn --no-build-isolation`. -->
@@ -63,18 +63,18 @@ python tests/run_tests.py
 
 | Task           | Command                                                                         |
 | -------------- | ------------------------------------------------------------------------------- |
-| Pretrain       | `python scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml` |
+| Pretrain       | `python scripts/pretraining/pretrain.py --config configs/pretraining/pretrain_neobert.yaml` |
 | GLUE eval      | `python scripts/evaluation/run_glue.py --config configs/glue/{task}.yaml`       |
 | Summarize GLUE | `python scripts/evaluation/glue/summarize_glue.py {results_path}`               |
 | Run tests      | `python tests/run_tests.py`                                                     |
 
 ### Next steps
 
-- Train or fine-tune: see [/docs/training.md](/docs/training.md)
-- Evaluate on GLUE or MTEB: see [/docs/evaluation.md](/docs/evaluation.md)
-- Tune configs and overrides: see [/docs/configuration.md](/docs/configuration.md)
-- Export checkpoints to Hugging Face: see [/docs/export.md](/docs/export.md)
-- Troubleshoot common issues: see [/docs/troubleshooting.md](/docs/troubleshooting.md)
+- Train or fine-tune: see [docs/training.md](docs/training.md)
+- Evaluate on GLUE or MTEB: see [docs/evaluation.md](docs/evaluation.md)
+- Tune configs and overrides: see [docs/configuration.md](docs/configuration.md)
+- Export checkpoints to Hugging Face: see [docs/export.md](docs/export.md)
+- Troubleshoot common issues: see [docs/troubleshooting.md](docs/troubleshooting.md)
 
 ## How to use
 
@@ -130,15 +130,15 @@ print(tokenizer.decode(predicted_token_id))
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/pszemraj/NeoBERT)
 
-For detailed guides and documentation, see the **[Documentation](/docs/README.md)**:
+For detailed guides and documentation, see the **[Documentation](docs/README.md)**:
 
-- [Training Guide](/docs/training.md) - Pretraining, contrastive learning, and monitoring runs
-- [Evaluation Guide](/docs/evaluation.md) - GLUE, MTEB, and result analysis
-- [Configuration System](/docs/configuration.md) - YAML hierarchy and CLI overrides
-- [Export Guide](/docs/export.md) - Convert checkpoints to Hugging Face format
-- [Architecture Details](/docs/architecture.md) - Model internals
-- [Testing Guide](/docs/testing.md) - Regression suite and coverage
-- [Troubleshooting](/docs/troubleshooting.md) - Common failure modes and fixes
+- [Training Guide](docs/training.md) - Pretraining, contrastive learning, and monitoring runs
+- [Evaluation Guide](docs/evaluation.md) - GLUE, MTEB, and result analysis
+- [Configuration System](docs/configuration.md) - YAML hierarchy and CLI overrides
+- [Export Guide](docs/export.md) - Convert checkpoints to Hugging Face format
+- [Architecture Details](docs/architecture.md) - Model internals
+- [Testing Guide](docs/testing.md) - Regression suite and coverage
+- [Troubleshooting](docs/troubleshooting.md) - Common failure modes and fixes
 
 ## Features
 
@@ -193,10 +193,10 @@ This repository includes the complete training and evaluation codebase for NeoBE
 
 Additional guidance lives in:
 
-- [`docs/training.md`](/docs/training.md) for full training workflows
-- [`docs/evaluation.md`](/docs/evaluation.md) for benchmark recipes
-- [`docs/testing.md`](/docs/testing.md) for extending the test suite
-- [`docs/export.md`](/docs/export.md) for Hugging Face conversion
-- [`docs/troubleshooting.md`](/docs/troubleshooting.md) for debugging tips
+- [`docs/training.md`](docs/training.md) for full training workflows
+- [`docs/evaluation.md`](docs/evaluation.md) for benchmark recipes
+- [`docs/testing.md`](docs/testing.md) for extending the test suite
+- [`docs/export.md`](docs/export.md) for Hugging Face conversion
+- [`docs/troubleshooting.md`](docs/troubleshooting.md) for debugging tips
 
 ---
