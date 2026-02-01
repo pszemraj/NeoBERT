@@ -21,10 +21,75 @@ import logging
 import sys
 import warnings
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from transformers import AutoModel, AutoModelForMaskedLM, AutoTokenizer
+
+
+def _load_config(model_path: Path) -> Dict[str, Any]:
+    """Load config.json if present.
+
+    :param Path model_path: Model directory path.
+    :return dict[str, Any]: Parsed config mapping (empty if missing).
+    """
+    config_path = model_path / "config.json"
+    if not config_path.exists():
+        return {}
+    import json
+
+    with open(config_path, "r") as f:
+        return json.load(f)
+
+
+def _check_required_config_fields(config: Dict[str, Any]) -> Optional[str]:
+    """Verify config contains fields required by HF NeoBERT.
+
+    :param dict[str, Any] config: Loaded config mapping.
+    :return str | None: Issue summary if missing fields.
+    """
+    required = [
+        "hidden_size",
+        "num_hidden_layers",
+        "num_attention_heads",
+        "intermediate_size",
+        "vocab_size",
+        "max_position_embeddings",
+        "norm_eps",
+        "pad_token_id",
+        "rms_norm",
+        "rope",
+        "hidden_act",
+        "dropout",
+        "flash_attention",
+        "swiglu_packed",
+    ]
+    missing = [field for field in required if field not in config]
+    if missing:
+        return f"missing config fields: {missing}"
+    return None
+
+
+def _check_swiglu_layout(model: object, config: Dict[str, Any]) -> Optional[str]:
+    """Check that swiglu_packed matches loaded parameter layout.
+
+    :param object model: Loaded HF model.
+    :param dict[str, Any] config: Loaded config mapping.
+    :return str | None: Issue summary if mismatch detected.
+    """
+    if not config:
+        return None
+    if str(config.get("hidden_act", "")).lower() != "swiglu":
+        return None
+    packed_cfg = config.get("swiglu_packed", True)
+    state = model.state_dict()
+    has_w12 = any(".ffn.w12." in key for key in state.keys())
+    has_w1 = any(".ffn.w1." in key for key in state.keys())
+    if packed_cfg and has_w1 and not has_w12:
+        return "config swiglu_packed=true but model has unpacked w1/w2 weights"
+    if not packed_cfg and has_w12 and not has_w1:
+        return "config swiglu_packed=false but model has packed w12 weights"
+    return None
 
 
 def validate_model_files(model_path: Path) -> List[str]:
@@ -44,6 +109,10 @@ def validate_model_files(model_path: Path) -> List[str]:
     missing = [f for f in required_files if not (model_path / f).exists()]
     if not any((model_path / f).exists() for f in weight_files):
         missing.append("model weights (model.safetensors or pytorch_model.bin)")
+    config = _load_config(model_path)
+    config_issues = _check_required_config_fields(config)
+    if config_issues:
+        missing.append(config_issues)
     return missing
 
 
@@ -140,6 +209,14 @@ def test_model_loading(model_path: Path) -> Tuple[bool, str]:
 
         if issues:
             return False, "load issues: " + issues
+
+        config = _load_config(model_path)
+        config_issues = _check_required_config_fields(config)
+        if config_issues:
+            return False, "config issues: " + config_issues
+        swiglu_issues = _check_swiglu_layout(model, config)
+        if swiglu_issues:
+            return False, "swiglu layout mismatch: " + swiglu_issues
 
         tokenizer = AutoTokenizer.from_pretrained(
             str(model_path), trust_remote_code=True
