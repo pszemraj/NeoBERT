@@ -57,12 +57,20 @@ class GLUEConfigValidator:
     }
 
     def __init__(self, verbose: bool = False):
+        """Initialize the validator.
+
+        :param bool verbose: Enable verbose output.
+        """
         self.verbose = verbose
         self.errors: List[str] = []
         self.warnings: List[str] = []
 
     def validate(self, config_path: Path) -> bool:
-        """Validate a GLUE configuration file."""
+        """Validate a GLUE configuration file.
+
+        :param Path config_path: Path to the config file.
+        :return bool: True if validation passes.
+        """
         self.errors = []
         self.warnings = []
 
@@ -108,8 +116,11 @@ class GLUEConfigValidator:
 
         return len(self.errors) == 0
 
-    def _validate_glue_section(self, glue_config: Dict):
-        """Validate GLUE-specific configuration."""
+    def _validate_glue_section(self, glue_config: Dict) -> None:
+        """Validate GLUE-specific configuration.
+
+        :param dict glue_config: GLUE section mapping.
+        """
         if "task_name" not in glue_config:
             self.errors.append("Missing glue.task_name")
         elif glue_config["task_name"] not in self.GLUE_TASKS:
@@ -127,8 +138,11 @@ class GLUEConfigValidator:
                 "Missing glue.max_seq_length (will use tokenizer max_length)"
             )
 
-    def _validate_model_section(self, model_config: Dict):
-        """Validate model configuration."""
+    def _validate_model_section(self, model_config: Dict) -> None:
+        """Validate model configuration.
+
+        :param dict model_config: Model section mapping.
+        """
         for field, expected_type in self.MODEL_REQUIRED.items():
             if field not in model_config:
                 self.errors.append(f"Missing required model field: model.{field}")
@@ -145,8 +159,11 @@ class GLUEConfigValidator:
                     f"Pretrained checkpoint directory does not exist: {checkpoint_dir}"
                 )
 
-    def _validate_trainer_section(self, trainer_config: Dict):
-        """Validate trainer configuration."""
+    def _validate_trainer_section(self, trainer_config: Dict) -> None:
+        """Validate trainer configuration.
+
+        :param dict trainer_config: Trainer section mapping.
+        """
         for field, expected_type in self.TRAINER_REQUIRED.items():
             if field not in trainer_config:
                 self.errors.append(f"Missing required trainer field: trainer.{field}")
@@ -171,8 +188,11 @@ class GLUEConfigValidator:
                     f"Output directory should follow pattern './outputs/glue/{{model_name}}/{{task}}', got '{output_dir}'"
                 )
 
-    def _validate_optimizer_section(self, optimizer_config: Dict):
-        """Validate optimizer configuration."""
+    def _validate_optimizer_section(self, optimizer_config: Dict) -> None:
+        """Validate optimizer configuration.
+
+        :param dict optimizer_config: Optimizer section mapping.
+        """
         if "name" not in optimizer_config:
             self.errors.append("Missing optimizer.name")
         elif optimizer_config["name"] not in ["adamw", "adam", "sgd"]:
@@ -201,8 +221,11 @@ class GLUEConfigValidator:
                     f"Learning rate {lr} seems high for GLUE fine-tuning. Typical range is 1e-5 to 5e-5"
                 )
 
-    def _validate_tokenizer_section(self, tokenizer_config: Dict):
-        """Validate tokenizer configuration."""
+    def _validate_tokenizer_section(self, tokenizer_config: Dict) -> None:
+        """Validate tokenizer configuration.
+
+        :param dict tokenizer_config: Tokenizer section mapping.
+        """
         if "name" not in tokenizer_config:
             self.errors.append("Missing tokenizer.name")
 
@@ -213,8 +236,11 @@ class GLUEConfigValidator:
                 f"tokenizer.max_length={tokenizer_config['max_length']} is larger than typical BERT max (512)"
             )
 
-    def print_report(self, config_path: Path):
-        """Print validation report."""
+    def print_report(self, config_path: Path) -> None:
+        """Print a validation report.
+
+        :param Path config_path: Path to the config file.
+        """
         print(f"\nValidation Report for {config_path}")
         print("=" * 60)
 
@@ -235,7 +261,8 @@ class GLUEConfigValidator:
         print()
 
 
-def main():
+def main() -> None:
+    """Run the GLUE config validation CLI."""
     parser = argparse.ArgumentParser(description="Validate GLUE configuration files")
     parser.add_argument("config", type=str, help="Path to configuration file")
     parser.add_argument(

@@ -1,6 +1,9 @@
+"""Compute pseudo-perplexity scores for masked language models."""
+
 import os
 from argparse import ArgumentParser
 from functools import partial
+from typing import Any, Iterator, Tuple
 
 import numpy as np
 import torch
@@ -18,11 +21,22 @@ from transformers.models.roberta.modeling_roberta import RobertaEmbeddings
 from neobert.model import NeoBERTConfig, NeoBERTLMHead
 
 
-def get_data(dataset):
+def get_data(dataset: Any) -> Any:
+    """Filter and subsample long-text examples.
+
+    :param Any dataset: Dataset to filter.
+    :return Any: Filtered dataset.
+    """
     dataset = dataset.filter(lambda x: len(x["text"]) > 20000)
     # Select 100 samples from each length window (20000-30000, 30000-40000, etc.)
 
-    def filter_by_length(length, example):
+    def filter_by_length(length: int, example: dict[str, Any]) -> bool:
+        """Filter examples by text length window.
+
+        :param int length: Minimum length of the window.
+        :param dict[str, Any] example: Dataset example.
+        :return bool: True if example falls in the window.
+        """
         text_length = len(example["text"])
         return length <= text_length < length + 10000
 
@@ -37,21 +51,13 @@ def get_data(dataset):
     return final
 
 
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
-    """
-    Precompute the frequency tensor for complex exponentials (cis) with given dimensions.
+def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
+    """Precompute the frequency tensor for complex exponentials.
 
-    This function calculates a frequency tensor with complex exponentials using the given dimension 'dim'
-    and the end index 'end'. The 'theta' parameter scales the frequencies.
-    The returned tensor contains complex values in complex64 data type.
-
-    Args:
-        dim (int): Dimension of the frequency tensor.
-        end (int): End index for precomputing frequencies.
-        theta (float, optional): Scaling factor for frequency computation. Defaults to 10000.0.
-
-    Returns:
-        torch.Tensor: Precomputed frequency tensor with complex exponentials.
+    :param int dim: Dimension of the frequency tensor.
+    :param int end: End index for precomputing frequencies.
+    :param float theta: Scaling factor for frequency computation.
+    :return torch.Tensor: Precomputed frequency tensor.
     """
 
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
@@ -158,7 +164,16 @@ if __name__ == "__main__":
     dataset = dataset.shard(8, args.dataset_shard)
 
     # Generator that, for each sentence, tokenize, mask each position, and batch
-    def batch_tokenize_mask(dataset, tokenizer, batch_size):
+    def batch_tokenize_mask(
+        dataset: Any, tokenizer: Any, batch_size: int
+    ) -> Iterator[Tuple[Any, torch.Tensor, torch.Tensor]]:
+        """Yield masked token batches for pseudo-perplexity.
+
+        :param Any dataset: Dataset with text/id columns.
+        :param Any tokenizer: Tokenizer instance.
+        :param int batch_size: Batch size for masked tokens.
+        :return Iterator[tuple[Any, torch.Tensor, torch.Tensor]]: Batches of ids/x/y.
+        """
         for x, id in zip(dataset["text"], dataset["id"]):
             tokenized_input = tokenizer(
                 x,

@@ -1,3 +1,5 @@
+"""Aggregate MTEB results into averaged score tables."""
+
 import argparse
 import json
 import os
@@ -108,7 +110,8 @@ TASK_LIST_NAMES = [
 ]
 
 
-def compute_table():
+def compute_table() -> None:
+    """Compute and write average MTEB score tables."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--result_folder", dest="result_folder", type=str)
     parser.add_argument("--model_name", dest="model_name", type=str)
@@ -122,7 +125,12 @@ def compute_table():
         UserWarning("Overwriting existing result file.")
         os.remove(result_file)
 
-    def explore(path):
+    def explore(path: str) -> list[str]:
+        """Collect leaf directories containing result JSON files.
+
+        :param str path: Root path to search.
+        :return list[str]: Leaf directories with JSON files.
+        """
         paths = []
         file_level = False
         files = os.listdir(path)

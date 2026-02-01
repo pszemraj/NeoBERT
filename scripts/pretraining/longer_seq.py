@@ -1,11 +1,18 @@
+"""Filter datasets to longer sequence lengths."""
+
 import os
+from typing import Any
 
 from datasets import load_from_disk
 
 from neobert.config import load_config_from_args
 
 
-def longer_seq(cfg):
+def longer_seq(cfg: Any) -> None:
+    """Filter a dataset into longer-sequence variants.
+
+    :param Any cfg: Configuration object with dataset settings.
+    """
     # Get the number of cpu cores available to the process
     num_proc = len(os.sched_getaffinity(0))
 
@@ -37,7 +44,8 @@ def longer_seq(cfg):
     )
 
 
-def main():
+def main() -> None:
+    """Run the longer sequence filtering CLI."""
     # Load configuration from command line arguments
     config = load_config_from_args()
 

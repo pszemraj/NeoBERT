@@ -10,7 +10,8 @@ from transformers import AutoTokenizer
 from neobert.tokenizer import tokenize
 
 
-def main():
+def main() -> None:
+    """Run the dataset tokenization CLI."""
     parser = argparse.ArgumentParser(
         description="Pre-tokenize datasets for NeoBERT training"
     )
