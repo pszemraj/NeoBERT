@@ -274,6 +274,12 @@ def trainer(cfg: Config) -> None:
     def _resolve_checkpoint_tag(
         checkpoint_dir: str, checkpoint: str | int | None
     ) -> str:
+        """Resolve a checkpoint tag to a concrete step directory name.
+
+        :param str checkpoint_dir: Base directory that holds checkpoint step folders.
+        :param str | int | None checkpoint: Tag or step to resolve, or ``None``/"latest".
+        :return str: Resolved checkpoint step tag.
+        """
         if checkpoint is None or str(checkpoint).lower() == "latest":
             latest_path = os.path.join(checkpoint_dir, "latest")
             if os.path.isfile(latest_path):
