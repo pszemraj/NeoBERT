@@ -75,6 +75,10 @@ class TestConfigSystem(unittest.TestCase):
             "5e-4",
             "--trainer.per_device_train_batch_size",
             "4",
+            "--dataset.streaming",
+            "false",
+            "--datacollator.pack_sequences",
+            "true",
         ]
 
         # Mock sys.argv
@@ -90,6 +94,8 @@ class TestConfigSystem(unittest.TestCase):
             self.assertEqual(
                 config.trainer.per_device_train_batch_size, 4
             )  # Overridden from 2
+            self.assertFalse(config.dataset.streaming)
+            self.assertTrue(config.datacollator.pack_sequences)
 
             # Check that non-overridden values remain the same
             self.assertEqual(config.model.num_hidden_layers, 2)

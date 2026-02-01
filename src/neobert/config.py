@@ -574,6 +574,11 @@ def create_argument_parser() -> argparse.ArgumentParser:
         "--dataset.num_workers", type=int, help="Number of data workers"
     )
     parser.add_argument(
+        "--dataset.streaming",
+        type=lambda x: x.lower() == "true",
+        help="Stream dataset from hub",
+    )
+    parser.add_argument(
         "--dataset.max_seq_length", type=int, help="Maximum sequence length"
     )
     parser.add_argument(
@@ -635,6 +640,11 @@ def create_argument_parser() -> argparse.ArgumentParser:
     # Data collator arguments
     parser.add_argument(
         "--datacollator.mlm_probability", type=float, help="MLM probability"
+    )
+    parser.add_argument(
+        "--datacollator.pack_sequences",
+        type=lambda x: x.lower() == "true",
+        help="Pack sequences into fixed-length chunks",
     )
 
     # WandB arguments
