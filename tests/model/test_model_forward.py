@@ -288,6 +288,28 @@ class TestModelForward(unittest.TestCase):
         # Padded positions should still have valid outputs (model handles internally)
         self.assertEqual(outputs.shape, (2, 5, self.tiny_config.hidden_size))
 
+    def test_block_attention_mask(self):
+        """Test 3D block attention masks are accepted."""
+        model = NeoBERT(self.tiny_config)
+        model.eval()
+
+        block_mask = torch.full(
+            (self.batch_size, self.seq_length, self.seq_length),
+            float("-inf"),
+        )
+        eye = torch.eye(self.seq_length).unsqueeze(0).expand(self.batch_size, -1, -1)
+        block_mask = torch.where(eye == 1, float(0.0), block_mask)
+
+        with torch.no_grad():
+            outputs = model(self.input_ids, block_mask)
+
+        expected_shape = (
+            self.batch_size,
+            self.seq_length,
+            self.tiny_config.hidden_size,
+        )
+        self.assertEqual(outputs.shape, expected_shape)
+
     def test_gradient_flow(self):
         """Test that gradients flow properly through the model."""
         model = NeoBERT(self.tiny_config)

@@ -77,32 +77,65 @@ class DataCollatorWithPacking(DefaultDataCollator):
             return_tensors = self.return_tensors
 
         packed_sequences = []
-        current_sequence = []
+        packed_segments = []
+        current_sequence: list[int] = []
+        current_segments: list[int] = []
+        current_segment_id = 0
 
-        i = 0
-        while i < len(features) or current_sequence:
-            current_length = len(current_sequence)
-            while current_length < self.max_length and i < len(features):
-                seq = features[i]["input_ids"]
-                i += 1
+        for feature in features:
+            seq = feature["input_ids"]
 
-                current_sequence.extend(seq)
-                current_length = len(current_sequence)
+            if current_sequence and self.sep_token_id is not None:
+                if len(current_sequence) < self.max_length:
+                    current_sequence.append(self.sep_token_id)
+                    current_segments.append(current_segment_id)
+                else:
+                    packed_sequences.append({"input_ids": current_sequence})
+                    packed_segments.append(current_segments)
+                    current_sequence = []
+                    current_segments = []
+                    current_segment_id = 0
 
-            # Truncate sequence and add to packed sequences
-            if current_length >= self.max_length:
-                packed_sequences.append(
-                    {"input_ids": current_sequence[: self.max_length]}
+            for token in seq:
+                current_sequence.append(token)
+                current_segments.append(current_segment_id)
+                if len(current_sequence) == self.max_length:
+                    packed_sequences.append({"input_ids": current_sequence})
+                    packed_segments.append(current_segments)
+                    current_sequence = []
+                    current_segments = []
+                    current_segment_id = 0
+
+            current_segment_id += 1
+
+        if current_sequence:
+            packed_sequences.append({"input_ids": current_sequence})
+            packed_segments.append(current_segments)
+
+        batch = self.default_data_collator(packed_sequences, return_tensors)
+
+        if not packed_segments:
+            return batch
+
+        max_len = batch["input_ids"].shape[1]
+        masks = []
+        for seg in packed_segments:
+            seg_tensor = torch.tensor(seg, dtype=torch.long)
+            if seg_tensor.numel() < max_len:
+                pad = torch.full(
+                    (max_len - seg_tensor.numel(),), -1, dtype=seg_tensor.dtype
                 )
-
-            # Keep truncated end of sequence for the next packing
-            current_sequence = (
-                current_sequence[self.max_length :]
-                if current_length > self.max_length + 1
-                else []
+                seg_tensor = torch.cat([seg_tensor, pad], dim=0)
+            valid = seg_tensor != -1
+            mask = (
+                (seg_tensor[:, None] == seg_tensor[None, :])
+                & valid[:, None]
+                & valid[None, :]
             )
+            masks.append(mask)
 
-        return self.default_data_collator(packed_sequences, return_tensors)
+        batch["attention_mask"] = torch.stack(masks, dim=0)
+        return batch
 
 
 def get_collator(
@@ -153,13 +186,16 @@ def get_collator(
         )
 
         def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
-            """Collate packed sequences and disable attention masking.
+            """Collate packed sequences and build block attention mask.
 
             :param list[dict[str, Any]] batch: List of dataset examples.
             :return dict[str, Any]: Batch dictionary with packed input IDs.
             """
             batch = collator(batch)
-            batch["attention_mask"] = None
+            if "attention_mask" in batch and batch["attention_mask"] is not None:
+                batch["attention_mask"] = torch.where(
+                    batch["attention_mask"], float(0.0), float("-inf")
+                ).type(dtype)
             return batch
 
     else:

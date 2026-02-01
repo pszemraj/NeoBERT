@@ -567,11 +567,20 @@ class NeoBERT(NeoBERTPreTrainedModel):
             assert pad_mask.dtype != torch.bool and 1.0 not in pad_mask, (
                 "NeoBERT expects an additive pad_mask"
             )
-            pad_mask = (
-                pad_mask.unsqueeze(1)
-                .unsqueeze(1)
-                .repeat(1, self.config.num_attention_heads, pad_mask.size(-1), 1)
-            )
+            if pad_mask.dim() == 2:
+                pad_mask = (
+                    pad_mask.unsqueeze(1)
+                    .unsqueeze(1)
+                    .repeat(1, self.config.num_attention_heads, pad_mask.size(-1), 1)
+                )
+            elif pad_mask.dim() == 3:
+                pad_mask = pad_mask.unsqueeze(1).repeat(
+                    1, self.config.num_attention_heads, 1, 1
+                )
+            else:
+                raise ValueError(
+                    "pad_mask must have shape (batch, seq_len) or (batch, seq_len, seq_len)"
+                )
 
         # RoPE
         freqs_cis = None
@@ -688,11 +697,20 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
             assert pad_mask.dtype != torch.bool and 1.0 not in pad_mask, (
                 "NeoBERT expects an additive pad_mask"
             )
-            pad_mask = (
-                pad_mask.unsqueeze(1)
-                .unsqueeze(1)
-                .repeat(1, self.config.num_attention_heads, pad_mask.size(-1), 1)
-            )
+            if pad_mask.dim() == 2:
+                pad_mask = (
+                    pad_mask.unsqueeze(1)
+                    .unsqueeze(1)
+                    .repeat(1, self.config.num_attention_heads, pad_mask.size(-1), 1)
+                )
+            elif pad_mask.dim() == 3:
+                pad_mask = pad_mask.unsqueeze(1).repeat(
+                    1, self.config.num_attention_heads, 1, 1
+                )
+            else:
+                raise ValueError(
+                    "pad_mask must have shape (batch, seq_len) or (batch, seq_len, seq_len)"
+                )
 
         # RoPE
         freqs_cis = None

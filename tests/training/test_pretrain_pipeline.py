@@ -238,21 +238,57 @@ class TestPretrainComponents(unittest.TestCase):
         labels = torch.tensor([[2, -100]])
         self.assertEqual(_count_masked_correct(logits, labels), 1)
 
-    def test_pack_sequences_not_supported(self):
-        """Ensure pack_sequences fails fast with a clear error."""
-        config = ConfigLoader.load(
-            Path(__file__).parent.parent
-            / "configs"
-            / "pretraining"
-            / "test_tiny_pretrain.yaml"
-        )
-        with tempfile.TemporaryDirectory() as temp_dir:
-            config.trainer.output_dir = temp_dir
-            config.wandb.mode = "disabled"
-            config.datacollator.pack_sequences = True
+    def test_pack_sequences_collator(self):
+        """Ensure packed collator builds a block attention mask."""
+        from transformers import AutoTokenizer
 
-            with self.assertRaisesRegex(NotImplementedError, "pack_sequences"):
-                trainer(config)
+        from neobert.collator import get_collator
+
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                "bert-base-uncased", use_fast=True
+            )
+            if tokenizer.pad_token is None:
+                if tokenizer.eos_token is not None:
+                    tokenizer.pad_token = tokenizer.eos_token
+                else:
+                    tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+
+            collator = get_collator(
+                tokenizer=tokenizer,
+                mlm_probability=0.15,
+                pack_sequences=True,
+                max_length=8,
+            )
+
+            batch = [
+                {
+                    "input_ids": tokenizer("hello", add_special_tokens=False)[
+                        "input_ids"
+                    ]
+                },
+                {
+                    "input_ids": tokenizer("world", add_special_tokens=False)[
+                        "input_ids"
+                    ]
+                },
+            ]
+
+            collated = collator(batch)
+
+            self.assertIn("attention_mask", collated)
+            self.assertEqual(collated["attention_mask"].dim(), 3)
+            self.assertEqual(
+                collated["attention_mask"].shape[-1],
+                collated["input_ids"].shape[1],
+            )
+            self.assertLess(collated["attention_mask"].min().item(), 0)
+
+        except Exception as e:
+            if "mask_token" in str(e) or "sentencepiece" in str(e):
+                self.skipTest(f"Tokenizer setup failed (expected on CPU-only): {e}")
+            else:
+                raise
 
     def test_to_target_batch_size_handles_empty_buffer(self):
         """Ensure batch packing handles empty buffers without crashing."""

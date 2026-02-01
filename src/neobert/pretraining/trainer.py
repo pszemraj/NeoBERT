@@ -215,10 +215,8 @@ def trainer(cfg: Config) -> None:
         dtype_pad_mask = torch.bfloat16
 
     if cfg.datacollator.pack_sequences:
-        raise NotImplementedError(
-            "datacollator.pack_sequences is not supported in pretraining yet. "
-            "Packed sequences require block-diagonal attention or FlashAttention varlen kernels. "
-            "See docs/dev.md for the current roadmap."
+        logger.info(
+            "Using packed sequences with block-diagonal attention masks (experimental)."
         )
 
     # Tokenizer
@@ -565,12 +563,18 @@ def trainer(cfg: Config) -> None:
 
                     # Log metrics
                     metrics["train/local_samples"] += batch["input_ids"].shape[0]
-                    if "attention_mask" in batch.keys():
-                        metrics["train/local_tokens"] += (
-                            (batch["attention_mask"] == 0).sum().item()
-                        )
+                    if (
+                        "attention_mask" in batch.keys()
+                        and batch["attention_mask"] is not None
+                    ):
+                        if batch["attention_mask"].dim() == 2:
+                            metrics["train/local_tokens"] += (
+                                (batch["attention_mask"] == 0).sum().item()
+                            )
+                        else:
+                            metrics["train/local_tokens"] += batch["input_ids"].numel()
                     else:
-                        metrics["train/local_tokens"] += batch["input_ids"].shape[1]
+                        metrics["train/local_tokens"] += batch["input_ids"].numel()
                     metrics["train/local_num_pred"] += (
                         (batch["labels"] != -100).sum().item()
                     )
@@ -638,12 +642,18 @@ def trainer(cfg: Config) -> None:
                 pbar.update(1)
                 metrics["train/steps"] += 1
                 metrics["train/local_samples"] += batch["input_ids"].shape[0]
-                if "attention_mask" in batch.keys():
-                    metrics["train/local_tokens"] += (
-                        (batch["attention_mask"] == 0).sum().item()
-                    )
+                if (
+                    "attention_mask" in batch.keys()
+                    and batch["attention_mask"] is not None
+                ):
+                    if batch["attention_mask"].dim() == 2:
+                        metrics["train/local_tokens"] += (
+                            (batch["attention_mask"] == 0).sum().item()
+                        )
+                    else:
+                        metrics["train/local_tokens"] += batch["input_ids"].numel()
                 else:
-                    metrics["train/local_tokens"] += batch["input_ids"].shape[1]
+                    metrics["train/local_tokens"] += batch["input_ids"].numel()
                 metrics["train/local_num_pred"] += (
                     (batch["labels"] != -100).sum().item()
                 )
