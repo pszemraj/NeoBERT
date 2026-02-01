@@ -20,6 +20,7 @@ configs/
 - `pretrain_neobert.yaml` – Standard 768×12 recipe
 - `pretrain_streaming.yaml` – Streaming dataset example
 - `pretrain_gpu_small.yaml` – Smaller GPU-friendly config
+- `pretrain_smoke.yaml` – Short smoke-test config (IMDB subset)
 - `pretrain_neobert100m_smollm2data.yaml` – 100M SmolLM2 dataset variant
 - `pretrain_neobert250m_smollm2data.yaml` – 250M SmolLM2 dataset variant
 - `pretrain_neobert100m_smollm2data_muonclip.yaml` – MuonClip variant
