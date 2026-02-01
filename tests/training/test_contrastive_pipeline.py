@@ -185,6 +185,11 @@ class TestContrastivePipeline(unittest.TestCase):
             self.assertTrue(hasattr(config, "contrastive"))
             self.assertIsNotNone(config.contrastive.temperature)
 
+            # Missing dataset.path should raise a clear error early.
+            config.dataset.path = None
+            with self.assertRaisesRegex(ValueError, "dataset.path"):
+                trainer(config)
+
         except ImportError as e:
             self.skipTest(f"Contrastive trainer module not available: {e}")
         except Exception as e:

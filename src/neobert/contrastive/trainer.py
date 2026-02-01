@@ -20,8 +20,6 @@ from datasets import load_from_disk
 # Deepspeed
 from deepspeed.utils import safe_get_full_fp32_param
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -31,6 +29,8 @@ from transformers import DataCollatorWithPadding
 # Configuration
 from ..config import Config
 from ..model import NeoBERT, NeoBERTConfig
+from ..optimizer import get_optimizer
+from ..scheduler import get_scheduler
 from ..tokenizer import get_tokenizer
 from ..utils import prepare_wandb_config
 from .datasets import get_bsz
@@ -102,6 +102,11 @@ def trainer(cfg: Config) -> None:
         raise ValueError(
             "Dropout needs to be positive in order to perform steps of SimCSE."
         )
+    if not cfg.dataset.path:
+        raise ValueError(
+            "Contrastive training requires dataset.path to point to a preprocessed dataset. "
+            "Run scripts/contrastive/preprocess.py to build it first."
+        )
 
     # Get the last checkpoint id
     checkpoint_dir = os.path.join(cfg.trainer.output_dir, "checkpoints")
@@ -114,20 +119,28 @@ def trainer(cfg: Config) -> None:
         and len(os.listdir(checkpoint_dir)) > 0
     ):
         # This regular expression was taken from accelerator.load_state()
-        folders = os.listdir(checkpoint_dir)
-        iteration = (
-            max(
-                int(re.findall(r"[\/]?([0-9]+)(?=[^\/]*$)", folder)[0])
-                for folder in folders
+        folders = [
+            folder
+            for folder in os.listdir(checkpoint_dir)
+            if os.path.isdir(os.path.join(checkpoint_dir, folder))
+            and re.findall(r"[\/]?([0-9]+)(?=[^\/]*$)", folder)
+        ]
+        if folders:
+            iteration = (
+                max(
+                    int(re.findall(r"[\/]?([0-9]+)(?=[^\/]*$)", folder)[0])
+                    for folder in folders
+                )
+                + 1
             )
-            + 1
-        )
 
-    # Accelerator object
+    save_total_limit = max(
+        getattr(cfg.trainer, "save_total_limit", 0), getattr(cfg.trainer, "max_ckpt", 0)
+    )
     project_config = ProjectConfiguration(
         cfg.trainer.output_dir,
         automatic_checkpoint_naming=True,
-        total_limit=2,  # Keep only 2 checkpoints
+        total_limit=save_total_limit or None,
         iteration=iteration,
     )
     accelerator = Accelerator(
@@ -195,58 +208,133 @@ def trainer(cfg: Config) -> None:
     )
 
     # Dataset
-    dataset = load_from_disk(os.path.join(cfg.dataset.path, "all"))
+    dataset_path = str(cfg.dataset.path)
+    dataset = load_from_disk(os.path.join(dataset_path, "all"))
     pretraining_dataset = load_from_disk(
-        cfg.dataset.path
+        dataset_path
     )  # Base dataset for pretraining SimCSE
 
     data_collator = CustomDataCollatorWithPadding(
-        tokenizer=tokenizer, return_tensors="pt", **cfg.datacollator
+        tokenizer=tokenizer,
+        return_tensors="pt",
+        pad_to_multiple_of=cfg.datacollator.pad_to_multiple_of,
     )
+    target_bsz = (
+        cfg.trainer.per_device_train_batch_size or cfg.trainer.train_batch_size or 16
+    )
+    dataloader_kwargs = {
+        "collate_fn": data_collator,
+        "num_workers": cfg.trainer.dataloader_num_workers,
+        "pin_memory": torch.cuda.is_available(),
+        "shuffle": True,
+    }
     dataloaders = {
         key: DataLoader(
             dataset[key],
-            collate_fn=data_collator,
-            batch_size=get_bsz(key, cfg.dataloader.target_bsz),
-            **cfg.dataloader.train,
+            batch_size=max(1, get_bsz(key, target_bsz)),
+            **dataloader_kwargs,
         )
         for key in dataset.keys()
-    } | {
-        "pretraining": DataLoader(
-            pretraining_dataset,
-            collate_fn=data_collator,
-            batch_size=cfg.dataloader.target_bsz,
-            **cfg.dataloader.train,
-        )
     }
+    dataloaders["pretraining"] = DataLoader(
+        pretraining_dataset,
+        batch_size=target_bsz,
+        **dataloader_kwargs,
+    )
 
-    total = sum(x**cfg.datasets.alpha for x in dataset.num_rows.values())
+    alpha = getattr(cfg.dataset, "alpha", 1.0)
+    total = sum(x**alpha for x in dataset.num_rows.values())
     sample_probs = {
-        key: num_rows**cfg.datasets.alpha / total
-        for key, num_rows in dataset.num_rows.items()
+        key: num_rows**alpha / total for key, num_rows in dataset.num_rows.items()
     }
 
     # Model
-    model = NeoBERT(config=NeoBERTConfig(**cfg.model, **cfg.tokenizer))
+    model_config = NeoBERTConfig(
+        hidden_size=cfg.model.hidden_size,
+        num_hidden_layers=cfg.model.num_hidden_layers,
+        num_attention_heads=cfg.model.num_attention_heads,
+        intermediate_size=cfg.model.intermediate_size,
+        max_position_embeddings=cfg.model.max_position_embeddings,
+        vocab_size=cfg.model.vocab_size,
+        rope=cfg.model.rope,
+        rms_norm=cfg.model.rms_norm,
+        hidden_act=cfg.model.hidden_act,
+        dropout_prob=cfg.model.dropout_prob,
+        norm_eps=cfg.model.norm_eps,
+        embedding_init_range=cfg.model.embedding_init_range,
+        decoder_init_range=cfg.model.decoder_init_range,
+        flash_attention=cfg.model.flash_attention,
+        ngpt=cfg.model.ngpt,
+        base_scale=cfg.model.base_scale,
+        pad_token_id=tokenizer.pad_token_id,
+    )
+    model = NeoBERT(config=model_config)
 
-    # Get path of desired checkpoint
-    if "ckpt" in cfg.model.keys() and cfg.model.ckpt != "latest":
-        tag = cfg.model.ckpt
-    else:
-        latest_path = os.path.join(cfg.model.ckpt_dir, "latest")
-        if os.path.isfile(latest_path):
-            with open(latest_path, "r") as fd:
-                tag = fd.read().strip()
+    def _resolve_checkpoint_tag(
+        checkpoint_dir: str, checkpoint: str | int | None
+    ) -> str:
+        if checkpoint is None or str(checkpoint).lower() == "latest":
+            latest_path = os.path.join(checkpoint_dir, "latest")
+            if os.path.isfile(latest_path):
+                with open(latest_path, "r") as fd:
+                    return fd.read().strip()
+            steps = [
+                int(entry)
+                for entry in os.listdir(checkpoint_dir)
+                if entry.isdigit()
+                and os.path.isdir(os.path.join(checkpoint_dir, entry))
+            ]
+            if not steps:
+                raise ValueError(
+                    f"No checkpoint steps found in {checkpoint_dir} to resolve 'latest'."
+                )
+            return str(max(steps))
+        return str(checkpoint)
+
+    # Load weights if provided
+    pretrained_checkpoint_dir = None
+    pretrained_checkpoint = None
+    allow_random_weights = False
+    use_deepspeed = getattr(cfg, "use_deepspeed", False)
+    if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
+        pretrained_checkpoint_dir = cfg._raw_model_dict.get("pretrained_checkpoint_dir")
+        pretrained_checkpoint = cfg._raw_model_dict.get("pretrained_checkpoint")
+        allow_random_weights = cfg._raw_model_dict.get("allow_random_weights", False)
+        if "deepspeed" in cfg._raw_model_dict:
+            use_deepspeed = cfg._raw_model_dict.get("deepspeed")
+
+    if pretrained_checkpoint_dir:
+        if not pretrained_checkpoint_dir.endswith("model_checkpoints"):
+            pretrained_checkpoint_dir = os.path.join(
+                pretrained_checkpoint_dir, "model_checkpoints"
+            )
+        tag = _resolve_checkpoint_tag(
+            pretrained_checkpoint_dir,
+            pretrained_checkpoint or cfg.pretrained_checkpoint,
+        )
+        if use_deepspeed:
+            model = load_state_dict_from_zero_checkpoint(
+                model, pretrained_checkpoint_dir, tag=str(tag)
+            )
         else:
-            raise ValueError(f"Unable to find 'latest' file at {latest_path}")
-
-    # Load weights
-    if cfg.model.deepspeed:
-        model = load_state_dict_from_zero_checkpoint(
-            model, cfg.model.ckpt_dir, tag=str(tag)
+            state_dict_path = os.path.join(
+                pretrained_checkpoint_dir, str(tag), "state_dict.pt"
+            )
+            if not os.path.exists(state_dict_path):
+                raise ValueError(
+                    f"Expected state_dict.pt at {state_dict_path}. "
+                    "Set pretrained_checkpoint_dir or enable DeepSpeed loading."
+                )
+            state_dict = torch.load(state_dict_path, map_location="cpu")
+            model.load_state_dict(state_dict, strict=False)
+    elif allow_random_weights:
+        logger.warning(
+            "allow_random_weights=true: contrastive training will start from random initialization."
         )
     else:
-        raise NotImplementedError
+        logger.warning(
+            "No pretrained checkpoint provided. Contrastive training will start from random initialization."
+        )
 
     # Log the number of parameters
     # Log model parameters to console instead of wandb
@@ -254,34 +342,27 @@ def trainer(cfg: Config) -> None:
     accelerator.print(f"Model parameters: {model_params:,}")
 
     # Optimizer
-    optimizer = AdamW(model.parameters(), **cfg.optimizer.hparams)
+    optimizer = get_optimizer(
+        model,
+        accelerator.distributed_type,
+        name=cfg.optimizer.name,
+        lr=cfg.optimizer.lr,
+        weight_decay=cfg.optimizer.weight_decay,
+        betas=tuple(cfg.optimizer.betas),
+        eps=cfg.optimizer.eps,
+        muon_config=cfg.optimizer.muon_config,
+    )
 
     # Scheduler
-    scheduler1 = LinearLR(
-        optimizer,
-        start_factor=1e-4,
-        end_factor=1.0,
-        total_iters=cfg.scheduler.warmup_steps,
-    )
-    scheduler2 = CosineAnnealingLR(
-        optimizer,
-        T_max=cfg.scheduler.decay_steps,
-        eta_min=cfg.optimizer.hparams.lr * 0.1,
-    )
-
-    def _constant_min_lr(_: int) -> float:
-        """Return a constant learning-rate multiplier.
-
-        :param int _: Current epoch or step index.
-        :return float: Constant LR multiplier.
-        """
-        return 0.1
-
-    scheduler3 = LambdaLR(optimizer, lr_lambda=_constant_min_lr)
-    scheduler = SequentialLR(
-        optimizer,
-        [scheduler1, scheduler2, scheduler3],
-        [cfg.scheduler.warmup_steps, cfg.scheduler.decay_steps],
+    total_steps = cfg.scheduler.total_steps or cfg.trainer.max_steps
+    decay_steps = max(total_steps, cfg.scheduler.warmup_steps + 1)
+    scheduler = get_scheduler(
+        optimizer=optimizer,
+        lr=cfg.optimizer.lr,
+        decay=cfg.scheduler.name,
+        warmup_steps=min(cfg.scheduler.warmup_steps, cfg.trainer.max_steps),
+        decay_steps=decay_steps,
+        constant_steps=0,
     )
 
     # Accelerate
@@ -321,13 +402,15 @@ def trainer(cfg: Config) -> None:
                 )
 
     # Loss function
-    train_loss_fn = SupConLoss()
+    train_loss_fn = SupConLoss(temperature=cfg.contrastive.temperature)
 
-    # # Resume from the latest checkpoint
-    # skipped_train_dataloader = None
-    # if cfg.trainer.resume and os.path.exists(checkpoint_dir) and len(os.listdir(checkpoint_dir)) > 0:
-    #     accelerator.load_state()
-    #     skipped_train_dataloader = accelerator.skip_first_batches(train_dataloader, metrics["train/batches"] % len(train_dataloader))
+    # Resume from the latest checkpoint if available
+    if (
+        cfg.trainer.resume_from_checkpoint
+        and os.path.exists(checkpoint_dir)
+        and len(os.listdir(checkpoint_dir)) > 0
+    ):
+        accelerator.load_state()
 
     # Signal handler that save the accelerate state
     def handler(signum: int, frame: FrameType | None) -> None:
@@ -365,7 +448,7 @@ def trainer(cfg: Config) -> None:
         coin_flip = numpy.random.random()
 
         # Choose from one of the finetuning datasets
-        if coin_flip > cfg.datasets.pretraining_prob:
+        if coin_flip > cfg.dataset.pretraining_prob:
             # Randomly select which task to draw a batch from
             task_name = numpy.random.choice(
                 list(sample_probs.keys()), p=list(sample_probs.values())
@@ -447,7 +530,7 @@ def trainer(cfg: Config) -> None:
 
                 # Log metrics
                 metrics["train/local_samples"] += batch["input_ids_queries"].shape[0]
-                metrics["train/local_sum_loss"] += train_loss
+                metrics["train/local_sum_loss"] += train_loss.item()
 
         else:
             # Forward pass
@@ -493,7 +576,7 @@ def trainer(cfg: Config) -> None:
             pbar.update(1)
             metrics["train/steps"] += 1
             metrics["train/local_samples"] += batch["input_ids_queries"].shape[0]
-            metrics["train/local_sum_loss"] += train_loss
+            metrics["train/local_sum_loss"] += train_loss.item()
 
             if metrics["train/steps"] % cfg.wandb.log_interval == 0:
                 # https://deepspeed.readthedocs.io/en/latest/zero3.html#deepspeed.utils.safe_get_full_grad
@@ -520,30 +603,30 @@ def trainer(cfg: Config) -> None:
                 metrics["train/learning_rate"] = optimizer.param_groups[0]["lr"]
                 metrics.log(accelerator)
 
-            # Save the accelerator state from the main process
-            if metrics["train/steps"] % cfg.trainer.accelerate.save_steps == 0:
+            # Save accelerator state
+            if metrics["train/steps"] % cfg.trainer.save_steps == 0:
                 accelerator.save_state()
 
             # Save the pytorch model
-            if metrics["train/steps"] % cfg.trainer.model.save_steps == 0:
-                if cfg.trainer.model.max_ckpt is not None:
+            if metrics["train/steps"] % cfg.trainer.save_steps == 0:
+                save_total_limit = getattr(cfg.trainer, "save_total_limit", 0)
+                max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
+                limit = max(save_total_limit, max_ckpt)
+                if limit > 0:
                     # Delete checkpoints if there are too many
                     files = os.listdir(model_checkpoint_dir)
                     iterations = [int(f) for f in files if f.isdigit()]
                     iterations.sort()
 
                     # Remove files with the smallest iterations until the limit is met
-                    while (
-                        iterations is not None
-                        and len(iterations) >= cfg.trainer.model.max_ckpt
-                    ):
+                    while iterations and len(iterations) >= limit:
                         file_to_remove = iterations.pop(0)
                         shutil.rmtree(
                             os.path.join(model_checkpoint_dir, str(file_to_remove))
                         )
                         print(
                             f"Deleted old model checkpoint {file_to_remove} due to limit "
-                            f"(max_ckpt = {cfg.trainer.model.max_ckpt})"
+                            f"(limit = {limit})"
                         )
                 # Save the checkpoint
                 if accelerator.distributed_type is DistributedType.DEEPSPEED:
