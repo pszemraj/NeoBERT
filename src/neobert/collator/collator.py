@@ -86,17 +86,29 @@ class DataCollatorWithPacking(DefaultDataCollator):
             seq = feature["input_ids"]
 
             if current_sequence and self.sep_token_id is not None:
-                if len(current_sequence) < self.max_length:
-                    current_sequence.append(self.sep_token_id)
-                    current_segments.append(current_segment_id)
-                else:
+                if len(current_sequence) >= self.max_length:
                     packed_sequences.append({"input_ids": current_sequence})
                     packed_segments.append(current_segments)
                     current_sequence = []
                     current_segments = []
                     current_segment_id = 0
+                else:
+                    current_sequence.append(self.sep_token_id)
+                    current_segments.append(current_segment_id)
+                    if len(current_sequence) == self.max_length:
+                        packed_sequences.append({"input_ids": current_sequence})
+                        packed_segments.append(current_segments)
+                        current_sequence = []
+                        current_segments = []
+                        current_segment_id = 0
 
             for token in seq:
+                if len(current_sequence) == self.max_length:
+                    packed_sequences.append({"input_ids": current_sequence})
+                    packed_segments.append(current_segments)
+                    current_sequence = []
+                    current_segments = []
+                    current_segment_id = 0
                 current_sequence.append(token)
                 current_segments.append(current_segment_id)
                 if len(current_sequence) == self.max_length:
