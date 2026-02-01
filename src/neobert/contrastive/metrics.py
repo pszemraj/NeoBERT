@@ -1,21 +1,39 @@
+"""Metric aggregation helpers for contrastive training."""
+
 from collections import defaultdict
+from typing import Any, Dict
 
 from accelerate import Accelerator
 from torch import Tensor
 
 
 class Metrics(defaultdict):
+    """Dictionary-like metrics container with distributed aggregation helpers."""
+
     def __init__(self):
+        """Initialize metrics storage with integer defaults."""
         super().__init__(int)
 
-    def state_dict(self):
+    def state_dict(self) -> Dict[str, Any]:
+        """Return a serializable copy of the metrics.
+
+        :return dict[str, Any]: Metrics state.
+        """
         return dict(self)
 
-    def load_state_dict(self, state_dict):
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        """Load metrics from a serialized state.
+
+        :param dict[str, Any] state_dict: Metrics state to load.
+        """
         for k, v in state_dict.items():
             self[k] = v
 
-    def log(self, accelerator: Accelerator):
+    def log(self, accelerator: Accelerator) -> None:
+        """Aggregate and log metrics across devices.
+
+        :param Accelerator accelerator: Accelerator used for reduction/logging.
+        """
         # Aggregate ALL metrics across devices (only required for local counters!)
         metrics_agg = Tensor(list(self.values())).to(
             accelerator.device, non_blocking=True

@@ -1,9 +1,12 @@
+"""Phase-2 pretraining loop for NeoBERT."""
+
 import logging
 import os
 import re
 import shutil
 import signal
 import sys
+from types import FrameType
 
 import numpy as np
 
@@ -25,6 +28,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import DataCollatorForLanguageModeling
 
+from ..config import Config
 from ..model import NeoBERTConfig, NeoBERTLMHead
 from ..tokenizer import get_tokenizer
 from ..utils import prepare_wandb_config
@@ -33,7 +37,11 @@ from ..utils import prepare_wandb_config
 from .metrics import Metrics
 
 
-def trainer(cfg):
+def trainer(cfg: Config) -> None:
+    """Run the phase-2 pretraining loop.
+
+    :param Config cfg: Training configuration.
+    """
     # Get the last checkpoint id
     checkpoint_dir = os.path.join(cfg.trainer.dir, "checkpoints")
     model_checkpoint_dir = os.path.join(cfg.trainer.dir, "model_checkpoints")
@@ -195,8 +203,12 @@ def trainer(cfg):
             total_iters=cfg.scheduler.decay_steps,
         )
 
-    def _constant_min_lr(_):
-        """LambdaLR multiplies the optimizer's lr with lr_lambda(epoch)"""
+    def _constant_min_lr(_: int) -> float:
+        """Return a constant learning-rate multiplier.
+
+        :param int _: Current epoch or step index.
+        :return float: Constant LR multiplier.
+        """
         return 0.1
 
     scheduler3 = LambdaLR(optimizer, lr_lambda=_constant_min_lr)
@@ -253,7 +265,12 @@ def trainer(cfg):
             )
 
     # Signal handler that save the accelerate state
-    def handler(signum, frame):
+    def handler(signum: int, frame: FrameType | None) -> None:
+        """Handle termination signals by checkpointing state.
+
+        :param int signum: Signal number received.
+        :param FrameType | None frame: Current stack frame.
+        """
         print(
             f"Signal {signum} received on rank {accelerator.process_index}, checkpointing..."
         )

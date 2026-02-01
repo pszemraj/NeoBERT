@@ -22,7 +22,7 @@ import logging
 import re
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import torch
 from torch.optim import Optimizer
@@ -172,7 +172,14 @@ class NeoBERTAttentionHooks:
     The expensive QK statistics are computed lazily during the optimizer step.
     """
 
-    def __init__(self, model_config, layer_mapping: Optional[Dict[str, str]] = None):
+    def __init__(
+        self, model_config: Any, layer_mapping: Optional[Dict[str, str]] = None
+    ) -> None:
+        """Initialize the hook system.
+
+        :param Any model_config: Model configuration with attention settings.
+        :param dict[str, str] | None layer_mapping: Optional Q/K/V name mapping.
+        """
         self.config = model_config
         self.num_heads = model_config.num_attention_heads
         self.head_dim = model_config.hidden_size // model_config.num_attention_heads
@@ -188,7 +195,8 @@ class NeoBERTAttentionHooks:
 
         self._validate_config()
 
-    def _validate_config(self):
+    def _validate_config(self) -> None:
+        """Validate that the attention configuration is consistent."""
         if self.config.hidden_size % self.config.num_attention_heads != 0:
             raise ValueError(
                 f"hidden_size ({self.config.hidden_size}) must be divisible by "
@@ -247,7 +255,11 @@ class NeoBERTAttentionHooks:
     def _resolve_transformer_layers(
         self, model: torch.nn.Module
     ) -> Optional[Sequence[torch.nn.Module]]:
-        """Return the sequence of encoder layers exposed by ``model``."""
+        """Return the sequence of encoder layers exposed by ``model``.
+
+        :param torch.nn.Module model: Model to inspect.
+        :return Sequence[torch.nn.Module] | None: Encoder layers if found.
+        """
         if hasattr(model, "transformer_encoder"):
             return model.transformer_encoder
 
@@ -261,8 +273,24 @@ class NeoBERTAttentionHooks:
 
         return None
 
-    def _create_qkv_input_hook(self, layer_idx: int):
-        def hook_fn(module, inputs, output):
+    def _create_qkv_input_hook(
+        self, layer_idx: int
+    ) -> Callable[[torch.nn.Module, tuple[Any, ...], Any], None]:
+        """Create a hook capturing QKV input activations.
+
+        :param int layer_idx: Encoder layer index.
+        :return Callable: Hook function for forward pass.
+        """
+
+        def hook_fn(
+            module: torch.nn.Module, inputs: tuple[Any, ...], output: Any
+        ) -> None:
+            """Store the QKV input tensor for a layer.
+
+            :param torch.nn.Module module: Hooked module.
+            :param tuple[Any, ...] inputs: Forward inputs.
+            :param Any output: Forward output (unused).
+            """
             if not self.enabled or not inputs:
                 return
             x = inputs[0]
@@ -272,8 +300,24 @@ class NeoBERTAttentionHooks:
 
         return hook_fn
 
-    def _create_block_context_hook(self, layer_idx: int):
-        def hook_fn(module, inputs, output):
+    def _create_block_context_hook(
+        self, layer_idx: int
+    ) -> Callable[[torch.nn.Module, tuple[Any, ...], Any], None]:
+        """Create a hook capturing pad mask and rotary embeddings.
+
+        :param int layer_idx: Encoder layer index.
+        :return Callable: Hook function for forward pass.
+        """
+
+        def hook_fn(
+            module: torch.nn.Module, inputs: tuple[Any, ...], output: Any
+        ) -> None:
+            """Store pad mask and rotary embeddings for a layer.
+
+            :param torch.nn.Module module: Hooked module.
+            :param tuple[Any, ...] inputs: Forward inputs.
+            :param Any output: Forward output (unused).
+            """
             if not self.enabled or not inputs:
                 return
 
@@ -292,18 +336,26 @@ class NeoBERTAttentionHooks:
     def get_layer_data(
         self, layer_idx: int
     ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Return cached tensors for a given layer.
+
+        :param int layer_idx: Encoder layer index.
+        :return tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+            Input, pad mask, and rotary frequencies.
+        """
         return (
             self.layer_inputs.get(layer_idx),
             self.layer_pad_masks.get(layer_idx),
             self.layer_freqs.get(layer_idx),
         )
 
-    def clear(self):
+    def clear(self) -> None:
+        """Clear cached tensors from all layers."""
         self.layer_inputs.clear()
         self.layer_pad_masks.clear()
         self.layer_freqs.clear()
 
-    def remove_hooks(self):
+    def remove_hooks(self) -> None:
+        """Remove all registered forward hooks."""
         for handle in self.hook_handles:
             handle.remove()
         self.hook_handles.clear()
@@ -331,8 +383,13 @@ class MuonClipOptimizer(Optimizer):
 
     def __init__(
         self, model: torch.nn.Module, model_config: Any, config: MuonClipConfig
-    ):
-        """Initialize the optimizer and attach attention hooks as needed."""
+    ) -> None:
+        """Initialize the optimizer and attach attention hooks as needed.
+
+        :param torch.nn.Module model: Model to optimize.
+        :param Any model_config: Model configuration.
+        :param MuonClipConfig config: Optimizer configuration.
+        """
         self.config = config
         self.model_config = model_config
         self._step = 0
@@ -379,8 +436,11 @@ class MuonClipOptimizer(Optimizer):
                 "Gradient anomaly detection enabled - training will be slower"
             )
 
-    def _validate_model(self, model):
-        """Validate model architecture compatibility."""
+    def _validate_model(self, model: torch.nn.Module) -> None:
+        """Validate model architecture compatibility.
+
+        :param torch.nn.Module model: Model to validate.
+        """
         base_model, transformer_layers = self._resolve_transformer_stack(model)
         if base_model is None or transformer_layers is None:
             raise ValueError(
@@ -422,12 +482,11 @@ class MuonClipOptimizer(Optimizer):
 
         logger.debug("Model architecture validation passed")
 
-    def _build_param_groups(self, model) -> List[Dict]:
-        """
-        Build parameter groups for hybrid Muon+Adam optimization.
+    def _build_param_groups(self, model: torch.nn.Module) -> List[Dict]:
+        """Build parameter groups for hybrid Muon+Adam optimization.
 
-        Muon: 2D weight matrices (QKV, W_o, FFN weights)
-        Adam: 1D parameters (biases, LayerNorm weights)
+        :param torch.nn.Module model: Model to inspect.
+        :return list[dict]: Parameter groups for the optimizer.
         """
         muon_params = []
         adam_params = []
@@ -513,7 +572,12 @@ class MuonClipOptimizer(Optimizer):
     def _resolve_transformer_stack(
         self, model: torch.nn.Module
     ) -> Tuple[Optional[torch.nn.Module], Optional[Sequence[torch.nn.Module]]]:
-        """Discover the base encoder module and its layers inside ``model``."""
+        """Discover the base encoder module and its layers inside ``model``.
+
+        :param torch.nn.Module model: Model to inspect.
+        :return tuple[torch.nn.Module | None, Sequence[torch.nn.Module] | None]:
+            Base model and encoder layers.
+        """
         if hasattr(model, "transformer_encoder"):
             return model, model.transformer_encoder
 
@@ -528,15 +592,13 @@ class MuonClipOptimizer(Optimizer):
         return None, None
 
     @torch.no_grad()
-    def step(self, closure=None):
-        """
-        Perform optimization step.
+    def step(
+        self, closure: Optional[Callable[[], torch.Tensor]] = None
+    ) -> Optional[torch.Tensor]:
+        """Perform an optimization step.
 
-        Order of operations:
-        1. Apply Muon updates to 2D parameters
-        2. Apply Adam updates to 1D parameters
-        3. Apply QK-clipping (if enabled and past warmup)
-        4. Collect metrics
+        :param Callable | None closure: Optional closure to recompute loss.
+        :return torch.Tensor | None: Loss value if closure is provided.
         """
         loss = None
         if closure is not None:
@@ -561,8 +623,11 @@ class MuonClipOptimizer(Optimizer):
         self._step += 1
         return loss
 
-    def _muon_step(self, group):
-        """Apply Muon update with Newton-Schulz orthogonalization."""
+    def _muon_step(self, group: Dict[str, Any]) -> None:
+        """Apply Muon update with orthogonalization.
+
+        :param dict[str, Any] group: Parameter group metadata.
+        """
         for param in group["params"]:
             if param.grad is None:
                 continue
@@ -599,8 +664,11 @@ class MuonClipOptimizer(Optimizer):
             # Parameter update
             param.add_(update, alpha=-group["lr"])
 
-    def _adam_step(self, group):
-        """Apply standard Adam update to 1D parameters."""
+    def _adam_step(self, group: Dict[str, Any]) -> None:
+        """Apply standard Adam update to 1D parameters.
+
+        :param dict[str, Any] group: Parameter group metadata.
+        """
         for param in group["params"]:
             if param.grad is None:
                 continue
@@ -649,10 +717,11 @@ class MuonClipOptimizer(Optimizer):
             param.addcdiv_(state["exp_avg"], denom, value=-step_size)
 
     def _newton_schulz_update(self, grad: torch.Tensor, steps: int = 5) -> torch.Tensor:
-        """
-        Apply Newton-Schulz orthogonalization to gradient.
+        """Apply Newton-Schulz orthogonalization to a gradient.
 
-        This orthogonalizes 2D gradients to make updates scale-free.
+        :param torch.Tensor grad: Gradient tensor.
+        :param int steps: Number of iteration steps.
+        :return torch.Tensor: Orthogonalized update.
         """
         if grad.ndim != 2:
             return grad
@@ -682,7 +751,11 @@ class MuonClipOptimizer(Optimizer):
         return X.T if is_transpose else X
 
     def _orthogonalize_update(self, grad: torch.Tensor) -> torch.Tensor:
-        """Dispatch orthogonalization based on configuration."""
+        """Dispatch orthogonalization based on configuration.
+
+        :param torch.Tensor grad: Gradient tensor.
+        :return torch.Tensor: Orthogonalized update.
+        """
         algo = getattr(self.config, "orthogonalization", "polar_express")
         if algo == "polar_express":
             return self._polar_express_update(grad, self.config.ns_steps)
@@ -691,8 +764,12 @@ class MuonClipOptimizer(Optimizer):
     def _polar_express_update(
         self, grad: torch.Tensor, steps: int = 5, eps: float = 1e-7
     ) -> torch.Tensor:
-        """
-        Apply Polar Express orthogonalization with adaptive coefficient schedule.
+        """Apply Polar Express orthogonalization with adaptive coefficients.
+
+        :param torch.Tensor grad: Gradient tensor.
+        :param int steps: Number of iteration steps.
+        :param float eps: Numerical stability epsilon.
+        :return torch.Tensor: Orthogonalized update.
         """
         if grad.ndim != 2:
             return grad
@@ -732,7 +809,11 @@ class MuonClipOptimizer(Optimizer):
         return working.T if is_transpose else working
 
     def _get_polar_coefficients(self, steps: int) -> List[Tuple[float, float, float]]:
-        """Return dampened coefficient schedule for Polar Express algorithm."""
+        """Return dampened coefficient schedule for Polar Express.
+
+        :param int steps: Number of coefficients to return.
+        :return list[tuple[float, float, float]]: Coefficient schedule.
+        """
         cache = self._polar_coeff_cache
         if steps in cache:
             return cache[steps]
@@ -768,10 +849,8 @@ class MuonClipOptimizer(Optimizer):
         cache[steps] = coeffs
         return coeffs
 
-    def _apply_qk_clipping(self):
-        """
-        Apply per-head QK-clipping using cached activations.
-        """
+    def _apply_qk_clipping(self) -> None:
+        """Apply per-head QK-clipping using cached activations."""
         if not self.hook_system:
             return
 
@@ -866,7 +945,14 @@ class MuonClipOptimizer(Optimizer):
         pad_mask: Optional[torch.Tensor],
         freqs_cis: Optional[torch.Tensor],
     ) -> Tuple[Optional[torch.Tensor], Optional[float]]:
-        """Compute per-head scaling factors for fused QKV weights."""
+        """Compute per-head scaling factors for fused QKV weights.
+
+        :param torch.Tensor inputs: Cached layer inputs.
+        :param torch.nn.Parameter param: Fused QKV weight parameter.
+        :param torch.Tensor | None pad_mask: Optional pad mask.
+        :param torch.Tensor | None freqs_cis: Optional rotary frequencies.
+        :return tuple[torch.Tensor | None, float | None]: Eta per head and max logit.
+        """
         try:
             inputs = inputs.to(device=param.device, dtype=param.dtype)
             projections = torch.matmul(inputs, param.transpose(0, 1))
@@ -904,7 +990,15 @@ class MuonClipOptimizer(Optimizer):
         pad_mask: Optional[torch.Tensor],
         freqs_cis: Optional[torch.Tensor],
     ) -> Tuple[Optional[torch.Tensor], Optional[float]]:
-        """Compute per-head scaling factors for separate Q/K projections."""
+        """Compute per-head scaling factors for separate Q/K projections.
+
+        :param torch.Tensor inputs: Cached layer inputs.
+        :param torch.nn.Parameter q_param: Query projection weights.
+        :param torch.nn.Parameter k_param: Key projection weights.
+        :param torch.Tensor | None pad_mask: Optional pad mask.
+        :param torch.Tensor | None freqs_cis: Optional rotary frequencies.
+        :return tuple[torch.Tensor | None, float | None]: Eta per head and max logit.
+        """
         try:
             inputs_q = inputs.to(device=q_param.device, dtype=q_param.dtype)
             inputs_k = inputs.to(device=k_param.device, dtype=k_param.dtype)
@@ -932,7 +1026,14 @@ class MuonClipOptimizer(Optimizer):
         pad_mask: Optional[torch.Tensor],
         freqs_cis: Optional[torch.Tensor],
     ) -> Tuple[Optional[torch.Tensor], Optional[float]]:
-        """Derive per-head eta values from Q and K projections."""
+        """Derive per-head eta values from Q and K projections.
+
+        :param torch.Tensor xq: Query projections.
+        :param torch.Tensor xk: Key projections.
+        :param torch.Tensor | None pad_mask: Optional pad mask.
+        :param torch.Tensor | None freqs_cis: Optional rotary frequencies.
+        :return tuple[torch.Tensor | None, float | None]: Eta per head and max logit.
+        """
         if self.model_config.rope and freqs_cis is not None:
             from ..model.rotary import apply_rotary_emb
 
@@ -960,17 +1061,12 @@ class MuonClipOptimizer(Optimizer):
 
     def _scale_qkv_weights(
         self, param: torch.nn.Parameter, eta_per_head: torch.Tensor, alpha: float
-    ):
-        """
-        Scale Q and K portions of fused QKV weight matrix.
+    ) -> None:
+        """Scale Q and K portions of fused QKV weight matrix.
 
-        QKV weight shape: [hidden_size, 3*hidden_size]
-        Need to scale Q and K per-head, leave V unchanged.
-
-        Args:
-            param: QKV weight parameter
-            eta_per_head: Scaling factors per head [num_heads]
-            alpha: Q/K scaling balance (0.5 = equal)
+        :param torch.nn.Parameter param: QKV weight parameter.
+        :param torch.Tensor eta_per_head: Scaling factors per head.
+        :param float alpha: Q/K scaling balance (0.5 = equal).
         """
         # Dimensions derived from model config
         hidden_size = self.model_config.hidden_size
@@ -1004,15 +1100,13 @@ class MuonClipOptimizer(Optimizer):
         eta_per_head: torch.Tensor,
         alpha: float,
         proj_type: str,
-    ):
-        """
-        Scale separate Q or K projection weights when architectures do not use fused QKV.
+    ) -> None:
+        """Scale separate Q or K projection weights.
 
-        Args:
-            param: Projection weight parameter
-            eta_per_head: Scaling factors per head [num_heads]
-            alpha: Q/K scaling balance (0.5 = equal)
-            proj_type: 'q' or 'k'
+        :param torch.nn.Parameter param: Projection weight parameter.
+        :param torch.Tensor eta_per_head: Scaling factors per head.
+        :param float alpha: Q/K scaling balance (0.5 = equal).
+        :param str proj_type: Projection type ('q' or 'k').
         """
         hidden_size = self.model_config.hidden_size
         num_heads = self.model_config.num_attention_heads
@@ -1033,22 +1127,19 @@ class MuonClipOptimizer(Optimizer):
         param_view = param.view(num_heads, head_dim, -1)
         param_view.mul_(eta_power)
 
-    def get_metrics(self) -> Dict:
-        """
-        Get metrics for logging.
+    def get_metrics(self) -> Dict[str, float]:
+        """Get metrics for logging and clear internal storage.
 
-        Returns metrics dict and clears internal storage.
+        :return dict[str, float]: Metrics collected during optimization.
         """
         metrics = dict(self._last_metrics)
         self._last_metrics.clear()
         return metrics
 
-    def zero_grad(self, set_to_none: bool = True):
-        """
-        Override zero_grad to clear hook statistics.
+    def zero_grad(self, set_to_none: bool = True) -> None:
+        """Clear gradients and hook statistics.
 
-        Important: Hook statistics should be cleared after each step
-        to prevent memory leaks.
+        :param bool set_to_none: Whether to set grads to None.
         """
         super().zero_grad(set_to_none=set_to_none)
         if self.hook_system:

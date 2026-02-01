@@ -1,3 +1,5 @@
+"""Pretraining loop for masked language modeling."""
+
 import json
 import logging
 import os
@@ -42,7 +44,14 @@ def to_target_batch_size(
     batch: BatchEncoding,
     stored_batch: BatchEncoding,
     target_size: int = 8,
-):
+) -> tuple[BatchEncoding, BatchEncoding]:
+    """Adjust batch to a target size by splitting/concatenating.
+
+    :param BatchEncoding batch: Current batch to adjust.
+    :param BatchEncoding stored_batch: Buffered batch fragments.
+    :param int target_size: Target batch size.
+    :return tuple[BatchEncoding, BatchEncoding]: Adjusted batch and buffer.
+    """
     tmp = {}
     batch_size = batch["input_ids"].shape[0]
 
@@ -86,7 +95,11 @@ def to_target_batch_size(
     return batch, stored_batch
 
 
-def trainer(cfg: Config):
+def trainer(cfg: Config) -> None:
+    """Run the pretraining loop.
+
+    :param Config cfg: Training configuration.
+    """
     # Get the last checkpoint id
     checkpoint_dir = os.path.join(cfg.trainer.output_dir, "checkpoints")
     model_checkpoint_dir = os.path.join(cfg.trainer.output_dir, "model_checkpoints")

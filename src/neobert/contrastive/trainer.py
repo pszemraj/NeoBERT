@@ -1,9 +1,12 @@
+"""Training loop for contrastive and SimCSE-style finetuning."""
+
 import logging
 import os
 import re
 import shutil
 import signal
 import sys
+from types import FrameType
 
 import numpy
 
@@ -38,6 +41,8 @@ logger = logging.getLogger(__name__)
 
 
 class CustomDataCollatorWithPadding(DataCollatorWithPadding):
+    """Collator that pads query/corpus/negative fields separately."""
+
     def __call__(self, features):
         features_queries = [
             {
@@ -87,7 +92,11 @@ class CustomDataCollatorWithPadding(DataCollatorWithPadding):
         return batch
 
 
-def trainer(cfg: Config):
+def trainer(cfg: Config) -> None:
+    """Run contrastive training loop.
+
+    :param Config cfg: Training configuration.
+    """
     # Check if dropout is non zero
     if cfg.model.dropout_prob <= 0:
         raise ValueError(
@@ -260,8 +269,12 @@ def trainer(cfg: Config):
         eta_min=cfg.optimizer.hparams.lr * 0.1,
     )
 
-    def _constant_min_lr(_):
-        """LambdaLR multiplies the optimizer's lr with lr_lambda(epoch)"""
+    def _constant_min_lr(_: int) -> float:
+        """Return a constant learning-rate multiplier.
+
+        :param int _: Current epoch or step index.
+        :return float: Constant LR multiplier.
+        """
         return 0.1
 
     scheduler3 = LambdaLR(optimizer, lr_lambda=_constant_min_lr)
@@ -317,7 +330,12 @@ def trainer(cfg: Config):
     #     skipped_train_dataloader = accelerator.skip_first_batches(train_dataloader, metrics["train/batches"] % len(train_dataloader))
 
     # Signal handler that save the accelerate state
-    def handler(signum, frame):
+    def handler(signum: int, frame: FrameType | None) -> None:
+        """Handle termination signals by checkpointing state.
+
+        :param int signum: Signal number received.
+        :param FrameType | None frame: Current stack frame.
+        """
         print(
             f"Signal {signum} received on rank {accelerator.process_index}, checkpointing..."
         )

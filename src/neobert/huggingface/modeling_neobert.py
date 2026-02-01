@@ -13,7 +13,7 @@ Architecture Features:
 Based on: https://github.com/facebookresearch/llama/blob/main/llama/model.py
 """
 
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import torch
@@ -61,7 +61,7 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
         **kwargs: Additional arguments passed to DataCollatorForLanguageModeling.
     """
 
-    def __init__(self, pack_sequences: bool = False, **kwargs) -> None:
+    def __init__(self, pack_sequences: bool = False, **kwargs: Any) -> None:
         """Initialize the data collator.
 
         Args:
@@ -146,9 +146,22 @@ class NeoBERTConfig(PretrainedConfig):
         vocab_size: int = 30522,
         pad_token_id: int = 0,
         max_length: int = 1024,
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
-        """Initialize the NeoBERT configuration."""
+        """Initialize the NeoBERT configuration.
+
+        :param int hidden_size: Dimensionality of encoder layers.
+        :param int num_hidden_layers: Number of transformer layers.
+        :param int num_attention_heads: Number of attention heads per layer.
+        :param int intermediate_size: Feed-forward hidden size.
+        :param float embedding_init_range: Stddev for embedding initialization.
+        :param float decoder_init_range: Stddev for decoder initialization.
+        :param float norm_eps: Epsilon for normalization layers.
+        :param int vocab_size: Vocabulary size.
+        :param int pad_token_id: Padding token ID.
+        :param int max_length: Maximum sequence length.
+        :param Any kwargs: Additional configuration parameters.
+        """
         super().__init__(**kwargs)
 
         self.hidden_size = hidden_size
@@ -484,7 +497,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         output_hidden_states: bool = False,
         output_attentions: bool = False,
-        **kwargs,
+        **kwargs: Any,
     ) -> BaseModelOutput:
         """Forward pass through the NeoBERT model.
 
@@ -611,7 +624,7 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         output_hidden_states: bool = False,
         output_attentions: bool = False,
-        **kwargs,
+        **kwargs: Any,
     ) -> MaskedLMOutput:
         """Forward pass for masked language modeling.
 

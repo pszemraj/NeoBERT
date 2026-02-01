@@ -1,3 +1,5 @@
+"""GLUE fine-tuning and evaluation utilities."""
+
 __all__ = [
     "trainer",
     "get_best_checkpoint_path",

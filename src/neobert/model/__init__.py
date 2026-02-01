@@ -1,3 +1,5 @@
+"""NeoBERT model architectures and task heads."""
+
 __all__ = [
     "NeoBERTForMTEB",
     "NeoBERTForSequenceClassification",

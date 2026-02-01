@@ -1,3 +1,5 @@
+"""NeoBERT model architecture and task heads."""
+
 # From https://stackoverflow.com/a/23689767
 # From https://github.com/pytorch/pytorch/issues/97899
 # From https://github.com/facebookresearch/llama/blob/main/llama/model.py
@@ -35,15 +37,33 @@ except (ImportError, RuntimeError) as e:
 
     # Native PyTorch SwiGLU implementation as fallback
     class SwiGLU(nn.Module):
+        """Fallback SwiGLU implementation when xFormers is unavailable."""
+
         def __init__(
-            self, in_features, hidden_features=None, out_features=None, bias=True
-        ):
+            self,
+            in_features: int,
+            hidden_features: Optional[int] = None,
+            out_features: Optional[int] = None,
+            bias: bool = True,
+        ) -> None:
+            """Initialize the SwiGLU block.
+
+            :param int in_features: Input feature dimension.
+            :param int | None hidden_features: Hidden feature dimension.
+            :param int | None out_features: Output feature dimension.
+            :param bool bias: Whether to use bias in linear layers.
+            """
             super().__init__()
             self.w1 = nn.Linear(in_features, hidden_features, bias=bias)
             self.w2 = nn.Linear(in_features, hidden_features, bias=bias)
             self.w3 = nn.Linear(hidden_features, out_features, bias=bias)
 
-        def forward(self, x):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Apply SwiGLU activation.
+
+            :param torch.Tensor x: Input tensor.
+            :return torch.Tensor: Output tensor.
+            """
             return self.w3(nn.functional.silu(self.w1(x)) * self.w2(x))
 
 
@@ -52,6 +72,8 @@ from .rotary import apply_rotary_emb, precompute_freqs_cis
 
 
 class NeoBERTConfig(PretrainedConfig):
+    """Configuration for the NeoBERT model."""
+
     model_type = "neobert"
 
     # All config parameters must have a default value.
@@ -74,8 +96,29 @@ class NeoBERTConfig(PretrainedConfig):
         flash_attention: bool = True,
         base_scale: float = 1.0 / (960.0**0.5),
         ngpt: bool = False,
-        **kwargs,
+        **kwargs: Any,
     ):
+        """Initialize the NeoBERT configuration.
+
+        :param int hidden_size: Hidden size of the transformer.
+        :param int num_hidden_layers: Number of transformer layers.
+        :param int num_attention_heads: Number of attention heads.
+        :param int intermediate_size: Feed-forward hidden size.
+        :param float dropout: Dropout probability.
+        :param float embedding_init_range: Embedding init range.
+        :param float decoder_init_range: Decoder init range.
+        :param bool rms_norm: Whether to use RMSNorm.
+        :param bool rope: Whether to use rotary embeddings.
+        :param float norm_eps: Normalization epsilon.
+        :param str hidden_act: Activation function name.
+        :param int vocab_size: Vocabulary size.
+        :param int pad_token_id: Padding token ID.
+        :param int max_length: Maximum sequence length.
+        :param bool flash_attention: Whether to use flash attention.
+        :param float base_scale: Base scaling factor for NGPT.
+        :param bool ngpt: Whether to enable NGPT mode.
+        :param Any kwargs: Additional configuration parameters.
+        """
         super().__init__(**kwargs)
 
         # Core dims
@@ -121,7 +164,11 @@ class NeoBERTConfig(PretrainedConfig):
 class EncoderBlock(nn.Module):
     """Transformer encoder block."""
 
-    def __init__(self, config: NeoBERTConfig):
+    def __init__(self, config: NeoBERTConfig) -> None:
+        """Initialize the encoder block.
+
+        :param NeoBERTConfig config: Model configuration.
+        """
         super().__init__()
 
         self.config = config
@@ -182,14 +229,30 @@ class EncoderBlock(nn.Module):
 
         self.ffn_dropout = nn.Dropout(config.dropout)
 
-    def forward(self, x: torch.Tensor, pad_mask: torch.Tensor, freqs_cis: torch.Tensor):
+    def forward(
+        self, x: torch.Tensor, pad_mask: torch.Tensor, freqs_cis: torch.Tensor
+    ) -> torch.Tensor:
+        """Run the encoder block forward pass.
+
+        :param torch.Tensor x: Input tensor.
+        :param torch.Tensor pad_mask: Additive attention mask.
+        :param torch.Tensor freqs_cis: Rotary embedding frequencies.
+        :return torch.Tensor: Updated hidden states.
+        """
         x = x + self._att_block(self.attention_norm(x), pad_mask, freqs_cis)
         x = x + self._ff_block(self.ffn_norm(x))
         return x
 
     def _att_block(
         self, x: torch.Tensor, pad_mask: torch.Tensor, freqs_cis: torch.Tensor
-    ):
+    ) -> torch.Tensor:
+        """Apply the attention sub-layer.
+
+        :param torch.Tensor x: Normalized hidden states.
+        :param torch.Tensor pad_mask: Additive attention mask.
+        :param torch.Tensor freqs_cis: Rotary embedding frequencies.
+        :return torch.Tensor: Attention output.
+        """
         batch_size, seq_len, _ = x.shape
 
         xq, xk, xv = (
@@ -234,14 +297,23 @@ class EncoderBlock(nn.Module):
             )
         )
 
-    def _ff_block(self, x: torch.Tensor):
+    def _ff_block(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply the feed-forward sub-layer.
+
+        :param torch.Tensor x: Input tensor.
+        :return torch.Tensor: Feed-forward output.
+        """
         return self.ffn_dropout(self.ffn(x))
 
 
 class NormEncoderBlock(nn.Module):
     """Transformer encoder block."""
 
-    def __init__(self, config: NeoBERTConfig):
+    def __init__(self, config: NeoBERTConfig) -> None:
+        """Initialize the normalized encoder block.
+
+        :param NeoBERTConfig config: Model configuration.
+        """
         super().__init__()
 
         self.config = config
@@ -291,11 +363,25 @@ class NormEncoderBlock(nn.Module):
             self.suv_init_scaling * torch.ones(2 * config.intermediate_size)
         )
 
-    def justnorm(self, x):
+    def justnorm(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply L2 normalization across the last dimension.
+
+        :param torch.Tensor x: Input tensor.
+        :return torch.Tensor: Normalized tensor.
+        """
         res = x / x.norm(p=2, dim=-1, keepdim=True)
         return res
 
-    def forward(self, x: torch.Tensor, pad_mask: torch.Tensor, freqs_cis: torch.Tensor):
+    def forward(
+        self, x: torch.Tensor, pad_mask: torch.Tensor, freqs_cis: torch.Tensor
+    ) -> torch.Tensor:
+        """Run the normalized encoder block forward pass.
+
+        :param torch.Tensor x: Input tensor.
+        :param torch.Tensor pad_mask: Additive attention mask.
+        :param torch.Tensor freqs_cis: Rotary embedding frequencies.
+        :return torch.Tensor: Updated hidden states.
+        """
         x_attn = self._att_block(x, pad_mask, freqs_cis)
 
         lr = self.attn_alpha * (
@@ -320,7 +406,14 @@ class NormEncoderBlock(nn.Module):
 
     def _att_block(
         self, x: torch.Tensor, pad_mask: torch.Tensor, freqs_cis: torch.Tensor
-    ):
+    ) -> torch.Tensor:
+        """Apply the attention sub-layer.
+
+        :param torch.Tensor x: Input tensor.
+        :param torch.Tensor pad_mask: Additive attention mask.
+        :param torch.Tensor freqs_cis: Rotary embedding frequencies.
+        :return torch.Tensor: Attention output.
+        """
         batch_size, seq_len, _ = x.shape
 
         xq, xk, xv = (
@@ -373,7 +466,12 @@ class NormEncoderBlock(nn.Module):
             self.wo(attn.reshape(batch_size, seq_len, self.config.hidden_size))
         )
 
-    def _ff_block(self, x: torch.Tensor):
+    def _ff_block(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply the feed-forward sub-layer.
+
+        :param torch.Tensor x: Input tensor.
+        :return torch.Tensor: Feed-forward output.
+        """
         uv = self.c_fc(x)
         suv = self.suv * (
             (self.suv_init_value / self.suv_init_scaling)
@@ -389,11 +487,17 @@ class NormEncoderBlock(nn.Module):
 
 
 class NeoBERTPreTrainedModel(PreTrainedModel):
+    """Base class with NeoBERT weight initialization."""
+
     config_class = NeoBERTConfig
     _supports_cache_class = True
     supports_gradient_checkpointing = True
 
-    def _init_weights(self, module):
+    def _init_weights(self, module: nn.Module) -> None:
+        """Initialize weights for NeoBERT modules.
+
+        :param nn.Module module: Module to initialize.
+        """
         if isinstance(module, nn.Linear):
             module.weight.data.uniform_(
                 -self.config.decoder_init_range, self.config.decoder_init_range
@@ -407,9 +511,15 @@ class NeoBERTPreTrainedModel(PreTrainedModel):
 
 
 class NeoBERT(NeoBERTPreTrainedModel):
+    """NeoBERT encoder model."""
+
     config_class = NeoBERTConfig
 
-    def __init__(self, config: NeoBERTConfig):
+    def __init__(self, config: NeoBERTConfig) -> None:
+        """Initialize the NeoBERT encoder.
+
+        :param NeoBERTConfig config: Model configuration.
+        """
         super().__init__(config)
 
         self.config = config
@@ -443,7 +553,15 @@ class NeoBERT(NeoBERTPreTrainedModel):
         self.post_init()
         self.gradient_checkpointing = False
 
-    def forward(self, src, pad_mask=None):
+    def forward(
+        self, src: torch.Tensor, pad_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Run the NeoBERT encoder forward pass.
+
+        :param torch.Tensor src: Input token IDs.
+        :param torch.Tensor | None pad_mask: Additive attention mask.
+        :return torch.Tensor: Encoded hidden states.
+        """
         # Expand and repeat: (Batch, Length) -> (Batch, Heads, Length, Length)
         if pad_mask is not None:
             assert pad_mask.dtype != torch.bool and 1.0 not in pad_mask, (
@@ -475,7 +593,12 @@ class NeoBERT(NeoBERTPreTrainedModel):
         for layer in self.transformer_encoder:
             if self.gradient_checkpointing and self.training:
                 # Capture mask + rotary frequencies in closure so checkpoint only sees Tensor inputs.
-                def custom_forward(hidden_states):
+                def custom_forward(hidden_states: torch.Tensor) -> torch.Tensor:
+                    """Wrap the encoder layer for checkpointing.
+
+                    :param torch.Tensor hidden_states: Hidden states to process.
+                    :return torch.Tensor: Updated hidden states.
+                    """
                     return layer(hidden_states, pad_mask, freqs_cis)
 
                 x = checkpoint(
@@ -495,9 +618,15 @@ class NeoBERT(NeoBERTPreTrainedModel):
 
 
 class NormNeoBERT(NeoBERTPreTrainedModel):
+    """NeoBERT encoder with normalized residuals."""
+
     config_class = NeoBERTConfig
 
-    def __init__(self, config: NeoBERTConfig):
+    def __init__(self, config: NeoBERTConfig) -> None:
+        """Initialize the normalized NeoBERT encoder.
+
+        :param NeoBERTConfig config: Model configuration.
+        """
         super().__init__(config)
 
         self.config = config
@@ -545,7 +674,15 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
             self.sz_init_scaling * torch.ones(config.vocab_size, dtype=torch.float32)
         )
 
-    def forward(self, src, pad_mask=None):
+    def forward(
+        self, src: torch.Tensor, pad_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Run the normalized encoder forward pass.
+
+        :param torch.Tensor src: Input token IDs.
+        :param torch.Tensor | None pad_mask: Additive attention mask.
+        :return torch.Tensor: Encoded hidden states.
+        """
         # Expand and repeat: (Batch, Length) -> (Batch, Heads, Length, Length)
         if pad_mask is not None:
             assert pad_mask.dtype != torch.bool and 1.0 not in pad_mask, (
@@ -577,7 +714,12 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
         for layer in self.transformer_encoder:
             if self.gradient_checkpointing and self.training:
 
-                def custom_forward(hidden_states):
+                def custom_forward(hidden_states: torch.Tensor) -> torch.Tensor:
+                    """Wrap the encoder layer for checkpointing.
+
+                    :param torch.Tensor hidden_states: Hidden states to process.
+                    :return torch.Tensor: Updated hidden states.
+                    """
                     return layer(hidden_states, pad_mask, freqs_cis)
 
                 x = checkpoint(
@@ -594,9 +736,15 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
 
 
 class NeoBERTLMHead(NeoBERTPreTrainedModel):
+    """NeoBERT with a language modeling head."""
+
     config_class = NeoBERTConfig
 
-    def __init__(self, config: NeoBERTConfig):
+    def __init__(self, config: NeoBERTConfig) -> None:
+        """Initialize the language modeling head.
+
+        :param NeoBERTConfig config: Model configuration.
+        """
         super().__init__(config)
 
         self.config = config
@@ -606,7 +754,15 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
 
         self.post_init()
 
-    def forward(self, src, pad_mask=None):
+    def forward(
+        self, src: torch.Tensor, pad_mask: Optional[torch.Tensor] = None
+    ) -> Dict[str, torch.Tensor]:
+        """Run the LM head forward pass.
+
+        :param torch.Tensor src: Input token IDs.
+        :param torch.Tensor | None pad_mask: Additive attention mask.
+        :return dict[str, torch.Tensor]: Hidden states and logits.
+        """
         hidden_representation = self.model.forward(src, pad_mask)
         logits = self.decoder(hidden_representation)
 
@@ -614,14 +770,24 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
 
 
 class NeoBERTForSequenceClassification(NeoBERTPreTrainedModel):
+    """NeoBERT with a classification head."""
+
     def __init__(
         self,
         config: NeoBERTConfig,
         num_labels: int = 2,
         classifier_dropout: float = 0.1,
         classifier_init_range: float = 0.02,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
+        """Initialize the sequence classification head.
+
+        :param NeoBERTConfig config: Model configuration.
+        :param int num_labels: Number of output labels.
+        :param float classifier_dropout: Dropout probability.
+        :param float classifier_init_range: Init range for classifier.
+        :param Any kwargs: Unused extra arguments for compatibility.
+        """
         super().__init__(config)
 
         self.config = config
@@ -638,13 +804,25 @@ class NeoBERTForSequenceClassification(NeoBERTPreTrainedModel):
 
         self.post_init()
 
-    def _init_weights(self, module):
+    def _init_weights(self, module: nn.Module) -> None:
+        """Initialize classifier weights.
+
+        :param nn.Module module: Module to initialize.
+        """
         if isinstance(module, nn.Linear):
             module.weight.data.normal_(mean=0.0, std=self.classifier_init_range)
             if module.bias is not None:
                 module.bias.data.zero_()
 
-    def forward(self, src, pad_mask=None):
+    def forward(
+        self, src: torch.Tensor, pad_mask: Optional[torch.Tensor] = None
+    ) -> Dict[str, torch.Tensor]:
+        """Run the classification head forward pass.
+
+        :param torch.Tensor src: Input token IDs.
+        :param torch.Tensor | None pad_mask: Additive attention mask.
+        :return dict[str, torch.Tensor]: Hidden states and logits.
+        """
         hidden_representation = self.model.forward(src, pad_mask)
 
         x = hidden_representation[:, 0, :]
@@ -659,9 +837,15 @@ class NeoBERTForSequenceClassification(NeoBERTPreTrainedModel):
 
 
 class NeoBERTHFForSequenceClassification(NeoBERTPreTrainedModel):
+    """Hugging Face compatible NeoBERT sequence classifier."""
+
     config_class = NeoBERTConfig
 
-    def __init__(self, config: NeoBERTConfig):
+    def __init__(self, config: NeoBERTConfig) -> None:
+        """Initialize the HF-compatible classifier.
+
+        :param NeoBERTConfig config: Model configuration.
+        """
         super().__init__(config)
 
         self.config = config
@@ -678,7 +862,11 @@ class NeoBERTHFForSequenceClassification(NeoBERTPreTrainedModel):
 
         self.post_init()
 
-    def _init_weights(self, module):
+    def _init_weights(self, module: nn.Module) -> None:
+        """Initialize classifier weights.
+
+        :param nn.Module module: Module to initialize.
+        """
         if isinstance(module, nn.Linear):
             module.weight.data.normal_(mean=0.0, std=self.classifier_init_range)
             if module.bias is not None:
@@ -695,7 +883,20 @@ class NeoBERTHFForSequenceClassification(NeoBERTPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-    ):
+    ) -> SequenceClassifierOutput | tuple:
+        """Forward pass for sequence classification.
+
+        :param torch.Tensor | None input_ids: Input token IDs.
+        :param torch.Tensor | None attention_mask: Attention mask.
+        :param torch.Tensor | None token_type_ids: Token type IDs.
+        :param torch.Tensor | None position_ids: Position IDs.
+        :param torch.Tensor | None inputs_embeds: Optional input embeddings.
+        :param torch.Tensor | None labels: Optional labels for loss.
+        :param bool | None output_attentions: Whether to return attentions.
+        :param bool | None output_hidden_states: Whether to return hidden states.
+        :param bool | None return_dict: Whether to return dict outputs.
+        :return SequenceClassifierOutput | tuple: Model outputs.
+        """
         # Convert HuggingFace attention mask (1s and 0s) to additive mask (-inf and 0)
         if attention_mask is not None:
             additive_mask = torch.where(attention_mask == 0, float("-inf"), float(0.0))
@@ -748,6 +949,8 @@ class NeoBERTHFForSequenceClassification(NeoBERTPreTrainedModel):
 
 
 class NeoBERTForMTEB(NeoBERTPreTrainedModel):
+    """NeoBERT wrapper for MTEB-style encoding."""
+
     config_class = NeoBERTConfig
 
     def __init__(
@@ -757,8 +960,17 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
         max_length: int = 1024,
         batch_size: int = 8,
         pooling: str = "avg",
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
+        """Initialize the MTEB encoder wrapper.
+
+        :param NeoBERTConfig config: Model configuration.
+        :param PreTrainedTokenizerFast tokenizer: Tokenizer for text inputs.
+        :param int max_length: Maximum sequence length.
+        :param int batch_size: Encoding batch size.
+        :param str pooling: Pooling strategy (avg/cls).
+        :param Any kwargs: Unused extra arguments for compatibility.
+        """
         super().__init__(config)
 
         self.config = config
@@ -769,7 +981,13 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
         self.batch_size = batch_size
         self.pooling = pooling
 
-    def encode_queries(self, queries: List[str], **kwargs):
+    def encode_queries(self, queries: List[str], **kwargs: Any) -> np.ndarray:
+        """Encode a list of queries.
+
+        :param list[str] queries: Query strings to encode.
+        :param Any kwargs: Additional encoding arguments.
+        :return np.ndarray: Encoded query embeddings.
+        """
         if "instructions" in kwargs:
             if kwargs["instructions"] is not None:
                 queries = [
@@ -787,7 +1005,19 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
             **new_kwargs,
         )
 
-    def encode_corpus(self, corpus: List[Dict[str, str]], batch_size: int, **kwargs):
+    def encode_corpus(
+        self,
+        corpus: List[Dict[str, str]] | Dict[str, List[str]],
+        batch_size: int,
+        **kwargs: Any,
+    ) -> np.ndarray:
+        """Encode a corpus of documents.
+
+        :param list[dict[str, str]] | dict[str, list[str]] corpus: Corpus inputs.
+        :param int batch_size: Encoding batch size.
+        :param Any kwargs: Additional encoding arguments.
+        :return np.ndarray: Encoded corpus embeddings.
+        """
         if isinstance(corpus, dict):
             sentences = [
                 (corpus["title"][i] + " " + corpus["text"][i]).strip()
@@ -832,7 +1062,15 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        def _transform_func(tokenizer: PreTrainedTokenizerFast, x: Dict[str, List]):
+        def _transform_func(
+            tokenizer: PreTrainedTokenizerFast, x: Dict[str, List]
+        ) -> Dict[str, List]:
+            """Tokenize a batch of input texts.
+
+            :param PreTrainedTokenizerFast tokenizer: Tokenizer to apply.
+            :param dict[str, list] x: Batch with ``input_texts``.
+            :return dict[str, list]: Tokenized batch.
+            """
             batch_dict = tokenizer(
                 x["input_texts"],
                 truncation=True,

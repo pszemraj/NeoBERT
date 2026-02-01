@@ -20,34 +20,18 @@ def get_optimizer(
     distributed_type: DistributedType,
     model_config: Optional[Any] = None,
     muon_config: Optional[Any] = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> torch.optim.Optimizer:
     """Construct an optimizer configured for the current training run.
 
-    Parameters
-    ----------
-    model:
-        The model whose parameters will be optimized.
-    distributed_type:
-        Distributed execution mode reported by Accelerate.
-    model_config:
-        Optional model configuration. Required when instantiating MuonClip.
-    muon_config:
-        Dataclass or mapping containing MuonClip overrides.
-    **kwargs:
-        Additional optimizer-specific keyword arguments (e.g. ``lr``).
-
-    Returns
-    -------
-    torch.optim.Optimizer
-        An initialized optimizer instance.
-
-    Raises
-    ------
-    ValueError
-        If the MuonClip optimizer is requested without ``model_config``.
-    ValueError
-        If an unsupported optimizer name is provided.
+    :param torch.nn.Module model: Model whose parameters will be optimized.
+    :param DistributedType distributed_type: Distributed execution mode.
+    :param Any | None model_config: Optional model config (required for MuonClip).
+    :param Any | None muon_config: MuonClip overrides or dataclass.
+    :param Any kwargs: Additional optimizer-specific keyword arguments.
+    :return torch.optim.Optimizer: Initialized optimizer instance.
+    :raises ValueError: If MuonClip is requested without ``model_config``.
+    :raises ValueError: If an unsupported optimizer name is provided.
     """
     optimizer_name = kwargs.pop("name").lower()
 
