@@ -230,6 +230,29 @@ class TestPretrainComponents(unittest.TestCase):
             else:
                 raise
 
+    def test_to_target_batch_size_handles_empty_buffer(self):
+        """Ensure batch packing handles empty buffers without crashing."""
+        from neobert.pretraining.trainer import to_target_batch_size
+
+        batch = {
+            "input_ids": torch.zeros((2, 4), dtype=torch.long),
+            "attention_mask": torch.ones((2, 4), dtype=torch.long),
+            "labels": torch.zeros((2, 4), dtype=torch.long),
+        }
+        stored_batch = {"input_ids": None, "attention_mask": None, "labels": None}
+
+        out, stored = to_target_batch_size(batch, stored_batch, target_size=4)
+        self.assertEqual(out["input_ids"].shape[0], 2)
+        self.assertIsNone(stored["input_ids"])
+
+        stored_batch = {
+            "input_ids": torch.zeros((2, 4), dtype=torch.long),
+            "attention_mask": torch.ones((2, 4), dtype=torch.long),
+            "labels": torch.zeros((2, 4), dtype=torch.long),
+        }
+        out, stored = to_target_batch_size(batch, stored_batch, target_size=4)
+        self.assertEqual(out["input_ids"].shape[0], 4)
+
     def test_optimizer_creation(self):
         """Test optimizer creation from config."""
         config = ConfigLoader.load(

@@ -70,6 +70,8 @@ def to_target_batch_size(
 
     # If the batch is too small, we had some stored_batch
     elif batch_size < target_size:
+        if stored_batch["input_ids"] is None:
+            return batch, stored_batch
         # We have already enough samples stored
         if stored_batch["input_ids"].shape[0] >= target_size - batch_size:
             for key in batch.keys():
@@ -84,7 +86,7 @@ def to_target_batch_size(
                 batch[key] = torch.cat([batch[key], tmp[key][0]], dim=0)
                 stored_batch[key] = tmp[key][1]
                 # Save on CPU to prevent full GPU memory
-                stored_batch[key].to("cpu", non_blocking=True)
+                stored_batch[key] = stored_batch[key].to("cpu", non_blocking=True)
 
         # Concatenate otherwise
         else:
@@ -105,6 +107,7 @@ def trainer(cfg: Config) -> None:
     model_checkpoint_dir = os.path.join(cfg.trainer.output_dir, "model_checkpoints")
     os.makedirs(model_checkpoint_dir, exist_ok=True)
     iteration = 0
+    resume_checkpoint_path = None
 
     if (
         cfg.trainer.resume_from_checkpoint
@@ -112,14 +115,18 @@ def trainer(cfg: Config) -> None:
         and len(os.listdir(checkpoint_dir)) > 0
     ):
         # This regular expression was taken from accelerator.load_state()
-        folders = os.listdir(checkpoint_dir)
-        iteration = (
-            max(
+        folders = [
+            folder
+            for folder in os.listdir(checkpoint_dir)
+            if os.path.isdir(os.path.join(checkpoint_dir, folder)) and folder.isdigit()
+        ]
+        if folders:
+            latest_step = max(
                 int(re.findall(r"[\/]?([0-9]+)(?=[^\/]*$)", folder)[0])
                 for folder in folders
             )
-            + 1
-        )
+            iteration = latest_step + 1
+            resume_checkpoint_path = os.path.join(checkpoint_dir, str(latest_step))
 
     # Accelerator object - disable automatic checkpointing to avoid duplicate checkpoints/ directory
     project_config = ProjectConfiguration(
@@ -460,15 +467,16 @@ def trainer(cfg: Config) -> None:
 
     # Resume from the latest checkpoint
     skipped_train_dataloader = None
-    if (
-        cfg.trainer.resume_from_checkpoint
-        and os.path.exists(checkpoint_dir)
-        and len(os.listdir(checkpoint_dir)) > 0
-    ):
-        accelerator.load_state()
+    if cfg.trainer.resume_from_checkpoint and resume_checkpoint_path:
+        accelerator.load_state(resume_checkpoint_path)
         train_dataloader.set_epoch(metrics["train/epochs"])
         skipped_train_dataloader = accelerator.skip_first_batches(
             train_dataloader, metrics["train/batches"] % len(train_dataloader)
+        )
+    elif cfg.trainer.resume_from_checkpoint:
+        logger.warning(
+            "resume_from_checkpoint is set but no valid checkpoints were found in %s",
+            checkpoint_dir,
         )
 
     # Progress bar
@@ -650,8 +658,38 @@ def trainer(cfg: Config) -> None:
                     metrics["train/learning_rate"] = optimizer.param_groups[0]["lr"]
                     metrics.log(accelerator)
 
-                # Skip saving accelerator state - we only need model checkpoints
-                # This avoids the duplicate checkpoints/ directory
+                # Save accelerator state for resumable training
+                if metrics["train/steps"] % cfg.trainer.save_steps == 0:
+                    save_total_limit = getattr(cfg.trainer, "save_total_limit", 0)
+                    max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
+                    limit = max(save_total_limit, max_ckpt)
+                    if limit > 0 and os.path.exists(checkpoint_dir):
+                        accel_checkpoints = []
+                        for item in os.listdir(checkpoint_dir):
+                            item_path = os.path.join(checkpoint_dir, item)
+                            if os.path.isdir(item_path) and item.isdigit():
+                                accel_checkpoints.append(int(item))
+                        if len(accel_checkpoints) >= limit:
+                            accel_checkpoints.sort()
+                            for old_ckpt in accel_checkpoints[
+                                : len(accel_checkpoints) - limit + 1
+                            ]:
+                                old_path = os.path.join(checkpoint_dir, str(old_ckpt))
+                                if os.path.exists(old_path):
+                                    import shutil
+
+                                    shutil.rmtree(old_path)
+                                    if accelerator.is_main_process:
+                                        logger.info(
+                                            "Removed old accelerator checkpoint: %s (limit=%s)",
+                                            old_path,
+                                            limit,
+                                        )
+
+                    state_checkpoint_path = os.path.join(
+                        checkpoint_dir, str(metrics["train/steps"])
+                    )
+                    accelerator.save_state(output_dir=state_checkpoint_path)
 
                 # Save the pytorch model
                 if metrics["train/steps"] % cfg.trainer.save_steps == 0:
