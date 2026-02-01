@@ -1,9 +1,11 @@
+"""MTEB wrapper utilities for pretrained models."""
+
 # From https://stackoverflow.com/a/23689767
 # From https://github.com/pytorch/pytorch/issues/97899
 # From https://github.com/facebookresearch/llama/blob/main/llama/model.py
 
 from functools import partial
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import mteb
 import numpy as np
@@ -30,16 +32,28 @@ DEFAULT_PROMPTS = {
 
 
 class PreTrainedModelForMTEB(PreTrainedModel):
+    """Wrapper that exposes encode methods for MTEB evaluations."""
+
     def __init__(
         self,
         model: PreTrainedModel,
         tokenizer: PreTrainedTokenizerFast,
         batch_size: int = 8,
         pooling: str = "avg",
-        tasks_to_instructions_query: dict = None,
-        tasks_to_instructions_corpus: dict = None,
-        **kwargs,
+        tasks_to_instructions_query: Optional[Dict[str, str]] = None,
+        tasks_to_instructions_corpus: Optional[Dict[str, str]] = None,
+        **kwargs: Any,
     ):
+        """Initialize the MTEB wrapper.
+
+        :param PreTrainedModel model: Base model to wrap.
+        :param PreTrainedTokenizerFast tokenizer: Tokenizer to use.
+        :param int batch_size: Encoding batch size.
+        :param str pooling: Pooling strategy (avg or cls).
+        :param dict[str, str] | None tasks_to_instructions_query: Query instructions.
+        :param dict[str, str] | None tasks_to_instructions_corpus: Corpus instructions.
+        :param Any kwargs: Unused extra arguments for compatibility.
+        """
         super().__init__()
 
         self.model = model
@@ -50,7 +64,16 @@ class PreTrainedModelForMTEB(PreTrainedModel):
         self.tasks_to_instructions_query = tasks_to_instructions_query
         self.tasks_to_instructions_corpus = tasks_to_instructions_corpus
 
-    def encode_queries(self, queries: List[str], prompt_name: str = None, **kwargs):
+    def encode_queries(
+        self, queries: List[str], prompt_name: Optional[str] = None, **kwargs: Any
+    ) -> np.ndarray:
+        """Encode a list of queries.
+
+        :param list[str] queries: Query strings.
+        :param str | None prompt_name: Optional prompt/task name.
+        :param Any kwargs: Additional encoding arguments.
+        :return np.ndarray: Encoded query embeddings.
+        """
         if prompt_name is not None and self.tasks_to_instructions_query:
             if prompt_name in self.tasks_to_instructions_query:
                 instruction = self.tasks_to_instructions_query[prompt_name]
@@ -72,8 +95,18 @@ class PreTrainedModelForMTEB(PreTrainedModel):
         )
 
     def encode_corpus(
-        self, corpus: List[Dict[str, str]], prompt_name: str = None, **kwargs
-    ):
+        self,
+        corpus: List[Dict[str, str]] | Dict[str, List[str]],
+        prompt_name: Optional[str] = None,
+        **kwargs: Any,
+    ) -> np.ndarray:
+        """Encode a corpus of documents.
+
+        :param list[dict[str, str]] | dict[str, list[str]] corpus: Corpus inputs.
+        :param str | None prompt_name: Optional prompt/task name.
+        :param Any kwargs: Additional encoding arguments.
+        :return np.ndarray: Encoded corpus embeddings.
+        """
         if isinstance(corpus, dict):
             sentences = [
                 (corpus["title"][i] + " " + corpus["text"][i]).strip()
@@ -115,19 +148,25 @@ class PreTrainedModelForMTEB(PreTrainedModel):
     def encode(
         self, sentences: list[str], prompt_name: str = None, **kwargs: Any
     ) -> torch.Tensor:
-        """Encodes the given sentences using the encoder.
+        """Encode sentences using the wrapped model.
 
-        Args:
-            sentences: The sentences to encode.
-            **kwargs: Additional arguments to pass to the encoder.
-
-        Returns:
-            The encoded sentences.
+        :param list[str] sentences: Sentences to encode.
+        :param str | None prompt_name: Optional prompt/task name.
+        :param Any kwargs: Additional arguments passed to the encoder.
+        :return torch.Tensor: Encoded sentence embeddings.
         """
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        def _transform_func(tokenizer: PreTrainedTokenizerFast, x: Dict[str, List]):
+        def _transform_func(
+            tokenizer: PreTrainedTokenizerFast, x: Dict[str, List]
+        ) -> Dict[str, List]:
+            """Tokenize a batch of input texts.
+
+            :param PreTrainedTokenizerFast tokenizer: Tokenizer instance.
+            :param dict[str, list] x: Batch with ``input_texts``.
+            :return dict[str, list]: Tokenized batch.
+            """
             batch_dict = tokenizer(
                 x["input_texts"],
                 truncation=True,

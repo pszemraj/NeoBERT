@@ -21,13 +21,18 @@ import logging
 import sys
 import warnings
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import torch
 from transformers import AutoModel, AutoModelForMaskedLM, AutoTokenizer
 
 
 def validate_model_files(model_path: Path) -> List[str]:
+    """Check for required files in an exported model directory.
+
+    :param Path model_path: Model directory to inspect.
+    :return list[str]: Missing file names.
+    """
     # Project-specific expectations
     required_files = [
         "config.json",
@@ -43,8 +48,15 @@ def validate_model_files(model_path: Path) -> List[str]:
 
 
 def _from_pretrained_with_info(
-    model_cls, model_path: Path, verbose: bool = False
+    model_cls: Any, model_path: Path, verbose: bool = False
 ) -> Tuple[object, Optional[dict]]:
+    """Load a model with output_loading_info when supported.
+
+    :param Any model_cls: AutoModel class to load.
+    :param Path model_path: Model directory path.
+    :param bool verbose: Whether to print model info.
+    :return tuple[object, dict | None]: Loaded model and loading info.
+    """
     # Prefer output_loading_info for deterministic checks; fall back if remote code doesn't support it.
     try:
         model, loading_info = model_cls.from_pretrained(
@@ -63,6 +75,11 @@ def _from_pretrained_with_info(
 
 
 def _format_loading_issues(loading_info: Optional[dict]) -> Optional[str]:
+    """Format loading issues from transformers output.
+
+    :param dict | None loading_info: Loading info from transformers.
+    :return str | None: Formatted issue summary.
+    """
     if not loading_info:
         return None
     missing = loading_info.get("missing_keys", [])
@@ -141,6 +158,11 @@ def test_model_loading(model_path: Path) -> Tuple[bool, str]:
 
 
 def test_tokenizer_loading(model_path: Path) -> Tuple[bool, str]:
+    """Test that the tokenizer loads and returns input_ids.
+
+    :param Path model_path: Model directory path.
+    :return tuple[bool, str]: Success flag and message.
+    """
     try:
         tok = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
         toks = tok("tokenizer check.", return_tensors="pt")
@@ -153,6 +175,12 @@ def test_tokenizer_loading(model_path: Path) -> Tuple[bool, str]:
 
 
 def test_masked_lm_loading(model_path: Path, verbose: bool = False) -> Tuple[bool, str]:
+    """Test AutoModelForMaskedLM loading and forward pass.
+
+    :param Path model_path: Model directory path.
+    :param bool verbose: Whether to print model info.
+    :return tuple[bool, str]: Success flag and message.
+    """
     try:
         mlm, loading_info = _from_pretrained_with_info(
             AutoModelForMaskedLM, model_path, verbose=verbose
@@ -176,6 +204,11 @@ def test_masked_lm_loading(model_path: Path, verbose: bool = False) -> Tuple[boo
 
 
 def test_end_to_end_pipeline(model_path: Path) -> Tuple[bool, str]:
+    """Test end-to-end tokenization and encoding.
+
+    :param Path model_path: Model directory path.
+    :return tuple[bool, str]: Success flag and message.
+    """
     try:
         tok = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
         model = AutoModel.from_pretrained(str(model_path), trust_remote_code=True)
@@ -200,6 +233,11 @@ def test_end_to_end_pipeline(model_path: Path) -> Tuple[bool, str]:
 
 
 def test_cosine_similarity_sanity(model_path: Path) -> Tuple[bool, str]:
+    """Sanity-check cosine similarities of CLS embeddings.
+
+    :param Path model_path: Model directory path.
+    :return tuple[bool, str]: Success flag and message.
+    """
     try:
         tok = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
         model = AutoModel.from_pretrained(str(model_path), trust_remote_code=True)
@@ -219,7 +257,13 @@ def test_cosine_similarity_sanity(model_path: Path) -> Tuple[bool, str]:
                 out = model(**inp)
                 embs.append(out.last_hidden_state[:, 0, :].squeeze())
 
-        def cos(a, b):
+        def cos(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+            """Compute cosine similarity between two vectors.
+
+            :param torch.Tensor a: First vector.
+            :param torch.Tensor b: Second vector.
+            :return torch.Tensor: Cosine similarity value.
+            """
             return (a @ b) / (a.norm() * b.norm())
 
         sim1 = cos(embs[0], embs[1]).item()
@@ -239,7 +283,8 @@ def test_cosine_similarity_sanity(model_path: Path) -> Tuple[bool, str]:
         return False, f"{type(e).__name__}: {e}"
 
 
-def main():
+def main() -> None:
+    """Run the export validation CLI."""
     p = argparse.ArgumentParser(
         description="Validate an exported HF model (concise output).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,

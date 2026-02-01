@@ -1,6 +1,8 @@
+"""Utility helpers for logging, TF32 setup, and model summaries."""
+
 import logging
 from dataclasses import asdict, dataclass, is_dataclass
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
@@ -35,7 +37,7 @@ def prepare_wandb_config(cfg: Any) -> Dict[str, Any]:
     return config_dict
 
 
-def configure_tf32(print_fn=None) -> bool:
+def configure_tf32(print_fn: Optional[Callable[[str], Any]] = None) -> bool:
     """Enable TF32 precision for GPUs with compute capability >= 8.0 (Ampere+).
 
     :param print_fn: Optional function to use for printing messages (default: logging.info)
@@ -94,9 +96,17 @@ def model_summary(
 
     # ---------- formatting helpers ----------
     def _format_number(num: int) -> str:
+        """Format integer counts for display.
+
+        :return str: Formatted number string.
+        """
         return f"{num:,}" if num > 0 else "--"
 
     def _format_shape(shape: Optional[torch.Size]) -> str:
+        """Format a tensor shape for display.
+
+        :return str: Shape string or ``N/A`` when missing.
+        """
         return "x".join(map(str, shape)) if shape else "N/A"
 
     # ---------- build param info once ----------

@@ -1,3 +1,7 @@
+"""GLUE/SuperGLUE preprocessing utilities."""
+
+from typing import Any
+
 glue_task_to_keys = {
     "cola": ("sentence", None),
     "mnli": ("premise", "hypothesis"),
@@ -41,7 +45,14 @@ super_glue_task_to_keys = {
 }
 
 
-def get_labels(examples, meta_task, task):
+def get_labels(examples: dict[str, Any], meta_task: str, task: str) -> list[int]:
+    """Extract labels for GLUE/SuperGLUE tasks.
+
+    :param dict[str, Any] examples: Batch of dataset examples.
+    :param str meta_task: Meta task identifier (glue/superglue).
+    :param str task: Specific task name.
+    :return list[int]: List of labels for the batch.
+    """
     if meta_task == "glue" or task in (
         "axb",
         "axg",
@@ -84,8 +95,23 @@ def get_labels(examples, meta_task, task):
 
 
 def get_sentences(
-    examples, meta_task, task, bos_token="<s>", eos_token="</s>", sep_token="<s>"
-):
+    examples: dict[str, Any],
+    meta_task: str,
+    task: str,
+    bos_token: str = "<s>",
+    eos_token: str = "</s>",
+    sep_token: str = "<s>",
+) -> tuple[list[str], list[str] | None]:
+    """Build sentence pairs for GLUE/SuperGLUE tasks.
+
+    :param dict[str, Any] examples: Batch of dataset examples.
+    :param str meta_task: Meta task identifier (glue/superglue).
+    :param str task: Specific task name.
+    :param str bos_token: BOS token to inject in some tasks.
+    :param str eos_token: EOS token to inject in some tasks.
+    :param str sep_token: Separator token to inject in some tasks.
+    :return tuple[list[str], list[str] | None]: Sentence pairs or single sentences.
+    """
     if meta_task == "glue":
         key1, key2 = glue_task_to_keys[task]
         return (
@@ -161,7 +187,16 @@ def get_sentences(
     return (output["sentence1"], output["sentence2"] or None)
 
 
-def process_function(examples, cfg, tokenizer):
+def process_function(
+    examples: dict[str, Any], cfg: Any, tokenizer: Any
+) -> dict[str, Any]:
+    """Tokenize a batch for GLUE/SuperGLUE tasks.
+
+    :param dict[str, Any] examples: Batch of dataset examples.
+    :param Any cfg: Task configuration with tokenizer settings.
+    :param Any tokenizer: Tokenizer with GLUE-compatible special tokens.
+    :return dict[str, Any]: Tokenized batch with labels when applicable.
+    """
     sentences = get_sentences(
         examples=examples,
         meta_task=cfg.meta_task,

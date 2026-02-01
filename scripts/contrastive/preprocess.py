@@ -1,6 +1,9 @@
+"""Preprocess and tokenize contrastive datasets."""
+
 import json
 import os
 import shutil
+from typing import Any
 
 from datasets import DatasetDict, load_from_disk
 
@@ -47,7 +50,12 @@ DATASETS = {
 }
 
 
-def pipeline(cfg):
+def pipeline(cfg: Any) -> DatasetDict:
+    """Run dataset preprocessing and tokenization.
+
+    :param Any cfg: Configuration object with dataset/tokenizer settings.
+    :return DatasetDict: Prepared dataset dictionary.
+    """
     if cfg.datasets.load_all_from_disk:
         dataset = load_from_disk(os.path.join(cfg.datasets.path, "all"))
 
@@ -98,7 +106,8 @@ def pipeline(cfg):
     return dataset
 
 
-def main():
+def main() -> None:
+    """Run preprocessing from a CLI config."""
     # Load configuration from command line arguments
     config = load_config_from_args()
 

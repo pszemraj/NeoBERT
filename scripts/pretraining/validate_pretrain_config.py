@@ -45,12 +45,20 @@ class PretrainConfigValidator:
     }
 
     def __init__(self, verbose: bool = False):
+        """Initialize the validator.
+
+        :param bool verbose: Enable verbose output.
+        """
         self.verbose = verbose
         self.errors: List[str] = []
         self.warnings: List[str] = []
 
     def validate(self, config_path: Path) -> bool:
-        """Validate a pretraining configuration file."""
+        """Validate a pretraining configuration file.
+
+        :param Path config_path: Path to the config file.
+        :return bool: True if validation passes.
+        """
         self.errors = []
         self.warnings = []
 
@@ -102,8 +110,11 @@ class PretrainConfigValidator:
 
         return len(self.errors) == 0
 
-    def _validate_model_section(self, model_config: Dict):
-        """Validate model configuration."""
+    def _validate_model_section(self, model_config: Dict) -> None:
+        """Validate model configuration.
+
+        :param dict model_config: Model section mapping.
+        """
         for field, expected_type in self.MODEL_REQUIRED.items():
             if field not in model_config:
                 self.errors.append(f"Missing required model field: model.{field}")
@@ -125,8 +136,11 @@ class PretrainConfigValidator:
                     f"Unusual activation function: {model_config['hidden_act']}. Common choices: {valid_acts}"
                 )
 
-    def _validate_dataset_section(self, dataset_config: Dict):
-        """Validate dataset configuration."""
+    def _validate_dataset_section(self, dataset_config: Dict) -> None:
+        """Validate dataset configuration.
+
+        :param dict dataset_config: Dataset section mapping.
+        """
         for field, expected_type in self.DATASET_REQUIRED.items():
             if field not in dataset_config:
                 self.errors.append(f"Missing required dataset field: dataset.{field}")
@@ -164,8 +178,11 @@ class PretrainConfigValidator:
                     f"max_seq_length={max_seq} is quite small for pretraining."
                 )
 
-    def _validate_trainer_section(self, trainer_config: Dict):
-        """Validate trainer configuration."""
+    def _validate_trainer_section(self, trainer_config: Dict) -> None:
+        """Validate trainer configuration.
+
+        :param dict trainer_config: Trainer section mapping.
+        """
         for field, expected_type in self.TRAINER_REQUIRED.items():
             if field not in trainer_config:
                 self.errors.append(f"Missing required trainer field: trainer.{field}")
@@ -206,8 +223,11 @@ class PretrainConfigValidator:
                     f"Output directory should be under './outputs/', got '{output_dir}'"
                 )
 
-    def _validate_optimizer_section(self, optimizer_config: Dict):
-        """Validate optimizer configuration."""
+    def _validate_optimizer_section(self, optimizer_config: Dict) -> None:
+        """Validate optimizer configuration.
+
+        :param dict optimizer_config: Optimizer section mapping.
+        """
         if "name" not in optimizer_config:
             self.errors.append("Missing optimizer.name")
 
@@ -243,8 +263,11 @@ class PretrainConfigValidator:
                     f"weight_decay={optimizer_config['weight_decay']} seems high"
                 )
 
-    def _validate_scheduler_section(self, scheduler_config: Dict):
-        """Validate scheduler configuration."""
+    def _validate_scheduler_section(self, scheduler_config: Dict) -> None:
+        """Validate scheduler configuration.
+
+        :param dict scheduler_config: Scheduler section mapping.
+        """
         if "name" not in scheduler_config:
             self.errors.append("Missing scheduler.name")
 
@@ -260,8 +283,11 @@ class PretrainConfigValidator:
                 "Both warmup_steps and warmup_percent specified. warmup_percent will take precedence."
             )
 
-    def _validate_tokenizer_section(self, tokenizer_config: Dict):
-        """Validate tokenizer configuration."""
+    def _validate_tokenizer_section(self, tokenizer_config: Dict) -> None:
+        """Validate tokenizer configuration.
+
+        :param dict tokenizer_config: Tokenizer section mapping.
+        """
         if "name" not in tokenizer_config:
             self.errors.append("Missing tokenizer.name")
 
@@ -278,8 +304,11 @@ class PretrainConfigValidator:
                         f"Tokenizer vocab_size ({vocab_size}) doesn't match model vocab_size ({model_vocab})"
                     )
 
-    def print_report(self, config_path: Path):
-        """Print validation report."""
+    def print_report(self, config_path: Path) -> None:
+        """Print a validation report.
+
+        :param Path config_path: Path to the config file.
+        """
         print(f"\nValidation Report for {config_path}")
         print("=" * 60)
 
@@ -300,7 +329,8 @@ class PretrainConfigValidator:
         print()
 
 
-def main():
+def main() -> None:
+    """Run the pretraining config validation CLI."""
     parser = argparse.ArgumentParser(
         description="Validate pretraining configuration files"
     )

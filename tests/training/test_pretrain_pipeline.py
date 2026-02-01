@@ -3,6 +3,7 @@
 
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 
 import torch
@@ -66,33 +67,42 @@ class TestPretrainPipeline(unittest.TestCase):
         config.trainer.output_dir = self.temp_dir
         config.trainer.num_train_epochs = 0  # Don't actually train
         config.trainer.max_steps = 1  # Minimal steps
+        config.wandb.mode = "disabled"
 
         # Test that the trainer function can be called
         # Note: This will fail if dataset loading fails, which is expected for CPU-only testing
-        try:
-            trainer(config)
-        except Exception as e:
-            # Expected failures for CPU-only testing:
-            # - Dataset download/loading failures
-            # - Missing dependencies for specific datasets
-            expected_errors = [
-                "HfApi",  # Hugging Face API issues on CPU-only
-                "Connection",  # Network issues
-                "disk",  # Disk space issues
-                "CUDA",  # CUDA-related errors (expected on CPU)
-                "404",  # Dataset not found (expected for small test datasets)
-                "sentencepiece",  # Tokenizer not found
-                "Repository Not Found",  # HF repo not found
-                "input_ids",  # Dataset format mismatch
-                "ValueError",  # Dataset not tokenized
-            ]
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r".*epoch parameter in `scheduler\.step\(\)`.*",
+                category=UserWarning,
+            )
+            try:
+                trainer(config)
+            except Exception as e:
+                # Expected failures for CPU-only testing:
+                # - Dataset download/loading failures
+                # - Missing dependencies for specific datasets
+                expected_errors = [
+                    "HfApi",  # Hugging Face API issues on CPU-only
+                    "Connection",  # Network issues
+                    "disk",  # Disk space issues
+                    "CUDA",  # CUDA-related errors (expected on CPU)
+                    "404",  # Dataset not found (expected for small test datasets)
+                    "sentencepiece",  # Tokenizer not found
+                    "Repository Not Found",  # HF repo not found
+                    "input_ids",  # Dataset format mismatch
+                    "ValueError",  # Dataset not tokenized
+                ]
 
-            error_str = str(e).lower()
-            is_expected_error = any(err.lower() in error_str for err in expected_errors)
+                error_str = str(e).lower()
+                is_expected_error = any(
+                    err.lower() in error_str for err in expected_errors
+                )
 
-            if not is_expected_error:
-                # If it's not an expected dataset/network error, re-raise
-                raise e
+                if not is_expected_error:
+                    # If it's not an expected dataset/network error, re-raise
+                    raise e
 
     def test_model_config_compatibility(self):
         """Test that model config is compatible with pretraining."""
@@ -219,6 +229,89 @@ class TestPretrainComponents(unittest.TestCase):
                 self.skipTest(f"Tokenizer setup failed (expected on CPU-only): {e}")
             else:
                 raise
+
+    def test_masked_correct_count(self):
+        """Test masked accuracy counting ignores -100 labels."""
+        from neobert.pretraining.trainer import _count_masked_correct
+
+        logits = torch.tensor([[[0.1, 0.2, 0.7], [0.9, 0.1, 0.0]]])
+        labels = torch.tensor([[2, -100]])
+        self.assertEqual(_count_masked_correct(logits, labels), 1)
+
+    def test_pack_sequences_collator(self):
+        """Ensure packed collator builds a block attention mask."""
+        from transformers import AutoTokenizer
+
+        from neobert.collator import get_collator
+
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                "bert-base-uncased", use_fast=True
+            )
+            if tokenizer.pad_token is None:
+                if tokenizer.eos_token is not None:
+                    tokenizer.pad_token = tokenizer.eos_token
+                else:
+                    tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+
+            collator = get_collator(
+                tokenizer=tokenizer,
+                mlm_probability=0.15,
+                pack_sequences=True,
+                max_length=8,
+            )
+
+            batch = [
+                {
+                    "input_ids": tokenizer("hello", add_special_tokens=False)[
+                        "input_ids"
+                    ]
+                },
+                {
+                    "input_ids": tokenizer("world", add_special_tokens=False)[
+                        "input_ids"
+                    ]
+                },
+            ]
+
+            collated = collator(batch)
+
+            self.assertIn("attention_mask", collated)
+            self.assertEqual(collated["attention_mask"].dim(), 3)
+            self.assertEqual(
+                collated["attention_mask"].shape[-1],
+                collated["input_ids"].shape[1],
+            )
+            self.assertLess(collated["attention_mask"].min().item(), 0)
+
+        except Exception as e:
+            if "mask_token" in str(e) or "sentencepiece" in str(e):
+                self.skipTest(f"Tokenizer setup failed (expected on CPU-only): {e}")
+            else:
+                raise
+
+    def test_to_target_batch_size_handles_empty_buffer(self):
+        """Ensure batch packing handles empty buffers without crashing."""
+        from neobert.pretraining.trainer import to_target_batch_size
+
+        batch = {
+            "input_ids": torch.zeros((2, 4), dtype=torch.long),
+            "attention_mask": torch.ones((2, 4), dtype=torch.long),
+            "labels": torch.zeros((2, 4), dtype=torch.long),
+        }
+        stored_batch = {"input_ids": None, "attention_mask": None, "labels": None}
+
+        out, stored = to_target_batch_size(batch, stored_batch, target_size=4)
+        self.assertEqual(out["input_ids"].shape[0], 2)
+        self.assertIsNone(stored["input_ids"])
+
+        stored_batch = {
+            "input_ids": torch.zeros((2, 4), dtype=torch.long),
+            "attention_mask": torch.ones((2, 4), dtype=torch.long),
+            "labels": torch.zeros((2, 4), dtype=torch.long),
+        }
+        out, stored = to_target_batch_size(batch, stored_batch, target_size=4)
+        self.assertEqual(out["input_ids"].shape[0], 4)
 
     def test_optimizer_creation(self):
         """Test optimizer creation from config."""

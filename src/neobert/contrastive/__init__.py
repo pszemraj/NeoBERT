@@ -1,3 +1,5 @@
+"""Contrastive training datasets, losses, and trainer."""
+
 __all__ = [
     "SupConLoss",
     "trainer",

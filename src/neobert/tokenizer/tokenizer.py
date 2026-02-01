@@ -1,6 +1,8 @@
+"""Tokenizer utilities and dataset tokenization helpers."""
+
 import os
 from functools import partial
-from typing import Tuple
+from typing import Any, Optional, Tuple
 
 from datasets import Dataset, Features, Sequence, Value
 from tokenizers.processors import TemplateProcessing
@@ -11,9 +13,18 @@ def get_tokenizer(
     pretrained_model_name_or_path: str = "meta-llama/Llama-2-7b-hf",
     vocab_size: int = 32064,
     max_length: int = 4096,
-    token: str = None,
-    **kwargs,
-):
+    token: Optional[str] = None,
+    **kwargs: Any,
+) -> PreTrainedTokenizer:
+    """Load and configure a tokenizer for NeoBERT usage.
+
+    :param str pretrained_model_name_or_path: Tokenizer model name or path.
+    :param int vocab_size: Target vocabulary size.
+    :param int max_length: Maximum sequence length.
+    :param str | None token: Optional auth token for gated models.
+    :param Any kwargs: Additional kwargs forwarded to ``from_pretrained``.
+    :return PreTrainedTokenizer: Configured tokenizer instance.
+    """
     # Load Tokenizer and replace/add special tokens
     tokenizer = AutoTokenizer.from_pretrained(
         pretrained_model_name_or_path,
@@ -120,7 +131,22 @@ def get_tokenizer(
     return tokenizer
 
 
-def single_column_mapping(x, tokenizer, column_name, max_length, truncation):
+def single_column_mapping(
+    x: dict[str, Any],
+    tokenizer: PreTrainedTokenizer,
+    column_name: str,
+    max_length: int,
+    truncation: bool,
+) -> dict[str, Any]:
+    """Tokenize a single text column in a batched mapping call.
+
+    :param dict[str, Any] x: Batch of examples from the dataset.
+    :param PreTrainedTokenizer tokenizer: Tokenizer to apply.
+    :param str column_name: Column containing text inputs.
+    :param int max_length: Maximum sequence length.
+    :param bool truncation: Whether to truncate sequences.
+    :return dict[str, Any]: Tokenized outputs for the batch.
+    """
     return tokenizer(
         x[column_name],
         truncation=truncation,
@@ -129,7 +155,22 @@ def single_column_mapping(x, tokenizer, column_name, max_length, truncation):
     )
 
 
-def multi_column_mapping(x, tokenizer, column_name, max_length, truncation):
+def multi_column_mapping(
+    x: dict[str, Any],
+    tokenizer: PreTrainedTokenizer,
+    column_name: tuple[str, ...],
+    max_length: int,
+    truncation: bool,
+) -> dict[str, Any]:
+    """Tokenize multiple text columns in a batched mapping call.
+
+    :param dict[str, Any] x: Batch of examples from the dataset.
+    :param PreTrainedTokenizer tokenizer: Tokenizer to apply.
+    :param tuple[str, ...] column_name: Columns containing text inputs.
+    :param int max_length: Maximum sequence length.
+    :param bool truncation: Whether to truncate sequences.
+    :return dict[str, Any]: Tokenized outputs for the batch.
+    """
     output = {}
     for col in column_name:
         if isinstance(x[col][0], list):
@@ -167,12 +208,23 @@ def multi_column_mapping(x, tokenizer, column_name, max_length, truncation):
 def tokenize(
     dataset: Dataset,
     tokenizer: PreTrainedTokenizer,
-    column_name: str | Tuple[str],
+    column_name: str | Tuple[str, ...],
     max_length: int = 4096,
     remove_columns: bool = True,
     truncation: bool = True,
-    **kwargs,
-):
+    **kwargs: Any,
+) -> Dataset:
+    """Tokenize a dataset with a single- or multi-column schema.
+
+    :param Dataset dataset: Dataset to tokenize.
+    :param PreTrainedTokenizer tokenizer: Tokenizer to apply.
+    :param str | tuple[str, ...] column_name: Column(s) to tokenize.
+    :param int max_length: Maximum sequence length.
+    :param bool remove_columns: Whether to remove non-token columns.
+    :param bool truncation: Whether to truncate sequences.
+    :param Any kwargs: Extra arguments passed to ``Dataset.map``.
+    :return Dataset: Tokenized dataset.
+    """
     # Check if this is a streaming dataset (IterableDataset)
     is_streaming = hasattr(dataset, "_iter") or "IterableDataset" in str(type(dataset))
 

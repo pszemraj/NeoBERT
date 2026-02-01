@@ -22,7 +22,7 @@ Common issues and their solutions when training and using NeoBERT.
 - **Symptom**: Launching GLUE evaluation with Flash Attention enabled produces runtime errors or crashes.
 - **Cause**: GLUE tasks use variable-length batches that are currently incompatible with Flash Attention's alignment requirements.
 - **Solution**:
-  1. When using the provided GLUE scripts/configs, no action is needed—Flash Attention is automatically disabled for you.
+  1. When using the provided GLUE scripts/configs, no action is needed-Flash Attention is automatically disabled for you.
   2. If you author custom launchers, set `model.flash_attention: false` (or pass `--model.flash_attention false`) before evaluation.
   3. Restart the run after toggling the setting; mixed Flash Attention/eager runs in the same process can leave partially initialized CUDA kernels.
 
@@ -50,10 +50,10 @@ This issue was fixed in `trainer.py` and `trainer_phase_2.py`.
 
 **Solutions**:
 
-1. Enable gradient checkpointing: `--model.gradient_checkpointing true`
+1. Enable gradient checkpointing: `--trainer.gradient_checkpointing true`
 2. Reduce batch size: `--trainer.per_device_train_batch_size 16`
 3. Use gradient accumulation: `--trainer.gradient_accumulation_steps 4`
-4. Enable mixed precision: `--trainer.fp16 true` or `--trainer.bf16 true`
+4. Enable mixed precision: `--mixed_precision bf16` (pretraining) or `--trainer.mixed_precision bf16` (GLUE/contrastive)
 
 ## Export Issues
 
@@ -120,7 +120,9 @@ attn_mask=attention_mask.bool() if attention_mask is not None else None
 1. Use batch processing for multiple inputs
 2. Enable CUDA if available: `model.cuda()`
 3. Use half precision: `model.half()` or `torch.autocast`
-4. Install Flash Attention: `pip install flash-attn`
+4. Install the appropriate attention backend:
+   - Training: `pip install xformers`
+   - Exported HF models: `pip install flash-attn`
 
 ### High Memory Usage
 
@@ -133,26 +135,23 @@ attn_mask=attention_mask.bool() if attention_mask is not None else None
 
 ## Environment Issues
 
-### Flash Attention Not Available
+### Flash Attention Backends
 
-**Problem**: Flash Attention fails to install or isn't detected.
+NeoBERT uses different backends depending on the code path:
 
-**Solution**:
+- **Training** uses `xformers.ops.memory_efficient_attention` when `model.flash_attention: true`.
+- **Exported HF models** use `flash-attn` if available.
+
+**If training backend is missing**:
 
 ```bash
-# Build from source for latest GPUs
-pip install flash-attn --no-build-isolation
+pip install xformers
 ```
 
-### XFormers Compatibility
-
-**Problem**: XFormers not working with your PyTorch version.
-
-**Solution**:
+**If HF flash-attn is missing**:
 
 ```bash
-# Build from source
-pip install -v --no-build-isolation git+https://github.com/facebookresearch/xformers.git@main
+pip install flash-attn --no-build-isolation
 ```
 
 ## Validation Tools
@@ -164,7 +163,7 @@ Use these scripts to diagnose issues:
 python scripts/export-hf/validate.py /path/to/exported/model
 
 # Test MLM predictions
-python scratch/mlm_predict.py /path/to/model --text "Test [MASK] sentence"
+python scripts/export-hf/mlm_predict.py /path/to/model --text "Test [MASK] sentence"
 
 # Run comprehensive tests
 python tests/run_tests.py
@@ -176,7 +175,7 @@ If you encounter issues not covered here:
 
 1. Check the [GitHub Issues](https://github.com/chandar-lab/NeoBERT/issues)
 2. Review the test outputs for clues
-3. Enable debug mode: `export NEOBERT_DEBUG=1`
+3. Enable debug mode: pass `--debug` or set `debug: true` in your config
 4. Open a new issue with:
    - Error message and stack trace
    - Config file used

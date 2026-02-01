@@ -26,14 +26,22 @@ from transformers import AutoTokenizer
 
 
 def load_config(config_path: Path) -> Dict[str, Any]:
-    """Load and parse config.yaml."""
+    """Load and parse config.yaml.
+
+    :param Path config_path: Path to the config file.
+    :return dict[str, Any]: Parsed configuration mapping.
+    """
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
     return config
 
 
 def get_torch_dtype_from_state_dict(state_dict: Dict[str, torch.Tensor]) -> str:
-    """Infer the torch dtype from the state dict weights."""
+    """Infer the torch dtype from the state dict weights.
+
+    :param dict[str, torch.Tensor] state_dict: Model state dict.
+    :return str: Torch dtype string (e.g. "float32").
+    """
     if not state_dict:
         raise ValueError("State dict is empty, cannot infer dtype")
 
@@ -86,7 +94,12 @@ def validate_required_config_fields(model_config: Dict[str, Any]) -> None:
 def create_hf_config(
     neobert_config: Dict[str, Any], state_dict: Dict[str, torch.Tensor]
 ) -> Dict[str, Any]:
-    """Convert NeoBERT config.yaml to HuggingFace config.json format."""
+    """Convert NeoBERT config.yaml to Hugging Face config.json format.
+
+    :param dict[str, Any] neobert_config: Loaded NeoBERT config mapping.
+    :param dict[str, torch.Tensor] state_dict: Model state dict.
+    :return dict[str, Any]: Hugging Face config mapping.
+    """
     model_config = neobert_config.get("model", {})
 
     # Validate that we have all required fields
@@ -142,6 +155,9 @@ def map_weights(
     Export structure for HF compatibility:
     - Base model weights with "model." prefix for NeoBERTLMHead
     - Decoder weights at top level for LM head
+    :param dict[str, torch.Tensor] state_dict: Training state dict.
+    :param dict[str, Any] model_config: Model config mapping.
+    :return dict[str, torch.Tensor]: Remapped state dict.
     """
     mapped = {}
 
@@ -185,8 +201,11 @@ def validate_tokenizer_special_tokens(tokenizer_dir: Path) -> None:
         )
 
 
-def copy_hf_modeling_files(target_dir: Path):
-    """Copy the HuggingFace modeling files from src/neobert/huggingface/."""
+def copy_hf_modeling_files(target_dir: Path) -> None:
+    """Copy the Hugging Face modeling files from src/neobert/huggingface/.
+
+    :param Path target_dir: Destination directory for modeling files.
+    """
     print("Copying HuggingFace modeling files...")
 
     # Go up to repo root then down to src/neobert/huggingface
@@ -206,12 +225,12 @@ def copy_hf_modeling_files(target_dir: Path):
         print(f"  Copied {filename} -> {dst_name}")
 
 
-def export_checkpoint(checkpoint_path: Path, output_dir: Path = None):
+def export_checkpoint(checkpoint_path: Path, output_dir: Path | None = None) -> Path:
     """Export a NeoBERT checkpoint to HuggingFace format.
 
-    Args:
-        checkpoint_path: Path to checkpoint directory containing state_dict.pt and config.yaml
-        output_dir: Optional output directory. If None, creates hf/{checkpoint_name} in parent dir
+    :param Path checkpoint_path: Checkpoint directory with state_dict.pt and config.yaml.
+    :param Path | None output_dir: Optional output directory.
+    :return Path: Output directory containing exported files.
     """
     checkpoint_path = Path(checkpoint_path).resolve()
 
@@ -497,7 +516,8 @@ Full training config:
     return output_dir
 
 
-def main():
+def main() -> None:
+    """Run the Hugging Face export CLI."""
     parser = argparse.ArgumentParser(
         description="Export NeoBERT checkpoint to HuggingFace format",
         formatter_class=argparse.RawDescriptionHelpFormatter,

@@ -1,3 +1,5 @@
+"""NeoBERT package entry points and shared utilities."""
+
 from .config import Config, ConfigLoader, load_config_from_args
 from .utils import configure_tf32, model_summary
 

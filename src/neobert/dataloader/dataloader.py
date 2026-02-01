@@ -1,3 +1,5 @@
+"""Dataloader helpers for masked language model pretraining."""
+
 import torch
 from datasets import Dataset
 from torch.utils.data import DataLoader
@@ -24,23 +26,22 @@ def get_dataloader(
     pack_sequences: bool = False,
     max_length: int = 512,
 ) -> torch.utils.data.DataLoader:
-    """Wrapper for constructing a ``torch`` dataloader, with a collator function applying masked language modeling and returning an additive pad mask.
+    """Build a ``torch`` dataloader with an MLM collator and pad mask.
 
-    Args:
-        dataset (Dataset).
-        tokenizer (PreTrainedTokenizer).
-        dtype (torch.dtype, optional): Dtype of the pad_mask. Defaults to torch.float32.
-        mlm_probability (float, optional): Ratio of tokens that are masked. Defaults to 0.15.
-        mask_all (bool, optional): Whether to mask every randomly selected tokens or to use the 80/10/10 masking scheme.
-        pad_to_multiple_of (int, optional): Pad to a multiple of. Defaults to 8.
-        num_workers (int): Number of workers for the dataloader. Defaults to 4.
-        batch_size (int): Batch size for each GPU. Defaults to 64.
-        shuffle (bool, optional): Whether to shuffle the dataset at the beginning of every epoch. Defaults to True.
-        pin_memory (bool, optional): If True, the dataloader will copy Tensors into device/CUDA pinned memory before returning them. Defaults to False.
-        persistent_workers (bool, optional): If True, the dataloader will not shut down the worker processes after a dataset has been consumed once. This allows to maintain the workers Dataset instances alive. Defaults to True.
-
-    Returns:
-        torch.utils.data.DataLoader
+    :param Dataset dataset: Dataset to iterate over.
+    :param PreTrainedTokenizer tokenizer: Tokenizer used by the collator.
+    :param torch.dtype dtype: Dtype of the pad mask (defaults to ``torch.float32``).
+    :param float mlm_probability: Ratio of tokens to mask.
+    :param bool mask_all: Whether to mask all sampled tokens.
+    :param int pad_to_multiple_of: Pad length to a multiple of this value.
+    :param int num_workers: Number of dataloader workers.
+    :param int batch_size: Batch size per device.
+    :param bool shuffle: Whether to shuffle the dataset each epoch.
+    :param bool pin_memory: Whether to pin memory in the dataloader.
+    :param bool persistent_workers: Keep workers alive across epochs.
+    :param bool pack_sequences: Whether to pack sequences before collation.
+    :param int max_length: Maximum sequence length for packing.
+    :return torch.utils.data.DataLoader: Configured dataloader instance.
     """
 
     collate_fn = get_collator(

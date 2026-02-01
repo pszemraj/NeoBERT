@@ -1,3 +1,5 @@
+"""Model checkpoint merging utilities."""
+
 import os
 
 import terge
@@ -8,7 +10,12 @@ from neobert.model import NeoBERTConfig, NeoBERTForSequenceClassification
 from ..config import Config
 
 
-def get_merged_model(cfg: Config):
+def get_merged_model(cfg: Config) -> torch.nn.Module:
+    """Load and merge multiple checkpoints into a single model.
+
+    :param Config cfg: Configuration with checkpoint list and model settings.
+    :return torch.nn.Module: Merged model instance.
+    """
     # Use the config model settings directly
     model_list = []
     for ckpt in cfg.model.checkpoint_list:

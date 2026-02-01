@@ -1,3 +1,5 @@
+"""Configuration dataclasses and helpers for NeoBERT runs."""
+
 import argparse
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -7,15 +9,19 @@ import yaml
 
 
 def round_up_to_multiple(x: int, N: int = 128) -> int:
-    """
-    Rounds up integer x to the nearest multiple of N (default: 128).
-    This improves GPU efficiency for matrix operations.
+    """Round an integer up to the nearest multiple of ``N``.
+
+    :param int x: Value to round up.
+    :param int N: Multiple to round to (default: 128).
+    :return int: Rounded value.
     """
     return ((x + N - 1) // N) * N
 
 
 @dataclass
 class ModelConfig:
+    """Model architecture and initialization settings."""
+
     hidden_size: int = 768
     num_hidden_layers: int = 12
     num_attention_heads: int = 12
@@ -38,6 +44,8 @@ class ModelConfig:
 
 @dataclass
 class DatasetConfig:
+    """Dataset loading and preprocessing configuration."""
+
     name: str = "refinedweb"
     path: str = ""
     num_workers: int = 16
@@ -61,6 +69,8 @@ class DatasetConfig:
 
 @dataclass
 class TokenizerConfig:
+    """Tokenizer setup for training and evaluation."""
+
     name: str = "bert-base-uncased"
     path: Optional[str] = None
     max_length: int = 512
@@ -71,6 +81,8 @@ class TokenizerConfig:
 
 @dataclass
 class MuonConfig:
+    """Muon optimizer-specific configuration."""
+
     muon_beta: float = 0.95
     muon_decay: float = 0.0
     ns_steps: int = 5
@@ -87,6 +99,8 @@ class MuonConfig:
 
 @dataclass
 class OptimizerConfig:
+    """Optimizer hyperparameters for training."""
+
     name: str = "adamw"
     lr: float = 1e-4
     weight_decay: float = 0.01
@@ -97,6 +111,8 @@ class OptimizerConfig:
 
 @dataclass
 class SchedulerConfig:
+    """Learning-rate scheduler configuration."""
+
     name: str = "cosine"
     warmup_steps: int = 10000
     total_steps: Optional[int] = None
@@ -108,6 +124,8 @@ class SchedulerConfig:
 
 @dataclass
 class TrainerConfig:
+    """Training loop and runtime configuration."""
+
     per_device_train_batch_size: int = 16
     per_device_eval_batch_size: int = 32
     gradient_accumulation_steps: int = 1
@@ -149,12 +167,19 @@ class TrainerConfig:
 
 @dataclass
 class DataCollatorConfig:
+    """Masking and padding configuration for data collators."""
+
     mlm_probability: float = 0.15
     pad_to_multiple_of: Optional[int] = None
+    mask_all: bool = False
+    pack_sequences: bool = False
+    max_length: Optional[int] = None
 
 
 @dataclass
 class WandbConfig:
+    """Weights & Biases logging configuration."""
+
     project: str = "neo-bert"
     entity: Optional[str] = None
     name: Optional[str] = None
@@ -167,6 +192,8 @@ class WandbConfig:
 
 @dataclass
 class GLUEConfig:
+    """GLUE task configuration for fine-tuning and evaluation."""
+
     # Task configuration
     task_name: str = "cola"
     num_labels: int = 2
@@ -192,6 +219,8 @@ class GLUEConfig:
 
 @dataclass
 class ContrastiveConfig:
+    """Contrastive training configuration."""
+
     temperature: float = 0.05
     pooling: str = "avg"  # avg, cls, max
     loss_type: str = "simcse"  # simcse, supcon
@@ -200,6 +229,8 @@ class ContrastiveConfig:
 
 @dataclass
 class Config:
+    """Top-level configuration aggregating all sub-configs."""
+
     model: ModelConfig = field(default_factory=ModelConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
     tokenizer: TokenizerConfig = field(default_factory=TokenizerConfig)
@@ -238,17 +269,26 @@ class Config:
 
 
 class ConfigLoader:
-    """Load and merge configuration from YAML files and command line arguments"""
+    """Load and merge configuration from YAML files and command line arguments."""
 
     @staticmethod
     def load_yaml(path: Union[str, Path]) -> Dict[str, Any]:
-        """Load a YAML configuration file"""
+        """Load a YAML configuration file.
+
+        :param Union[str, Path] path: Path to a YAML file.
+        :return dict[str, Any]: Parsed configuration mapping.
+        """
         with open(path, "r") as f:
             return yaml.safe_load(f) or {}
 
     @staticmethod
     def merge_configs(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
-        """Recursively merge override config into base config"""
+        """Recursively merge override config into base config.
+
+        :param dict[str, Any] base: Base configuration mapping.
+        :param dict[str, Any] override: Override configuration mapping.
+        :return dict[str, Any]: Merged configuration mapping.
+        """
         result = base.copy()
 
         for key, value in override.items():
@@ -265,7 +305,11 @@ class ConfigLoader:
 
     @staticmethod
     def dict_to_config(cfg_dict: Dict[str, Any]) -> Config:
-        """Convert dictionary to Config dataclass"""
+        """Convert dictionary to a ``Config`` dataclass.
+
+        :param dict[str, Any] cfg_dict: Nested configuration mapping.
+        :return Config: Fully-populated configuration instance.
+        """
         config = Config()
 
         # Store raw model dict for GLUE compatibility
@@ -373,9 +417,12 @@ class ConfigLoader:
 
     @staticmethod
     def preprocess_config(config: Config) -> Config:
-        """
-        Preprocess and validate config, resolving any dynamic values.
+        """Preprocess and validate config, resolving any dynamic values.
+
         This should be called after config loading but before any downstream consumers.
+
+        :param Config config: Configuration to preprocess.
+        :return Config: Preprocessed configuration.
         """
         # Resolve vocab_size for GPU efficiency (skip CPU-only runs/tests).
         use_cpu = getattr(config.trainer, "use_cpu", False)
@@ -418,7 +465,13 @@ class ConfigLoader:
         overrides: Optional[Dict[str, Any]] = None,
         preprocess: bool = True,
     ) -> Config:
-        """Load configuration from file and apply overrides"""
+        """Load configuration from file and apply overrides.
+
+        :param str | Path | None config_file: Optional YAML configuration path.
+        :param dict[str, Any] | None overrides: Optional override mapping.
+        :param bool preprocess: Whether to run ``preprocess_config``.
+        :return Config: Loaded configuration.
+        """
         config_dict = {}
 
         # Load from file if provided
@@ -438,8 +491,12 @@ class ConfigLoader:
         return config
 
     @staticmethod
-    def save(config: Config, path: Union[str, Path]):
-        """Save configuration to YAML file"""
+    def save(config: Config, path: Union[str, Path]) -> None:
+        """Save configuration to a YAML file.
+
+        :param Config config: Configuration to serialize.
+        :param str | Path path: Destination path for the YAML file.
+        """
         # Convert dataclasses to dict
         config_dict = {
             "model": asdict(config.model),
@@ -450,6 +507,8 @@ class ConfigLoader:
             "trainer": asdict(config.trainer),
             "datacollator": asdict(config.datacollator),
             "wandb": asdict(config.wandb),
+            "glue": asdict(config.glue),
+            "contrastive": asdict(config.contrastive),
             "task": config.task,
             "accelerate_config_file": config.accelerate_config_file,
             "mixed_precision": config.mixed_precision,
@@ -469,7 +528,10 @@ class ConfigLoader:
 
 
 def create_argument_parser() -> argparse.ArgumentParser:
-    """Create argument parser for command line overrides"""
+    """Create an argument parser for command line overrides.
+
+    :return argparse.ArgumentParser: Configured argument parser.
+    """
     parser = argparse.ArgumentParser(description="NeoBERT Configuration")
 
     parser.add_argument(
@@ -510,6 +572,11 @@ def create_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset.path", type=str, help="Dataset path")
     parser.add_argument(
         "--dataset.num_workers", type=int, help="Number of data workers"
+    )
+    parser.add_argument(
+        "--dataset.streaming",
+        type=lambda x: x.lower() == "true",
+        help="Stream dataset from hub",
     )
     parser.add_argument(
         "--dataset.max_seq_length", type=int, help="Maximum sequence length"
@@ -574,6 +641,11 @@ def create_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--datacollator.mlm_probability", type=float, help="MLM probability"
     )
+    parser.add_argument(
+        "--datacollator.pack_sequences",
+        type=lambda x: x.lower() == "true",
+        help="Pack sequences into fixed-length chunks",
+    )
 
     # WandB arguments
     parser.add_argument("--wandb.project", type=str, help="WandB project name")
@@ -610,7 +682,11 @@ def create_argument_parser() -> argparse.ArgumentParser:
 
 
 def parse_args_to_dict(args: argparse.Namespace) -> Dict[str, Any]:
-    """Convert argparse namespace to nested dictionary"""
+    """Convert an argparse namespace to a nested dictionary.
+
+    :param argparse.Namespace args: Parsed CLI arguments.
+    :return dict[str, Any]: Nested configuration mapping.
+    """
     config_dict = {}
 
     for key, value in vars(args).items():
@@ -630,7 +706,10 @@ def parse_args_to_dict(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def load_config_from_args() -> Config:
-    """Load configuration from command line arguments"""
+    """Load configuration from command line arguments.
+
+    :return Config: Loaded configuration with CLI overrides applied.
+    """
     parser = create_argument_parser()
     args = parser.parse_args()
 

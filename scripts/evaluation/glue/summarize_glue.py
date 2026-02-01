@@ -55,6 +55,11 @@ BERT_BASE_SCORES = {
 
 
 def _normalize_metrics(data: dict) -> dict[str, float]:
+    """Normalize metric keys for GLUE reporting.
+
+    :param dict data: Raw metric mapping.
+    :return dict[str, float]: Normalized metric mapping.
+    """
     normalized: dict[str, float] = {}
     for key, value in (data or {}).items():
         if not isinstance(key, str) or not isinstance(value, (int, float)):
@@ -65,6 +70,12 @@ def _normalize_metrics(data: dict) -> dict[str, float]:
 
 
 def _compute_task_score(task: str, metrics: dict[str, float]) -> float | None:
+    """Compute the official GLUE score for a task.
+
+    :param str task: GLUE task name.
+    :param dict[str, float] metrics: Metric mapping for the task.
+    :return float | None: Task score or None if unavailable.
+    """
     spec = TASK_SCORES.get(task)
     if spec is None:
         return None
@@ -94,7 +105,12 @@ def _compute_task_score(task: str, metrics: dict[str, float]) -> float | None:
 
 
 def get_task_results(task_dir: Path, task: str) -> float | None:
-    """Extract the best (max) official GLUE score from a task directory."""
+    """Extract the best (max) official GLUE score from a task directory.
+
+    :param Path task_dir: Directory containing evaluation results.
+    :param str task: GLUE task name.
+    :return float | None: Best score or None if missing.
+    """
     results_files = list(task_dir.glob("all_results_step_*.json"))
     if not results_files:
         results_file = task_dir / "all_results.json"
@@ -123,7 +139,8 @@ def get_task_results(task_dir: Path, task: str) -> float | None:
     return best_score
 
 
-def main():
+def main() -> None:
+    """Run the GLUE summary CLI."""
     parser = argparse.ArgumentParser(
         description="Parse and summarize GLUE evaluation results",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,

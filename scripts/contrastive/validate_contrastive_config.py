@@ -13,6 +13,10 @@ class ContrastiveConfigValidator:
     """Validator for contrastive learning configuration files."""
 
     def __init__(self, verbose: bool = False):
+        """Initialize the validator.
+
+        :param bool verbose: Enable verbose output.
+        """
         self.verbose = verbose
 
     def validate(self, config_path: Path) -> bool:
@@ -22,8 +26,11 @@ class ContrastiveConfigValidator:
             "The contrastive learning module is still under development."
         )
 
-    def print_report(self, config_path: Path):
-        """Print validation report."""
+    def print_report(self, config_path: Path) -> None:
+        """Print a validation report.
+
+        :param Path config_path: Path to the config file.
+        """
         print(f"\nValidation Report for {config_path}")
         print("=" * 60)
         print("⚠️  Contrastive learning validation not yet implemented")
@@ -31,7 +38,8 @@ class ContrastiveConfigValidator:
         print()
 
 
-def main():
+def main() -> None:
+    """Run the config validation CLI."""
     parser = argparse.ArgumentParser(
         description="Validate contrastive learning configuration files"
     )

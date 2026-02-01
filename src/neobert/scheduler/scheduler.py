@@ -1,4 +1,7 @@
+"""Learning-rate scheduler factory for training runs."""
+
 import torch
+from typing import Any
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
 
 
@@ -10,21 +13,19 @@ def get_scheduler(
     decay_steps: int,
     final_ratio: float = 0.1,
     constant_steps: int = 0,
-    **kwargs,
-) -> torch.optim.lr_scheduler:
-    """Scheduler.
+    **kwargs: Any,
+) -> SequentialLR:
+    """Create a chained warmup/decay scheduler.
 
-    Args:
-        optimizer (torch.optim.Optimizer): Optimizer.
-        and "CosineDecayWarmRestart" are supported.
-        warmup_steps (int): Number of warmup steps (over which to linearly increase the learning rate from 0 to the peak
-        learning rate).
-        constant_steps (int): Global training step at which the constant scheduler should end.
-        decay_steps (int): Global training step at which the decay scheduler should end.
-        final_ratio (float): Number we multiply learning rate with at the end of the decay process.
-
-    Returns:
-        torch.optim.lr_scheduler: Initialized scheduler.
+    :param torch.optim.Optimizer optimizer: Optimizer to schedule.
+    :param float lr: Base learning rate.
+    :param str decay: Decay type (``cosine`` or ``linear``).
+    :param int warmup_steps: Steps for linear warmup.
+    :param int decay_steps: Steps for decay schedule.
+    :param float final_ratio: Final LR multiplier after decay.
+    :param int constant_steps: Optional constant plateau steps.
+    :param Any kwargs: Unused extra scheduler arguments.
+    :return SequentialLR: Configured scheduler.
     """
 
     if decay.lower() not in ["cosine", "linear"]:
@@ -64,7 +65,12 @@ def get_scheduler(
     milestones.append(decay_steps)
 
     # Final constant scheduler at lowest learning rate
-    def _constant_min_lr(_):
+    def _constant_min_lr(_: int) -> float:
+        """Return a constant LR multiplier at the minimum ratio.
+
+        :param int _: Current epoch or step index.
+        :return float: Final LR multiplier.
+        """
         return final_ratio
 
     schedulers.append(LambdaLR(optimizer, lr_lambda=_constant_min_lr))

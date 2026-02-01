@@ -1,10 +1,18 @@
+"""Preprocess and tokenize pretraining datasets."""
+
+from typing import Any
+
 from datasets import concatenate_datasets, load_dataset
 
 from neobert.config import load_config_from_args
 from neobert.tokenizer import get_tokenizer, tokenize
 
 
-def preprocess(cfg):
+def preprocess(cfg: Any) -> None:
+    """Tokenize and save the pretraining dataset.
+
+    :param Any cfg: Configuration object with dataset/tokenizer settings.
+    """
     # Tokenizer
     tokenizer = get_tokenizer(
         pretrained_model_name_or_path=cfg.tokenizer.name,
@@ -41,7 +49,8 @@ def preprocess(cfg):
     dataset.save_to_disk(cfg.dataset.path, max_shard_size="1GB")
 
 
-def main():
+def main() -> None:
+    """Run the preprocessing CLI."""
     # Load configuration from command line arguments
     config = load_config_from_args()
 

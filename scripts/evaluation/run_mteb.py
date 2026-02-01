@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 
 import torch
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
@@ -122,7 +123,11 @@ TASK_TYPE = {
 }
 
 
-def evaluate_mteb(cfg):
+def evaluate_mteb(cfg: Any) -> None:
+    """Evaluate a model on the MTEB benchmark.
+
+    :param Any cfg: Configuration object with MTEB settings.
+    """
     # Get MTEB-specific config (we'll add these to Config later)
     mteb_task_type = getattr(cfg, "mteb_task_type", "all")
     mteb_batch_size = getattr(cfg, "mteb_batch_size", 32)
@@ -224,7 +229,8 @@ def evaluate_mteb(cfg):
             )
 
 
-def main():
+def main() -> None:
+    """Run the MTEB evaluation CLI."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Run MTEB evaluation")

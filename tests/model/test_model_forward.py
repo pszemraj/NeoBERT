@@ -145,7 +145,9 @@ class TestModelForward(unittest.TestCase):
 
         with torch.no_grad():
             outputs = model(
-                input_ids=self.input_ids, attention_mask=self.pad_mask, return_dict=True
+                input_ids=self.input_ids,
+                attention_mask=self.attention_mask,
+                return_dict=True,
             )
 
         # Should return SequenceClassifierOutput
@@ -154,6 +156,36 @@ class TestModelForward(unittest.TestCase):
 
         expected_logits_shape = (self.batch_size, 2)  # num_labels=2
         self.assertEqual(outputs.logits.shape, expected_logits_shape)
+
+    def test_hf_attention_mask_blocks_padding(self):
+        """Ensure HF attention masks properly zero out padding attention."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=16,
+        )
+        model = NeoBERT(config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 0, 0], [4, 5, 6, 7, 8]])
+        attention_mask = torch.tensor([[1, 1, 1, 0, 0], [1, 1, 1, 1, 1]])
+
+        with torch.no_grad():
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_attentions=True,
+            )
+
+        attn_weights = outputs.attentions[0]
+        pad_mask = attention_mask == 0
+        pad_mask = pad_mask.unsqueeze(1).unsqueeze(2).expand_as(attn_weights)
+        self.assertLess(attn_weights.masked_select(pad_mask).max().item(), 1e-6)
 
     def test_rope_vs_positional_embeddings(self):
         """Test both RoPE and positional embedding modes."""
@@ -227,6 +259,18 @@ class TestModelForward(unittest.TestCase):
         # self.assertEqual(swiglu_outputs.shape, expected_shape)
         self.assertEqual(gelu_outputs.shape, expected_shape)
 
+    def test_invalid_activation_raises(self):
+        """Ensure unsupported activations fail fast."""
+        with self.assertRaises(ValueError):
+            NeoBERTConfig(
+                hidden_size=64,
+                num_hidden_layers=1,
+                num_attention_heads=2,
+                hidden_act="relu",
+                flash_attention=False,
+                vocab_size=1000,
+            )
+
     def test_attention_mask_handling(self):
         """Test proper attention mask handling."""
         model = NeoBERT(self.tiny_config)
@@ -255,6 +299,28 @@ class TestModelForward(unittest.TestCase):
 
         # Padded positions should still have valid outputs (model handles internally)
         self.assertEqual(outputs.shape, (2, 5, self.tiny_config.hidden_size))
+
+    def test_block_attention_mask(self):
+        """Test 3D block attention masks are accepted."""
+        model = NeoBERT(self.tiny_config)
+        model.eval()
+
+        block_mask = torch.full(
+            (self.batch_size, self.seq_length, self.seq_length),
+            float("-inf"),
+        )
+        eye = torch.eye(self.seq_length).unsqueeze(0).expand(self.batch_size, -1, -1)
+        block_mask = torch.where(eye == 1, float(0.0), block_mask)
+
+        with torch.no_grad():
+            outputs = model(self.input_ids, block_mask)
+
+        expected_shape = (
+            self.batch_size,
+            self.seq_length,
+            self.tiny_config.hidden_size,
+        )
+        self.assertEqual(outputs.shape, expected_shape)
 
     def test_gradient_flow(self):
         """Test that gradients flow properly through the model."""

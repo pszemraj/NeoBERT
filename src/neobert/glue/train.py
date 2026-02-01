@@ -1,13 +1,15 @@
 """Finetuning a NeoBERT model for sequence classification on GLUE or Super GLUE."""
 
 import json
+import logging
 import math
 import os
 import random
 import shutil
-from pathlib import Path
 from contextlib import nullcontext
 from functools import partial
+from pathlib import Path
+from typing import Any, Optional
 
 import evaluate
 import numpy as np
@@ -76,7 +78,12 @@ TASK_TO_TRANSFER_FROM = {
 }
 
 
-def _to_serializable(value):
+def _to_serializable(value: Any) -> Any:
+    """Convert tensors/NumPy scalars to JSON-serializable values.
+
+    :param Any value: Value to convert.
+    :return Any: Serializable representation.
+    """
     if isinstance(value, (np.floating, np.integer)):
         return float(value)
     if torch.is_tensor(value):
@@ -84,7 +91,11 @@ def _to_serializable(value):
     return value
 
 
-def _configure_wandb_metrics(accelerator):
+def _configure_wandb_metrics(accelerator: Accelerator) -> None:
+    """Configure W&B metric definitions for GLUE runs.
+
+    :param Accelerator accelerator: Accelerator instance with trackers.
+    """
     for tracker in getattr(accelerator, "trackers", []):
         if tracker.__class__.__name__ != "WandBTracker":
             continue
@@ -104,6 +115,11 @@ def _configure_wandb_metrics(accelerator):
 
 
 def _normalize_metrics_for_scoring(raw_metrics: dict) -> dict[str, float]:
+    """Normalize metric keys for GLUE score calculation.
+
+    :param dict raw_metrics: Raw metric mapping from evaluation.
+    :return dict[str, float]: Normalized metric mapping.
+    """
     normalized: dict[str, float] = {}
     for key, value in (raw_metrics or {}).items():
         if not isinstance(key, str) or not isinstance(value, (int, float)):
@@ -114,7 +130,12 @@ def _normalize_metrics_for_scoring(raw_metrics: dict) -> dict[str, float]:
 
 
 def compute_glue_score(task: str, metrics: dict[str, float]) -> float | None:
-    """Return official GLUE score (averaged where required) for a task."""
+    """Return official GLUE score (averaged where required) for a task.
+
+    :param str task: GLUE task name.
+    :param dict[str, float] metrics: Evaluation metrics for the task.
+    :return float | None: Official GLUE score, if available.
+    """
 
     metric_keys = GLUE_SCORE_SPECS.get(task)
     if not metric_keys:
@@ -139,7 +160,12 @@ def compute_glue_score(task: str, metrics: dict[str, float]) -> float | None:
     return float(sum(values) / len(values))
 
 
-def _update_wandb_config(accelerator, cfg: Config):
+def _update_wandb_config(accelerator: Accelerator, cfg: Config) -> None:
+    """Update W&B run config with GLUE metadata.
+
+    :param Accelerator accelerator: Accelerator instance with trackers.
+    :param Config cfg: Training configuration.
+    """
     metadata = getattr(cfg, "pretraining_metadata", {}) or {}
     glue_task = getattr(cfg.glue, "task_name", getattr(cfg, "task", "glue"))
     glue_max_len = getattr(cfg.glue, "max_seq_length", None)
@@ -170,7 +196,13 @@ def _update_wandb_config(accelerator, cfg: Config):
         break
 
 
-def _save_metrics(output_dir: str, split: str, metrics: dict):
+def _save_metrics(output_dir: str, split: str, metrics: dict[str, Any]) -> None:
+    """Persist evaluation metrics to disk.
+
+    :param str output_dir: Output directory for metrics files.
+    :param str split: Dataset split name.
+    :param dict[str, Any] metrics: Metrics mapping to write.
+    """
     if not metrics:
         return
     path = Path(output_dir)
@@ -181,16 +213,29 @@ def _save_metrics(output_dir: str, split: str, metrics: dict):
 
 
 def get_evaluation(
-    model,
-    dataloader,
-    is_regression,
-    metric=None,
-    accelerator=None,
-    dtype_pad_mask=torch.float32,
-    return_predictions=False,
-    compute_metric=True,
-    flash_attention=False,
-):
+    model: torch.nn.Module,
+    dataloader: DataLoader,
+    is_regression: bool,
+    metric: Any | None = None,
+    accelerator: Accelerator | None = None,
+    dtype_pad_mask: torch.dtype = torch.float32,
+    return_predictions: bool = False,
+    compute_metric: bool = True,
+    flash_attention: bool = False,
+) -> dict[str, Any]:
+    """Run evaluation over a dataloader and return metrics/predictions.
+
+    :param torch.nn.Module model: Model to evaluate.
+    :param DataLoader dataloader: Evaluation dataloader.
+    :param bool is_regression: Whether task is regression.
+    :param Any | None metric: Optional evaluation metric object.
+    :param Accelerator | None accelerator: Accelerator for distributed eval.
+    :param torch.dtype dtype_pad_mask: Dtype for attention mask.
+    :param bool return_predictions: Whether to return predictions tensor.
+    :param bool compute_metric: Whether to compute metric values.
+    :param bool flash_attention: Whether to use flash attention masking.
+    :return dict[str, Any]: Evaluation outputs (metrics, predictions).
+    """
     samples_seen = 0
     # Fix: Use list for efficient accumulation instead of repeated torch.cat
     predictions_list = [] if return_predictions else None
@@ -260,26 +305,40 @@ def get_evaluation(
 
 
 def run_evaluation_and_save(
-    model,
-    eval_dataloader,
-    metric,
-    cfg,
-    accelerator,
-    dtype_pad_mask,
-    is_regression,
-    flash_attention,
-    completed_steps,
-    epoch,
-    train_metric,
-    total_loss,
-    logger,
-    mm_eval_dataloader=None,
-    mm_metric=None,
-):
+    model: torch.nn.Module,
+    eval_dataloader: DataLoader,
+    metric: Any,
+    cfg: Config,
+    accelerator: Accelerator,
+    dtype_pad_mask: torch.dtype,
+    is_regression: bool,
+    flash_attention: bool,
+    completed_steps: int,
+    epoch: int,
+    train_metric: Optional[dict[str, float]],
+    total_loss: float,
+    logger: logging.Logger,
+    mm_eval_dataloader: DataLoader | None = None,
+    mm_metric: Any | None = None,
+) -> tuple[dict[str, float], float, bool]:
     """Run evaluation, log metrics, and save results.
 
-    Returns:
-        tuple: (eval_metric dict, current_accuracy float, should_stop bool)
+    :param torch.nn.Module model: Model to evaluate.
+    :param DataLoader eval_dataloader: Evaluation dataloader.
+    :param Any metric: Metric object for evaluation.
+    :param Config cfg: Training configuration.
+    :param Accelerator accelerator: Accelerator for logging/sync.
+    :param torch.dtype dtype_pad_mask: Dtype for attention mask.
+    :param bool is_regression: Whether task is regression.
+    :param bool flash_attention: Whether to use flash attention masking.
+    :param int completed_steps: Completed training steps.
+    :param int epoch: Current epoch.
+    :param dict[str, float] | None train_metric: Training metric values.
+    :param float total_loss: Running total loss.
+    :param logging.Logger logger: Logger for output.
+    :param DataLoader | None mm_eval_dataloader: MNLI mismatched dataloader.
+    :param Any | None mm_metric: Metric for mismatched evaluation.
+    :return tuple[dict[str, float], float, bool]: Metrics, score, early-stop flag.
     """
     model.eval()
     eval_result = get_evaluation(
@@ -388,7 +447,16 @@ def run_evaluation_and_save(
     return eval_metric, curr_accuracy, False  # Last value is early_stop flag
 
 
-def get_best_checkpoint_path(base_dir, task, num_checkpoints_to_merge=1):
+def get_best_checkpoint_path(
+    base_dir: str, task: str, num_checkpoints_to_merge: int = 1
+) -> tuple[str | None, list[int | None]]:
+    """Select the best checkpoint based on saved evaluation metrics.
+
+    :param str base_dir: Base directory containing GLUE runs.
+    :param str task: GLUE task name.
+    :param int num_checkpoints_to_merge: Number of recent checkpoints to merge.
+    :return tuple[str | None, list[int | None]]: Checkpoint dir and ids.
+    """
     best_accuracy = -float("inf")
     best_checkpoint_path = None
     best_checkpoint = None
@@ -446,17 +514,19 @@ def get_best_checkpoint_path(base_dir, task, num_checkpoints_to_merge=1):
     return best_checkpoint_path, checkpoint_list
 
 
-def load_pretrained_weights(model, checkpoint_dir, checkpoint_id, logger):
+def load_pretrained_weights(
+    model: torch.nn.Module,
+    checkpoint_dir: str,
+    checkpoint_id: int | str,
+    logger: logging.Logger,
+) -> torch.nn.Module:
     """Load pretrained weights from a checkpoint directory.
 
-    Args:
-        model: The model to load weights into
-        checkpoint_dir: Directory containing checkpoint folders
-        checkpoint_id: Specific checkpoint number/name to load
-        logger: Logger for output
-
-    Returns:
-        model with loaded weights
+    :param torch.nn.Module model: Model to load weights into.
+    :param str checkpoint_dir: Directory containing checkpoints.
+    :param int | str checkpoint_id: Checkpoint number or tag to load.
+    :param logging.Logger logger: Logger for output.
+    :return torch.nn.Module: Model with loaded weights.
     """
     checkpoint_path = os.path.join(checkpoint_dir, str(checkpoint_id))
 
@@ -510,14 +580,18 @@ def load_pretrained_weights(model, checkpoint_dir, checkpoint_id, logger):
     return model
 
 
-def save_training_checkpoint(cfg, model, accelerator, completed_steps):
+def save_training_checkpoint(
+    cfg: Config,
+    model: torch.nn.Module,
+    accelerator: Accelerator,
+    completed_steps: int,
+) -> None:
     """Save a training checkpoint during fine-tuning.
 
-    Args:
-        cfg: Configuration object
-        model: Model to save
-        accelerator: Accelerator object
-        completed_steps: Current training step
+    :param Config cfg: Configuration object.
+    :param torch.nn.Module model: Model to save.
+    :param Accelerator accelerator: Accelerator instance.
+    :param int completed_steps: Current training step.
     """
     model_checkpoint_dir = os.path.join(cfg.trainer.output_dir, "model_checkpoints")
 
@@ -556,7 +630,11 @@ def save_training_checkpoint(cfg, model, accelerator, completed_steps):
         )
 
 
-def trainer(cfg: Config):
+def trainer(cfg: Config) -> None:
+    """Run GLUE/SuperGLUE fine-tuning loop.
+
+    :param Config cfg: Training configuration.
+    """
     # Extract task and meta_task from config
     task = cfg.glue.task_name if hasattr(cfg, "glue") else cfg.task
     meta_task = "glue"  # Default for GLUE tasks
@@ -727,7 +805,12 @@ def trainer(cfg: Config):
     elif cfg.task == "allnli":
         raw_datasets = load_dataset("sentence-transformers/all-nli", name="pair-class")
 
-        def collapse_classes(examples):
+        def collapse_classes(examples: dict[str, Any]) -> dict[str, Any]:
+            """Collapse neutral/contradiction into non-entailment.
+
+            :param dict[str, Any] examples: Batched examples.
+            :return dict[str, Any]: Updated examples with collapsed labels.
+            """
             examples["label"] = [
                 1 if label == 2 else label for label in examples["label"]
             ]
@@ -803,7 +886,12 @@ def trainer(cfg: Config):
     if accelerator.mixed_precision == "bf16":
         dtype_pad_mask = torch.bfloat16
 
-    def collate_fn(batch):
+    def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
+        """Apply padding collator and build additive attention mask.
+
+        :param list[dict[str, Any]] batch: Batch of examples.
+        :return dict[str, Any]: Collated batch with attention mask.
+        """
         batch = data_collator(batch)
         batch["attention_mask"] = torch.where(
             batch["attention_mask"] == 1, float(0.0), float("-inf")

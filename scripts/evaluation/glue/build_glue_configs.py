@@ -126,6 +126,11 @@ BASE_SCHEDULER = {
 
 
 def parse_override_value(value: str) -> object:
+    """Parse a CLI override value using YAML rules.
+
+    :param str value: Raw override value string.
+    :return object: Parsed Python value.
+    """
     try:
         parsed = yaml.safe_load(value)
     except yaml.YAMLError:
@@ -134,6 +139,11 @@ def parse_override_value(value: str) -> object:
 
 
 def parse_overrides(entries: Iterable[str]) -> Dict[str, object]:
+    """Parse dotted-path CLI overrides into a nested mapping.
+
+    :param Iterable[str] entries: Override entries in key=value form.
+    :return dict[str, object]: Nested overrides mapping.
+    """
     overrides: Dict[str, object] = {}
     for entry in entries or []:
         if "=" not in entry:
@@ -156,6 +166,11 @@ def parse_overrides(entries: Iterable[str]) -> Dict[str, object]:
 
 
 def apply_overrides(config: Dict[str, object], overrides: Dict[str, object]) -> None:
+    """Apply overrides recursively to a config mapping.
+
+    :param dict[str, object] config: Target configuration mapping.
+    :param dict[str, object] overrides: Override mapping to apply.
+    """
     for key, value in overrides.items():
         if isinstance(value, dict):
             if key not in config or not isinstance(config[key], dict):
@@ -170,7 +185,11 @@ def apply_overrides(config: Dict[str, object], overrides: Dict[str, object]) -> 
 
 
 def slugify(value: str) -> str:
-    """Return a filesystem-friendly slug."""
+    """Return a filesystem-friendly slug.
+
+    :param str value: Raw string to normalize.
+    :return str: Slugified string.
+    """
 
     value = value.strip()
     if not value:
@@ -181,7 +200,12 @@ def slugify(value: str) -> str:
 
 
 def relpath(path: Path, base: Path) -> str:
-    """Return a POSIX path, relative to base when possible."""
+    """Return a POSIX path, relative to base when possible.
+
+    :param Path path: Path to normalize.
+    :param Path base: Base path to relativize against.
+    :return str: POSIX path string.
+    """
 
     try:
         resolved = Path(path).resolve()
@@ -191,7 +215,12 @@ def relpath(path: Path, base: Path) -> str:
 
 
 def find_checkpoint_step(checkpoint_dir: Path, requested_step: Optional[str]) -> str:
-    """Resolve the checkpoint step. If "latest", pick the highest numeric step."""
+    """Resolve the checkpoint step.
+
+    :param Path checkpoint_dir: Directory containing model checkpoints.
+    :param str | None requested_step: Requested step or "latest".
+    :return str: Resolved checkpoint step.
+    """
 
     if requested_step and requested_step != "latest":
         return requested_step
@@ -209,6 +238,11 @@ def find_checkpoint_step(checkpoint_dir: Path, requested_step: Optional[str]) ->
 
 
 def load_pretraining_config(config_path: Path) -> Dict[str, object]:
+    """Load and validate a pretraining config file.
+
+    :param Path config_path: Path to config.yaml.
+    :return dict[str, object]: Parsed configuration mapping.
+    """
     with config_path.open("r") as handle:
         loaded = yaml.safe_load(handle) or {}
     if not isinstance(loaded, dict):
@@ -221,6 +255,13 @@ def load_pretraining_config(config_path: Path) -> Dict[str, object]:
 def build_trainer_section(
     base_output_dir: Path, task_name: str, overrides: Dict[str, object]
 ) -> Dict[str, object]:
+    """Build trainer section for a GLUE task.
+
+    :param Path base_output_dir: Root output directory.
+    :param str task_name: GLUE task name.
+    :param dict[str, object] overrides: Task-specific overrides.
+    :return dict[str, object]: Trainer configuration mapping.
+    """
     trainer_cfg = deepcopy(BASE_TRAINER)
     trainer_cfg.update(overrides)
     trainer_cfg.setdefault("metric_for_best_model", "eval_accuracy")
@@ -231,6 +272,14 @@ def build_trainer_section(
 def build_wandb_section(
     project: str, run_prefix: str, task: str, checkpoint_step: str
 ) -> Dict[str, object]:
+    """Build the W&B section for a GLUE config.
+
+    :param str project: W&B project name.
+    :param str run_prefix: Run name prefix.
+    :param str task: Task name.
+    :param str checkpoint_step: Checkpoint identifier.
+    :return dict[str, object]: W&B configuration mapping.
+    """
     return {
         "project": project,
         "name": f"{run_prefix}-{task}-{checkpoint_step}",
@@ -244,6 +293,14 @@ def build_pretraining_metadata(
     config_path: Path,
     pretrain_config: Dict[str, object],
 ) -> Dict[str, object]:
+    """Build metadata linking GLUE runs to pretraining configs.
+
+    :param Path checkpoint_dir: Pretraining checkpoint directory.
+    :param str checkpoint_step: Checkpoint identifier.
+    :param Path config_path: Pretraining config path.
+    :param dict[str, object] pretrain_config: Pretraining configuration mapping.
+    :return dict[str, object]: Metadata mapping.
+    """
     trainer_cfg = pretrain_config.get("trainer") or {}
     if not isinstance(trainer_cfg, dict):
         trainer_cfg = {}
@@ -275,6 +332,8 @@ def build_pretraining_metadata(
 
 @dataclass
 class BuildArgs:
+    """Arguments for building GLUE configs."""
+
     checkpoint_dir: Path
     checkpoint_step: str
     pretrain_config_path: Path
@@ -287,6 +346,11 @@ class BuildArgs:
 
 
 def build_configs(args: BuildArgs) -> Dict[str, Dict[str, object]]:
+    """Build GLUE configs for the requested tasks.
+
+    :param BuildArgs args: Build settings.
+    :return dict[str, dict[str, object]]: Mapping of task name to config.
+    """
     pretrain_cfg = load_pretraining_config(args.pretrain_config_path)
     tokenizer_cfg = pretrain_cfg.get("tokenizer") or {}
     if not isinstance(tokenizer_cfg, dict):
@@ -367,6 +431,11 @@ def build_configs(args: BuildArgs) -> Dict[str, Dict[str, object]]:
 
 
 def write_configs(configs: Dict[str, Dict[str, object]], output_dir: Path) -> None:
+    """Write configs to YAML files.
+
+    :param dict[str, dict[str, object]] configs: Task configs to write.
+    :param Path output_dir: Output directory for YAML files.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     for task, cfg in configs.items():
         path = output_dir / f"{task}.yaml"
@@ -375,6 +444,10 @@ def write_configs(configs: Dict[str, Dict[str, object]], output_dir: Path) -> No
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for config generation.
+
+    :return argparse.Namespace: Parsed arguments.
+    """
     parser = argparse.ArgumentParser(
         description="Generate GLUE config set for a pretrained checkpoint"
     )
@@ -447,6 +520,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Generate GLUE configs from a pretraining checkpoint."""
     args = parse_args()
 
     checkpoint_dir = args.checkpoint_dir.resolve()

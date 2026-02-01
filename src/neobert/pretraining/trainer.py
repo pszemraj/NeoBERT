@@ -1,3 +1,5 @@
+"""Pretraining loop for masked language modeling."""
+
 import json
 import logging
 import os
@@ -38,11 +40,35 @@ from .metrics import Metrics
 logger = logging.getLogger(__name__)
 
 
+def _count_masked_correct(
+    logits: torch.Tensor, labels: torch.Tensor, ignore_index: int = -100
+) -> int:
+    """Count correct predictions while ignoring masked labels.
+
+    :param torch.Tensor logits: Logits of shape ``[batch, seq_len, vocab]``.
+    :param torch.Tensor labels: Label IDs of shape ``[batch, seq_len]``.
+    :param int ignore_index: Label value to ignore (default: -100).
+    :return int: Number of correct predictions on unmasked tokens.
+    """
+    mask = labels != ignore_index
+    if not mask.any():
+        return 0
+    preds = logits.argmax(dim=-1)
+    return (preds[mask] == labels[mask]).sum().item()
+
+
 def to_target_batch_size(
     batch: BatchEncoding,
     stored_batch: BatchEncoding,
     target_size: int = 8,
-):
+) -> tuple[BatchEncoding, BatchEncoding]:
+    """Adjust batch to a target size by splitting/concatenating.
+
+    :param BatchEncoding batch: Current batch to adjust.
+    :param BatchEncoding stored_batch: Buffered batch fragments.
+    :param int target_size: Target batch size.
+    :return tuple[BatchEncoding, BatchEncoding]: Adjusted batch and buffer.
+    """
     tmp = {}
     batch_size = batch["input_ids"].shape[0]
 
@@ -61,6 +87,8 @@ def to_target_batch_size(
 
     # If the batch is too small, we had some stored_batch
     elif batch_size < target_size:
+        if stored_batch["input_ids"] is None:
+            return batch, stored_batch
         # We have already enough samples stored
         if stored_batch["input_ids"].shape[0] >= target_size - batch_size:
             for key in batch.keys():
@@ -75,7 +103,7 @@ def to_target_batch_size(
                 batch[key] = torch.cat([batch[key], tmp[key][0]], dim=0)
                 stored_batch[key] = tmp[key][1]
                 # Save on CPU to prevent full GPU memory
-                stored_batch[key].to("cpu", non_blocking=True)
+                stored_batch[key] = stored_batch[key].to("cpu", non_blocking=True)
 
         # Concatenate otherwise
         else:
@@ -86,12 +114,17 @@ def to_target_batch_size(
     return batch, stored_batch
 
 
-def trainer(cfg: Config):
+def trainer(cfg: Config) -> None:
+    """Run the pretraining loop.
+
+    :param Config cfg: Training configuration.
+    """
     # Get the last checkpoint id
     checkpoint_dir = os.path.join(cfg.trainer.output_dir, "checkpoints")
     model_checkpoint_dir = os.path.join(cfg.trainer.output_dir, "model_checkpoints")
     os.makedirs(model_checkpoint_dir, exist_ok=True)
     iteration = 0
+    resume_checkpoint_path = None
 
     if (
         cfg.trainer.resume_from_checkpoint
@@ -99,14 +132,18 @@ def trainer(cfg: Config):
         and len(os.listdir(checkpoint_dir)) > 0
     ):
         # This regular expression was taken from accelerator.load_state()
-        folders = os.listdir(checkpoint_dir)
-        iteration = (
-            max(
+        folders = [
+            folder
+            for folder in os.listdir(checkpoint_dir)
+            if os.path.isdir(os.path.join(checkpoint_dir, folder)) and folder.isdigit()
+        ]
+        if folders:
+            latest_step = max(
                 int(re.findall(r"[\/]?([0-9]+)(?=[^\/]*$)", folder)[0])
                 for folder in folders
             )
-            + 1
-        )
+            iteration = latest_step + 1
+            resume_checkpoint_path = os.path.join(checkpoint_dir, str(latest_step))
 
     # Accelerator object - disable automatic checkpointing to avoid duplicate checkpoints/ directory
     project_config = ProjectConfiguration(
@@ -176,6 +213,11 @@ def trainer(cfg: Config):
     # Always use bf16 for mixed precision
     if accelerator.mixed_precision == "bf16":
         dtype_pad_mask = torch.bfloat16
+
+    if cfg.datacollator.pack_sequences:
+        logger.info(
+            "Using packed sequences with block-diagonal attention masks (experimental)."
+        )
 
     # Tokenizer
     tokenizer = get_tokenizer(
@@ -327,6 +369,7 @@ def trainer(cfg: Config):
             )
 
     # Dataloader
+    collator_max_length = cfg.datacollator.max_length or cfg.dataset.max_seq_length
     train_dataloader = get_dataloader(
         train_dataset,
         tokenizer,
@@ -335,6 +378,9 @@ def trainer(cfg: Config):
         num_workers=cfg.dataset.num_workers,
         mlm_probability=cfg.datacollator.mlm_probability,
         pad_to_multiple_of=cfg.datacollator.pad_to_multiple_of,
+        mask_all=cfg.datacollator.mask_all,
+        pack_sequences=cfg.datacollator.pack_sequences,
+        max_length=collator_max_length,
     )
 
     # Model
@@ -447,15 +493,16 @@ def trainer(cfg: Config):
 
     # Resume from the latest checkpoint
     skipped_train_dataloader = None
-    if (
-        cfg.trainer.resume_from_checkpoint
-        and os.path.exists(checkpoint_dir)
-        and len(os.listdir(checkpoint_dir)) > 0
-    ):
-        accelerator.load_state()
+    if cfg.trainer.resume_from_checkpoint and resume_checkpoint_path:
+        accelerator.load_state(resume_checkpoint_path)
         train_dataloader.set_epoch(metrics["train/epochs"])
         skipped_train_dataloader = accelerator.skip_first_batches(
             train_dataloader, metrics["train/batches"] % len(train_dataloader)
+        )
+    elif cfg.trainer.resume_from_checkpoint:
+        logger.warning(
+            "resume_from_checkpoint is set but no valid checkpoints were found in %s",
+            checkpoint_dir,
         )
 
     # Progress bar
@@ -516,20 +563,26 @@ def trainer(cfg: Config):
 
                     # Log metrics
                     metrics["train/local_samples"] += batch["input_ids"].shape[0]
-                    if "attention_mask" in batch.keys():
-                        metrics["train/local_tokens"] += (
-                            (batch["attention_mask"] == 0).sum().item()
-                        )
+                    if (
+                        "attention_mask" in batch.keys()
+                        and batch["attention_mask"] is not None
+                    ):
+                        if batch["attention_mask"].dim() == 2:
+                            metrics["train/local_tokens"] += (
+                                (batch["attention_mask"] == 0).sum().item()
+                            )
+                        else:
+                            metrics["train/local_tokens"] += batch["input_ids"].numel()
                     else:
-                        metrics["train/local_tokens"] += batch["input_ids"].shape[1]
+                        metrics["train/local_tokens"] += batch["input_ids"].numel()
                     metrics["train/local_num_pred"] += (
                         (batch["labels"] != -100).sum().item()
                     )
                     metrics["train/local_sum_loss"] += (
                         train_loss.item() * (batch["labels"] != -100).sum().item()
                     )
-                    metrics["train/local_num_correct"] += (
-                        (logits.argmax(dim=-1) == batch["labels"]).sum().item()
+                    metrics["train/local_num_correct"] += _count_masked_correct(
+                        logits, batch["labels"]
                     )
 
             else:
@@ -589,20 +642,26 @@ def trainer(cfg: Config):
                 pbar.update(1)
                 metrics["train/steps"] += 1
                 metrics["train/local_samples"] += batch["input_ids"].shape[0]
-                if "attention_mask" in batch.keys():
-                    metrics["train/local_tokens"] += (
-                        (batch["attention_mask"] == 0).sum().item()
-                    )
+                if (
+                    "attention_mask" in batch.keys()
+                    and batch["attention_mask"] is not None
+                ):
+                    if batch["attention_mask"].dim() == 2:
+                        metrics["train/local_tokens"] += (
+                            (batch["attention_mask"] == 0).sum().item()
+                        )
+                    else:
+                        metrics["train/local_tokens"] += batch["input_ids"].numel()
                 else:
-                    metrics["train/local_tokens"] += batch["input_ids"].shape[1]
+                    metrics["train/local_tokens"] += batch["input_ids"].numel()
                 metrics["train/local_num_pred"] += (
                     (batch["labels"] != -100).sum().item()
                 )
                 metrics["train/local_sum_loss"] += (
                     train_loss.item() * (batch["labels"] != -100).sum().item()
                 )
-                metrics["train/local_num_correct"] += (
-                    (logits.argmax(dim=-1) == batch["labels"]).sum().item()
+                metrics["train/local_num_correct"] += _count_masked_correct(
+                    logits, batch["labels"]
                 )
 
                 # Update the parameters and the scheduler
@@ -637,8 +696,42 @@ def trainer(cfg: Config):
                     metrics["train/learning_rate"] = optimizer.param_groups[0]["lr"]
                     metrics.log(accelerator)
 
-                # Skip saving accelerator state - we only need model checkpoints
-                # This avoids the duplicate checkpoints/ directory
+                # Save accelerator state for resumable training
+                if metrics["train/steps"] % cfg.trainer.save_steps == 0:
+                    save_total_limit = getattr(cfg.trainer, "save_total_limit", 0)
+                    max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
+                    limit = max(save_total_limit, max_ckpt)
+                    if (
+                        limit > 0
+                        and os.path.exists(checkpoint_dir)
+                        and accelerator.is_main_process
+                    ):
+                        accel_checkpoints = []
+                        for item in os.listdir(checkpoint_dir):
+                            item_path = os.path.join(checkpoint_dir, item)
+                            if os.path.isdir(item_path) and item.isdigit():
+                                accel_checkpoints.append(int(item))
+                        if len(accel_checkpoints) >= limit:
+                            accel_checkpoints.sort()
+                            for old_ckpt in accel_checkpoints[
+                                : len(accel_checkpoints) - limit + 1
+                            ]:
+                                old_path = os.path.join(checkpoint_dir, str(old_ckpt))
+                                if os.path.exists(old_path):
+                                    import shutil
+
+                                    shutil.rmtree(old_path)
+                                    logger.info(
+                                        "Removed old accelerator checkpoint: %s (limit=%s)",
+                                        old_path,
+                                        limit,
+                                    )
+                    accelerator.wait_for_everyone()
+
+                    state_checkpoint_path = os.path.join(
+                        checkpoint_dir, str(metrics["train/steps"])
+                    )
+                    accelerator.save_state(output_dir=state_checkpoint_path)
 
                 # Save the pytorch model
                 if metrics["train/steps"] % cfg.trainer.save_steps == 0:

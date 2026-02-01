@@ -191,11 +191,12 @@ class TestMuonClipOptimizer:
         """Test QK-clipping actually modifies weights."""
         model_instance, config = model
 
-        muon_config = MuonClipConfig(
-            lr=1e-3,
-            enable_clipping=True,
-            clipping_threshold=10.0,  # Very low threshold
-        )
+        with pytest.warns(UserWarning, match="clipping_threshold"):
+            muon_config = MuonClipConfig(
+                lr=1e-3,
+                enable_clipping=True,
+                clipping_threshold=10.0,  # Very low threshold
+            )
 
         optimizer = MuonClipOptimizer(model_instance, config, muon_config)
 

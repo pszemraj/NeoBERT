@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 from neobert.config import (
     Config,
     ConfigLoader,
@@ -73,6 +75,10 @@ class TestConfigSystem(unittest.TestCase):
             "5e-4",
             "--trainer.per_device_train_batch_size",
             "4",
+            "--dataset.streaming",
+            "false",
+            "--datacollator.pack_sequences",
+            "true",
         ]
 
         # Mock sys.argv
@@ -88,6 +94,8 @@ class TestConfigSystem(unittest.TestCase):
             self.assertEqual(
                 config.trainer.per_device_train_batch_size, 4
             )  # Overridden from 2
+            self.assertFalse(config.dataset.streaming)
+            self.assertTrue(config.datacollator.pack_sequences)
 
             # Check that non-overridden values remain the same
             self.assertEqual(config.model.num_hidden_layers, 2)
@@ -184,6 +192,27 @@ optimizer:
 
         self.assertIsInstance(config_dict, dict)
         self.assertEqual(config_dict["model"]["hidden_size"], 128)
+
+    def test_config_save_includes_task_sections(self):
+        """Ensure saved configs include glue and contrastive sections."""
+        config = Config()
+        config.glue.task_name = "sst2"
+        config.contrastive.temperature = 0.1
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            path = f.name
+
+        try:
+            ConfigLoader.save(config, path)
+            with open(path, "r") as fh:
+                data = yaml.safe_load(fh)
+
+            self.assertIn("glue", data)
+            self.assertIn("contrastive", data)
+            self.assertEqual(data["glue"]["task_name"], "sst2")
+            self.assertEqual(data["contrastive"]["temperature"], 0.1)
+        finally:
+            os.unlink(path)
 
     def test_missing_config_file(self):
         """Test handling of missing config file."""
