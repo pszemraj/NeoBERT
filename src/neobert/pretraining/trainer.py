@@ -523,7 +523,7 @@ def trainer(cfg: Config) -> None:
                 )
 
     # Loss function
-    train_loss_fn = CrossEntropyLoss()
+    train_loss_fn = CrossEntropyLoss(reduction="sum")
 
     # Resume from the latest checkpoint
     skipped_train_dataloader = None
@@ -548,6 +548,7 @@ def trainer(cfg: Config) -> None:
         disable=(not accelerator.is_main_process),
     )
 
+    accum_tokens = torch.zeros((), device=accelerator.device)
     while cfg.trainer.max_steps > metrics["train/steps"]:
         # Use skipped_train_dataloader the first epoch after resuming
         dataloader = (
@@ -578,6 +579,8 @@ def trainer(cfg: Config) -> None:
                 stored_batch = batch
                 continue
 
+            num_pred = (batch["labels"] != -100).sum()
+
             # Under the no_sync context manager, PyTorch will skip synchronizing the gradients when .backward() is
             # called, and the first call to .backward() outside this context manager will trigger the synchronization.
             # Accumulating manually gives more flexibility and is compatible with TPUs.
@@ -587,13 +590,14 @@ def trainer(cfg: Config) -> None:
                     logits = model(
                         batch["input_ids"], batch.get("attention_mask", None)
                     )["logits"]
-                    train_loss = train_loss_fn(
+                    loss_sum = train_loss_fn(
                         logits.view(-1, model_config.vocab_size),
                         batch["labels"].view(-1),
                     )
 
                     # Compute gradient
-                    accelerator.backward(train_loss)
+                    accelerator.backward(loss_sum)
+                    accum_tokens += num_pred
 
                     # Log metrics
                     metrics["train/local_samples"] += batch["input_ids"].shape[0]
@@ -609,12 +613,8 @@ def trainer(cfg: Config) -> None:
                             metrics["train/local_tokens"] += batch["input_ids"].numel()
                     else:
                         metrics["train/local_tokens"] += batch["input_ids"].numel()
-                    metrics["train/local_num_pred"] += (
-                        (batch["labels"] != -100).sum().item()
-                    )
-                    metrics["train/local_sum_loss"] += (
-                        train_loss.item() * (batch["labels"] != -100).sum().item()
-                    )
+                    metrics["train/local_num_pred"] += num_pred.item()
+                    metrics["train/local_sum_loss"] += loss_sum.item()
                     metrics["train/local_num_correct"] += _count_masked_correct(
                         logits, batch["labels"]
                     )
@@ -624,12 +624,28 @@ def trainer(cfg: Config) -> None:
                 logits = model(batch["input_ids"], batch.get("attention_mask", None))[
                     "logits"
                 ]
-                train_loss = train_loss_fn(
+                loss_sum = train_loss_fn(
                     logits.view(-1, model_config.vocab_size), batch["labels"].view(-1)
                 )
 
                 # Compute gradient
-                accelerator.backward(train_loss)
+                accelerator.backward(loss_sum)
+                accum_tokens += num_pred
+
+                tokens_global = accelerator.reduce(accum_tokens, reduction="sum")
+                if tokens_global.item() > 0:
+                    # Match full-batch normalization across variable-length microbatches.
+                    scale = (
+                        accelerator.num_processes
+                        * accelerator.gradient_accumulation_steps
+                    ) / tokens_global.float()
+                    for param in model.parameters():
+                        if param.grad is not None:
+                            param.grad.mul_(scale)
+                else:
+                    for param in model.parameters():
+                        if param.grad is not None:
+                            param.grad.zero_()
 
                 # Measure gradient norm prior to optional clipping so we always log it
                 grad_norm_value = None
@@ -688,12 +704,8 @@ def trainer(cfg: Config) -> None:
                         metrics["train/local_tokens"] += batch["input_ids"].numel()
                 else:
                     metrics["train/local_tokens"] += batch["input_ids"].numel()
-                metrics["train/local_num_pred"] += (
-                    (batch["labels"] != -100).sum().item()
-                )
-                metrics["train/local_sum_loss"] += (
-                    train_loss.item() * (batch["labels"] != -100).sum().item()
-                )
+                metrics["train/local_num_pred"] += num_pred.item()
+                metrics["train/local_sum_loss"] += loss_sum.item()
                 metrics["train/local_num_correct"] += _count_masked_correct(
                     logits, batch["labels"]
                 )
@@ -701,6 +713,7 @@ def trainer(cfg: Config) -> None:
                 # Update the parameters and the scheduler
                 optimizer.step()
                 scheduler.step()
+                accum_tokens.zero_()
 
                 if metrics["train/steps"] % cfg.wandb.log_interval == 0:
                     if grad_norm_value is not None:
