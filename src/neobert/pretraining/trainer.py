@@ -93,6 +93,13 @@ def to_target_batch_size(
         # We have already enough samples stored
         if stored_batch["input_ids"].shape[0] >= target_size - batch_size:
             for key in batch.keys():
+                if stored_batch[key] is None:
+                    continue
+                if stored_batch[key].device != batch[key].device:
+                    stored_batch[key] = stored_batch[key].to(
+                        batch[key].device, non_blocking=True
+                    )
+            for key in batch.keys():
                 tmp[key] = torch.split(
                     stored_batch[key],
                     [
@@ -109,6 +116,12 @@ def to_target_batch_size(
         # Concatenate otherwise
         else:
             for key in batch.keys():
+                if stored_batch[key] is None:
+                    continue
+                if stored_batch[key].device != batch[key].device:
+                    stored_batch[key] = stored_batch[key].to(
+                        batch[key].device, non_blocking=True
+                    )
                 batch[key] = torch.cat([batch[key], stored_batch[key]], dim=0)
                 stored_batch[key] = None
 
