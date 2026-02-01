@@ -352,6 +352,7 @@ def trainer(cfg: Config) -> None:
     optimizer = get_optimizer(
         model,
         accelerator.distributed_type,
+        model_config=model_config,
         name=cfg.optimizer.name,
         lr=cfg.optimizer.lr,
         weight_decay=cfg.optimizer.weight_decay,

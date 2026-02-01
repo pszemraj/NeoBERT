@@ -4,6 +4,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import torch
 
@@ -199,6 +200,68 @@ class TestContrastivePipeline(unittest.TestCase):
                 self.skipTest(f"Expected dataset/network error: {e}")
             else:
                 raise e
+
+    def test_muonclip_trainer_passes_model_config(self):
+        """Ensure MuonClip optimizer receives a model config in trainer."""
+        config = ConfigLoader.load(str(self.test_config_path))
+        config.dataset.path = self.temp_dir
+        config.optimizer.name = "muonclip"
+        config.trainer.max_steps = 0
+        config.wandb.mode = "disabled"
+
+        try:
+            from datasets import Dataset, DatasetDict
+            from tokenizers import Tokenizer, models, pre_tokenizers
+            from transformers import PreTrainedTokenizerFast
+
+            from neobert.contrastive.trainer import trainer
+
+            dataset_dict = DatasetDict({"ALLNLI": Dataset.from_dict({"dummy": ["x"]})})
+            pretraining_dataset = Dataset.from_dict({"dummy": ["x"]})
+
+            def _fake_load_from_disk(path: str):
+                if path.endswith("all"):
+                    return dataset_dict
+                return pretraining_dataset
+
+            def _make_tokenizer() -> PreTrainedTokenizerFast:
+                vocab = {"[PAD]": 0, "[UNK]": 1, "hello": 2}
+                tokenizer = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
+                tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+                return PreTrainedTokenizerFast(
+                    tokenizer_object=tokenizer,
+                    pad_token="[PAD]",
+                    unk_token="[UNK]",
+                )
+
+            captured = {}
+
+            def _fake_get_optimizer(
+                model, distributed_type, model_config=None, **kwargs
+            ):
+                captured["model_config"] = model_config
+                return torch.optim.Adam(model.parameters(), lr=1e-3)
+
+            with (
+                mock.patch(
+                    "neobert.contrastive.trainer.load_from_disk",
+                    side_effect=_fake_load_from_disk,
+                ),
+                mock.patch(
+                    "neobert.contrastive.trainer.get_tokenizer",
+                    return_value=_make_tokenizer(),
+                ),
+                mock.patch(
+                    "neobert.contrastive.trainer.get_optimizer",
+                    side_effect=_fake_get_optimizer,
+                ),
+            ):
+                trainer(config)
+
+            self.assertIsNotNone(captured.get("model_config"))
+
+        except ImportError as e:
+            self.skipTest(f"Contrastive trainer dependencies unavailable: {e}")
 
     def test_contrastive_metrics(self):
         """Test contrastive learning metrics."""
