@@ -14,6 +14,7 @@ Core documentation for training, evaluating, and using NeoBERT models.
 - **[Architecture](architecture.md)** - Model architecture details
 - **[Testing](testing.md)** - Running the test suite
 - **[Troubleshooting](troubleshooting.md)** - Common issues and solutions
+- **[Dev Notes](dev.md)** - Known limitations and roadmap items
 
 ## Quick Links
 

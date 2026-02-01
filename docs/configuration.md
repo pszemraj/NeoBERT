@@ -125,7 +125,12 @@ tokenizer.vocab_size: int | None = None
 ```
 datacollator.mlm_probability: float = 0.15
 datacollator.pad_to_multiple_of: int | None = None
+datacollator.mask_all: bool = False
+datacollator.pack_sequences: bool = False
+datacollator.max_length: int | None = None
 ```
+
+Note: `pack_sequences` is not supported in pretraining yet. See `docs/dev.md` for the current roadmap.
 
 ### Trainer (`trainer`)
 
