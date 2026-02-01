@@ -605,6 +605,7 @@ def trainer(cfg: Config) -> None:
                         "attention_mask" in batch.keys()
                         and batch["attention_mask"] is not None
                     ):
+                        # Packed sequences use a 3D block mask; fall back to counting tokens directly.
                         if batch["attention_mask"].dim() == 2:
                             metrics["train/local_tokens"] += (
                                 (batch["attention_mask"] == 0).sum().item()
@@ -635,6 +636,10 @@ def trainer(cfg: Config) -> None:
                 tokens_global = accelerator.reduce(accum_tokens, reduction="sum")
                 if tokens_global.item() > 0:
                     # Match full-batch normalization across variable-length microbatches.
+                    # accelerator.backward() already divides by grad_accumulation_steps, and DDP averages
+                    # across processes, so we rescale by (num_processes * grad_accum_steps) / tokens_global
+                    # to recover per-token mean gradients for the global batch size.
+                    # Ref: Unsloth blog (archived) https://archive.ph/RmO0U
                     scale = (
                         accelerator.num_processes
                         * accelerator.gradient_accumulation_steps
@@ -696,6 +701,7 @@ def trainer(cfg: Config) -> None:
                     "attention_mask" in batch.keys()
                     and batch["attention_mask"] is not None
                 ):
+                    # Packed sequences use a 3D block mask; fall back to counting tokens directly.
                     if batch["attention_mask"].dim() == 2:
                         metrics["train/local_tokens"] += (
                             (batch["attention_mask"] == 0).sum().item()
