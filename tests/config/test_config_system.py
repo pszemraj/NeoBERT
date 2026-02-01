@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 
 import yaml
+from tokenizers import Tokenizer, models, pre_tokenizers
+from transformers import PreTrainedTokenizerFast
 
 from neobert.config import (
     Config,
@@ -19,6 +21,7 @@ from neobert.config import (
     TokenizerConfig,
     TrainerConfig,
     load_config_from_args,
+    round_up_to_multiple,
 )
 
 
@@ -213,6 +216,32 @@ optimizer:
             self.assertEqual(data["contrastive"]["temperature"], 0.1)
         finally:
             os.unlink(path)
+
+    def test_preprocess_uses_tokenizer_path(self):
+        """Ensure tokenizer path is preferred when provided."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            vocab = {"[PAD]": 0, "[UNK]": 1, "[MASK]": 2, "hello": 3}
+            raw_tokenizer = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
+            raw_tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+            tokenizer = PreTrainedTokenizerFast(
+                tokenizer_object=raw_tokenizer,
+                pad_token="[PAD]",
+                unk_token="[UNK]",
+                mask_token="[MASK]",
+            )
+            tokenizer.save_pretrained(tmpdir)
+
+            config = Config()
+            config.trainer.use_cpu = False
+            config.tokenizer.name = "non-existent-tokenizer"
+            config.tokenizer.path = tmpdir
+            config.tokenizer.vocab_size = len(tokenizer)
+            config.model.vocab_size = len(tokenizer)
+
+            processed = ConfigLoader.preprocess_config(config)
+
+            expected_vocab_size = round_up_to_multiple(len(tokenizer), 128)
+            self.assertEqual(processed.model.vocab_size, expected_vocab_size)
 
     def test_missing_config_file(self):
         """Test handling of missing config file."""

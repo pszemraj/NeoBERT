@@ -761,8 +761,12 @@ def trainer(cfg: Config) -> None:
         if pretrained_config_path:
             model_pretraining_config = ConfigLoader.load(pretrained_config_path)
             model_pretraining_config.model.flash_attention = flash_attention
+            tokenizer_source = (
+                model_pretraining_config.tokenizer.path
+                or model_pretraining_config.tokenizer.name
+            )
             tokenizer = get_tokenizer(
-                pretrained_model_name_or_path=model_pretraining_config.tokenizer.name,
+                pretrained_model_name_or_path=tokenizer_source,
                 max_length=model_pretraining_config.tokenizer.max_length,
             )
         else:
