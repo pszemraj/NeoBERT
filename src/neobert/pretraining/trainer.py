@@ -701,7 +701,11 @@ def trainer(cfg: Config) -> None:
                     save_total_limit = getattr(cfg.trainer, "save_total_limit", 0)
                     max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
                     limit = max(save_total_limit, max_ckpt)
-                    if limit > 0 and os.path.exists(checkpoint_dir):
+                    if (
+                        limit > 0
+                        and os.path.exists(checkpoint_dir)
+                        and accelerator.is_main_process
+                    ):
                         accel_checkpoints = []
                         for item in os.listdir(checkpoint_dir):
                             item_path = os.path.join(checkpoint_dir, item)
@@ -717,12 +721,12 @@ def trainer(cfg: Config) -> None:
                                     import shutil
 
                                     shutil.rmtree(old_path)
-                                    if accelerator.is_main_process:
-                                        logger.info(
-                                            "Removed old accelerator checkpoint: %s (limit=%s)",
-                                            old_path,
-                                            limit,
-                                        )
+                                    logger.info(
+                                        "Removed old accelerator checkpoint: %s (limit=%s)",
+                                        old_path,
+                                        limit,
+                                    )
+                    accelerator.wait_for_everyone()
 
                     state_checkpoint_path = os.path.join(
                         checkpoint_dir, str(metrics["train/steps"])
