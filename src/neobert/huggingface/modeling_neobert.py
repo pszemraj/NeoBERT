@@ -534,7 +534,24 @@ class NeoBERT(NeoBERTPreTrainedModel):
         # Shape: (batch, seq_len) -> (batch, heads, seq_len, seq_len)
         # SDPA expects a bool mask where True entries are masked.
         if attention_mask is not None:
-            if attention_mask.dtype is not torch.bool:
+            if attention_mask.dtype is torch.bool:
+                # Bool masks are ambiguous; prefer HF semantics (True = keep).
+                if (
+                    input_ids is not None
+                    and self.config.pad_token_id is not None
+                    and attention_mask.shape == input_ids.shape
+                ):
+                    pad_positions = input_ids == self.config.pad_token_id
+                    if torch.equal(attention_mask, pad_positions):
+                        # Already in "True = masked" form.
+                        pass
+                    elif torch.equal(attention_mask, ~pad_positions):
+                        attention_mask = ~attention_mask
+                    elif attention_mask.float().mean() > 0.5:
+                        attention_mask = ~attention_mask
+                else:
+                    attention_mask = ~attention_mask
+            else:
                 # Accept HF-style 1/0 masks as well as additive 0/-inf masks.
                 if attention_mask.min() < 0:
                     attention_mask = attention_mask < 0
