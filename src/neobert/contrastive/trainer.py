@@ -249,12 +249,13 @@ def trainer(cfg: Config) -> None:
     }
 
     # Model
+    max_length = cfg.tokenizer.max_length or cfg.model.max_position_embeddings
     model_config = NeoBERTConfig(
         hidden_size=cfg.model.hidden_size,
         num_hidden_layers=cfg.model.num_hidden_layers,
         num_attention_heads=cfg.model.num_attention_heads,
         intermediate_size=cfg.model.intermediate_size,
-        max_position_embeddings=cfg.model.max_position_embeddings,
+        max_length=max_length,
         vocab_size=cfg.model.vocab_size,
         rope=cfg.model.rope,
         rms_norm=cfg.model.rms_norm,
