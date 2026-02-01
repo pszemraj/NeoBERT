@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 from neobert.config import (
     Config,
     ConfigLoader,
@@ -184,6 +186,27 @@ optimizer:
 
         self.assertIsInstance(config_dict, dict)
         self.assertEqual(config_dict["model"]["hidden_size"], 128)
+
+    def test_config_save_includes_task_sections(self):
+        """Ensure saved configs include glue and contrastive sections."""
+        config = Config()
+        config.glue.task_name = "sst2"
+        config.contrastive.temperature = 0.1
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            path = f.name
+
+        try:
+            ConfigLoader.save(config, path)
+            with open(path, "r") as fh:
+                data = yaml.safe_load(fh)
+
+            self.assertIn("glue", data)
+            self.assertIn("contrastive", data)
+            self.assertEqual(data["glue"]["task_name"], "sst2")
+            self.assertEqual(data["contrastive"]["temperature"], 0.1)
+        finally:
+            os.unlink(path)
 
     def test_missing_config_file(self):
         """Test handling of missing config file."""
