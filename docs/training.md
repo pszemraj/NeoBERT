@@ -36,6 +36,18 @@ python scripts/pretraining/pretrain.py \
   --trainer.max_steps 100000
 ```
 
+### CLI-only Smoke Run (No Custom YAML)
+
+```bash
+# Short smoke test without writing a new config file
+python scripts/pretraining/pretrain.py \
+  --config configs/pretraining/pretrain_smoke.yaml \
+  --dataset.streaming false \
+  --datacollator.pack_sequences false \
+  --trainer.max_steps 50 \
+  --wandb.mode offline
+```
+
 ### Configuration Highlights
 
 See [docs/configuration.md](configuration.md) for the full schema. Key knobs used during pretraining:
