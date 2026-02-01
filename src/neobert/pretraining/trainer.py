@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+from typing import Callable
 
 # PyTorch
 import torch
@@ -17,7 +18,7 @@ from accelerate.utils import (
 )
 
 # Hugging Face
-from datasets import load_dataset, load_from_disk
+from datasets import Dataset, load_dataset, load_from_disk
 
 # Deepspeed
 from deepspeed.utils import safe_get_full_fp32_param
@@ -112,6 +113,29 @@ def to_target_batch_size(
                 stored_batch[key] = None
 
     return batch, stored_batch
+
+
+def _maybe_shuffle_streaming_dataset(
+    dataset: Dataset,
+    buffer_size: int,
+    seed: int,
+    print_fn: Callable[[str], None] | None = None,
+) -> Dataset:
+    """Shuffle a streaming dataset if a positive buffer size is configured.
+
+    :param Dataset dataset: Dataset to shuffle.
+    :param int buffer_size: Shuffle buffer size.
+    :param int seed: Random seed for deterministic shuffling.
+    :param callable | None print_fn: Optional logging callback.
+    :return Dataset: Shuffled dataset (or the original dataset if no shuffle is applied).
+    """
+    if buffer_size <= 0 or not hasattr(dataset, "shuffle"):
+        return dataset
+
+    shuffled = dataset.shuffle(buffer_size=buffer_size, seed=seed)
+    if print_fn is not None:
+        print_fn(f"Added shuffle buffer with size {buffer_size}")
+    return shuffled
 
 
 def trainer(cfg: Config) -> None:
@@ -352,21 +376,18 @@ def trainer(cfg: Config) -> None:
             )
         if cfg.dataset.streaming:
             accelerator.print("Tokenization setup complete for streaming dataset.")
-            # Add shuffle buffer for streaming datasets
-            if (
-                hasattr(cfg.dataset, "shuffle_buffer_size")
-                and cfg.dataset.shuffle_buffer_size > 0
-            ):
-                train_dataset = train_dataset.shuffle(
-                    buffer_size=cfg.dataset.shuffle_buffer_size, seed=cfg.trainer.seed
-                )
-                accelerator.print(
-                    f"Added shuffle buffer with size {cfg.dataset.shuffle_buffer_size}"
-                )
         else:
             accelerator.print(
                 f"Tokenization complete. Dataset size: {len(train_dataset)}"
             )
+
+    if cfg.dataset.streaming and hasattr(cfg.dataset, "shuffle_buffer_size"):
+        train_dataset = _maybe_shuffle_streaming_dataset(
+            train_dataset,
+            cfg.dataset.shuffle_buffer_size,
+            cfg.trainer.seed,
+            print_fn=accelerator.print,
+        )
 
     # Dataloader
     collator_max_length = cfg.datacollator.max_length or cfg.dataset.max_seq_length
