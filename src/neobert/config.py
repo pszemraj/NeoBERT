@@ -420,6 +420,7 @@ class ConfigLoader:
         """Preprocess and validate config, resolving any dynamic values.
 
         This should be called after config loading but before any downstream consumers.
+        Note: this mutates ``config`` in-place and may load tokenizers/datasets.
 
         :param Config config: Configuration to preprocess.
         :return Config: Preprocessed configuration.

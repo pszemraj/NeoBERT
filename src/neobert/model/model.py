@@ -1,5 +1,9 @@
 """NeoBERT model architecture and task heads."""
 
+# NOTE: Hugging Face export/inference uses ``neobert/huggingface/modeling_neobert.py`` with
+# different attention backends. Keep core math consistent when updating either path.
+# Typing coverage here is incremental; prefer correctness/clarity over exhaustive hints.
+
 # From https://stackoverflow.com/a/23689767
 # From https://github.com/pytorch/pytorch/issues/97899
 # From https://github.com/facebookresearch/llama/blob/main/llama/model.py
@@ -283,6 +287,8 @@ class EncoderBlock(nn.Module):
                 raise ImportError(
                     "Flash attention requires xformers. Install with: pip install xformers"
                 )
+            # xFormers expects attn_bias shaped [B, H, S, S]; non-multiple-of-8 S is supported
+            # but may be slower on some GPUs.
             attn = memory_efficient_attention(
                 query=xq, key=xk, value=xv, attn_bias=pad_mask, p=0
             )
@@ -457,6 +463,8 @@ class NormEncoderBlock(nn.Module):
                 raise ImportError(
                     "Flash attention requires xformers. Install with: pip install xformers"
                 )
+            # xFormers expects attn_bias shaped [B, H, S, S]; non-multiple-of-8 S is supported
+            # but may be slower on some GPUs.
             attn = memory_efficient_attention(
                 query=xq, key=xk, value=xv, attn_bias=pad_mask, p=0, scale=softmax_scale
             )

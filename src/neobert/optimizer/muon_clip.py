@@ -296,6 +296,8 @@ class NeoBERTAttentionHooks:
             x = inputs[0]
             if not torch.is_tensor(x):
                 return
+            # During gradient accumulation, we intentionally keep only the latest
+            # microbatch activation to bound memory/compute overhead.
             self.layer_inputs[layer_idx] = x.detach()
 
         return hook_fn
@@ -745,6 +747,8 @@ class MuonClipOptimizer(Optimizer):
 
         # RMS scaling for Adam lr compatibility
         # Factor: 0.4 * sqrt(max_dim)
+        # Polar Express heuristic scaling coefficient (see paper appendix).
+        # Polar Express heuristic scaling coefficient (see paper appendix).
         scale_factor = 0.4 * max(working.size(0), working.size(1)) ** 0.5
         X = scale_factor * X
 
@@ -829,6 +833,7 @@ class MuonClipOptimizer(Optimizer):
             (1.875000000000000, -1.250000000000000, 0.375000000000000),
         ]
 
+        # Dampening factor from Polar Express implementation; keeps updates stable.
         dampening_factor = 1.01
         coeffs = [
             (
@@ -844,6 +849,15 @@ class MuonClipOptimizer(Optimizer):
             result = coeffs[:steps]
             cache[steps] = result
             return result
+
+        if not getattr(self, "_warned_polar_coeff_extrapolation", False):
+            logger.warning(
+                "Polar Express coefficients defined for %s steps; repeating final "
+                "coefficient for steps=%s. Consider lowering ns_steps.",
+                len(coeffs),
+                steps,
+            )
+            self._warned_polar_coeff_extrapolation = True
 
         coeffs.extend([coeffs[-1]] * (steps - len(coeffs)))
         cache[steps] = coeffs

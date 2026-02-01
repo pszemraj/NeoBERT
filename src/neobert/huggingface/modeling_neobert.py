@@ -11,6 +11,10 @@ Architecture Features:
 - Flash Attention support for efficient long-context processing
 
 Based on: https://github.com/facebookresearch/llama/blob/main/llama/model.py
+
+NOTE: The training-time implementation lives in ``src/neobert/model/model.py`` and
+uses xFormers for flash attention. This HF variant targets export/inference APIs
+and may use different attention backends; keep the math consistent when editing.
 """
 
 from typing import Any, Dict, List, Optional, Union
@@ -526,11 +530,16 @@ class NeoBERT(NeoBERTPreTrainedModel):
         # Initialize containers for outputs
         hidden_states, attentions = [], []
 
-        # Prepare attention mask for multi-head attention
+        # Prepare attention mask for multi-head attention.
         # Shape: (batch, seq_len) -> (batch, heads, seq_len, seq_len)
         # SDPA expects a bool mask where True entries are masked.
         if attention_mask is not None:
-            attention_mask = attention_mask == 0
+            if attention_mask.dtype is not torch.bool:
+                # Accept HF-style 1/0 masks as well as additive 0/-inf masks.
+                if attention_mask.min() < 0:
+                    attention_mask = attention_mask < 0
+                else:
+                    attention_mask = attention_mask == 0
             attention_mask = (
                 attention_mask.unsqueeze(1)
                 .unsqueeze(2)

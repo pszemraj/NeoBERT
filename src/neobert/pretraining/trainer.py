@@ -633,6 +633,7 @@ def trainer(cfg: Config) -> None:
                 accelerator.backward(loss_sum)
                 accum_tokens += num_pred
 
+                # Reduce to global token count to handle uneven sharding across ranks.
                 tokens_global = accelerator.reduce(accum_tokens, reduction="sum")
                 if tokens_global.item() > 0:
                     # Match full-batch normalization across variable-length microbatches.
@@ -883,6 +884,7 @@ def trainer(cfg: Config) -> None:
 
         # For streaming datasets, update the epoch to ensure different shuffling
         if cfg.dataset.streaming and hasattr(train_dataset, "set_epoch"):
+            # Called after epoch increment so the next epoch uses the new seed.
             train_dataset.set_epoch(metrics["train/epochs"])
             accelerator.print(
                 f"Set streaming dataset epoch to {metrics['train/epochs']}"

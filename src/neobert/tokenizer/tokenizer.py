@@ -75,6 +75,11 @@ def get_tokenizer(
         tokenizer.add_special_tokens(special_tokens)
 
         # Update the processor to add <eos> and <bos> tokens
+        if tokenizer._tokenizer.post_processor is not None:
+            logger.warning(
+                "Overriding existing tokenizer post_processor to enforce MLM-style "
+                "special tokens; custom post-processing will be replaced."
+            )
         tokenizer._tokenizer.post_processor = TemplateProcessing(
             single=tokenizer.bos_token + " $A " + tokenizer.eos_token,
             pair=tokenizer.bos_token

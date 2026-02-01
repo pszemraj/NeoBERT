@@ -187,6 +187,38 @@ class TestModelForward(unittest.TestCase):
         pad_mask = pad_mask.unsqueeze(1).unsqueeze(2).expand_as(attn_weights)
         self.assertLess(attn_weights.masked_select(pad_mask).max().item(), 1e-6)
 
+    def test_hf_additive_attention_mask_supported(self):
+        """Ensure additive 0/-inf masks are accepted in HF model."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=16,
+            flash_attention=False,
+        )
+        model = NeoBERT(config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 0, 0], [4, 5, 6, 7, 8]])
+        attention_mask = torch.tensor([[1, 1, 1, 0, 0], [1, 1, 1, 1, 1]])
+        additive_mask = torch.where(attention_mask == 1, float(0.0), float("-inf"))
+
+        with torch.no_grad():
+            outputs_bool = model(input_ids=input_ids, attention_mask=attention_mask)
+            outputs_add = model(input_ids=input_ids, attention_mask=additive_mask)
+
+        self.assertTrue(
+            torch.allclose(
+                outputs_bool.last_hidden_state,
+                outputs_add.last_hidden_state,
+                atol=1e-6,
+            )
+        )
+
     def test_rope_vs_positional_embeddings(self):
         """Test both RoPE and positional embedding modes."""
         # Test with RoPE (default)

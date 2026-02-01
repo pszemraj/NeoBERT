@@ -334,6 +334,7 @@ def trainer(cfg: Config) -> None:
             with accelerator.no_sync(model):
                 # Forward pass
                 logits = model(batch["input_ids"], pad_mask)["logits"]
+                # cfg.tokenizer.vocab_size is updated to the rounded model vocab earlier.
                 train_loss = train_loss_fn(
                     logits.view(-1, cfg.tokenizer.vocab_size), batch["labels"].view(-1)
                 )
@@ -357,6 +358,7 @@ def trainer(cfg: Config) -> None:
         else:
             # Forward pass
             logits = model(batch["input_ids"], pad_mask)["logits"]
+            # cfg.tokenizer.vocab_size is updated to the rounded model vocab earlier.
             train_loss = train_loss_fn(
                 logits.view(-1, cfg.tokenizer.vocab_size), batch["labels"].view(-1)
             )

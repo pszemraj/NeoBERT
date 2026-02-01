@@ -333,6 +333,8 @@ def trainer(cfg: Config) -> None:
                     "Set pretrained_checkpoint_dir or enable DeepSpeed loading."
                 )
             state_dict = torch.load(state_dict_path, map_location="cpu")
+            # NOTE: We allow partial loads for flexibility; checkpoint/config mismatches
+            # are not validated beyond this strict=False load.
             model.load_state_dict(state_dict, strict=False)
     elif allow_random_weights:
         logger.warning(

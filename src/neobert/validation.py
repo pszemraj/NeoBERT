@@ -1,4 +1,7 @@
-"""Configuration validation for NeoBERT training and evaluation."""
+"""Configuration validation for NeoBERT training and evaluation.
+
+Legacy shim: prefer ``neobert.validation.validators`` for canonical validation logic.
+"""
 
 from typing import Any
 
