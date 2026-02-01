@@ -40,6 +40,23 @@ from .metrics import Metrics
 logger = logging.getLogger(__name__)
 
 
+def _count_masked_correct(
+    logits: torch.Tensor, labels: torch.Tensor, ignore_index: int = -100
+) -> int:
+    """Count correct predictions while ignoring masked labels.
+
+    :param torch.Tensor logits: Logits of shape ``[batch, seq_len, vocab]``.
+    :param torch.Tensor labels: Label IDs of shape ``[batch, seq_len]``.
+    :param int ignore_index: Label value to ignore (default: -100).
+    :return int: Number of correct predictions on unmasked tokens.
+    """
+    mask = labels != ignore_index
+    if not mask.any():
+        return 0
+    preds = logits.argmax(dim=-1)
+    return (preds[mask] == labels[mask]).sum().item()
+
+
 def to_target_batch_size(
     batch: BatchEncoding,
     stored_batch: BatchEncoding,
@@ -197,6 +214,13 @@ def trainer(cfg: Config) -> None:
     if accelerator.mixed_precision == "bf16":
         dtype_pad_mask = torch.bfloat16
 
+    if cfg.datacollator.pack_sequences:
+        raise NotImplementedError(
+            "datacollator.pack_sequences is not supported in pretraining yet. "
+            "Packed sequences require block-diagonal attention or FlashAttention varlen kernels. "
+            "See docs/dev.md for the current roadmap."
+        )
+
     # Tokenizer
     tokenizer = get_tokenizer(
         pretrained_model_name_or_path=cfg.tokenizer.name,
@@ -347,6 +371,7 @@ def trainer(cfg: Config) -> None:
             )
 
     # Dataloader
+    collator_max_length = cfg.datacollator.max_length or cfg.dataset.max_seq_length
     train_dataloader = get_dataloader(
         train_dataset,
         tokenizer,
@@ -355,6 +380,9 @@ def trainer(cfg: Config) -> None:
         num_workers=cfg.dataset.num_workers,
         mlm_probability=cfg.datacollator.mlm_probability,
         pad_to_multiple_of=cfg.datacollator.pad_to_multiple_of,
+        mask_all=cfg.datacollator.mask_all,
+        pack_sequences=cfg.datacollator.pack_sequences,
+        max_length=collator_max_length,
     )
 
     # Model
@@ -549,8 +577,8 @@ def trainer(cfg: Config) -> None:
                     metrics["train/local_sum_loss"] += (
                         train_loss.item() * (batch["labels"] != -100).sum().item()
                     )
-                    metrics["train/local_num_correct"] += (
-                        (logits.argmax(dim=-1) == batch["labels"]).sum().item()
+                    metrics["train/local_num_correct"] += _count_masked_correct(
+                        logits, batch["labels"]
                     )
 
             else:
@@ -622,8 +650,8 @@ def trainer(cfg: Config) -> None:
                 metrics["train/local_sum_loss"] += (
                     train_loss.item() * (batch["labels"] != -100).sum().item()
                 )
-                metrics["train/local_num_correct"] += (
-                    (logits.argmax(dim=-1) == batch["labels"]).sum().item()
+                metrics["train/local_num_correct"] += _count_masked_correct(
+                    logits, batch["labels"]
                 )
 
                 # Update the parameters and the scheduler

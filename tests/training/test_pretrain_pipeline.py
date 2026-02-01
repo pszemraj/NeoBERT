@@ -230,6 +230,25 @@ class TestPretrainComponents(unittest.TestCase):
             else:
                 raise
 
+    def test_masked_correct_count(self):
+        """Test masked accuracy counting ignores -100 labels."""
+        from neobert.pretraining.trainer import _count_masked_correct
+
+        logits = torch.tensor([[[0.1, 0.2, 0.7], [0.9, 0.1, 0.0]]])
+        labels = torch.tensor([[2, -100]])
+        self.assertEqual(_count_masked_correct(logits, labels), 1)
+
+    def test_pack_sequences_not_supported(self):
+        """Ensure pack_sequences fails fast with a clear error."""
+        config = ConfigLoader.load(str(self.test_config_path))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config.trainer.output_dir = temp_dir
+            config.wandb.mode = "disabled"
+            config.datacollator.pack_sequences = True
+
+            with self.assertRaisesRegex(NotImplementedError, "pack_sequences"):
+                trainer(config)
+
     def test_to_target_batch_size_handles_empty_buffer(self):
         """Ensure batch packing handles empty buffers without crashing."""
         from neobert.pretraining.trainer import to_target_batch_size

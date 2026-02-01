@@ -171,6 +171,9 @@ class DataCollatorConfig:
 
     mlm_probability: float = 0.15
     pad_to_multiple_of: Optional[int] = None
+    mask_all: bool = False
+    pack_sequences: bool = False
+    max_length: Optional[int] = None
 
 
 @dataclass
@@ -504,6 +507,8 @@ class ConfigLoader:
             "trainer": asdict(config.trainer),
             "datacollator": asdict(config.datacollator),
             "wandb": asdict(config.wandb),
+            "glue": asdict(config.glue),
+            "contrastive": asdict(config.contrastive),
             "task": config.task,
             "accelerate_config_file": config.accelerate_config_file,
             "mixed_precision": config.mixed_precision,
