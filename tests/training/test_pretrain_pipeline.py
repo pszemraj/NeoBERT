@@ -3,6 +3,7 @@
 
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 
 import torch
@@ -66,33 +67,42 @@ class TestPretrainPipeline(unittest.TestCase):
         config.trainer.output_dir = self.temp_dir
         config.trainer.num_train_epochs = 0  # Don't actually train
         config.trainer.max_steps = 1  # Minimal steps
+        config.wandb.mode = "disabled"
 
         # Test that the trainer function can be called
         # Note: This will fail if dataset loading fails, which is expected for CPU-only testing
-        try:
-            trainer(config)
-        except Exception as e:
-            # Expected failures for CPU-only testing:
-            # - Dataset download/loading failures
-            # - Missing dependencies for specific datasets
-            expected_errors = [
-                "HfApi",  # Hugging Face API issues on CPU-only
-                "Connection",  # Network issues
-                "disk",  # Disk space issues
-                "CUDA",  # CUDA-related errors (expected on CPU)
-                "404",  # Dataset not found (expected for small test datasets)
-                "sentencepiece",  # Tokenizer not found
-                "Repository Not Found",  # HF repo not found
-                "input_ids",  # Dataset format mismatch
-                "ValueError",  # Dataset not tokenized
-            ]
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r".*epoch parameter in `scheduler\.step\(\)`.*",
+                category=UserWarning,
+            )
+            try:
+                trainer(config)
+            except Exception as e:
+                # Expected failures for CPU-only testing:
+                # - Dataset download/loading failures
+                # - Missing dependencies for specific datasets
+                expected_errors = [
+                    "HfApi",  # Hugging Face API issues on CPU-only
+                    "Connection",  # Network issues
+                    "disk",  # Disk space issues
+                    "CUDA",  # CUDA-related errors (expected on CPU)
+                    "404",  # Dataset not found (expected for small test datasets)
+                    "sentencepiece",  # Tokenizer not found
+                    "Repository Not Found",  # HF repo not found
+                    "input_ids",  # Dataset format mismatch
+                    "ValueError",  # Dataset not tokenized
+                ]
 
-            error_str = str(e).lower()
-            is_expected_error = any(err.lower() in error_str for err in expected_errors)
+                error_str = str(e).lower()
+                is_expected_error = any(
+                    err.lower() in error_str for err in expected_errors
+                )
 
-            if not is_expected_error:
-                # If it's not an expected dataset/network error, re-raise
-                raise e
+                if not is_expected_error:
+                    # If it's not an expected dataset/network error, re-raise
+                    raise e
 
     def test_model_config_compatibility(self):
         """Test that model config is compatible with pretraining."""

@@ -189,12 +189,11 @@ def test_distributed_compatibility():
         print("✓ Ready for distributed training (DDP/DeepSpeed)")
     except Exception as e:
         print(f"✗ Failed to create optimizer: {e}")
-        return False
+        raise AssertionError("Failed to create MuonClip optimizer") from e
 
     print("=" * 60)
     print("✅ Distributed compatibility test passed!")
     print("=" * 60)
-    return True
 
 
 if __name__ == "__main__":
