@@ -145,7 +145,9 @@ class TestModelForward(unittest.TestCase):
 
         with torch.no_grad():
             outputs = model(
-                input_ids=self.input_ids, attention_mask=self.pad_mask, return_dict=True
+                input_ids=self.input_ids,
+                attention_mask=self.attention_mask,
+                return_dict=True,
             )
 
         # Should return SequenceClassifierOutput
@@ -154,6 +156,36 @@ class TestModelForward(unittest.TestCase):
 
         expected_logits_shape = (self.batch_size, 2)  # num_labels=2
         self.assertEqual(outputs.logits.shape, expected_logits_shape)
+
+    def test_hf_attention_mask_blocks_padding(self):
+        """Ensure HF attention masks properly zero out padding attention."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=16,
+        )
+        model = NeoBERT(config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 0, 0], [4, 5, 6, 7, 8]])
+        attention_mask = torch.tensor([[1, 1, 1, 0, 0], [1, 1, 1, 1, 1]])
+
+        with torch.no_grad():
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_attentions=True,
+            )
+
+        attn_weights = outputs.attentions[0]
+        pad_mask = attention_mask == 0
+        pad_mask = pad_mask.unsqueeze(1).unsqueeze(2).expand_as(attn_weights)
+        self.assertLess(attn_weights.masked_select(pad_mask).max().item(), 1e-6)
 
     def test_rope_vs_positional_embeddings(self):
         """Test both RoPE and positional embedding modes."""

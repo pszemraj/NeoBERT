@@ -389,7 +389,7 @@ class EncoderBlock(nn.Module):
                 xq.permute(0, 2, 1, 3) @ xk.permute(0, 2, 3, 1) / (xq.size(-1) ** 0.5)
             )
             if attention_mask is not None:
-                attn_weights = attn_weights * attention_mask
+                attn_weights = attn_weights.masked_fill(attention_mask, float("-inf"))
             attn_weights = attn_weights.softmax(-1)
             attn = attn_weights @ xv.permute(0, 2, 1, 3)
             attn = attn.transpose(1, 2)
@@ -399,7 +399,7 @@ class EncoderBlock(nn.Module):
                 query=xq.transpose(1, 2),
                 key=xk.transpose(1, 2),
                 value=xv.transpose(1, 2),
-                attn_mask=attention_mask.bool() if attention_mask is not None else None,
+                attn_mask=attention_mask if attention_mask is not None else None,
                 dropout_p=0,
             ).transpose(1, 2)
 
@@ -528,11 +528,18 @@ class NeoBERT(NeoBERTPreTrainedModel):
 
         # Prepare attention mask for multi-head attention
         # Shape: (batch, seq_len) -> (batch, heads, seq_len, seq_len)
+        # SDPA expects a bool mask where True entries are masked.
         if attention_mask is not None:
+            attention_mask = attention_mask == 0
             attention_mask = (
                 attention_mask.unsqueeze(1)
-                .unsqueeze(1)
-                .repeat(1, self.config.num_attention_heads, attention_mask.size(-1), 1)
+                .unsqueeze(2)
+                .expand(
+                    -1,
+                    self.config.num_attention_heads,
+                    attention_mask.size(-1),
+                    attention_mask.size(-1),
+                )
             )
 
         # Validate packed sequence configuration
