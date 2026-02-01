@@ -283,15 +283,18 @@ def tokenize(
 
     # Multi column tokenization
     else:
-        feat = {}
-        for col in column_name:
-            if isinstance(dataset[col][0], list):
-                feat[f"input_ids_{col}"] = Sequence(Sequence(Value("int32")))
-                feat[f"attention_mask_{col}"] = Sequence(Sequence(Value("bool")))
-            else:
-                feat[f"input_ids_{col}"] = Sequence(Value("int32"))
-                feat[f"attention_mask_{col}"] = Sequence(Value("bool"))
-        features = Features(feat)
+        features = None
+        if not is_streaming:
+            feat = {}
+            for col in column_name:
+                sample = dataset[col][0] if len(dataset) > 0 else ""
+                if isinstance(sample, list):
+                    feat[f"input_ids_{col}"] = Sequence(Sequence(Value("int32")))
+                    feat[f"attention_mask_{col}"] = Sequence(Sequence(Value("bool")))
+                else:
+                    feat[f"input_ids_{col}"] = Sequence(Value("int32"))
+                    feat[f"attention_mask_{col}"] = Sequence(Value("bool"))
+            features = Features(feat)
 
         mapping = partial(
             multi_column_mapping,
