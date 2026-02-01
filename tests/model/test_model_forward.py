@@ -259,6 +259,18 @@ class TestModelForward(unittest.TestCase):
         # self.assertEqual(swiglu_outputs.shape, expected_shape)
         self.assertEqual(gelu_outputs.shape, expected_shape)
 
+    def test_invalid_activation_raises(self):
+        """Ensure unsupported activations fail fast."""
+        with self.assertRaises(ValueError):
+            NeoBERTConfig(
+                hidden_size=64,
+                num_hidden_layers=1,
+                num_attention_heads=2,
+                hidden_act="relu",
+                flash_attention=False,
+                vocab_size=1000,
+            )
+
     def test_attention_mask_handling(self):
         """Test proper attention mask handling."""
         model = NeoBERT(self.tiny_config)

@@ -140,6 +140,11 @@ class NeoBERTConfig(PretrainedConfig):
         self.rms_norm = rms_norm
         self.rope = rope
         self.norm_eps = norm_eps
+        normalized_act = str(hidden_act).lower()
+        if normalized_act not in {"swiglu", "gelu"}:
+            raise ValueError(
+                f"Unsupported hidden_act '{hidden_act}'. Supported: swiglu, gelu."
+            )
         self.hidden_act = hidden_act
         self.vocab_size = vocab_size
         self.pad_token_id = pad_token_id
@@ -214,6 +219,10 @@ class EncoderBlock(nn.Module):
                     nn.Linear(config.hidden_size, config.intermediate_size, bias=False),
                     nn.GELU(),
                     nn.Linear(config.intermediate_size, config.hidden_size, bias=False),
+                )
+            case _:
+                raise ValueError(
+                    f"Unsupported hidden_act '{config.hidden_act}'. Supported: swiglu, gelu."
                 )
 
         self.attention_norm = (
