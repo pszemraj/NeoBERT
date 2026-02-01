@@ -240,7 +240,12 @@ class TestPretrainComponents(unittest.TestCase):
 
     def test_pack_sequences_not_supported(self):
         """Ensure pack_sequences fails fast with a clear error."""
-        config = ConfigLoader.load(str(self.test_config_path))
+        config = ConfigLoader.load(
+            Path(__file__).parent.parent
+            / "configs"
+            / "pretraining"
+            / "test_tiny_pretrain.yaml"
+        )
         with tempfile.TemporaryDirectory() as temp_dir:
             config.trainer.output_dir = temp_dir
             config.wandb.mode = "disabled"
