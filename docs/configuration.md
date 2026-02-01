@@ -207,18 +207,18 @@ contrastive:
 
 MuonClip extends the optimizer block with an optional `muon_config` section. If the section is omitted the defaults below are applied; if it is present while `optimizer.name` is not `muonclip`, NeoBERT will warn and ignore it. See `configs/pretraining/pretrain_neobert100m_smollm2data_muonclip.yaml` for a full example.
 
-| Parameter | Default | Description |
-| --- | --- | --- |
-| `muon_beta` | `0.95` | Momentum coefficient for 2D weight matrices |
-| `muon_decay` | `0.0` | Weight decay for Muon parameters |
-| `ns_steps` | `5` | Newton-Schulz iterations for orthogonalization |
-| `orthogonalization` | `polar_express` | Orthogonalization algorithm |
-| `enable_clipping` | `true` | Toggle QK-clipping |
-| `clipping_threshold` | `50.0` | Max attention logit before rescaling |
-| `clipping_alpha` | `0.5` | Balance scaling between Q and K |
-| `clipping_warmup_steps` | `0` | Delay clipping for first *n* steps |
-| `clipping_layers_mapping` | `{}` | Mapping for separate q/k proj names |
-| `detect_anomalies` | `false` | Enable PyTorch anomaly detection |
+| Parameter                 | Default         | Description                                    |
+| ------------------------- | --------------- | ---------------------------------------------- |
+| `muon_beta`               | `0.95`          | Momentum coefficient for 2D weight matrices    |
+| `muon_decay`              | `0.0`           | Weight decay for Muon parameters               |
+| `ns_steps`                | `5`             | Newton-Schulz iterations for orthogonalization |
+| `orthogonalization`       | `polar_express` | Orthogonalization algorithm                    |
+| `enable_clipping`         | `true`          | Toggle QK-clipping                             |
+| `clipping_threshold`      | `50.0`          | Max attention logit before rescaling           |
+| `clipping_alpha`          | `0.5`           | Balance scaling between Q and K                |
+| `clipping_warmup_steps`   | `0`             | Delay clipping for first *n* steps             |
+| `clipping_layers_mapping` | `{}`            | Mapping for separate q/k proj names            |
+| `detect_anomalies`        | `false`         | Enable PyTorch anomaly detection               |
 
 ## Config Directory Layout
 

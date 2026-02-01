@@ -56,16 +56,16 @@ The exporter writes:
 
 The export script maps NeoBERT config fields to HF config fields, including:
 
-| NeoBERT | HF | Notes |
-| --- | --- | --- |
-| `hidden_size` | `hidden_size` | Model dimension |
-| `num_hidden_layers` | `num_hidden_layers` | Layers |
-| `num_attention_heads` | `num_attention_heads` | Heads |
-| `intermediate_size` | `intermediate_size` | FFN size |
-| `max_position_embeddings` | `max_length` | Max sequence length |
-| `norm_eps` | `norm_eps` | Norm epsilon |
-| `vocab_size` | `vocab_size` | Vocab size |
-| `pad_token_id` | `pad_token_id` | Padding token |
+| NeoBERT                   | HF                    | Notes               |
+| ------------------------- | --------------------- | ------------------- |
+| `hidden_size`             | `hidden_size`         | Model dimension     |
+| `num_hidden_layers`       | `num_hidden_layers`   | Layers              |
+| `num_attention_heads`     | `num_attention_heads` | Heads               |
+| `intermediate_size`       | `intermediate_size`   | FFN size            |
+| `max_position_embeddings` | `max_length`          | Max sequence length |
+| `norm_eps`                | `norm_eps`            | Norm epsilon        |
+| `vocab_size`              | `vocab_size`          | Vocab size          |
+| `pad_token_id`            | `pad_token_id`        | Padding token       |
 
 ## Validation
 

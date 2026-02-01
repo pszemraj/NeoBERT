@@ -7,17 +7,17 @@ This guide covers pretraining and fine-tuning NeoBERT models. It focuses on **ho
 
 ## Script Entry Points
 
-| Script | Purpose | Reference |
-| --- | --- | --- |
-| `scripts/pretraining/pretrain.py` | Pretraining (MLM) | This guide (Pretraining, Checkpointing, Tips) |
-| `scripts/pretraining/preprocess.py` | Tokenize raw corpora into shards | Dataset Preparation |
-| `scripts/pretraining/longer_seq.py` | Continue training with longer context | Pretraining Tips |
-| `scripts/contrastive/download.py` | Fetch contrastive datasets | Contrastive Learning |
-| `scripts/contrastive/preprocess.py` | Normalize/tokenize contrastive data | Contrastive Learning |
-| `scripts/contrastive/finetune.py` | Contrastive fine-tuning | Contrastive Learning |
-| `scripts/evaluation/run_glue.py` | GLUE evaluation | [Evaluation Guide](evaluation.md) |
-| `scripts/evaluation/run_mteb.py` | MTEB evaluation | [Evaluation Guide](evaluation.md) |
-| `scripts/export-hf/export.py` | Export to Hugging Face | [Export Guide](export.md) |
+| Script                              | Purpose                               | Reference                                     |
+| ----------------------------------- | ------------------------------------- | --------------------------------------------- |
+| `scripts/pretraining/pretrain.py`   | Pretraining (MLM)                     | This guide (Pretraining, Checkpointing, Tips) |
+| `scripts/pretraining/preprocess.py` | Tokenize raw corpora into shards      | Dataset Preparation                           |
+| `scripts/pretraining/longer_seq.py` | Continue training with longer context | Pretraining Tips                              |
+| `scripts/contrastive/download.py`   | Fetch contrastive datasets            | Contrastive Learning                          |
+| `scripts/contrastive/preprocess.py` | Normalize/tokenize contrastive data   | Contrastive Learning                          |
+| `scripts/contrastive/finetune.py`   | Contrastive fine-tuning               | Contrastive Learning                          |
+| `scripts/evaluation/run_glue.py`    | GLUE evaluation                       | [Evaluation Guide](evaluation.md)             |
+| `scripts/evaluation/run_mteb.py`    | MTEB evaluation                       | [Evaluation Guide](evaluation.md)             |
+| `scripts/export-hf/export.py`       | Export to Hugging Face                | [Export Guide](export.md)                     |
 
 ## Pretraining
 

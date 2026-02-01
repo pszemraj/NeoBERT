@@ -75,13 +75,13 @@ Notes:
 
 ## Differences from BERT (High Level)
 
-| Feature | BERT | NeoBERT |
-| --- | --- | --- |
-| Position encoding | Learned | RoPE (optional) |
-| Normalization | LayerNorm | RMSNorm or LayerNorm |
-| Activation | GELU | SwiGLU or GELU |
-| Attention backend | Standard | xformers (optional) |
-| Token types | Yes | No |
+| Feature           | BERT      | NeoBERT              |
+| ----------------- | --------- | -------------------- |
+| Position encoding | Learned   | RoPE (optional)      |
+| Normalization     | LayerNorm | RMSNorm or LayerNorm |
+| Activation        | GELU      | SwiGLU or GELU       |
+| Attention backend | Standard  | xformers (optional)  |
+| Token types       | Yes       | No                   |
 
 ## Next Steps
 

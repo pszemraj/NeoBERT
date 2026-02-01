@@ -22,7 +22,7 @@ Common issues and their solutions when training and using NeoBERT.
 - **Symptom**: Launching GLUE evaluation with Flash Attention enabled produces runtime errors or crashes.
 - **Cause**: GLUE tasks use variable-length batches that are currently incompatible with Flash Attention's alignment requirements.
 - **Solution**:
-  1. When using the provided GLUE scripts/configs, no action is needed—Flash Attention is automatically disabled for you.
+  1. When using the provided GLUE scripts/configs, no action is needed-Flash Attention is automatically disabled for you.
   2. If you author custom launchers, set `model.flash_attention: false` (or pass `--model.flash_attention false`) before evaluation.
   3. Restart the run after toggling the setting; mixed Flash Attention/eager runs in the same process can leave partially initialized CUDA kernels.
 

@@ -1,6 +1,6 @@
 # NeoBERT Test Suite
 
-Automated regression tests for NeoBERT live here—unit, integration, and pipeline coverage.
+Automated regression tests for NeoBERT live here-unit, integration, and pipeline coverage.
 
 > [!TIP]
 > For setup, CLI options, and authoring guidance, see [docs/testing.md](../docs/testing.md). Tiny smoke-test configs live in `tests/configs/`.

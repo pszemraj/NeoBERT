@@ -61,12 +61,12 @@ python tests/run_tests.py
 
 ### Quick commands
 
-| Task           | Command                                                                         |
-| -------------- | ------------------------------------------------------------------------------- |
+| Task           | Command                                                                                     |
+| -------------- | ------------------------------------------------------------------------------------------- |
 | Pretrain       | `python scripts/pretraining/pretrain.py --config configs/pretraining/pretrain_neobert.yaml` |
-| GLUE eval      | `python scripts/evaluation/run_glue.py --config configs/glue/{task}.yaml`       |
-| Summarize GLUE | `python scripts/evaluation/glue/summarize_glue.py {results_path}`               |
-| Run tests      | `python tests/run_tests.py`                                                     |
+| GLUE eval      | `python scripts/evaluation/run_glue.py --config configs/glue/{task}.yaml`                   |
+| Summarize GLUE | `python scripts/evaluation/glue/summarize_glue.py {results_path}`                           |
+| Run tests      | `python tests/run_tests.py`                                                                 |
 
 ### Next steps
 
