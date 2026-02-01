@@ -117,6 +117,26 @@ def create_hf_config(
             )
             model_config["vocab_size"] = actual_vocab_size
 
+    hidden_act = str(model_config.get("hidden_act", "swiglu")).lower()
+    if hidden_act not in {"swiglu", "gelu"}:
+        raise ValueError(
+            f"Unsupported hidden_act '{hidden_act}' for HF export. Supported: swiglu, gelu."
+        )
+
+    if model_config.get("ngpt", False):
+        raise ValueError("ngpt/NormNeoBERT is not supported by the HF export path.")
+
+    swiglu_packed = model_config.get("swiglu_packed")
+    if swiglu_packed is None and hidden_act == "swiglu":
+        has_w12 = any(key.endswith(".ffn.w12.weight") for key in state_dict)
+        has_w1 = any(key.endswith(".ffn.w1.weight") for key in state_dict)
+        if has_w12 and not has_w1:
+            swiglu_packed = True
+        elif has_w1 and not has_w12:
+            swiglu_packed = False
+        else:
+            swiglu_packed = True
+
     # Map our config to HF format - using the original HF model structure
     hf_config = {
         "architectures": ["NeoBERTLMHead"],
@@ -133,9 +153,16 @@ def create_hf_config(
         "intermediate_size": model_config["intermediate_size"],
         "vocab_size": model_config["vocab_size"],
         "max_length": model_config["max_position_embeddings"],
+        "max_position_embeddings": model_config["max_position_embeddings"],
         "embedding_init_range": model_config.get("embedding_init_range", 0.02),
         "decoder_init_range": model_config.get("decoder_init_range", 0.02),
         "norm_eps": model_config["norm_eps"],
+        "rms_norm": model_config.get("rms_norm", True),
+        "rope": model_config.get("rope", True),
+        "hidden_act": hidden_act,
+        "dropout": model_config.get("dropout", model_config.get("dropout_prob", 0.0)),
+        "flash_attention": model_config.get("flash_attention", False),
+        "swiglu_packed": swiglu_packed if swiglu_packed is not None else True,
         "pad_token_id": model_config["pad_token_id"],
         "torch_dtype": torch_dtype,
         "transformers_version": transformers.__version__,

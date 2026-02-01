@@ -251,6 +251,35 @@ class TestModelForward(unittest.TestCase):
             )
         )
 
+    def test_hf_rope_disabled_uses_positional_embeddings(self):
+        """Ensure HF model runs when RoPE is disabled."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=16,
+            rope=False,
+            hidden_act="gelu",
+            flash_attention=False,
+        )
+        model = NeoBERT(config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 0, 0], [4, 5, 6, 7, 8]])
+        attention_mask = torch.tensor([[1, 1, 1, 0, 0], [1, 1, 1, 1, 1]])
+
+        with torch.no_grad():
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+
+        self.assertEqual(
+            outputs.last_hidden_state.shape,
+            (input_ids.shape[0], input_ids.shape[1], config.hidden_size),
+        )
+
     def test_rope_vs_positional_embeddings(self):
         """Test both RoPE and positional embedding modes."""
         # Test with RoPE (default)

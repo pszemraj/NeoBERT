@@ -150,6 +150,12 @@ class NeoBERTConfig(PretrainedConfig):
         vocab_size: int = 30522,
         pad_token_id: int = 0,
         max_length: int = 1024,
+        rms_norm: bool = True,
+        rope: bool = True,
+        hidden_act: str = "swiglu",
+        dropout: float = 0.0,
+        flash_attention: bool = False,
+        swiglu_packed: bool = True,
         **kwargs: Any,
     ) -> None:
         """Initialize the NeoBERT configuration.
@@ -164,6 +170,12 @@ class NeoBERTConfig(PretrainedConfig):
         :param int vocab_size: Vocabulary size.
         :param int pad_token_id: Padding token ID.
         :param int max_length: Maximum sequence length.
+        :param bool rms_norm: Whether to use RMSNorm (otherwise LayerNorm).
+        :param bool rope: Whether to use RoPE (otherwise learned positional embeddings).
+        :param str hidden_act: Activation name ("swiglu" or "gelu").
+        :param float dropout: Dropout probability for residual/MLP blocks.
+        :param bool flash_attention: Whether to prefer flash attention backends.
+        :param bool swiglu_packed: Whether SwiGLU weights are packed (w12) or unpacked.
         :param Any kwargs: Additional configuration parameters.
         """
         super().__init__(**kwargs)
@@ -181,14 +193,28 @@ class NeoBERTConfig(PretrainedConfig):
         self.embedding_init_range = embedding_init_range
         self.decoder_init_range = decoder_init_range
         self.norm_eps = norm_eps
+        self.rms_norm = rms_norm
+        self.rope = rope
+        normalized_act = str(hidden_act).lower()
+        if normalized_act not in {"swiglu", "gelu"}:
+            raise ValueError(
+                f"Unsupported hidden_act '{hidden_act}'. Supported: swiglu, gelu."
+            )
+        self.hidden_act = normalized_act
+        self.dropout = dropout
+        self.flash_attention = flash_attention
+        self.swiglu_packed = swiglu_packed
         self.vocab_size = vocab_size
         self.pad_token_id = pad_token_id
-        self.max_length = max_length
+        if "max_position_embeddings" in kwargs and kwargs["max_position_embeddings"]:
+            self.max_length = int(kwargs["max_position_embeddings"])
+        else:
+            self.max_length = max_length
         self.kwargs = kwargs
 
 
 class NeobertMLP(nn.Module):
-    """SwiGLU-based MLP layer for NeoBERT.
+    """Packed SwiGLU MLP layer for NeoBERT (w12 + w3).
 
     This implements the SwiGLU activation function which combines a gated
     linear unit with the SiLU (Swish) activation. The implementation follows
@@ -237,6 +263,35 @@ class NeobertMLP(nn.Module):
         return w3
 
 
+class UnpackedSwiGLU(nn.Module):
+    """Unpacked SwiGLU MLP (w1, w2, w3) matching training fallback."""
+
+    def __init__(
+        self,
+        in_features: int,
+        hidden_features: int,
+        out_features: Optional[int] = None,
+        bias: bool = False,
+    ) -> None:
+        """Initialize the unpacked SwiGLU block.
+
+        Args:
+            in_features: Input feature dimension.
+            hidden_features: Hidden feature dimension.
+            out_features: Output feature dimension (defaults to in_features).
+            bias: Whether to use bias in linear layers.
+        """
+        super().__init__()
+        out_features = out_features or in_features
+        self.w1 = nn.Linear(in_features, hidden_features, bias=bias)
+        self.w2 = nn.Linear(in_features, hidden_features, bias=bias)
+        self.w3 = nn.Linear(hidden_features, out_features, bias=bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply SwiGLU activation with unpacked weights."""
+        return self.w3(torch.nn.functional.silu(self.w1(x)) * self.w2(x))
+
+
 class EncoderBlock(nn.Module):
     """Transformer encoder block with Pre-RMSNorm and SwiGLU activation.
 
@@ -270,22 +325,54 @@ class EncoderBlock(nn.Module):
             in_features=config.hidden_size, out_features=config.hidden_size, bias=False
         )
 
-        # Feedforward network - adjust size to be multiple of 8 for efficiency
-        multiple_of = 8
-        intermediate_size = int(2 * config.intermediate_size / 3)
-        intermediate_size = multiple_of * (
-            (intermediate_size + multiple_of - 1) // multiple_of
-        )
-        if XFORMERS_AVAILABLE:
-            self.ffn = SwiGLU(
-                config.hidden_size, intermediate_size, config.hidden_size, bias=False
+        # Feedforward network
+        if config.hidden_act == "swiglu":
+            # Match training: reduce by 2/3 and round to multiple of 8.
+            multiple_of = 8
+            intermediate_size = int(2 * config.intermediate_size / 3)
+            intermediate_size = multiple_of * (
+                (intermediate_size + multiple_of - 1) // multiple_of
+            )
+            if XFORMERS_AVAILABLE:
+                self.ffn = SwiGLU(
+                    config.hidden_size,
+                    intermediate_size,
+                    config.hidden_size,
+                    bias=False,
+                    _pack_weights=config.swiglu_packed,
+                )
+            else:
+                self.ffn = (
+                    NeobertMLP(config.hidden_size, intermediate_size, bias=False)
+                    if config.swiglu_packed
+                    else UnpackedSwiGLU(
+                        config.hidden_size,
+                        intermediate_size,
+                        out_features=config.hidden_size,
+                        bias=False,
+                    )
+                )
+        elif config.hidden_act == "gelu":
+            self.ffn = nn.Sequential(
+                nn.Linear(config.hidden_size, config.intermediate_size, bias=False),
+                nn.GELU(),
+                nn.Linear(config.intermediate_size, config.hidden_size, bias=False),
             )
         else:
-            self.ffn = NeobertMLP(config.hidden_size, intermediate_size, bias=False)
+            raise ValueError(
+                f"Unsupported hidden_act '{config.hidden_act}'. Supported: swiglu, gelu."
+            )
 
         # Layer norms (Pre-norm architecture)
-        self.attention_norm = nn.RMSNorm(config.hidden_size, config.norm_eps)
-        self.ffn_norm = nn.RMSNorm(config.hidden_size, config.norm_eps)
+        if config.rms_norm:
+            self.attention_norm = nn.RMSNorm(config.hidden_size, config.norm_eps)
+            self.ffn_norm = nn.RMSNorm(config.hidden_size, config.norm_eps)
+        else:
+            self.attention_norm = nn.LayerNorm(config.hidden_size, config.norm_eps)
+            self.ffn_norm = nn.LayerNorm(config.hidden_size, config.norm_eps)
+
+        self.resid_dropout = nn.Dropout(config.dropout)
+        self.ffn_dropout = nn.Dropout(config.dropout)
 
     def forward(
         self,
@@ -326,7 +413,7 @@ class EncoderBlock(nn.Module):
         x = x + attn_output
 
         # Pre-norm feed-forward with residual connection
-        x = x + self.ffn(self.ffn_norm(x))
+        x = x + self.ffn_dropout(self.ffn(self.ffn_norm(x)))
 
         return x, attn_weights
 
@@ -369,7 +456,8 @@ class EncoderBlock(nn.Module):
         )
 
         # Apply rotary position embeddings to Q and K
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
+        if self.config.rope:
+            xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
 
         # Attention computation
         attn_weights = None
@@ -384,7 +472,7 @@ class EncoderBlock(nn.Module):
                 cu_seqlens_k=cu_seqlens,
                 max_seqlen_q=max_seqlen,
                 max_seqlen_k=max_seqlen,
-                dropout_p=0.0,
+                dropout_p=self.config.dropout if self.training else 0.0,
                 causal=False,
             )
         # Eager attention if attention weights are needed
@@ -404,20 +492,19 @@ class EncoderBlock(nn.Module):
                 key=xk.transpose(1, 2),
                 value=xv.transpose(1, 2),
                 attn_mask=attention_mask if attention_mask is not None else None,
-                dropout_p=0,
+                dropout_p=self.config.dropout if self.training else 0.0,
             ).transpose(1, 2)
 
         # Apply output projection
-        return (
-            self.wo(
-                attn.reshape(
-                    batch_size,
-                    seq_len,
-                    self.config.num_attention_heads * self.config.dim_head,
-                )
-            ),
-            attn_weights,
+        attn_out = self.wo(
+            attn.reshape(
+                batch_size,
+                seq_len,
+                self.config.num_attention_heads * self.config.dim_head,
+            )
         )
+        attn_out = self.resid_dropout(attn_out)
+        return attn_out, attn_weights
 
 
 class NeoBERTPreTrainedModel(PreTrainedModel):
@@ -474,12 +561,19 @@ class NeoBERT(NeoBERTPreTrainedModel):
             config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id
         )
 
-        # Precompute rotary position embeddings
+        # Precompute rotary position embeddings (or use learned positional embeddings)
         # Non-persistent buffers are not saved in the state_dict
-        freqs_cis = precompute_freqs_cis(
-            config.hidden_size // config.num_attention_heads, config.max_length
-        )
-        self.register_buffer("freqs_cis", freqs_cis, persistent=False)
+        if self.config.rope:
+            freqs_cis = precompute_freqs_cis(
+                config.hidden_size // config.num_attention_heads, config.max_length
+            )
+            self.register_buffer("freqs_cis", freqs_cis, persistent=False)
+        else:
+            self.positional_embedding = nn.Embedding(
+                config.max_length + 1,
+                config.hidden_size,
+                padding_idx=config.pad_token_id,
+            )
 
         # Stack of transformer encoder blocks
         self.transformer_encoder = nn.ModuleList()
@@ -487,7 +581,11 @@ class NeoBERT(NeoBERTPreTrainedModel):
             self.transformer_encoder.append(EncoderBlock(config))
 
         # Final layer normalization
-        self.layer_norm = nn.RMSNorm(config.hidden_size, config.norm_eps)
+        self.layer_norm = (
+            nn.RMSNorm(config.hidden_size, config.norm_eps)
+            if config.rms_norm
+            else nn.LayerNorm(config.hidden_size, config.norm_eps)
+        )
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -589,14 +687,26 @@ class NeoBERT(NeoBERTPreTrainedModel):
             )
 
         # Get rotary position embeddings
-        freqs_cis = (
-            self.freqs_cis[position_ids]
-            if position_ids is not None
-            else self.freqs_cis[: input_ids.shape[1]].unsqueeze(0)
-        )
+        freqs_cis = None
+        if self.config.rope:
+            freqs_cis = (
+                self.freqs_cis[position_ids]
+                if position_ids is not None
+                else self.freqs_cis[: input_ids.shape[1]].unsqueeze(0)
+            )
 
         # Token embeddings
         x = self.encoder(input_ids)
+
+        # Add learned positional embeddings if RoPE is disabled
+        if not self.config.rope:
+            if position_ids is not None:
+                pos_ids = position_ids + self.config.pad_token_id
+            else:
+                mask = input_ids.ne(self.config.pad_token_id).int()
+                incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask)) * mask
+                pos_ids = incremental_indices.long() + self.config.pad_token_id
+            x = x + self.positional_embedding(pos_ids)
 
         # Pass through transformer encoder blocks
         for layer in self.transformer_encoder:
