@@ -147,6 +147,11 @@ class DataCollatorWithPacking(DefaultDataCollator):
                 & valid[:, None]
                 & valid[None, :]
             )
+            if not valid.all():
+                # Avoid all-masked query rows (all False) that would become all -inf
+                # after additive conversion and can yield NaNs in SDPA.
+                pad_idx = torch.where(~valid)[0]
+                mask[pad_idx, pad_idx] = True
             masks.append(mask)
 
         batch["attention_mask"] = torch.stack(masks, dim=0)

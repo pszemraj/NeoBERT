@@ -77,3 +77,27 @@ class TestCollatorPacking(unittest.TestCase):
         self.assertEqual(batch["input_ids"][0].tolist(), [1, 2, 99, 3])
         self.assertIn("attention_mask", batch)
         self.assertEqual(batch["attention_mask"].shape, (1, 4, 4))
+
+    def test_padding_rows_have_valid_attention_entry(self):
+        """Ensure padded query rows are not fully masked."""
+        collator = DataCollatorWithPacking(
+            sep_token_id=99,
+            max_length=4,
+            default_data_collator=DummyPadCollator(),
+        )
+
+        batch = collator(
+            [
+                {"input_ids": [1, 2, 3]},
+                {"input_ids": [4, 5]},
+            ]
+        )
+
+        attention_mask = batch["attention_mask"]
+        self.assertTrue(attention_mask.any(dim=-1).all().item())
+
+        pad_positions = batch["input_ids"] == 0
+        for row_mask, is_pad in zip(attention_mask, pad_positions):
+            for row, pad in zip(row_mask, is_pad):
+                if pad.item():
+                    self.assertTrue(row.any().item())
