@@ -292,7 +292,14 @@ class UnpackedSwiGLU(nn.Module):
         self.w3 = nn.Linear(hidden_features, out_features, bias=bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply SwiGLU activation with unpacked weights."""
+        """Apply SwiGLU activation with unpacked weights.
+
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, in_features).
+
+        Returns:
+            Output tensor of shape (batch_size, seq_len, out_features).
+        """
         return self.w3(torch.nn.functional.silu(self.w1(x)) * self.w2(x))
 
 
