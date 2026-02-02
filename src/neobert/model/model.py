@@ -412,6 +412,8 @@ class EncoderBlock(nn.Module):
                 raise ValueError(
                     "Packed sequences require flash_attention with xFormers."
                 )
+            # Use explicit scale for consistency with NormEncoderBlock.
+            softmax_scale = 1.0 / math.sqrt(self.config.dim_head)
             # Input and output are of dimension (B, H, M, K)
             attn = scaled_dot_product_attention(
                 query=xq.transpose(1, 2),
@@ -419,6 +421,7 @@ class EncoderBlock(nn.Module):
                 value=xv.transpose(1, 2),
                 attn_mask=pad_mask,
                 dropout_p=self.config.dropout if self.training else 0,
+                scale=softmax_scale,
             ).transpose(1, 2)
 
         return self.resid_dropout(
