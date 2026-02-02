@@ -14,9 +14,10 @@ The script will create an hf/ directory in the parent folder with the exported m
 import argparse
 import json
 import shutil
+import sys
 import textwrap
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import transformers
@@ -66,6 +67,127 @@ def get_torch_dtype_from_state_dict(state_dict: Dict[str, torch.Tensor]) -> str:
         return dtype_str
 
 
+def load_tokenizer_info(tokenizer_info_path: Path) -> Optional[Dict[str, Any]]:
+    """Load tokenizer_info.json if present.
+
+    :param Path tokenizer_info_path: Path to tokenizer_info.json.
+    :return dict[str, Any] | None: Parsed tokenizer info or None if missing.
+    """
+    if not tokenizer_info_path.exists():
+        return None
+    with open(tokenizer_info_path, "r") as f:
+        return json.load(f)
+
+
+def _swiglu_intermediate_size(intermediate_size: int, multiple_of: int = 8) -> int:
+    """Compute the reduced SwiGLU hidden size used in training.
+
+    :param int intermediate_size: Config intermediate size.
+    :param int multiple_of: Alignment multiple.
+    :return int: Effective SwiGLU hidden size.
+    """
+    hidden = int(2 * intermediate_size / 3)
+    return multiple_of * ((hidden + multiple_of - 1) // multiple_of)
+
+
+def _check_shape(
+    state_dict: Dict[str, torch.Tensor], key: str, expected: Tuple[int, ...]
+) -> None:
+    """Verify a tensor exists and matches the expected shape."""
+    if key not in state_dict:
+        raise ValueError(f"Missing required weight: {key}")
+    actual = tuple(state_dict[key].shape)
+    if actual != expected:
+        raise ValueError(f"Shape mismatch for {key}: expected {expected}, got {actual}")
+
+
+def validate_state_dict_layout(
+    state_dict: Dict[str, torch.Tensor], model_config: Dict[str, Any]
+) -> None:
+    """Validate checkpoint tensors against the training config."""
+    hidden_size = model_config["hidden_size"]
+    num_layers = model_config["num_hidden_layers"]
+    vocab_size = model_config["vocab_size"]
+    hidden_act = str(model_config.get("hidden_act", "swiglu")).lower()
+
+    if hidden_act not in {"swiglu", "gelu"}:
+        raise ValueError(
+            f"Unsupported hidden_act '{hidden_act}'. Supported: swiglu, gelu."
+        )
+
+    _check_shape(state_dict, "model.encoder.weight", (vocab_size, hidden_size))
+    _check_shape(state_dict, "model.decoder.weight", (vocab_size, hidden_size))
+    if "model.decoder.bias" in state_dict:
+        _check_shape(state_dict, "model.decoder.bias", (vocab_size,))
+
+    if any(".ffn.w12." in key for key in state_dict.keys()):
+        raise ValueError(
+            "Packed SwiGLU weights (ffn.w12) found. Export expects unpacked "
+            "w1/w2/w3 weights from training."
+        )
+
+    for layer_idx in range(num_layers):
+        prefix = f"model.transformer_encoder.{layer_idx}"
+        _check_shape(state_dict, f"{prefix}.qkv.weight", (hidden_size * 3, hidden_size))
+        _check_shape(state_dict, f"{prefix}.wo.weight", (hidden_size, hidden_size))
+
+        if hidden_act == "swiglu":
+            mlp_hidden = _swiglu_intermediate_size(model_config["intermediate_size"])
+            _check_shape(
+                state_dict, f"{prefix}.ffn.w1.weight", (mlp_hidden, hidden_size)
+            )
+            _check_shape(
+                state_dict, f"{prefix}.ffn.w2.weight", (mlp_hidden, hidden_size)
+            )
+            _check_shape(
+                state_dict, f"{prefix}.ffn.w3.weight", (hidden_size, mlp_hidden)
+            )
+        else:
+            _check_shape(
+                state_dict,
+                f"{prefix}.ffn.0.weight",
+                (model_config["intermediate_size"], hidden_size),
+            )
+            _check_shape(
+                state_dict,
+                f"{prefix}.ffn.2.weight",
+                (hidden_size, model_config["intermediate_size"]),
+            )
+
+
+def run_forward_sanity_check(
+    hf_config: Dict[str, Any], mapped_state_dict: Dict[str, torch.Tensor]
+) -> None:
+    """Instantiate the HF model and run a lightweight forward pass."""
+    repo_root = Path(__file__).resolve().parents[2]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+    from neobert.huggingface.modeling_neobert import NeoBERTConfig, NeoBERTLMHead
+
+    model_config = NeoBERTConfig(**hf_config)
+    model = NeoBERTLMHead(model_config)
+    model.load_state_dict(mapped_state_dict, strict=True)
+    model.eval()
+
+    seq_len = max(1, min(8, int(hf_config["max_position_embeddings"])))
+    batch_size = 2
+    vocab_size = int(hf_config["vocab_size"])
+    input_ids = torch.randint(0, vocab_size, (batch_size, seq_len))
+    attention_mask = torch.ones_like(input_ids)
+
+    with torch.no_grad():
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+
+    if outputs.logits.shape != (batch_size, seq_len, vocab_size):
+        raise ValueError(
+            f"Sanity check failed: expected logits shape "
+            f"{(batch_size, seq_len, vocab_size)}, got {outputs.logits.shape}"
+        )
+    if torch.isnan(outputs.logits).any() or torch.isinf(outputs.logits).any():
+        raise ValueError("Sanity check failed: logits contain NaNs or Infs.")
+
+
 def validate_required_config_fields(model_config: Dict[str, Any]) -> None:
     """Validate that all required config fields are present."""
     required_fields = [
@@ -108,15 +230,6 @@ def create_hf_config(
     # Infer dtype from actual weights
     torch_dtype = get_torch_dtype_from_state_dict(state_dict)
 
-    # Infer actual vocab_size from embedding weights if available
-    if "model.encoder.weight" in state_dict:
-        actual_vocab_size = state_dict["model.encoder.weight"].shape[0]
-        if actual_vocab_size != model_config.get("vocab_size"):
-            print(
-                f"  Note: Using actual vocab_size from weights ({actual_vocab_size}) instead of config ({model_config.get('vocab_size')})"
-            )
-            model_config["vocab_size"] = actual_vocab_size
-
     hidden_act = str(model_config.get("hidden_act", "swiglu")).lower()
     if hidden_act not in {"swiglu", "gelu"}:
         raise ValueError(
@@ -125,17 +238,6 @@ def create_hf_config(
 
     if model_config.get("ngpt", False):
         raise ValueError("ngpt/NormNeoBERT is not supported by the HF export path.")
-
-    swiglu_packed = model_config.get("swiglu_packed")
-    if swiglu_packed is None and hidden_act == "swiglu":
-        has_w12 = any(key.endswith(".ffn.w12.weight") for key in state_dict)
-        has_w1 = any(key.endswith(".ffn.w1.weight") for key in state_dict)
-        if has_w12 and not has_w1:
-            swiglu_packed = True
-        elif has_w1 and not has_w12:
-            swiglu_packed = False
-        else:
-            swiglu_packed = True
 
     # Map our config to HF format - using the original HF model structure
     hf_config = {
@@ -162,7 +264,6 @@ def create_hf_config(
         "hidden_act": hidden_act,
         "dropout": model_config.get("dropout", model_config.get("dropout_prob", 0.0)),
         "flash_attention": model_config.get("flash_attention", False),
-        "swiglu_packed": swiglu_packed if swiglu_packed is not None else True,
         "pad_token_id": model_config["pad_token_id"],
         "torch_dtype": torch_dtype,
         "transformers_version": transformers.__version__,
@@ -176,8 +277,8 @@ def map_weights(
 ) -> Dict[str, torch.Tensor]:
     """Map weights from our training format to HF model format.
 
-    Our training format has "model." prefix and uses SwiGLU with w12 (concatenated w1+w2).
-    HF format expects w12 (xformers.SwiGLU expects the concatenated format).
+    Our training format has "model." prefix and uses SwiGLU with unpacked w1/w2/w3.
+    HF format mirrors the same unpacked layout.
 
     Export structure for HF compatibility:
     - Base model weights with "model." prefix for NeoBERTLMHead
@@ -283,9 +384,6 @@ def export_checkpoint(checkpoint_path: Path, output_dir: Path | None = None) -> 
     else:
         output_dir = Path(output_dir)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Exporting checkpoint to: {output_dir}")
-
     # 1. Load state dict first to get dtype info
     print("Loading model weights...")
     state_dict = torch.load(state_dict_path, map_location="cpu")
@@ -295,23 +393,61 @@ def export_checkpoint(checkpoint_path: Path, output_dir: Path | None = None) -> 
         f"  Loaded {len(state_dict)} weight tensors with dtype: {next(iter(state_dict.values())).dtype}"
     )
 
-    # 2. Load and convert config
-    print("Converting config...")
+    # 2. Load and validate config
+    print("Validating config and weights...")
     neobert_config = load_config(config_path)
     model_config = neobert_config.get("model", {})
     if not model_config:
         raise ValueError("Model config section is empty or missing from config.yaml")
 
-    hf_config = create_hf_config(neobert_config, state_dict)
+    validate_required_config_fields(model_config)
 
-    # Save config.json
-    with open(output_dir / "config.json", "w") as f:
-        json.dump(hf_config, f, indent=2)
-    print("  Saved config.json")
+    # Validate vocab_size and pad_token_id using checkpoint metadata.
+    tokenizer_info = load_tokenizer_info(checkpoint_path / "tokenizer_info.json")
+    if tokenizer_info is None:
+        print(
+            "  Warning: tokenizer_info.json not found; validating vocab_size against weights only."
+        )
+    else:
+        info_vocab = tokenizer_info.get("vocab_size")
+        if info_vocab is not None and info_vocab != model_config["vocab_size"]:
+            raise ValueError(
+                f"tokenizer_info vocab_size ({info_vocab}) does not match config "
+                f"vocab_size ({model_config['vocab_size']})."
+            )
+        info_pad = tokenizer_info.get("pad_token_id")
+        if info_pad is not None and info_pad != model_config["pad_token_id"]:
+            raise ValueError(
+                f"tokenizer_info pad_token_id ({info_pad}) does not match config "
+                f"pad_token_id ({model_config['pad_token_id']})."
+            )
+
+    embedding_vocab = state_dict["model.encoder.weight"].shape[0]
+    if embedding_vocab != model_config["vocab_size"]:
+        raise ValueError(
+            f"Config vocab_size ({model_config['vocab_size']}) does not match "
+            f"embedding weight shape ({embedding_vocab})."
+        )
+
+    validate_state_dict_layout(state_dict, model_config)
+
+    hf_config = create_hf_config(neobert_config, state_dict)
 
     # 3. Map weights
     print("Converting and mapping model weights...")
     mapped_state_dict = map_weights(state_dict, model_config)
+
+    # 3a. Sanity-check that the HF model loads and runs.
+    print("Running HF forward pass sanity check...")
+    run_forward_sanity_check(hf_config, mapped_state_dict)
+    print("  Sanity check passed")
+
+    # Save config.json
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Exporting checkpoint to: {output_dir}")
+    with open(output_dir / "config.json", "w") as f:
+        json.dump(hf_config, f, indent=2)
+    print("  Saved config.json")
 
     # Save as safetensors (preferred) and pytorch formats
     save_file(

@@ -62,7 +62,6 @@ def _check_required_config_fields(config: Dict[str, Any]) -> Optional[str]:
         "hidden_act",
         "dropout",
         "flash_attention",
-        "swiglu_packed",
     ]
     missing = [field for field in required if field not in config]
     if missing:
@@ -71,24 +70,20 @@ def _check_required_config_fields(config: Dict[str, Any]) -> Optional[str]:
 
 
 def _check_swiglu_layout(model: object, config: Dict[str, Any]) -> Optional[str]:
-    """Check that swiglu_packed matches loaded parameter layout.
-
-    :param object model: Loaded HF model.
-    :param dict[str, Any] config: Loaded config mapping.
-    :return str | None: Issue summary if mismatch detected.
-    """
+    """Check that SwiGLU weights are unpacked (w1/w2/w3)."""
     if not config:
         return None
     if str(config.get("hidden_act", "")).lower() != "swiglu":
         return None
-    packed_cfg = config.get("swiglu_packed", True)
     state = model.state_dict()
     has_w12 = any(".ffn.w12." in key for key in state.keys())
     has_w1 = any(".ffn.w1." in key for key in state.keys())
-    if packed_cfg and has_w1 and not has_w12:
-        return "config swiglu_packed=true but model has unpacked w1/w2 weights"
-    if not packed_cfg and has_w12 and not has_w1:
-        return "config swiglu_packed=false but model has packed w12 weights"
+    has_w2 = any(".ffn.w2." in key for key in state.keys())
+    has_w3 = any(".ffn.w3." in key for key in state.keys())
+    if has_w12:
+        return "packed SwiGLU weights (ffn.w12) found; expected unpacked w1/w2/w3"
+    if not (has_w1 and has_w2 and has_w3):
+        return "missing unpacked SwiGLU weights (w1/w2/w3)"
     return None
 
 

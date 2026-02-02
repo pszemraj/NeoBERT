@@ -29,8 +29,13 @@ from transformers import (
 )
 from transformers.modeling_outputs import SequenceClassifierOutput
 
+from .rmsnorm import RMSNorm
+from .rotary import apply_rotary_emb, precompute_freqs_cis
+
+XFORMERS_ERROR: Optional[str] = None
+
 try:
-    from xformers.ops import SwiGLU, memory_efficient_attention
+    from xformers.ops import memory_efficient_attention
 
     XFORMERS_AVAILABLE = True
 except (ImportError, RuntimeError) as e:
@@ -39,40 +44,36 @@ except (ImportError, RuntimeError) as e:
     XFORMERS_ERROR = str(e)
     memory_efficient_attention = None
 
-    # Native PyTorch SwiGLU implementation as fallback
-    class SwiGLU(nn.Module):
-        """Fallback SwiGLU implementation when xFormers is unavailable."""
 
-        def __init__(
-            self,
-            in_features: int,
-            hidden_features: Optional[int] = None,
-            out_features: Optional[int] = None,
-            bias: bool = True,
-        ) -> None:
-            """Initialize the SwiGLU block.
+class SwiGLU(nn.Module):
+    """Native SwiGLU implementation (unpacked w1/w2/w3)."""
 
-            :param int in_features: Input feature dimension.
-            :param int | None hidden_features: Hidden feature dimension.
-            :param int | None out_features: Output feature dimension.
-            :param bool bias: Whether to use bias in linear layers.
-            """
-            super().__init__()
-            self.w1 = nn.Linear(in_features, hidden_features, bias=bias)
-            self.w2 = nn.Linear(in_features, hidden_features, bias=bias)
-            self.w3 = nn.Linear(hidden_features, out_features, bias=bias)
+    def __init__(
+        self,
+        in_features: int,
+        hidden_features: Optional[int] = None,
+        out_features: Optional[int] = None,
+        bias: bool = True,
+    ) -> None:
+        """Initialize the SwiGLU block.
 
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            """Apply SwiGLU activation.
+        :param int in_features: Input feature dimension.
+        :param int | None hidden_features: Hidden feature dimension.
+        :param int | None out_features: Output feature dimension.
+        :param bool bias: Whether to use bias in linear layers.
+        """
+        super().__init__()
+        self.w1 = nn.Linear(in_features, hidden_features, bias=bias)
+        self.w2 = nn.Linear(in_features, hidden_features, bias=bias)
+        self.w3 = nn.Linear(hidden_features, out_features, bias=bias)
 
-            :param torch.Tensor x: Input tensor.
-            :return torch.Tensor: Output tensor.
-            """
-            return self.w3(nn.functional.silu(self.w1(x)) * self.w2(x))
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply SwiGLU activation.
 
-
-from .rmsnorm import RMSNorm
-from .rotary import apply_rotary_emb, precompute_freqs_cis
+        :param torch.Tensor x: Input tensor.
+        :return torch.Tensor: Output tensor.
+        """
+        return self.w3(nn.functional.silu(self.w1(x)) * self.w2(x))
 
 
 class NeoBERTConfig(PretrainedConfig):
@@ -196,14 +197,6 @@ class EncoderBlock(nn.Module):
         # Feedforward network
         match config.hidden_act.lower():
             case "swiglu":
-                if not XFORMERS_AVAILABLE:
-                    import warnings
-
-                    warnings.warn(
-                        f"xformers not available, using native PyTorch SwiGLU implementation. "
-                        f"For better performance, install xformers: pip install xformers. "
-                        f"Error was: {XFORMERS_ERROR if 'XFORMERS_ERROR' in globals() else 'Import failed'}"
-                    )
                 # To keep the number of parameters and the amount of computation constant, we reduce the number of
                 # hidden units by a factor of 2/3 (https://arxiv.org/pdf/2002.05202.pdf) and make it a multiple of 8 to
                 # avoid RuntimeError due to misaligned operand
@@ -285,7 +278,8 @@ class EncoderBlock(nn.Module):
         if self.config.flash_attention:
             if not XFORMERS_AVAILABLE:
                 raise ImportError(
-                    "Flash attention requires xformers. Install with: pip install xformers"
+                    "Flash attention requires xformers. Install with: pip install xformers. "
+                    f"Import error: {XFORMERS_ERROR}"
                 )
             # xFormers expects attn_bias shaped [B, H, S, S]; non-multiple-of-8 S is supported
             # but may be slower on some GPUs.
@@ -461,7 +455,8 @@ class NormEncoderBlock(nn.Module):
         if self.config.flash_attention:
             if not XFORMERS_AVAILABLE:
                 raise ImportError(
-                    "Flash attention requires xformers. Install with: pip install xformers"
+                    "Flash attention requires xformers. Install with: pip install xformers. "
+                    f"Import error: {XFORMERS_ERROR}"
                 )
             # xFormers expects attn_bias shaped [B, H, S, S]; non-multiple-of-8 S is supported
             # but may be slower on some GPUs.
@@ -546,8 +541,12 @@ class NeoBERT(NeoBERTPreTrainedModel):
         )
 
         if self.config.rope:
-            self.freqs_cis = precompute_freqs_cis(
-                config.hidden_size // config.num_attention_heads, config.max_length
+            self.register_buffer(
+                "freqs_cis",
+                precompute_freqs_cis(
+                    config.hidden_size // config.num_attention_heads, config.max_length
+                ),
+                persistent=False,
             )
         else:
             self.positional_embedding = nn.Embedding(
@@ -603,8 +602,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
         # RoPE
         freqs_cis = None
         if self.config.rope:
-            # Use blocking transfer so freqs_cis is ready before indexing.
-            self.freqs_cis = self.freqs_cis.to(src.device)
+            # Buffer follows the model device; don't reassign self.freqs_cis.
             freqs_cis = self.freqs_cis[: src.shape[1]]
 
         # Embedding
@@ -664,8 +662,12 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
         )
 
         if self.config.rope:
-            self.freqs_cis = precompute_freqs_cis(
-                config.hidden_size // config.num_attention_heads, config.max_length
+            self.register_buffer(
+                "freqs_cis",
+                precompute_freqs_cis(
+                    config.hidden_size // config.num_attention_heads, config.max_length
+                ),
+                persistent=False,
             )
         else:
             self.positional_embedding = nn.Embedding(
@@ -735,8 +737,7 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
         # RoPE
         freqs_cis = None
         if self.config.rope:
-            # Use blocking transfer so freqs_cis is ready before indexing.
-            self.freqs_cis = self.freqs_cis.to(src.device)
+            # Buffer follows the model device; don't reassign self.freqs_cis.
             freqs_cis = self.freqs_cis[: src.shape[1]]
 
         # Embedding

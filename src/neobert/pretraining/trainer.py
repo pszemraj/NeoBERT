@@ -64,14 +64,16 @@ def _scale_gradients(model: torch.nn.Module, scale: torch.Tensor) -> None:
     :param torch.nn.Module model: Model whose gradients should be scaled.
     :param torch.Tensor scale: Scale factor (scalar tensor).
     """
+    scale_cache: dict[torch.dtype, torch.Tensor] = {}
     for param in model.parameters():
         if param.grad is None:
             continue
         grad = param.grad
-        if grad.dtype != scale.dtype:
-            grad.mul_(scale.to(dtype=grad.dtype))
-        else:
-            grad.mul_(scale)
+        scale_value = scale_cache.get(grad.dtype)
+        if scale_value is None:
+            scale_value = scale.to(dtype=grad.dtype)
+            scale_cache[grad.dtype] = scale_value
+        grad.mul_(scale_value)
 
 
 def to_target_batch_size(
@@ -101,9 +103,7 @@ def to_target_batch_size(
             else:
                 # Keep stored batches on a single device (often CPU) to avoid device mismatches.
                 if stored_batch[key].device != tmp[key][1].device:
-                    leftover = tmp[key][1].to(
-                        stored_batch[key].device, non_blocking=True
-                    )
+                    leftover = tmp[key][1].to(stored_batch[key].device)
                 else:
                     leftover = tmp[key][1]
                 stored_batch[key] = torch.cat([stored_batch[key], leftover], dim=0)
@@ -118,9 +118,7 @@ def to_target_batch_size(
                 if stored_batch[key] is None:
                     continue
                 if stored_batch[key].device != batch[key].device:
-                    stored_batch[key] = stored_batch[key].to(
-                        batch[key].device, non_blocking=True
-                    )
+                    stored_batch[key] = stored_batch[key].to(batch[key].device)
             for key in batch.keys():
                 tmp[key] = torch.split(
                     stored_batch[key],
@@ -142,9 +140,7 @@ def to_target_batch_size(
                 if stored_batch[key] is None:
                     continue
                 if stored_batch[key].device != batch[key].device:
-                    stored_batch[key] = stored_batch[key].to(
-                        batch[key].device, non_blocking=True
-                    )
+                    stored_batch[key] = stored_batch[key].to(batch[key].device)
                 batch[key] = torch.cat([batch[key], stored_batch[key]], dim=0)
                 stored_batch[key] = None
 
@@ -189,11 +185,11 @@ def _prepare_resume_dataloader(
     :return torch.utils.data.DataLoader | None: Skipped dataloader or ``None``.
     """
     if is_streaming:
-        logger.warning(
-            "Streaming dataset resume: cannot skip batches without a length; "
-            "starting from the current epoch boundary."
+        raise ValueError(
+            "Cannot resume training with streaming datasets - data position is not "
+            "preserved. For resumable long runs, pre-tokenize your dataset:\n"
+            "  python scripts/pretraining/tokenize_dataset.py --dataset <name> --output <path>"
         )
-        return None
 
     if not hasattr(train_dataloader, "__len__"):
         logger.warning(
@@ -348,6 +344,13 @@ def trainer(cfg: Config) -> None:
     # For streaming datasets, we need to check differently
     is_streaming = cfg.dataset.streaming
     needs_tokenization = False
+
+    if cfg.trainer.resume_from_checkpoint and is_streaming:
+        raise ValueError(
+            "Cannot resume training with streaming datasets - data position is not "
+            "preserved. For resumable long runs, pre-tokenize your dataset:\n"
+            "  python scripts/pretraining/tokenize_dataset.py --dataset <name> --output <path>"
+        )
 
     if train_dataset:
         if is_streaming:
@@ -810,6 +813,12 @@ def trainer(cfg: Config) -> None:
 
                 # Save accelerator state for resumable training
                 if metrics["train/steps"] % cfg.trainer.save_steps == 0:
+                    state_checkpoint_path = os.path.join(
+                        checkpoint_dir, str(metrics["train/steps"])
+                    )
+                    accelerator.save_state(output_dir=state_checkpoint_path)
+                    accelerator.wait_for_everyone()
+
                     # Accelerator checkpoints are the source of truth for resuming.
                     save_total_limit = getattr(cfg.trainer, "save_total_limit", 0)
                     max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
@@ -824,10 +833,10 @@ def trainer(cfg: Config) -> None:
                             item_path = os.path.join(checkpoint_dir, item)
                             if os.path.isdir(item_path) and item.isdigit():
                                 accel_checkpoints.append(int(item))
-                        if len(accel_checkpoints) >= limit:
+                        if len(accel_checkpoints) > limit:
                             accel_checkpoints.sort()
                             for old_ckpt in accel_checkpoints[
-                                : len(accel_checkpoints) - limit + 1
+                                : len(accel_checkpoints) - limit
                             ]:
                                 old_path = os.path.join(checkpoint_dir, str(old_ckpt))
                                 if os.path.exists(old_path):
@@ -839,47 +848,10 @@ def trainer(cfg: Config) -> None:
                                         old_path,
                                         limit,
                                     )
-                    accelerator.wait_for_everyone()
-
-                    state_checkpoint_path = os.path.join(
-                        checkpoint_dir, str(metrics["train/steps"])
-                    )
-                    accelerator.save_state(output_dir=state_checkpoint_path)
 
                 # Save the pytorch model
                 if metrics["train/steps"] % cfg.trainer.save_steps == 0:
                     # Model checkpoints are used for inference/export and can be pruned independently.
-                    # Clean up old checkpoints if limit is set
-                    save_total_limit = getattr(cfg.trainer, "save_total_limit", 0)
-                    max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
-                    limit = max(save_total_limit, max_ckpt)  # Use whichever is set
-
-                    if limit > 0 and os.path.exists(model_checkpoint_dir):
-                        # Get all checkpoint directories
-                        checkpoints = []
-                        for item in os.listdir(model_checkpoint_dir):
-                            item_path = os.path.join(model_checkpoint_dir, item)
-                            if os.path.isdir(item_path) and item.isdigit():
-                                checkpoints.append(int(item))
-
-                        # Sort and remove oldest checkpoints if over limit
-                        if len(checkpoints) >= limit:
-                            checkpoints.sort()
-                            # Remove oldest checkpoints
-                            for old_ckpt in checkpoints[: len(checkpoints) - limit + 1]:
-                                old_path = os.path.join(
-                                    model_checkpoint_dir, str(old_ckpt)
-                                )
-                                if os.path.exists(old_path):
-                                    import shutil
-
-                                    shutil.rmtree(old_path)
-                                    # Use logger instead of accelerator.print to avoid progress bar interference
-                                    if accelerator.is_main_process:
-                                        logger.info(
-                                            f"Removed old checkpoint: {old_path} (limit={limit})"
-                                        )
-
                     # Save the checkpoint
                     if accelerator.distributed_type is DistributedType.DEEPSPEED:
                         # DeepSpeed checkpoints are not directly portable; use zero_to_fp32 to export.
@@ -930,6 +902,42 @@ def trainer(cfg: Config) -> None:
                         logger.info(
                             f"Saved checkpoint with config, tokenizer info, and full tokenizer to {checkpoint_path}"
                         )
+
+                    accelerator.wait_for_everyone()
+
+                    # Clean up old checkpoints if limit is set (after saving).
+                    save_total_limit = getattr(cfg.trainer, "save_total_limit", 0)
+                    max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
+                    limit = max(save_total_limit, max_ckpt)  # Use whichever is set
+
+                    if (
+                        limit > 0
+                        and os.path.exists(model_checkpoint_dir)
+                        and accelerator.is_main_process
+                    ):
+                        # Get all checkpoint directories
+                        checkpoints = []
+                        for item in os.listdir(model_checkpoint_dir):
+                            item_path = os.path.join(model_checkpoint_dir, item)
+                            if os.path.isdir(item_path) and item.isdigit():
+                                checkpoints.append(int(item))
+
+                        # Sort and remove oldest checkpoints if over limit
+                        if len(checkpoints) > limit:
+                            checkpoints.sort()
+                            # Remove oldest checkpoints
+                            for old_ckpt in checkpoints[: len(checkpoints) - limit]:
+                                old_path = os.path.join(
+                                    model_checkpoint_dir, str(old_ckpt)
+                                )
+                                if os.path.exists(old_path):
+                                    import shutil
+
+                                    shutil.rmtree(old_path)
+                                    # Use logger instead of accelerator.print to avoid progress bar interference
+                                    logger.info(
+                                        f"Removed old checkpoint: {old_path} (limit={limit})"
+                                    )
 
                 # Zero out the optimizer
                 optimizer.zero_grad()

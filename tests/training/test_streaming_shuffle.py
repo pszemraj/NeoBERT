@@ -47,7 +47,7 @@ class TestStreamingShuffle(unittest.TestCase):
         self.assertEqual(dataset.shuffle_calls, [])
 
     def test_prepare_resume_dataloader_skips_streaming(self):
-        """Ensure resume skip logic avoids len/set_epoch on streaming dataloaders."""
+        """Ensure resume fails fast on streaming dataloaders."""
 
         class DummyDataloader:
             def __init__(self) -> None:
@@ -71,11 +71,10 @@ class TestStreamingShuffle(unittest.TestCase):
         accelerator = DummyAccelerator()
         metrics = {"train/epochs": 1, "train/batches": 5}
 
-        skipped = _prepare_resume_dataloader(
-            dataloader, metrics, accelerator, is_streaming=True
-        )
-
-        self.assertIsNone(skipped)
+        with self.assertRaises(ValueError):
+            _prepare_resume_dataloader(
+                dataloader, metrics, accelerator, is_streaming=True
+            )
         self.assertFalse(dataloader.set_epoch_called)
         self.assertFalse(accelerator.skip_called)
 

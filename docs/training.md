@@ -90,6 +90,10 @@ dataset:
   num_workers: 0
 ```
 
+> [!IMPORTANT]
+> Streaming datasets cannot resume from checkpoints because data position is not preserved.
+> For resumable runs, pre-tokenize the dataset and disable streaming (see "Pre-tokenize data" below).
+
 ### Checkpointing
 
 Pretraining checkpoints are written under `trainer.output_dir/model_checkpoints/`:

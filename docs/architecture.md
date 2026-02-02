@@ -39,7 +39,7 @@ NeoBERT is a transformer encoder with modernized components:
 
 ### Feed-Forward Network
 
-- `model.hidden_act: swiglu` uses the SwiGLU block (native PyTorch fallback if xformers is missing).
+- `model.hidden_act: swiglu` uses the native PyTorch SwiGLU block (unpacked w1/w2/w3).
 - `model.hidden_act: gelu` uses a standard 2-layer GELU MLP.
 
 ### Normalization

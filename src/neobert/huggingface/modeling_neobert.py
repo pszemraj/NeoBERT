@@ -26,13 +26,6 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from torch.nn.functional import scaled_dot_product_attention
 
 try:
-    from xformers.ops import SwiGLU
-
-    XFORMERS_AVAILABLE = True
-except ImportError:
-    XFORMERS_AVAILABLE = False
-
-try:
     from flash_attn.flash_attn_interface import flash_attn_varlen_func
 
     FLASH_ATTN_AVAILABLE = True
@@ -159,7 +152,6 @@ class NeoBERTConfig(PretrainedConfig):
         hidden_act: str = "swiglu",
         dropout: float = 0.0,
         flash_attention: bool = False,
-        swiglu_packed: bool = True,
         **kwargs: Any,
     ) -> None:
         """Initialize the NeoBERT configuration.
@@ -179,7 +171,6 @@ class NeoBERTConfig(PretrainedConfig):
         :param str hidden_act: Activation name ("swiglu" or "gelu").
         :param float dropout: Dropout probability for residual/MLP blocks.
         :param bool flash_attention: Whether to prefer flash attention backends.
-        :param bool swiglu_packed: Whether SwiGLU weights are packed (w12) or unpacked.
         :param Any kwargs: Additional configuration parameters.
         """
         super().__init__(**kwargs)
@@ -207,7 +198,6 @@ class NeoBERTConfig(PretrainedConfig):
         self.hidden_act = normalized_act
         self.dropout = dropout
         self.flash_attention = flash_attention
-        self.swiglu_packed = swiglu_packed
         self.vocab_size = vocab_size
         self.pad_token_id = pad_token_id
         if "max_position_embeddings" in kwargs and kwargs["max_position_embeddings"]:
@@ -215,56 +205,6 @@ class NeoBERTConfig(PretrainedConfig):
         else:
             self.max_length = max_length
         self.kwargs = kwargs
-
-
-class NeobertMLP(nn.Module):
-    """Packed SwiGLU MLP layer for NeoBERT (w12 + w3).
-
-    This implements the SwiGLU activation function which combines a gated
-    linear unit with the SiLU (Swish) activation. The implementation follows
-    the approach from LLaMA where two linear projections are concatenated
-    for efficiency.
-
-    Adapted from: transformers.models.llama.modeling_llama.LlamaMLP
-
-    Args:
-        hidden_size: Input and output dimension.
-        intermediate_size: Hidden dimension of the MLP.
-        bias: Whether to include bias in linear layers.
-    """
-
-    def __init__(
-        self, hidden_size: int, intermediate_size: int, bias: bool = False
-    ) -> None:
-        """Initialize the MLP layer.
-
-        Args:
-            hidden_size: Dimension of input and output features.
-            intermediate_size: Dimension of the intermediate layer.
-            bias: Whether to use bias in linear projections.
-        """
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.intermediate_size = intermediate_size
-        # Concatenated linear for w1 and w2 for efficiency
-        self.w12 = nn.Linear(self.hidden_size, 2 * self.intermediate_size, bias=bias)
-        self.w3 = nn.Linear(self.intermediate_size, self.hidden_size, bias=bias)
-        self.act_fn = nn.SiLU()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply SwiGLU transformation.
-
-        Args:
-            x: Input tensor of shape (batch_size, seq_len, hidden_size).
-
-        Returns:
-            Output tensor of shape (batch_size, seq_len, hidden_size).
-        """
-        # Split the concatenated projection into gate and value
-        w1, w2 = self.w12(x).chunk(2, dim=-1)
-        # Apply SwiGLU: SiLU(w1) * w2, then project back
-        w3 = self.w3(self.act_fn(w1) * w2)
-        return w3
 
 
 class UnpackedSwiGLU(nn.Module):
@@ -344,25 +284,12 @@ class EncoderBlock(nn.Module):
             intermediate_size = multiple_of * (
                 (intermediate_size + multiple_of - 1) // multiple_of
             )
-            if XFORMERS_AVAILABLE:
-                self.ffn = SwiGLU(
-                    config.hidden_size,
-                    intermediate_size,
-                    config.hidden_size,
-                    bias=False,
-                    _pack_weights=config.swiglu_packed,
-                )
-            else:
-                self.ffn = (
-                    NeobertMLP(config.hidden_size, intermediate_size, bias=False)
-                    if config.swiglu_packed
-                    else UnpackedSwiGLU(
-                        config.hidden_size,
-                        intermediate_size,
-                        out_features=config.hidden_size,
-                        bias=False,
-                    )
-                )
+            self.ffn = UnpackedSwiGLU(
+                config.hidden_size,
+                intermediate_size,
+                out_features=config.hidden_size,
+                bias=False,
+            )
         elif config.hidden_act == "gelu":
             self.ffn = nn.Sequential(
                 nn.Linear(config.hidden_size, config.intermediate_size, bias=False),

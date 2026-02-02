@@ -377,19 +377,39 @@ class TestModelForward(unittest.TestCase):
         # Outputs should be different (different position encoding methods)
         self.assertFalse(torch.allclose(rope_outputs, pos_outputs, atol=1e-4))
 
+    def test_rope_freqs_cis_is_buffer(self):
+        """Ensure RoPE freqs_cis stays registered as a buffer."""
+        rope_config = NeoBERTConfig(
+            hidden_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            rope=True,
+            flash_attention=False,
+            vocab_size=1000,
+            hidden_act="gelu",
+        )
+        model = NeoBERT(rope_config)
+        buffers = dict(model.named_buffers())
+        self.assertIn("freqs_cis", buffers)
+        self.assertNotIn("freqs_cis", model.state_dict())
+
+        freqs_ref = model.freqs_cis
+        with torch.no_grad():
+            _ = model(self.input_ids, self.pad_mask)
+        self.assertIs(model.freqs_cis, freqs_ref)
+
     def test_activation_functions(self):
         """Test different activation functions."""
-        # Skip SwiGLU test due to xformers version mismatch
-        # Test SwiGLU (default)
-        # swiglu_config = NeoBERTConfig(
-        #     hidden_size=64,
-        #     num_hidden_layers=1,
-        #     num_attention_heads=2,
-        #     hidden_act="SwiGLU",
-        #     flash_attention=False,
-        #     vocab_size=1000,
-        # )
-        # swiglu_model = NeoBERT(swiglu_config)
+        # Test SwiGLU
+        swiglu_config = NeoBERTConfig(
+            hidden_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            hidden_act="swiglu",
+            flash_attention=False,
+            vocab_size=1000,
+        )
+        swiglu_model = NeoBERT(swiglu_config)
 
         # Test GELU
         gelu_config = NeoBERTConfig(
@@ -403,13 +423,34 @@ class TestModelForward(unittest.TestCase):
         gelu_model = NeoBERT(gelu_config)
 
         with torch.no_grad():
-            # swiglu_outputs = swiglu_model(self.input_ids, self.pad_mask)
+            swiglu_outputs = swiglu_model(self.input_ids, self.pad_mask)
             gelu_outputs = gelu_model(self.input_ids, self.pad_mask)
 
         # Both should produce valid outputs
         expected_shape = (self.batch_size, self.seq_length, 64)
-        # self.assertEqual(swiglu_outputs.shape, expected_shape)
+        self.assertEqual(swiglu_outputs.shape, expected_shape)
         self.assertEqual(gelu_outputs.shape, expected_shape)
+
+    def test_hf_swiglu_uses_unpacked_weights(self):
+        """Ensure HF SwiGLU uses unpacked w1/w2/w3 weights."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        hf_config = NeoBERTConfig(
+            hidden_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=128,
+            vocab_size=1000,
+            max_length=32,
+            hidden_act="swiglu",
+            flash_attention=False,
+        )
+        model = NeoBERT(hf_config)
+        state = model.state_dict()
+        self.assertTrue(any(".ffn.w1.weight" in key for key in state))
+        self.assertTrue(any(".ffn.w2.weight" in key for key in state))
+        self.assertTrue(any(".ffn.w3.weight" in key for key in state))
+        self.assertFalse(any(".ffn.w12.weight" in key for key in state))
 
     def test_invalid_activation_raises(self):
         """Ensure unsupported activations fail fast."""

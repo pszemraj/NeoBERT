@@ -98,6 +98,7 @@ class TestAttentionHooks:
             inputs, pad_mask, freqs = hook_system.get_layer_data(layer_idx)
             assert inputs is not None
             assert inputs.shape[-1] == model.config.hidden_size
+            assert inputs.device.type == "cpu"
             assert pad_mask is None
             assert freqs is None
 

@@ -43,7 +43,7 @@ The validation script (`validate.py`) performs these checks:
 
 - Training checkpoints with `model.*` prefix are preserved for HuggingFace compatibility
 - LM head weights (`model.decoder.*`) are mapped to top-level `decoder.*`
-- SwiGLU concatenated `w12` weights are preserved without splitting
+- SwiGLU uses unpacked `w1`/`w2`/`w3` weights; export preserves them without conversion
 
 **Config Field Mappings:**
 

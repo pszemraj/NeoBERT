@@ -299,7 +299,8 @@ class NeoBERTAttentionHooks:
             # During gradient accumulation, we intentionally keep only the latest
             # microbatch activation to bound memory/compute overhead.
             # Detach keeps storage alive; cloning here would multiply memory usage.
-            self.layer_inputs[layer_idx] = x.detach()
+            # Store on CPU to avoid stale device references if the model is moved.
+            self.layer_inputs[layer_idx] = x.detach().to("cpu")
 
         return hook_fn
 
@@ -328,10 +329,12 @@ class NeoBERTAttentionHooks:
             freqs_cis = inputs[2] if len(inputs) > 2 else None
 
             self.layer_pad_masks[layer_idx] = (
-                pad_mask.detach() if torch.is_tensor(pad_mask) else pad_mask
+                pad_mask.detach().to("cpu") if torch.is_tensor(pad_mask) else pad_mask
             )
             self.layer_freqs[layer_idx] = (
-                freqs_cis.detach() if torch.is_tensor(freqs_cis) else freqs_cis
+                freqs_cis.detach().to("cpu")
+                if torch.is_tensor(freqs_cis)
+                else freqs_cis
             )
 
         return hook_fn
