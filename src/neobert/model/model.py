@@ -584,6 +584,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
             assert pad_mask.dtype != torch.bool and 1.0 not in pad_mask, (
                 "NeoBERT expects an additive pad_mask"
             )
+            # HF export normalizes 1/0 or bool masks to this additive form.
             if pad_mask.dim() == 2:
                 pad_mask = (
                     pad_mask.unsqueeze(1)
@@ -602,7 +603,8 @@ class NeoBERT(NeoBERTPreTrainedModel):
         # RoPE
         freqs_cis = None
         if self.config.rope:
-            self.freqs_cis = self.freqs_cis.to(src.device, non_blocking=True)
+            # Use blocking transfer so freqs_cis is ready before indexing.
+            self.freqs_cis = self.freqs_cis.to(src.device)
             freqs_cis = self.freqs_cis[: src.shape[1]]
 
         # Embedding
@@ -714,6 +716,7 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
             assert pad_mask.dtype != torch.bool and 1.0 not in pad_mask, (
                 "NeoBERT expects an additive pad_mask"
             )
+            # HF export normalizes 1/0 or bool masks to this additive form.
             if pad_mask.dim() == 2:
                 pad_mask = (
                     pad_mask.unsqueeze(1)
@@ -732,7 +735,8 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
         # RoPE
         freqs_cis = None
         if self.config.rope:
-            self.freqs_cis = self.freqs_cis.to(src.device, non_blocking=True)
+            # Use blocking transfer so freqs_cis is ready before indexing.
+            self.freqs_cis = self.freqs_cis.to(src.device)
             freqs_cis = self.freqs_cis[: src.shape[1]]
 
         # Embedding

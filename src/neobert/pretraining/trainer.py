@@ -58,6 +58,22 @@ def _count_masked_correct(
     return (preds[mask] == labels[mask]).sum().item()
 
 
+def _scale_gradients(model: torch.nn.Module, scale: torch.Tensor) -> None:
+    """Scale gradients in-place using a dtype-safe scalar.
+
+    :param torch.nn.Module model: Model whose gradients should be scaled.
+    :param torch.Tensor scale: Scale factor (scalar tensor).
+    """
+    for param in model.parameters():
+        if param.grad is None:
+            continue
+        grad = param.grad
+        if grad.dtype != scale.dtype:
+            grad.mul_(scale.to(dtype=grad.dtype))
+        else:
+            grad.mul_(scale)
+
+
 def to_target_batch_size(
     batch: BatchEncoding,
     stored_batch: BatchEncoding,
@@ -116,8 +132,9 @@ def to_target_batch_size(
                 )
                 batch[key] = torch.cat([batch[key], tmp[key][0]], dim=0)
                 stored_batch[key] = tmp[key][1]
-                # Save on CPU to prevent full GPU memory
-                stored_batch[key] = stored_batch[key].to("cpu", non_blocking=True)
+                # Save on CPU to prevent full GPU memory.
+                # Use blocking transfer so buffered batches are ready when reused.
+                stored_batch[key] = stored_batch[key].to("cpu")
 
         # Concatenate otherwise
         else:
@@ -155,6 +172,44 @@ def _maybe_shuffle_streaming_dataset(
     if print_fn is not None:
         print_fn(f"Added shuffle buffer with size {buffer_size}")
     return shuffled
+
+
+def _prepare_resume_dataloader(
+    train_dataloader: torch.utils.data.DataLoader,
+    metrics: Metrics,
+    accelerator: Accelerator,
+    is_streaming: bool,
+) -> torch.utils.data.DataLoader | None:
+    """Prepare a skipped dataloader for resume when possible.
+
+    :param torch.utils.data.DataLoader train_dataloader: Training dataloader.
+    :param Metrics metrics: Metrics tracker with resumed counters.
+    :param Accelerator accelerator: Accelerator instance.
+    :param bool is_streaming: Whether the dataset is streaming.
+    :return torch.utils.data.DataLoader | None: Skipped dataloader or ``None``.
+    """
+    if is_streaming:
+        logger.warning(
+            "Streaming dataset resume: cannot skip batches without a length; "
+            "starting from the current epoch boundary."
+        )
+        return None
+
+    if not hasattr(train_dataloader, "__len__"):
+        logger.warning(
+            "Resume requested but dataloader has no length; "
+            "starting from the current epoch boundary."
+        )
+        return None
+
+    if hasattr(train_dataloader, "set_epoch"):
+        train_dataloader.set_epoch(metrics["train/epochs"])
+
+    resume_step = metrics["train/batches"] % len(train_dataloader)
+    if resume_step == 0:
+        return None
+
+    return accelerator.skip_first_batches(train_dataloader, resume_step)
 
 
 def trainer(cfg: Config) -> None:
@@ -535,9 +590,8 @@ def trainer(cfg: Config) -> None:
     skipped_train_dataloader = None
     if cfg.trainer.resume_from_checkpoint and resume_checkpoint_path:
         accelerator.load_state(resume_checkpoint_path)
-        train_dataloader.set_epoch(metrics["train/epochs"])
-        skipped_train_dataloader = accelerator.skip_first_batches(
-            train_dataloader, metrics["train/batches"] % len(train_dataloader)
+        skipped_train_dataloader = _prepare_resume_dataloader(
+            train_dataloader, metrics, accelerator, is_streaming
         )
     elif cfg.trainer.resume_from_checkpoint:
         logger.warning(
@@ -651,9 +705,7 @@ def trainer(cfg: Config) -> None:
                         accelerator.num_processes
                         * accelerator.gradient_accumulation_steps
                     ) / tokens_global.float()
-                    for param in model.parameters():
-                        if param.grad is not None:
-                            param.grad.mul_(scale)
+                    _scale_gradients(model, scale)
                 else:
                     for param in model.parameters():
                         if param.grad is not None:
@@ -758,6 +810,7 @@ def trainer(cfg: Config) -> None:
 
                 # Save accelerator state for resumable training
                 if metrics["train/steps"] % cfg.trainer.save_steps == 0:
+                    # Accelerator checkpoints are the source of truth for resuming.
                     save_total_limit = getattr(cfg.trainer, "save_total_limit", 0)
                     max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
                     limit = max(save_total_limit, max_ckpt)
@@ -795,6 +848,7 @@ def trainer(cfg: Config) -> None:
 
                 # Save the pytorch model
                 if metrics["train/steps"] % cfg.trainer.save_steps == 0:
+                    # Model checkpoints are used for inference/export and can be pruned independently.
                     # Clean up old checkpoints if limit is set
                     save_total_limit = getattr(cfg.trainer, "save_total_limit", 0)
                     max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
@@ -828,6 +882,7 @@ def trainer(cfg: Config) -> None:
 
                     # Save the checkpoint
                     if accelerator.distributed_type is DistributedType.DEEPSPEED:
+                        # DeepSpeed checkpoints are not directly portable; use zero_to_fp32 to export.
                         model.save_checkpoint(
                             model_checkpoint_dir, tag=metrics["train/steps"]
                         )

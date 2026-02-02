@@ -298,6 +298,7 @@ class NeoBERTAttentionHooks:
                 return
             # During gradient accumulation, we intentionally keep only the latest
             # microbatch activation to bound memory/compute overhead.
+            # Detach keeps storage alive; cloning here would multiply memory usage.
             self.layer_inputs[layer_idx] = x.detach()
 
         return hook_fn

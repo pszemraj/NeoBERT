@@ -644,6 +644,8 @@ class NeoBERT(NeoBERTPreTrainedModel):
         # SDPA expects a bool mask where True entries are masked.
         if attention_mask is not None:
             if attention_mask.dtype is torch.bool:
+                # Normalize to SDPA semantics (True = masked). If input_ids are available,
+                # use pad positions to disambiguate HF-style "True = keep" masks.
                 # Bool masks are ambiguous; prefer HF semantics (True = keep).
                 if (
                     input_ids is not None

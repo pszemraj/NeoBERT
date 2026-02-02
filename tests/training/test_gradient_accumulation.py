@@ -7,6 +7,8 @@ import unittest
 import torch
 import torch.nn.functional as F
 
+from neobert.pretraining.trainer import _scale_gradients
+
 
 class TestGradientAccumulationTokenWeighting(unittest.TestCase):
     """Ensure token-weighted GA matches full-batch gradients."""
@@ -56,3 +58,18 @@ class TestGradientAccumulationTokenWeighting(unittest.TestCase):
 
         for expected, actual in zip(full_grads, model_accum.parameters()):
             self.assertTrue(torch.allclose(expected, actual.grad, atol=1e-6))
+
+    def test_scale_gradients_casts_to_grad_dtype(self):
+        """Ensure gradient scaling casts the scalar to the grad dtype."""
+        model = torch.nn.Linear(2, 2, bias=False).to(dtype=torch.bfloat16)
+        for param in model.parameters():
+            param.grad = torch.ones_like(param, dtype=torch.bfloat16)
+
+        scale = torch.tensor(0.5, dtype=torch.float32)
+        _scale_gradients(model, scale)
+
+        for param in model.parameters():
+            self.assertEqual(param.grad.dtype, torch.bfloat16)
+            self.assertTrue(
+                torch.allclose(param.grad, torch.full_like(param.grad, 0.5))
+            )
