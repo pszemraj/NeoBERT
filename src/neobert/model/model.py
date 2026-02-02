@@ -503,8 +503,7 @@ class NormEncoderBlock(nn.Module):
         :param torch.Tensor x: Input tensor.
         :return torch.Tensor: Normalized tensor.
         """
-        res = x / x.norm(p=2, dim=-1, keepdim=True)
-        return res
+        return x / (x.norm(p=2, dim=-1, keepdim=True) + 1e-8)
 
     def forward(
         self,
