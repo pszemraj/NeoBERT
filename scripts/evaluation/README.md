@@ -72,6 +72,7 @@ GLUE evaluation **requires** a pretrained model. The trainer includes safety che
 - Evaluates tasks via the `mteb` package
 - Uses DeepSpeed utilities when `use_deepspeed: true`
 - Outputs results under `outputs/<run>/mteb/<step>/<max_length>/`
+- Reads `tokenizer.name`; if you trained with a local tokenizer, set `tokenizer.name` to that path in the config.
 
 **`pseudo_perplexity.py`:**
 

@@ -22,6 +22,13 @@ python scripts/export-hf/validate.py outputs/neobert_100m_100k/hf/neobert_100m_1
 
 ## Implementation Notes
 
+### Export Constraints
+
+- Supported activations: `hidden_act: swiglu` or `hidden_act: gelu`.
+- `ngpt` (NormNeoBERT) checkpoints are not exportable via the HF path.
+- SwiGLU weights must be **unpacked** (`w1/w2/w3`); packed `w12` weights are rejected.
+- `tokenizer_info.json` is validated when present and must match the checkpoint config.
+
 ### Metaspace Tokenizer Handling
 
 Some of the default configs for pretraining use [a Metaspace tokenizer](https://huggingface.co/BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp) with `prepend_scheme=\"always\"`. The export script emits guidance for cleaning up the extra space token (▁, ID 454) that appears before `[MASK]`. Refer to [MLM always predicts the same token](../../docs/troubleshooting.md#mlm-always-predicts-same-token) for the canonical workaround.
@@ -36,6 +43,8 @@ The validation script (`validate.py`) performs these checks:
 - MaskedLM variant compatibility
 - End-to-end pipeline test
 - Cosine similarity sanity check (similar pairs >= 0.5, dissimilar <= 0.95)
+
+The exporter also validates tensor shapes and runs a lightweight forward-pass sanity check before writing files.
 
 ### Technical Implementation Details
 
