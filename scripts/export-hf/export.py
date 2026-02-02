@@ -215,6 +215,10 @@ def validate_required_config_fields(model_config: Dict[str, Any]) -> None:
         "max_position_embeddings",
         "norm_eps",
         "pad_token_id",
+        # Architecture-affecting fields that must be explicit for correct export.
+        "rope",
+        "rms_norm",
+        "hidden_act",
     ]
 
     missing_fields = []
