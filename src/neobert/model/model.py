@@ -597,7 +597,8 @@ class NeoBERT(NeoBERTPreTrainedModel):
         """
         # Expand and repeat: (Batch, Length) -> (Batch, Heads, Length, Length)
         if pad_mask is not None:
-            assert pad_mask.dtype != torch.bool and 1.0 not in pad_mask, (
+            # Use a tensor reduction instead of Python membership to avoid O(n^2) scans.
+            assert pad_mask.dtype != torch.bool and torch.all(pad_mask <= 0).item(), (
                 "NeoBERT expects an additive pad_mask"
             )
             # Convert HF-style masks at the data boundary (collator/export wrapper),
@@ -635,6 +636,8 @@ class NeoBERT(NeoBERTPreTrainedModel):
 
         # Positional embedding
         if not self.config.rope:
+            # Content-based positions: padding stays at index 0, and left-padding
+            # does not shift token positions (padding-invariant positional IDs).
             mask = src.ne(self.config.pad_token_id).int()
             incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask)) * mask
             x += self.positional_embedding(incremental_indices.long())
@@ -737,7 +740,8 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
         """
         # Expand and repeat: (Batch, Length) -> (Batch, Heads, Length, Length)
         if pad_mask is not None:
-            assert pad_mask.dtype != torch.bool and 1.0 not in pad_mask, (
+            # Use a tensor reduction instead of Python membership to avoid O(n^2) scans.
+            assert pad_mask.dtype != torch.bool and torch.all(pad_mask <= 0).item(), (
                 "NeoBERT expects an additive pad_mask"
             )
             # Convert HF-style masks at the data boundary (collator/export wrapper),
@@ -775,6 +779,8 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
 
         # Positional embedding
         if not self.config.rope:
+            # Content-based positions: padding stays at index 0, and left-padding
+            # does not shift token positions (padding-invariant positional IDs).
             mask = src.ne(self.config.pad_token_id).int()
             incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask)) * mask
             x += self.positional_embedding(incremental_indices.long())

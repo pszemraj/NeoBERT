@@ -886,6 +886,9 @@ class MuonClipOptimizer(Optimizer):
         if not self.hook_system:
             return
 
+        # Note: we scale weights *after* the optimizer step by design. This matches
+        # MuonClip's reference behavior and keeps clipping orthogonal to momentum
+        # buffers; changing this to gradient scaling would alter dynamics.
         self._last_metrics.clear()
         max_attention_logit: Optional[float] = None
 

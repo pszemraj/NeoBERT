@@ -565,7 +565,10 @@ class NeoBERT(NeoBERTPreTrainedModel):
                 and attention_mask.shape == input_ids.shape
             ):
                 pad_positions = input_ids == self.config.pad_token_id
-                if torch.equal(attention_mask, pad_positions):
+                if (
+                    torch.equal(attention_mask, pad_positions)
+                    and pad_positions.any().item()
+                ):
                     raise ValueError(
                         "Boolean attention_mask appears to use True=mask. "
                         "HF-style masks should use True/1 for keep positions."
@@ -679,6 +682,8 @@ class NeoBERT(NeoBERTPreTrainedModel):
             if position_ids is not None:
                 pos_ids = position_ids
             else:
+                # Content-based positions: padding stays at index 0, and left-padding
+                # does not shift token positions (padding-invariant positional IDs).
                 mask = input_ids.ne(self.config.pad_token_id).int()
                 incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask)) * mask
                 pos_ids = incremental_indices.long()

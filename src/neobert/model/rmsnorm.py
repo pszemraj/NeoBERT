@@ -17,7 +17,7 @@ class RMSNorm(nn.Module):
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
 
-    @torch.compile
+    @torch.compile(dynamic=True)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply RMS normalization.
 
