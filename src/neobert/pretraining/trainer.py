@@ -109,50 +109,51 @@ def _run_eval(
     eval_num_correct = torch.zeros((), device=accelerator.device)
     eval_batches = 0
 
-    with torch.no_grad():
-        for batch in eval_dataloader:
-            if max_batches is not None and eval_batches >= max_batches:
-                break
-            packed_seqlens = batch.get("packed_seqlens")
-            pad_mask = (
-                None
-                if packed_seqlens is not None
-                else batch.get("attention_mask", None)
-            )
-            logits = model(
-                batch["input_ids"],
-                pad_mask,
-                packed_seqlens=packed_seqlens,
-            )["logits"]
-            loss_sum = loss_fn(
-                logits.view(-1, model_config.vocab_size), batch["labels"].view(-1)
-            )
-            num_pred = (batch["labels"] != -100).sum()
-            eval_loss_sum += loss_sum
-            eval_num_pred += num_pred
-            eval_num_correct += _count_masked_correct(logits, batch["labels"])
-            eval_batches += 1
+    try:
+        with torch.no_grad():
+            for batch in eval_dataloader:
+                if max_batches is not None and eval_batches >= max_batches:
+                    break
+                packed_seqlens = batch.get("packed_seqlens")
+                pad_mask = (
+                    None
+                    if packed_seqlens is not None
+                    else batch.get("attention_mask", None)
+                )
+                logits = model(
+                    batch["input_ids"],
+                    pad_mask,
+                    packed_seqlens=packed_seqlens,
+                )["logits"]
+                loss_sum = loss_fn(
+                    logits.view(-1, model_config.vocab_size), batch["labels"].view(-1)
+                )
+                num_pred = (batch["labels"] != -100).sum()
+                eval_loss_sum += loss_sum
+                eval_num_pred += num_pred
+                eval_num_correct += _count_masked_correct(logits, batch["labels"])
+                eval_batches += 1
 
-    total_loss = accelerator.reduce(eval_loss_sum, reduction="sum")
-    total_pred = accelerator.reduce(eval_num_pred, reduction="sum")
-    total_correct = accelerator.reduce(eval_num_correct, reduction="sum")
-    total_batches = accelerator.reduce(
-        torch.tensor(eval_batches, device=accelerator.device), reduction="sum"
-    )
+        total_loss = accelerator.reduce(eval_loss_sum, reduction="sum")
+        total_pred = accelerator.reduce(eval_num_pred, reduction="sum")
+        total_correct = accelerator.reduce(eval_num_correct, reduction="sum")
+        total_batches = accelerator.reduce(
+            torch.tensor(eval_batches, device=accelerator.device), reduction="sum"
+        )
 
-    metrics: dict[str, float] = {
-        "eval/batches": float(total_batches.item()),
-    }
-    if total_pred.item() > 0:
-        eval_loss = (total_loss / total_pred).item()
-        metrics["eval/loss"] = eval_loss
-        metrics["eval/perplexity"] = math.exp(eval_loss)
-        metrics["eval/accuracy"] = (total_correct / total_pred).item()
+        metrics: dict[str, float] = {
+            "eval/batches": float(total_batches.item()),
+        }
+        if total_pred.item() > 0:
+            eval_loss = (total_loss / total_pred).item()
+            metrics["eval/loss"] = eval_loss
+            metrics["eval/perplexity"] = math.exp(eval_loss)
+            metrics["eval/accuracy"] = (total_correct / total_pred).item()
 
-    if was_training:
-        model.train()
-
-    return metrics
+        return metrics
+    finally:
+        if was_training:
+            model.train()
 
 
 def _scale_gradients(model: torch.nn.Module, scale: torch.Tensor) -> None:
