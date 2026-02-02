@@ -18,7 +18,7 @@ and may use different attention backends; keep the math consistent when editing.
 Packed/varlen sequences are intentionally unsupported in this HF export model.
 """
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Optional, Union
 import warnings
 
 import torch
@@ -26,11 +26,7 @@ from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from torch.nn.functional import scaled_dot_product_attention
 
-from transformers import (
-    DataCollatorForLanguageModeling,
-    PretrainedConfig,
-    PreTrainedModel,
-)
+from transformers import PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import (
     BaseModelOutput,
     MaskedLMOutput,
@@ -42,38 +38,6 @@ try:
 except ImportError:  # pragma: no cover - triggered in exported HF repo layout.
     from modeling_utils import swiglu_intermediate_size
 from .rotary import apply_rotary_emb, precompute_freqs_cis
-
-
-class DataCollatorWithPacking(DataCollatorForLanguageModeling):
-    """HF export collator without packing support.
-
-    Packing is intentionally unsupported in the HF export path. Use the training
-    collators in ``src/neobert/collator`` for packed batches.
-    """
-
-    def __init__(self, pack_sequences: bool = False, **kwargs: Any) -> None:
-        """Initialize the data collator.
-
-        :param bool pack_sequences: Whether to pack multiple sequences together.
-        :param Any kwargs: Additional arguments for the parent collator.
-        :raises ValueError: If packing is requested.
-        """
-        if pack_sequences:
-            raise ValueError(
-                "Packed sequences are not supported in the HF export collator. "
-                "Use the training collator in src/neobert/collator for packing."
-            )
-        super().__init__(**kwargs)
-
-    def __call__(self, batch: List[Dict[str, List[int]]]) -> Dict[str, torch.Tensor]:
-        """Process a batch of examples.
-
-        :param list[dict[str, list[int]]] batch: Tokenized examples.
-        :return dict[str, torch.Tensor]: Batch tensors for HF model input.
-        """
-        batch = super().__call__(batch)
-        batch["attention_mask"] = batch["attention_mask"].to(torch.bool)
-        return batch
 
 
 class NeoBERTConfig(PretrainedConfig):
@@ -172,6 +136,13 @@ class NeoBERTConfig(PretrainedConfig):
             dropout = kwargs["dropout_prob"]
         self.dropout = dropout
         self.flash_attention = flash_attention
+        if self.flash_attention:
+            warnings.warn(
+                "NeoBERTConfig: 'flash_attention' is ignored in HF export; "
+                "scaled dot-product attention is always used.",
+                UserWarning,
+                stacklevel=2,
+            )
         self.vocab_size = vocab_size
         self.pad_token_id = pad_token_id
         if "max_position_embeddings" in kwargs and kwargs["max_position_embeddings"]:

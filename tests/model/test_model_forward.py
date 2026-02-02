@@ -2,6 +2,7 @@
 """Test NeoBERT model forward passes and functionality."""
 
 import unittest
+import warnings
 from unittest.mock import patch
 
 import torch
@@ -235,19 +236,6 @@ class TestModelForward(unittest.TestCase):
         pad_mask = pad_mask.unsqueeze(1).unsqueeze(2).expand_as(attn_weights)
         self.assertLess(attn_weights.masked_select(pad_mask).max().item(), 1e-6)
 
-    def test_hf_packed_collator_rejected(self):
-        """Ensure HF collator rejects packed sequences (export-only path)."""
-        from neobert.huggingface.modeling_neobert import DataCollatorWithPacking
-
-        tokenizer = self._make_tokenizer()
-        with self.assertRaises(ValueError):
-            DataCollatorWithPacking(
-                pack_sequences=True,
-                tokenizer=tokenizer,
-                mlm=False,
-                return_tensors="pt",
-            )
-
     def test_hf_additive_attention_mask_supported(self):
         """Ensure additive 0/-inf masks are accepted in HF model."""
         from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
@@ -347,6 +335,29 @@ class TestModelForward(unittest.TestCase):
                 outputs_int.last_hidden_state,
                 outputs_bool.last_hidden_state,
                 atol=1e-6,
+            )
+        )
+
+    def test_hf_flash_attention_warning(self):
+        """Ensure flash_attention emits a warning in HF export config."""
+        from neobert.huggingface.modeling_neobert import NeoBERTConfig
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            NeoBERTConfig(
+                hidden_size=32,
+                num_hidden_layers=1,
+                num_attention_heads=2,
+                intermediate_size=64,
+                vocab_size=100,
+                max_length=16,
+                flash_attention=True,
+            )
+
+        self.assertTrue(
+            any(
+                "flash_attention' is ignored" in str(warning.message)
+                for warning in caught
             )
         )
 
