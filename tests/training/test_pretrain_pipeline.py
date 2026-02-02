@@ -236,7 +236,7 @@ class TestPretrainComponents(unittest.TestCase):
 
         logits = torch.tensor([[[0.1, 0.2, 0.7], [0.9, 0.1, 0.0]]])
         labels = torch.tensor([[2, -100]])
-        self.assertEqual(_count_masked_correct(logits, labels), 1)
+        self.assertEqual(_count_masked_correct(logits, labels).item(), 1)
 
     def test_pack_sequences_collator(self):
         """Ensure packed collator builds a block attention mask."""
@@ -277,12 +277,11 @@ class TestPretrainComponents(unittest.TestCase):
             collated = collator(batch)
 
             self.assertIn("attention_mask", collated)
-            self.assertEqual(collated["attention_mask"].dim(), 3)
-            self.assertEqual(
-                collated["attention_mask"].shape[-1],
-                collated["input_ids"].shape[1],
+            self.assertEqual(collated["attention_mask"].dim(), 2)
+            self.assertIn("packed_seqlens", collated)
+            self.assertTrue(
+                all(len(seqlens) >= 1 for seqlens in collated["packed_seqlens"])
             )
-            self.assertLess(collated["attention_mask"].min().item(), 0)
 
         except Exception as e:
             if "mask_token" in str(e) or "sentencepiece" in str(e):

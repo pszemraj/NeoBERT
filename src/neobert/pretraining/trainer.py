@@ -5,6 +5,7 @@ import math
 import logging
 import os
 import re
+from contextlib import nullcontext
 from typing import Callable, Optional
 
 # PyTorch
@@ -30,6 +31,7 @@ from transformers import BatchEncoding
 from ..config import Config, ConfigLoader, MuonConfig
 from ..dataloader import get_dataloader
 from ..model import NeoBERTConfig, NeoBERTLMHead
+from ..model.model import XFORMERS_AVAILABLE, XFORMERS_ERROR
 from ..optimizer import get_optimizer
 from ..scheduler import get_scheduler
 from ..tokenizer import get_tokenizer
@@ -44,19 +46,19 @@ logger = logging.getLogger(__name__)
 
 def _count_masked_correct(
     logits: torch.Tensor, labels: torch.Tensor, ignore_index: int = -100
-) -> int:
+) -> torch.Tensor:
     """Count correct predictions while ignoring masked labels.
 
     :param torch.Tensor logits: Logits of shape ``[batch, seq_len, vocab]``.
     :param torch.Tensor labels: Label IDs of shape ``[batch, seq_len]``.
     :param int ignore_index: Label value to ignore (default: -100).
-    :return int: Number of correct predictions on unmasked tokens.
+    :return torch.Tensor: Scalar tensor of correct predictions on unmasked tokens.
     """
     mask = labels != ignore_index
     if not mask.any():
-        return 0
+        return torch.zeros((), device=logits.device, dtype=torch.long)
     preds = logits.argmax(dim=-1)
-    return (preds[mask] == labels[mask]).sum().item()
+    return (preds[mask] == labels[mask]).sum()
 
 
 def _resolve_text_column(dataset: Dataset, is_streaming: bool) -> str:
@@ -111,9 +113,17 @@ def _run_eval(
         for batch in eval_dataloader:
             if max_batches is not None and eval_batches >= max_batches:
                 break
-            logits = model(batch["input_ids"], batch.get("attention_mask", None))[
-                "logits"
-            ]
+            packed_seqlens = batch.get("packed_seqlens")
+            pad_mask = (
+                None
+                if packed_seqlens is not None
+                else batch.get("attention_mask", None)
+            )
+            logits = model(
+                batch["input_ids"],
+                pad_mask,
+                packed_seqlens=packed_seqlens,
+            )["logits"]
             loss_sum = loss_fn(
                 logits.view(-1, model_config.vocab_size), batch["labels"].view(-1)
             )
@@ -178,22 +188,31 @@ def to_target_batch_size(
     tmp = {}
     batch_size = batch["input_ids"].shape[0]
 
-    # If the batch is to large, we store samples
+    # If the batch is too large, we store samples
     if batch_size > target_size:
         for key in batch.keys():
-            tmp[key] = torch.split(
-                batch[key], [target_size, batch_size - target_size], dim=0
-            )
-            batch[key] = tmp[key][0]
-            if stored_batch[key] is None:
-                stored_batch[key] = tmp[key][1]
-            else:
-                # Keep stored batches on a single device (often CPU) to avoid device mismatches.
-                if stored_batch[key].device != tmp[key][1].device:
-                    leftover = tmp[key][1].to(stored_batch[key].device)
+            value = batch[key]
+            if torch.is_tensor(value):
+                tmp[key] = torch.split(
+                    value, [target_size, batch_size - target_size], dim=0
+                )
+                batch[key] = tmp[key][0]
+                if stored_batch[key] is None:
+                    stored_batch[key] = tmp[key][1]
                 else:
-                    leftover = tmp[key][1]
-                stored_batch[key] = torch.cat([stored_batch[key], leftover], dim=0)
+                    # Keep stored batches on a single device (often CPU) to avoid device mismatches.
+                    if stored_batch[key].device != tmp[key][1].device:
+                        leftover = tmp[key][1].to(stored_batch[key].device)
+                    else:
+                        leftover = tmp[key][1]
+                    stored_batch[key] = torch.cat([stored_batch[key], leftover], dim=0)
+            else:
+                batch[key] = value[:target_size]
+                leftover = value[target_size:]
+                if stored_batch[key] is None:
+                    stored_batch[key] = leftover
+                else:
+                    stored_batch[key] = stored_batch[key] + leftover
 
     # If the batch is too small, we had some stored_batch
     elif batch_size < target_size:
@@ -204,32 +223,43 @@ def to_target_batch_size(
             for key in batch.keys():
                 if stored_batch[key] is None:
                     continue
-                if stored_batch[key].device != batch[key].device:
+                if (
+                    torch.is_tensor(stored_batch[key])
+                    and stored_batch[key].device != batch[key].device
+                ):
                     stored_batch[key] = stored_batch[key].to(batch[key].device)
             for key in batch.keys():
-                tmp[key] = torch.split(
-                    stored_batch[key],
-                    [
-                        target_size - batch_size,
-                        stored_batch[key].shape[0] - (target_size - batch_size),
-                    ],
-                    dim=0,
-                )
-                batch[key] = torch.cat([batch[key], tmp[key][0]], dim=0)
-                stored_batch[key] = tmp[key][1]
-                # Save on CPU to prevent full GPU memory; this trades extra H2D copies
-                # for lower peak VRAM during uneven batch packing.
-                # Use blocking transfer so buffered batches are ready when reused.
-                stored_batch[key] = stored_batch[key].to("cpu")
+                if torch.is_tensor(stored_batch[key]):
+                    tmp[key] = torch.split(
+                        stored_batch[key],
+                        [
+                            target_size - batch_size,
+                            stored_batch[key].shape[0] - (target_size - batch_size),
+                        ],
+                        dim=0,
+                    )
+                    batch[key] = torch.cat([batch[key], tmp[key][0]], dim=0)
+                    stored_batch[key] = tmp[key][1]
+                    # Save on CPU to prevent full GPU memory; this trades extra H2D copies
+                    # for lower peak VRAM during uneven batch packing.
+                    # Use blocking transfer so buffered batches are ready when reused.
+                    stored_batch[key] = stored_batch[key].to("cpu")
+                else:
+                    take = target_size - batch_size
+                    batch[key] = batch[key] + stored_batch[key][:take]
+                    stored_batch[key] = stored_batch[key][take:]
 
         # Concatenate otherwise
         else:
             for key in batch.keys():
                 if stored_batch[key] is None:
                     continue
-                if stored_batch[key].device != batch[key].device:
-                    stored_batch[key] = stored_batch[key].to(batch[key].device)
-                batch[key] = torch.cat([batch[key], stored_batch[key]], dim=0)
+                if torch.is_tensor(stored_batch[key]):
+                    if stored_batch[key].device != batch[key].device:
+                        stored_batch[key] = stored_batch[key].to(batch[key].device)
+                    batch[key] = torch.cat([batch[key], stored_batch[key]], dim=0)
+                else:
+                    batch[key] = batch[key] + stored_batch[key]
                 stored_batch[key] = None
 
     return batch, stored_batch
@@ -396,10 +426,27 @@ def trainer(cfg: Config) -> None:
     if accelerator.mixed_precision == "bf16":
         dtype_pad_mask = torch.bfloat16
 
+    is_streaming = cfg.dataset.streaming
+    if cfg.trainer.resume_from_checkpoint and is_streaming:
+        raise ValueError(
+            "Cannot resume training with streaming datasets - data position is not "
+            "preserved. For resumable long runs, pre-tokenize your dataset:\n"
+            "  python scripts/pretraining/tokenize_dataset.py --dataset <name> --output <path>"
+        )
+
     if cfg.datacollator.pack_sequences:
         logger.info(
-            "Using packed sequences with block-diagonal attention masks (experimental)."
+            "Using packed sequences with xFormers block-diagonal attention (experimental)."
         )
+        if not cfg.model.flash_attention:
+            raise ValueError(
+                "Packed sequences require model.flash_attention=true (xFormers)."
+            )
+        if not XFORMERS_AVAILABLE:
+            raise ImportError(
+                "Packed sequences require xformers. Install with: pip install xformers. "
+                f"Import error: {XFORMERS_ERROR}"
+            )
 
     # Tokenizer
     tokenizer = get_tokenizer(
@@ -430,15 +477,7 @@ def trainer(cfg: Config) -> None:
 
     # Check if dataset needs tokenization
     # For streaming datasets, we need to check differently
-    is_streaming = cfg.dataset.streaming
     needs_tokenization = False
-
-    if cfg.trainer.resume_from_checkpoint and is_streaming:
-        raise ValueError(
-            "Cannot resume training with streaming datasets - data position is not "
-            "preserved. For resumable long runs, pre-tokenize your dataset:\n"
-            "  python scripts/pretraining/tokenize_dataset.py --dataset <name> --output <path>"
-        )
 
     if train_dataset:
         if is_streaming:
@@ -778,6 +817,11 @@ def trainer(cfg: Config) -> None:
     )
 
     accum_tokens = torch.zeros((), device=accelerator.device)
+    local_samples = torch.zeros((), device=accelerator.device, dtype=torch.long)
+    local_tokens = torch.zeros((), device=accelerator.device, dtype=torch.long)
+    local_num_pred = torch.zeros((), device=accelerator.device, dtype=torch.long)
+    local_sum_loss = torch.zeros((), device=accelerator.device, dtype=torch.float32)
+    local_num_correct = torch.zeros((), device=accelerator.device, dtype=torch.long)
     while cfg.trainer.max_steps > metrics["train/steps"]:
         # Use skipped_train_dataloader the first epoch after resuming
         dataloader = (
@@ -790,6 +834,7 @@ def trainer(cfg: Config) -> None:
             "input_ids": None,
             "attention_mask": None,
             "labels": None,
+            "packed_seqlens": None,
         }
         i = 0
         for batch in dataloader:
@@ -809,65 +854,48 @@ def trainer(cfg: Config) -> None:
                 continue
 
             num_pred = (batch["labels"] != -100).sum()
+            num_tokens = (batch["input_ids"] != model_config.pad_token_id).sum()
+            packed_seqlens = batch.get("packed_seqlens")
+            pad_mask = (
+                None
+                if packed_seqlens is not None
+                else batch.get("attention_mask", None)
+            )
 
-            # Under the no_sync context manager, PyTorch will skip synchronizing the gradients when .backward() is
-            # called, and the first call to .backward() outside this context manager will trigger the synchronization.
-            # Accumulating manually gives more flexibility and is compatible with TPUs.
-            if metrics["train/batches"] % cfg.trainer.gradient_accumulation_steps != 0:
-                with accelerator.no_sync(model):
-                    # Forward pass
-                    logits = model(
-                        batch["input_ids"], batch.get("attention_mask", None)
-                    )["logits"]
-                    loss_sum = train_loss_fn(
-                        logits.view(-1, model_config.vocab_size),
-                        batch["labels"].view(-1),
-                    )
-
-                    # Compute gradient
-                    accelerator.backward(loss_sum)
-                    accum_tokens += num_pred
-
-                    # Log metrics
-                    metrics["train/local_samples"] += batch["input_ids"].shape[0]
-                    if (
-                        "attention_mask" in batch.keys()
-                        and batch["attention_mask"] is not None
-                    ):
-                        # Packed sequences use a 3D block mask; fall back to counting tokens directly.
-                        if batch["attention_mask"].dim() == 2:
-                            metrics["train/local_tokens"] += (
-                                (batch["attention_mask"] == 0).sum().item()
-                            )
-                        else:
-                            metrics["train/local_tokens"] += batch["input_ids"].numel()
-                    else:
-                        metrics["train/local_tokens"] += batch["input_ids"].numel()
-                    metrics["train/local_num_pred"] += num_pred.item()
-                    metrics["train/local_sum_loss"] += loss_sum.item()
-                    metrics["train/local_num_correct"] += _count_masked_correct(
-                        logits, batch["labels"]
-                    )
-
-            else:
+            sync_gradients = (
+                metrics["train/batches"] % cfg.trainer.gradient_accumulation_steps == 0
+            )
+            context = nullcontext() if sync_gradients else accelerator.no_sync(model)
+            with context:
                 # Forward pass
-                logits = model(batch["input_ids"], batch.get("attention_mask", None))[
-                    "logits"
-                ]
+                logits = model(
+                    batch["input_ids"],
+                    pad_mask,
+                    packed_seqlens=packed_seqlens,
+                )["logits"]
                 loss_sum = train_loss_fn(
                     logits.view(-1, model_config.vocab_size), batch["labels"].view(-1)
                 )
 
                 # Compute gradient
                 accelerator.backward(loss_sum)
-                accum_tokens += num_pred
+                accum_tokens += num_pred.to(accum_tokens.dtype)
 
+                # Accumulate metrics on device to avoid per-batch syncs.
+                local_samples += batch["input_ids"].shape[0]
+                local_tokens += num_tokens
+                local_num_pred += num_pred
+                local_sum_loss += loss_sum.detach().float()
+                local_num_correct += _count_masked_correct(logits, batch["labels"])
+
+            if sync_gradients:
                 # Reduce to global token count to handle uneven sharding across ranks.
                 tokens_global = accelerator.reduce(accum_tokens, reduction="sum")
                 if tokens_global.item() > 0:
                     # Match full-batch normalization across variable-length microbatches.
                     # accelerator.backward() already divides by grad_accumulation_steps, and DDP averages
-                    # across processes, so we rescale by (num_processes * grad_accum_steps) / tokens_global
+                    # across processes on the sync step, so we rescale by
+                    # (num_processes * grad_accum_steps) / tokens_global
                     # to recover per-token mean gradients for the global batch size.
                     # This post-accumulation rescale is equivalent to scaling each microbatch loss
                     # because gradients are linear in the loss scalar.
@@ -926,25 +954,6 @@ def trainer(cfg: Config) -> None:
                 # Log metrics
                 pbar.update(1)
                 metrics["train/steps"] += 1
-                metrics["train/local_samples"] += batch["input_ids"].shape[0]
-                if (
-                    "attention_mask" in batch.keys()
-                    and batch["attention_mask"] is not None
-                ):
-                    # Packed sequences use a 3D block mask; fall back to counting tokens directly.
-                    if batch["attention_mask"].dim() == 2:
-                        metrics["train/local_tokens"] += (
-                            (batch["attention_mask"] == 0).sum().item()
-                        )
-                    else:
-                        metrics["train/local_tokens"] += batch["input_ids"].numel()
-                else:
-                    metrics["train/local_tokens"] += batch["input_ids"].numel()
-                metrics["train/local_num_pred"] += num_pred.item()
-                metrics["train/local_sum_loss"] += loss_sum.item()
-                metrics["train/local_num_correct"] += _count_masked_correct(
-                    logits, batch["labels"]
-                )
 
                 # Update the parameters and the scheduler
                 optimizer.step()
@@ -977,7 +986,17 @@ def trainer(cfg: Config) -> None:
                             metrics[key] = value
 
                     metrics["train/learning_rate"] = optimizer.param_groups[0]["lr"]
+                    metrics["train/local_samples"] = int(local_samples.item())
+                    metrics["train/local_tokens"] = int(local_tokens.item())
+                    metrics["train/local_num_pred"] = int(local_num_pred.item())
+                    metrics["train/local_sum_loss"] = float(local_sum_loss.item())
+                    metrics["train/local_num_correct"] = int(local_num_correct.item())
                     metrics.log(accelerator)
+                    local_samples.zero_()
+                    local_tokens.zero_()
+                    local_num_pred.zero_()
+                    local_sum_loss.zero_()
+                    local_num_correct.zero_()
 
                 # Save accelerator state for resumable training
                 if metrics["train/steps"] % cfg.trainer.save_steps == 0:
@@ -1021,24 +1040,28 @@ def trainer(cfg: Config) -> None:
                 if metrics["train/steps"] % cfg.trainer.save_steps == 0:
                     # Model checkpoints are used for inference/export and can be pruned independently.
                     # Save the checkpoint
+                    step_tag = str(metrics["train/steps"])
+                    tmp_tag = f"{step_tag}.tmp"
+
+                    if accelerator.is_main_process:
+                        tmp_path = os.path.join(model_checkpoint_dir, tmp_tag)
+                        if os.path.exists(tmp_path):
+                            import shutil
+
+                            shutil.rmtree(tmp_path)
+                    accelerator.wait_for_everyone()
+
                     if accelerator.distributed_type is DistributedType.DEEPSPEED:
                         # DeepSpeed checkpoints are not directly portable; use zero_to_fp32 to export.
-                        model.save_checkpoint(
-                            model_checkpoint_dir, tag=metrics["train/steps"]
-                        )
-                        checkpoint_path = os.path.join(
-                            model_checkpoint_dir, str(metrics["train/steps"])
-                        )
+                        model.save_checkpoint(model_checkpoint_dir, tag=tmp_tag)
+                        checkpoint_path = os.path.join(model_checkpoint_dir, tmp_tag)
                     else:
-                        path = os.path.join(
-                            model_checkpoint_dir, str(metrics["train/steps"])
-                        )
-                        os.makedirs(path, exist_ok=True)
+                        checkpoint_path = os.path.join(model_checkpoint_dir, tmp_tag)
+                        os.makedirs(checkpoint_path, exist_ok=True)
                         torch.save(
                             accelerator.unwrap_model(model).state_dict(),
-                            os.path.join(path, "state_dict.pt"),
+                            os.path.join(checkpoint_path, "state_dict.pt"),
                         )
-                        checkpoint_path = path
 
                     # Save config and tokenizer info (only from main process)
                     if accelerator.is_main_process:
@@ -1066,9 +1089,20 @@ def trainer(cfg: Config) -> None:
                         tokenizer.model_max_length = cfg.model.max_position_embeddings
                         tokenizer.save_pretrained(tokenizer_dir)
 
+                    accelerator.wait_for_everyone()
+
+                    if accelerator.is_main_process:
+                        final_path = os.path.join(model_checkpoint_dir, step_tag)
+                        if os.path.exists(final_path):
+                            import shutil
+
+                            shutil.rmtree(final_path)
+                        os.replace(checkpoint_path, final_path)
+                        checkpoint_path = final_path
                         # Use logger instead of accelerator.print to avoid progress bar interference
                         logger.info(
-                            f"Saved checkpoint with config, tokenizer info, and full tokenizer to {checkpoint_path}"
+                            "Saved checkpoint with config, tokenizer info, and full tokenizer to %s",
+                            checkpoint_path,
                         )
 
                     accelerator.wait_for_everyone()

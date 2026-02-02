@@ -133,7 +133,8 @@ datacollator.pack_sequences: bool = False
 datacollator.max_length: int | None = None
 ```
 
-Note: `pack_sequences` uses block-diagonal attention in pretraining and is considered experimental. See `docs/dev.md`.
+Note: `pack_sequences` uses xFormers block-diagonal attention in pretraining and is
+considered experimental. It requires `model.flash_attention: true`. See `docs/dev.md`.
 If `datacollator.max_length` is unset, pretraining uses `dataset.max_seq_length`.
 
 ### Trainer (`trainer`)

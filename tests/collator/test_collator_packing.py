@@ -30,7 +30,9 @@ class DummyPadCollator:
             f["input_ids"] + [self.pad_token_id] * (max_len - len(f["input_ids"]))
             for f in features
         ]
-        return {"input_ids": torch.tensor(batch_ids, dtype=torch.long)}
+        input_ids = torch.tensor(batch_ids, dtype=torch.long)
+        attention_mask = input_ids.ne(self.pad_token_id)
+        return {"input_ids": input_ids, "attention_mask": attention_mask}
 
 
 class TestCollatorPacking(unittest.TestCase):
@@ -56,7 +58,8 @@ class TestCollatorPacking(unittest.TestCase):
         self.assertEqual(batch["input_ids"][1].tolist(), [4, 5, 0])
         self.assertNotIn(99, batch["input_ids"][0].tolist())
         self.assertIn("attention_mask", batch)
-        self.assertEqual(batch["attention_mask"].shape, (2, 3, 3))
+        self.assertEqual(batch["attention_mask"].shape, (2, 3))
+        self.assertEqual(batch["packed_seqlens"], [[3], [2]])
 
     def test_separator_used_when_sequence_fits(self):
         """Ensure separator is inserted when the next sequence fits."""
@@ -76,10 +79,11 @@ class TestCollatorPacking(unittest.TestCase):
         self.assertEqual(batch["input_ids"].shape, (1, 4))
         self.assertEqual(batch["input_ids"][0].tolist(), [1, 2, 99, 3])
         self.assertIn("attention_mask", batch)
-        self.assertEqual(batch["attention_mask"].shape, (1, 4, 4))
+        self.assertEqual(batch["attention_mask"].shape, (1, 4))
+        self.assertEqual(batch["packed_seqlens"], [[2, 2]])
 
-    def test_padding_rows_have_valid_attention_entry(self):
-        """Ensure padded query rows are not fully masked."""
+    def test_packed_lengths_match_nonpad_tokens(self):
+        """Ensure packed lengths sum to non-pad token counts."""
         collator = DataCollatorWithPacking(
             sep_token_id=99,
             max_length=4,
@@ -94,10 +98,6 @@ class TestCollatorPacking(unittest.TestCase):
         )
 
         attention_mask = batch["attention_mask"]
-        self.assertTrue(attention_mask.any(dim=-1).all().item())
-
-        pad_positions = batch["input_ids"] == 0
-        for row_mask, is_pad in zip(attention_mask, pad_positions):
-            for row, pad in zip(row_mask, is_pad):
-                if pad.item():
-                    self.assertTrue(row.any().item())
+        token_counts = attention_mask.sum(dim=1).tolist()
+        packed_counts = [sum(lengths) for lengths in batch["packed_seqlens"]]
+        self.assertEqual(token_counts, packed_counts)

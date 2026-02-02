@@ -14,15 +14,16 @@ This page tracks known limitations and TODOs that need follow-up work as well as
 
 ## Pretraining: `datacollator.pack_sequences`
 
-Status: **experimental**. Pretraining uses a block-diagonal attention mask.
+Status: **experimental**. Pretraining uses xFormers block-diagonal attention
+without materializing a dense mask.
 
-Why: Packed sequences must prevent cross-sequence attention. Today we use a
-block-diagonal mask on the standard attention path. For efficiency, we may
+Why: Packed sequences must prevent cross-sequence attention. Today we use an
+xFormers block-diagonal bias on the flash-attention path. For efficiency, we may
 want to switch to FlashAttention varlen kernels in the future.
 
 Options:
 
-- block-diagonal attention mask (current implementation)
+- xFormers block-diagonal attention (current implementation)
 - FlashAttention varlen kernels (cu_seqlens + max_seqlen) with a packed layout
 
 TODO scope:
@@ -35,17 +36,17 @@ TODO scope:
 
 ### Next Step: FlashAttention varlen training path (cu_seqlens)
 
-Goal: eliminate the O(seq²) block mask by using FlashAttention varlen kernels for
-packed sequences during pretraining.
+Goal: eliminate any remaining O(seq²) paths by using FlashAttention varlen kernels
+for packed sequences during pretraining.
 
 Current state:
 
-- `src/neobert/collator/collator.py` builds a dense block-diagonal mask for packed
-  sequences and converts it to additive 0/-inf (O(seq²) memory).
-- `src/neobert/pretraining/trainer.py` uses `get_dataloader()` + `get_collator()`
-  and passes `attention_mask` into `NeoBERTLMHead`.
-- `src/neobert/model/model.py` supports xFormers (memory_efficient_attention) or
-  SDPA; it expects additive masks and has **no** varlen path.
+- `src/neobert/collator/collator.py` emits `packed_seqlens` for packed batches and
+  keeps a 2D padding `attention_mask`; it does **not** build dense block masks.
+- `src/neobert/pretraining/trainer.py` passes `packed_seqlens` into `NeoBERTLMHead`
+  and skips additive masks for packed batches.
+- `src/neobert/model/model.py` supports xFormers block-diagonal attention for
+  packed batches when `model.flash_attention: true`.
 - `src/neobert/huggingface/modeling_neobert.py` intentionally **does not**
   support packed/varlen inputs; the exported HF model stays within vanilla
   Transformers expectations.

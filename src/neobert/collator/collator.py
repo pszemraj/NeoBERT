@@ -51,7 +51,11 @@ class CustomCollatorForMLM(DataCollatorForLanguageModeling):
 
 
 class DataCollatorWithPacking(DefaultDataCollator):
-    """Data collator used for padding-free sequence packing."""
+    """Data collator used for padding-free sequence packing.
+
+    Packed batches include a ``packed_seqlens`` entry that lists segment lengths
+    per packed sequence; this enables block-diagonal attention without dense masks.
+    """
 
     def __init__(
         self,
@@ -132,31 +136,27 @@ class DataCollatorWithPacking(DefaultDataCollator):
         if not packed_segments:
             return batch
 
-        max_len = batch["input_ids"].shape[1]
-        masks = []
+        packed_seqlens: list[list[int]] = []
         for seg in packed_segments:
-            seg_tensor = torch.tensor(seg, dtype=torch.long)
-            if seg_tensor.numel() < max_len:
-                pad = torch.full(
-                    (max_len - seg_tensor.numel(),), -1, dtype=seg_tensor.dtype
-                )
-                seg_tensor = torch.cat([seg_tensor, pad], dim=0)
-            valid = seg_tensor != -1
-            # NOTE: This builds a dense block mask (O(seq^2)) for SDPA/xFormers.
-            # For very long sequences, prefer packed cu_seqlens with flash-attn.
-            mask = (
-                (seg_tensor[:, None] == seg_tensor[None, :])
-                & valid[:, None]
-                & valid[None, :]
-            )
-            if not valid.all():
-                # Avoid all-masked query rows (all False) that would become all -inf
-                # after additive conversion and can yield NaNs in SDPA.
-                pad_idx = torch.where(~valid)[0]
-                mask[pad_idx, pad_idx] = True
-            masks.append(mask)
+            if not seg:
+                packed_seqlens.append([])
+                continue
+            lengths: list[int] = []
+            current = seg[0]
+            count = 0
+            for seg_id in seg:
+                if seg_id != current:
+                    lengths.append(count)
+                    current = seg_id
+                    count = 1
+                else:
+                    count += 1
+            if count > 0:
+                lengths.append(count)
+            packed_seqlens.append(lengths)
 
-        batch["attention_mask"] = torch.stack(masks, dim=0)
+        # Return packed segment lengths for efficient block-diagonal attention.
+        batch["packed_seqlens"] = packed_seqlens
         return batch
 
 
@@ -208,17 +208,12 @@ def get_collator(
         )
 
         def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
-            """Collate packed sequences and build block attention mask.
+            """Collate packed sequences and attach segment lengths.
 
             :param list[dict[str, Any]] batch: List of dataset examples.
-            :return dict[str, Any]: Batch dictionary with packed input IDs.
+            :return dict[str, Any]: Batch dictionary with packed input IDs and lengths.
             """
-            batch = collator(batch)
-            if "attention_mask" in batch and batch["attention_mask"] is not None:
-                batch["attention_mask"] = torch.where(
-                    batch["attention_mask"], float(0.0), float("-inf")
-                ).type(dtype)
-            return batch
+            return collator(batch)
 
     else:
 

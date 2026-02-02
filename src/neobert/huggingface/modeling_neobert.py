@@ -568,9 +568,11 @@ class NeoBERT(NeoBERTPreTrainedModel):
         # Get rotary position embeddings
         freqs_cis = None
         if self.config.rope:
-            max_pos = input_ids.shape[1]
-            if position_ids is not None:
-                max_pos = int(position_ids.max().item()) + 1
+            seq_len = input_ids.shape[1]
+            config_max = getattr(self.config, "max_length", None)
+            if config_max is None:
+                config_max = getattr(self.config, "max_position_embeddings", None)
+            max_pos = max(seq_len, int(config_max)) if config_max else seq_len
             if (
                 self.freqs_cis.numel() == 0
                 or self.freqs_cis.device != input_ids.device
@@ -582,7 +584,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
             freqs_cis = (
                 self.freqs_cis[position_ids]
                 if position_ids is not None
-                else self.freqs_cis[: input_ids.shape[1]].unsqueeze(0)
+                else self.freqs_cis[:seq_len].unsqueeze(0)
             )
 
         # Token embeddings

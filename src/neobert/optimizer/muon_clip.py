@@ -750,13 +750,16 @@ class MuonClipOptimizer(Optimizer):
         is_transpose = grad.size(0) > grad.size(1)
         working = grad.T if is_transpose else grad
 
+        original_dtype = working.dtype
+        if working.dtype in (torch.float16, torch.bfloat16):
+            working = working.float()
         norm = torch.linalg.norm(working)
         if norm == 0:
             return torch.zeros_like(grad)
 
         # Newton-Schulz iteration coefficients from Polar Express appendix.
         a, b, c = (3.4445, -4.7750, 2.0315)
-        X = working / (norm + 1e-7)
+        X = working / (norm + 1e-5)
 
         for _ in range(steps):
             A = X @ X.T
@@ -767,6 +770,8 @@ class MuonClipOptimizer(Optimizer):
         # Factor: 0.4 * sqrt(max_dim) (Polar Express appendix).
         scale_factor = 0.4 * max(working.size(0), working.size(1)) ** 0.5
         X = scale_factor * X
+        if X.dtype != original_dtype:
+            X = X.to(original_dtype)
 
         return X.T if is_transpose else X
 
