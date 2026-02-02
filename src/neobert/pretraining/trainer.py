@@ -1051,22 +1051,23 @@ def trainer(cfg: Config) -> None:
                     # Save the checkpoint
                     step_tag = str(metrics["train/steps"])
                     tmp_tag = f"{step_tag}.tmp"
+                    tmp_path = os.path.join(model_checkpoint_dir, tmp_tag)
 
+                    # Clean up any stale tmp directory from a previous failed save.
+                    # Use exist_ok pattern to avoid TOCTOU race conditions in distributed setting.
                     if accelerator.is_main_process:
-                        tmp_path = os.path.join(model_checkpoint_dir, tmp_tag)
-                        if os.path.exists(tmp_path):
-                            import shutil
+                        import shutil
 
+                        if os.path.exists(tmp_path):
                             shutil.rmtree(tmp_path)
+                        os.makedirs(tmp_path, exist_ok=True)
                     accelerator.wait_for_everyone()
 
+                    checkpoint_path = tmp_path
                     if accelerator.distributed_type is DistributedType.DEEPSPEED:
                         # DeepSpeed checkpoints are not directly portable; use zero_to_fp32 to export.
                         model.save_checkpoint(model_checkpoint_dir, tag=tmp_tag)
-                        checkpoint_path = os.path.join(model_checkpoint_dir, tmp_tag)
                     else:
-                        checkpoint_path = os.path.join(model_checkpoint_dir, tmp_tag)
-                        os.makedirs(checkpoint_path, exist_ok=True)
                         torch.save(
                             accelerator.unwrap_model(model).state_dict(),
                             os.path.join(checkpoint_path, "state_dict.pt"),
