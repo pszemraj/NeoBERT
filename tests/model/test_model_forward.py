@@ -307,6 +307,17 @@ class TestModelForward(unittest.TestCase):
         normalized_keep_all = model._normalize_attention_mask(keep_all, input_ids)
         self.assertFalse(normalized_keep_all.any().item())
 
+        mixed_mask = torch.tensor(
+            [[True, False, True, False], [False, True, False, True]]
+        )
+        with self.assertRaises(ValueError):
+            model._normalize_attention_mask(mixed_mask, input_ids)
+
+        normalized_mixed = model._normalize_attention_mask(
+            mixed_mask, input_ids, attention_mask_is_masked=True
+        )
+        self.assertTrue(torch.equal(normalized_mixed, mixed_mask))
+
     def test_hf_bool_attention_mask_supported(self):
         """Ensure HF-style bool masks (True=keep) are accepted."""
         from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig

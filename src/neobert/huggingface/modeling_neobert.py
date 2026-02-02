@@ -490,14 +490,27 @@ class NeoBERT(NeoBERTPreTrainedModel):
         self,
         attention_mask: torch.Tensor,
         input_ids: Optional[torch.Tensor],
+        attention_mask_is_masked: Optional[bool] = None,
     ) -> torch.Tensor:
         """Normalize attention masks to SDPA semantics (True = masked).
 
         :param torch.Tensor attention_mask: Input attention mask.
         :param torch.Tensor | None input_ids: Optional input IDs for pad disambiguation.
+        :param bool | None attention_mask_is_masked: If set, True means mask is already
+            in SDPA format (True = masked). False means HF format (True = keep).
         :return torch.Tensor: Boolean mask with True entries masked.
         """
+        if attention_mask.dim() != 2:
+            raise ValueError(
+                "NeoBERT HF export expects a 2D attention_mask of shape "
+                "(batch, seq_len). Pre-expanded masks are not supported."
+            )
         if attention_mask.dtype is torch.bool:
+            if attention_mask_is_masked is True:
+                return attention_mask
+            if attention_mask_is_masked is False:
+                return ~attention_mask
+
             # HF convention: True/1 means "keep". Raise if mask appears inverted.
             if (
                 input_ids is not None
@@ -514,14 +527,27 @@ class NeoBERT(NeoBERTPreTrainedModel):
                         "Boolean attention_mask appears to use True=mask. "
                         "HF-style masks should use True/1 for keep positions."
                     )
-                # If there's no padding, a fully True mask is the common HF keep-all
-                # convention, while a mask with any False entries is more likely
-                # SDPA-style (True=masked). Only invert when we can confirm keep-all.
-                if not pad_positions.any().item() and attention_mask.all().item():
+                if pad_positions.any().item():
                     return ~attention_mask
-                if not pad_positions.any().item():
+
+                # If there's no padding, a fully True mask is the common HF keep-all
+                # convention, while an all-False mask is the SDPA keep-all convention.
+                # Mixed True/False is ambiguous; require callers to disambiguate.
+                if attention_mask.all().item():
+                    return ~attention_mask
+                if not attention_mask.any().item():
                     return attention_mask
+                raise ValueError(
+                    "Ambiguous boolean attention_mask without padding. "
+                    "Pass attention_mask_is_masked=True for SDPA-style masks, "
+                    "or attention_mask_is_masked=False for HF-style masks."
+                )
             return ~attention_mask
+
+        if attention_mask_is_masked is not None:
+            raise ValueError(
+                "attention_mask_is_masked is only valid for boolean attention masks."
+            )
 
         # Accept HF-style 1/0 masks as well as additive 0/-inf masks.
         if attention_mask.min() < 0:
@@ -535,6 +561,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         output_hidden_states: bool = False,
         output_attentions: bool = False,
+        attention_mask_is_masked: Optional[bool] = None,
         **kwargs: Any,
     ) -> BaseModelOutput:
         """Forward pass through the NeoBERT model.
@@ -547,6 +574,8 @@ class NeoBERT(NeoBERTPreTrainedModel):
                 Values should be 0 for masked positions, 1 for unmasked.
             output_hidden_states: Whether to return hidden states from all layers.
             output_attentions: Whether to return attention weights.
+            attention_mask_is_masked: If set, treat boolean attention_mask as already
+                in SDPA format (True = masked). If False, treat as HF keep mask.
             **kwargs: Additional keyword arguments (for compatibility).
 
         Returns:
@@ -563,17 +592,16 @@ class NeoBERT(NeoBERTPreTrainedModel):
         # Shape: (batch, seq_len) -> (batch, heads, seq_len, seq_len)
         # SDPA expects a bool mask where True entries are masked.
         if attention_mask is not None:
-            attention_mask = self._normalize_attention_mask(attention_mask, input_ids)
-            attention_mask = (
-                attention_mask.unsqueeze(1)
-                .unsqueeze(2)
-                .expand(
-                    -1,
-                    self.config.num_attention_heads,
-                    attention_mask.size(-1),
-                    attention_mask.size(-1),
-                )
+            attention_mask = self._normalize_attention_mask(
+                attention_mask, input_ids, attention_mask_is_masked
             )
+            if attention_mask.shape != input_ids.shape:
+                raise ValueError(
+                    "attention_mask must match input_ids shape for HF export "
+                    f"(got {attention_mask.shape} vs {input_ids.shape})."
+                )
+            # Keep mask in (B, 1, 1, S) form to avoid O(S^2) materialization.
+            attention_mask = attention_mask[:, None, None, :]
 
         # Get rotary position embeddings
         freqs_cis = None
@@ -667,6 +695,7 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         output_hidden_states: bool = False,
         output_attentions: bool = False,
+        attention_mask_is_masked: Optional[bool] = None,
         **kwargs: Any,
     ) -> MaskedLMOutput:
         """Forward pass for masked language modeling.
@@ -677,6 +706,8 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
             attention_mask: Attention mask of shape (batch_size, seq_len).
             output_hidden_states: Whether to return hidden states from all layers.
             output_attentions: Whether to return attention weights.
+            attention_mask_is_masked: If set, treat boolean attention_mask as already
+                in SDPA format (True = masked). If False, treat as HF keep mask.
             **kwargs: Additional keyword arguments.
 
         Returns:
@@ -692,6 +723,7 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
             attention_mask,
             output_hidden_states,
             output_attentions,
+            attention_mask_is_masked=attention_mask_is_masked,
         )
 
         # Apply language modeling head
@@ -765,6 +797,7 @@ class NeoBERTForSequenceClassification(NeoBERTPreTrainedModel):
         output_attentions: bool = False,
         labels: Optional[torch.Tensor] = None,
         return_dict: Optional[bool] = None,
+        attention_mask_is_masked: Optional[bool] = None,
     ) -> Union[SequenceClassifierOutput, tuple]:
         """Forward pass for sequence classification.
 
@@ -779,6 +812,8 @@ class NeoBERTForSequenceClassification(NeoBERTPreTrainedModel):
                 - (batch_size,) for single-label classification
                 - (batch_size, num_labels) for multi-label classification
             return_dict: Whether to return a SequenceClassifierOutput or tuple.
+            attention_mask_is_masked: If set, treat boolean attention_mask as already
+                in SDPA format (True = masked). If False, treat as HF keep mask.
 
         Returns:
             SequenceClassifierOutput or tuple containing:
@@ -794,6 +829,7 @@ class NeoBERTForSequenceClassification(NeoBERTPreTrainedModel):
             attention_mask,
             output_hidden_states,
             output_attentions,
+            attention_mask_is_masked=attention_mask_is_masked,
         )
         hidden_states = output.last_hidden_state
 
