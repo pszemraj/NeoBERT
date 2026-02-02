@@ -83,3 +83,7 @@ class TestExportHF(unittest.TestCase):
             self.assertTrue((target_dir / "model.py").exists())
             self.assertTrue((target_dir / "rotary.py").exists())
             self.assertTrue((target_dir / "modeling_utils.py").exists())
+            model_text = (target_dir / "model.py").read_text()
+            self.assertIn(
+                "from .modeling_utils import swiglu_intermediate_size", model_text
+            )

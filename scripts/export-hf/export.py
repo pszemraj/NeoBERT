@@ -345,6 +345,20 @@ def validate_tokenizer_special_tokens(tokenizer_dir: Path) -> None:
         )
 
 
+def _rewrite_export_model_imports(model_path: Path) -> None:
+    """Rewrite local imports in exported modeling code for HF dynamic modules.
+
+    :param Path model_path: Path to the exported model.py file.
+    """
+    contents = model_path.read_text()
+    updated = contents.replace(
+        "from ..modeling_utils import swiglu_intermediate_size",
+        "from .modeling_utils import swiglu_intermediate_size",
+    )
+    if updated != contents:
+        model_path.write_text(updated)
+
+
 def copy_hf_modeling_files(target_dir: Path) -> None:
     """Copy the Hugging Face modeling files from src/neobert/huggingface/.
 
@@ -372,6 +386,10 @@ def copy_hf_modeling_files(target_dir: Path) -> None:
     if modeling_utils_src.exists():
         shutil.copy(modeling_utils_src, target_dir / "modeling_utils.py")
         print("  Copied modeling_utils.py -> modeling_utils.py")
+
+    model_path = target_dir / "model.py"
+    if model_path.exists():
+        _rewrite_export_model_imports(model_path)
 
 
 def export_checkpoint(checkpoint_path: Path, output_dir: Path | None = None) -> Path:
