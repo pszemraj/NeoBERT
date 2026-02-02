@@ -223,47 +223,65 @@ class NeoBERTAttentionHooks:
         -------
         int
             Number of hook handles that were successfully registered.
+
+        Raises
+        ------
+        RuntimeError
+            If no transformer layers are found or hook registration fails.
+            On failure, any hooks registered before the error are cleaned up.
         """
         layers = self._resolve_transformer_layers(model)
         if not layers:
             raise RuntimeError("No transformer layers found for MuonClip hooks")
 
         num_hooks = 0
-        for idx, layer in enumerate(layers):
-            self.layers[idx] = layer
+        registered_handles: List[RemovableHandle] = []
+        try:
+            for idx, layer in enumerate(layers):
+                self.layers[idx] = layer
 
-            if hasattr(layer, "qkv"):
-                handle = layer.qkv.register_forward_hook(
-                    self._create_qkv_input_hook(idx)
+                if hasattr(layer, "qkv"):
+                    handle = layer.qkv.register_forward_hook(
+                        self._create_qkv_input_hook(idx)
+                    )
+                    registered_handles.append(handle)
+                    num_hooks += 1
+                else:
+                    q_proj_name = self.layer_mapping.get("q_proj")
+                    if not q_proj_name:
+                        raise RuntimeError(
+                            "Encoder block lacks fused qkv projection; provide "
+                            "'clipping_layers_mapping' with q_proj entry."
+                        )
+                    q_proj = getattr(layer, q_proj_name, None)
+                    if q_proj is None:
+                        raise RuntimeError(
+                            f"Encoder block missing projection '{q_proj_name}'"
+                        )
+                    handle = q_proj.register_forward_hook(
+                        self._create_qkv_input_hook(idx)
+                    )
+                    registered_handles.append(handle)
+                    num_hooks += 1
+
+                block_handle = layer.register_forward_hook(
+                    self._create_block_context_hook(idx)
                 )
-                self.hook_handles.append(handle)
-                num_hooks += 1
-            else:
-                q_proj_name = self.layer_mapping.get("q_proj")
-                if not q_proj_name:
-                    raise RuntimeError(
-                        "Encoder block lacks fused qkv projection; provide "
-                        "'clipping_layers_mapping' with q_proj entry."
-                    )
-                q_proj = getattr(layer, q_proj_name, None)
-                if q_proj is None:
-                    raise RuntimeError(
-                        f"Encoder block missing projection '{q_proj_name}'"
-                    )
-                handle = q_proj.register_forward_hook(self._create_qkv_input_hook(idx))
-                self.hook_handles.append(handle)
+                registered_handles.append(block_handle)
                 num_hooks += 1
 
-            block_handle = layer.register_forward_hook(
-                self._create_block_context_hook(idx)
-            )
-            self.hook_handles.append(block_handle)
-            num_hooks += 1
+                logger.debug(f"Registered MuonClip hooks on layer {idx}")
 
-            logger.debug(f"Registered MuonClip hooks on layer {idx}")
+            # All hooks registered successfully; transfer to instance list.
+            self.hook_handles.extend(registered_handles)
+            logger.info(f"Registered {num_hooks} MuonClip hooks")
+            return num_hooks
 
-        logger.info(f"Registered {num_hooks} MuonClip hooks")
-        return num_hooks
+        except Exception as e:
+            # Clean up any hooks registered before the failure to prevent dangling hooks.
+            for handle in registered_handles:
+                handle.remove()
+            raise RuntimeError(f"Hook registration failed on layer {idx}: {e}") from e
 
     def _resolve_transformer_layers(
         self, model: torch.nn.Module
