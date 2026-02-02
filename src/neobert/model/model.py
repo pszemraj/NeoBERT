@@ -1095,7 +1095,10 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
             The encoded sentences.
         """
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # Respect the model's current device/dtype to avoid CPU/GPU mismatches.
+        param = next(self.parameters())
+        device = param.device
+        mask_dtype = param.dtype
 
         def _transform_func(
             tokenizer: PreTrainedTokenizerFast, x: Dict[str, List]
@@ -1137,7 +1140,7 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
 
             pad_mask = batch["attention_mask"].to(device)
             xformers_mask = torch.where(pad_mask == 1, float(0.0), float("-inf")).type(
-                torch.bfloat16
+                mask_dtype
             )
 
             outputs = self.model(input_ids, xformers_mask)

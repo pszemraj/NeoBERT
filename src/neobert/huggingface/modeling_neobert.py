@@ -105,6 +105,10 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
 
             batch = super().__call__([packed_batch])
             batch["cu_seqlens"] = batch["cu_seqlens"].to(torch.int32).squeeze()
+            max_seqlen = batch.get("max_seqlen")
+            if isinstance(max_seqlen, torch.Tensor):
+                # Flash-attn expects a Python int, not a tensor that might be moved to GPU.
+                batch["max_seqlen"] = int(max_seqlen.max().item())
         else:
             batch = super().__call__(batch)
             batch["attention_mask"] = batch["attention_mask"].to(torch.bool)

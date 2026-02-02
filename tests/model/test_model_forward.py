@@ -2,8 +2,11 @@
 """Test NeoBERT model forward passes and functionality."""
 
 import unittest
+from unittest.mock import patch
 
 import torch
+from tokenizers import Tokenizer, models, pre_tokenizers
+from transformers import PreTrainedTokenizerFast
 
 from neobert.model import (
     NeoBERT,
@@ -17,6 +20,17 @@ from neobert.model import (
 
 class TestModelForward(unittest.TestCase):
     """Test NeoBERT model forward passes."""
+
+    def _make_tokenizer(self) -> PreTrainedTokenizerFast:
+        """Build a minimal tokenizer for tests."""
+        vocab = {"[PAD]": 0, "[UNK]": 1, "hello": 2, "world": 3}
+        tokenizer = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
+        tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+        return PreTrainedTokenizerFast(
+            tokenizer_object=tokenizer,
+            pad_token="[PAD]",
+            unk_token="[UNK]",
+        )
 
     def setUp(self):
         """Set up test fixtures."""
@@ -187,6 +201,21 @@ class TestModelForward(unittest.TestCase):
         pad_mask = pad_mask.unsqueeze(1).unsqueeze(2).expand_as(attn_weights)
         self.assertLess(attn_weights.masked_select(pad_mask).max().item(), 1e-6)
 
+    def test_hf_packed_collator_max_seqlen_is_int(self):
+        """Ensure packed collator returns max_seqlen as a Python int."""
+        from neobert.huggingface.modeling_neobert import DataCollatorWithPacking
+
+        tokenizer = self._make_tokenizer()
+        collator = DataCollatorWithPacking(
+            pack_sequences=True,
+            tokenizer=tokenizer,
+            mlm=False,
+            return_tensors="pt",
+        )
+        batch = collator([{"input_ids": [2, 3, 2]}, {"input_ids": [2]}])
+        self.assertIsInstance(batch["max_seqlen"], int)
+        self.assertEqual(batch["max_seqlen"], 3)
+
     def test_hf_additive_attention_mask_supported(self):
         """Ensure additive 0/-inf masks are accepted in HF model."""
         from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
@@ -250,6 +279,36 @@ class TestModelForward(unittest.TestCase):
                 atol=1e-6,
             )
         )
+
+    def test_mteb_encode_respects_model_device(self):
+        """Ensure MTEB encoder uses the model device over CUDA availability."""
+        from neobert.model import NeoBERTConfig, NeoBERTForMTEB
+
+        tokenizer = self._make_tokenizer()
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=10,
+            max_length=8,
+            flash_attention=False,
+            ngpt=False,
+            hidden_act="gelu",
+        )
+        model = NeoBERTForMTEB(
+            config=config,
+            tokenizer=tokenizer,
+            max_length=8,
+            batch_size=2,
+            pooling="avg",
+        )
+        model.to("cpu")
+
+        with patch("torch.cuda.is_available", return_value=True):
+            embeddings = model.encode(["hello world"])
+
+        self.assertEqual(embeddings.shape[0], 1)
 
     def test_hf_rope_disabled_uses_positional_embeddings(self):
         """Ensure HF model runs when RoPE is disabled."""
