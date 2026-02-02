@@ -243,9 +243,11 @@ def get_collator(
             :return dict[str, Any]: Batch dictionary with attention mask applied.
             """
             batch = mlm_collator(batch)
+            # Always use float32 for attention masks regardless of mixed precision.
+            # bf16 masks can cause numerical instability in softmax (NaN propagation).
             batch["attention_mask"] = torch.where(
-                batch["attention_mask"] == 1, float(0.0), float("-inf")
-            ).type(dtype)
+                batch["attention_mask"] == 1, 0.0, float("-inf")
+            ).to(torch.float32)
             return batch
 
     return collate_fn
