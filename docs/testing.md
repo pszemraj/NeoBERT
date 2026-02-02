@@ -19,6 +19,8 @@ Or use the repo helper:
 python tests/run_tests.py
 ```
 
+By default the helper uses pytest; pass `--no-pytest` to force unittest discovery.
+
 ### Run a subset
 
 ```bash
