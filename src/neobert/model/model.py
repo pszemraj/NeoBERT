@@ -775,7 +775,14 @@ class NeoBERT(NeoBERTPreTrainedModel):
         # RoPE
         freqs_cis = None
         if self.config.rope:
-            target_len = max(self.config.max_length, src.shape[1])
+            seq_len = src.shape[1]
+            if seq_len > self.config.max_length:
+                warnings.warn(
+                    f"Sequence length {seq_len} exceeds max_length {self.config.max_length}; "
+                    "RoPE cache will grow to accommodate. Consider truncating inputs.",
+                    stacklevel=2,
+                )
+            target_len = max(self.config.max_length, seq_len)
             if (
                 self.freqs_cis.numel() == 0
                 or self.freqs_cis.device != src.device
@@ -784,7 +791,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
                 self.freqs_cis = precompute_freqs_cis(
                     self.config.dim_head, target_len, device=src.device
                 )
-            freqs_cis = self.freqs_cis[: src.shape[1]]
+            freqs_cis = self.freqs_cis[:seq_len]
 
         # Embedding
         x = self.encoder(src)
@@ -938,7 +945,14 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
         # RoPE
         freqs_cis = None
         if self.config.rope:
-            target_len = max(self.config.max_length, src.shape[1])
+            seq_len = src.shape[1]
+            if seq_len > self.config.max_length:
+                warnings.warn(
+                    f"Sequence length {seq_len} exceeds max_length {self.config.max_length}; "
+                    "RoPE cache will grow to accommodate. Consider truncating inputs.",
+                    stacklevel=2,
+                )
+            target_len = max(self.config.max_length, seq_len)
             if (
                 self.freqs_cis.numel() == 0
                 or self.freqs_cis.device != src.device
@@ -947,7 +961,7 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
                 self.freqs_cis = precompute_freqs_cis(
                     self.config.dim_head, target_len, device=src.device
                 )
-            freqs_cis = self.freqs_cis[: src.shape[1]]
+            freqs_cis = self.freqs_cis[:seq_len]
 
         # Embedding
         x = self.encoder(src)
