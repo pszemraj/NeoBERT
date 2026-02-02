@@ -53,12 +53,12 @@ class TestCollatorPacking(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(batch["input_ids"].shape, (2, 3))
-        self.assertEqual(batch["input_ids"][0].tolist(), [1, 2, 3])
-        self.assertEqual(batch["input_ids"][1].tolist(), [4, 5, 0])
+        self.assertEqual(batch["input_ids"].shape, (2, 4))
+        self.assertEqual(batch["input_ids"][0].tolist(), [1, 2, 3, 0])
+        self.assertEqual(batch["input_ids"][1].tolist(), [4, 5, 0, 0])
         self.assertNotIn(99, batch["input_ids"][0].tolist())
         self.assertIn("attention_mask", batch)
-        self.assertEqual(batch["attention_mask"].shape, (2, 3))
+        self.assertEqual(batch["attention_mask"].shape, (2, 4))
         self.assertEqual(batch["packed_seqlens"], [[3], [2]])
 
     def test_separator_used_when_sequence_fits(self):
@@ -101,3 +101,4 @@ class TestCollatorPacking(unittest.TestCase):
         token_counts = attention_mask.sum(dim=1).tolist()
         packed_counts = [sum(lengths) for lengths in batch["packed_seqlens"]]
         self.assertEqual(token_counts, packed_counts)
+        self.assertEqual(batch["input_ids"].shape[1], 4)

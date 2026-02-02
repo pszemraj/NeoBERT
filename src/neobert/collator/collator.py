@@ -131,6 +131,25 @@ class DataCollatorWithPacking(DefaultDataCollator):
             packed_sequences.append({"input_ids": current_sequence})
             packed_segments.append(current_segments)
 
+        # Pad to a fixed length so batches can be concatenated by to_target_batch_size
+        # without shape mismatches across dataloader steps. Packing already fills up
+        # max_length chunks, so this only pads the final fragment when present.
+        pad_token_id = getattr(
+            getattr(self.default_data_collator, "tokenizer", None), "pad_token_id", None
+        )
+        if pad_token_id is None:
+            pad_token_id = 0
+
+        for seq in packed_sequences:
+            if len(seq["input_ids"]) > self.max_length:
+                raise ValueError(
+                    f"Packed sequence length {len(seq['input_ids'])} exceeds max_length={self.max_length}."
+                )
+            if len(seq["input_ids"]) < self.max_length:
+                seq["input_ids"].extend(
+                    [pad_token_id] * (self.max_length - len(seq["input_ids"]))
+                )
+
         batch = self.default_data_collator(packed_sequences, return_tensors)
 
         if not packed_segments:

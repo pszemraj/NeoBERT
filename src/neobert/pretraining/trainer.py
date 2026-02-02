@@ -1072,7 +1072,7 @@ def trainer(cfg: Config) -> None:
                         # Save tokenizer info as JSON
                         tokenizer_info = {
                             "tokenizer_name": cfg.tokenizer.path or cfg.tokenizer.name,
-                            "vocab_size": tokenizer.vocab_size,
+                            "vocab_size": cfg.model.vocab_size,
                             "pad_token_id": tokenizer.pad_token_id,
                         }
                         tokenizer_info_path = os.path.join(

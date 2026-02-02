@@ -37,7 +37,10 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutput,
 )
 
-from ..modeling_utils import swiglu_intermediate_size
+try:
+    from ..modeling_utils import swiglu_intermediate_size
+except ImportError:  # pragma: no cover - triggered in exported HF repo layout.
+    from modeling_utils import swiglu_intermediate_size
 from .rotary import apply_rotary_emb, precompute_freqs_cis
 
 

@@ -79,6 +79,21 @@ def load_tokenizer_info(tokenizer_info_path: Path) -> Optional[Dict[str, Any]]:
         return json.load(f)
 
 
+def maybe_alias_decoder_weights(
+    state_dict: Dict[str, torch.Tensor],
+) -> Dict[str, torch.Tensor]:
+    """Ensure decoder weights are available under the expected key prefix.
+
+    :param dict[str, torch.Tensor] state_dict: Loaded state dict.
+    :return dict[str, torch.Tensor]: State dict with model.decoder.* aliases if needed.
+    """
+    if "model.decoder.weight" not in state_dict and "decoder.weight" in state_dict:
+        state_dict["model.decoder.weight"] = state_dict["decoder.weight"]
+    if "model.decoder.bias" not in state_dict and "decoder.bias" in state_dict:
+        state_dict["model.decoder.bias"] = state_dict["decoder.bias"]
+    return state_dict
+
+
 def _swiglu_intermediate_size(intermediate_size: int, multiple_of: int = 8) -> int:
     """Compute the reduced SwiGLU hidden size used in training.
 
@@ -105,6 +120,7 @@ def validate_state_dict_layout(
     state_dict: Dict[str, torch.Tensor], model_config: Dict[str, Any]
 ) -> None:
     """Validate checkpoint tensors against the training config."""
+    state_dict = maybe_alias_decoder_weights(state_dict)
     hidden_size = model_config["hidden_size"]
     num_layers = model_config["num_hidden_layers"]
     vocab_size = model_config["vocab_size"]
@@ -352,6 +368,11 @@ def copy_hf_modeling_files(target_dir: Path) -> None:
         shutil.copy(src_file, target_dir / dst_name)
         print(f"  Copied {filename} -> {dst_name}")
 
+    modeling_utils_src = src_dir.parent / "modeling_utils.py"
+    if modeling_utils_src.exists():
+        shutil.copy(modeling_utils_src, target_dir / "modeling_utils.py")
+        print("  Copied modeling_utils.py -> modeling_utils.py")
+
 
 def export_checkpoint(checkpoint_path: Path, output_dir: Path | None = None) -> Path:
     """Export a NeoBERT checkpoint to HuggingFace format.
@@ -411,9 +432,10 @@ def export_checkpoint(checkpoint_path: Path, output_dir: Path | None = None) -> 
     else:
         info_vocab = tokenizer_info.get("vocab_size")
         if info_vocab is not None and info_vocab != model_config["vocab_size"]:
-            raise ValueError(
-                f"tokenizer_info vocab_size ({info_vocab}) does not match config "
-                f"vocab_size ({model_config['vocab_size']})."
+            print(
+                "  Warning: tokenizer_info vocab_size "
+                f"({info_vocab}) does not match config vocab_size "
+                f"({model_config['vocab_size']}); continuing."
             )
         info_pad = tokenizer_info.get("pad_token_id")
         if info_pad is not None and info_pad != model_config["pad_token_id"]:
