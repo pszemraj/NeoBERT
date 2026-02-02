@@ -514,6 +514,13 @@ class NeoBERT(NeoBERTPreTrainedModel):
                         "Boolean attention_mask appears to use True=mask. "
                         "HF-style masks should use True/1 for keep positions."
                     )
+                # If there's no padding, a fully True mask is the common HF keep-all
+                # convention, while a mask with any False entries is more likely
+                # SDPA-style (True=masked). Only invert when we can confirm keep-all.
+                if not pad_positions.any().item() and attention_mask.all().item():
+                    return ~attention_mask
+                if not pad_positions.any().item():
+                    return attention_mask
             return ~attention_mask
 
         # Accept HF-style 1/0 masks as well as additive 0/-inf masks.

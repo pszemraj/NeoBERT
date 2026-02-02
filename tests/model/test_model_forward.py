@@ -280,6 +280,33 @@ class TestModelForward(unittest.TestCase):
             )
         )
 
+    def test_hf_sdpa_bool_mask_without_padding(self):
+        """Ensure SDPA-style bool masks work when there is no padding."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=16,
+            flash_attention=False,
+        )
+        model = NeoBERT(config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
+        sdpa_mask = torch.zeros_like(input_ids, dtype=torch.bool)
+
+        normalized = model._normalize_attention_mask(sdpa_mask, input_ids)
+        self.assertTrue(torch.isfinite(normalized).all())
+        self.assertFalse(normalized.any().item())
+
+        keep_all = torch.ones_like(input_ids, dtype=torch.bool)
+        normalized_keep_all = model._normalize_attention_mask(keep_all, input_ids)
+        self.assertFalse(normalized_keep_all.any().item())
+
     def test_hf_bool_attention_mask_supported(self):
         """Ensure HF-style bool masks (True=keep) are accepted."""
         from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
