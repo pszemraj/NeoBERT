@@ -558,10 +558,12 @@ class NeoBERT(NeoBERTPreTrainedModel):
                 persistent=False,
             )
         else:
+            # Use a fixed padding index (0) for positional embeddings to decouple
+            # position IDs from token padding IDs.
             self.positional_embedding = nn.Embedding(
                 config.max_length + 1,
                 config.hidden_size,
-                padding_idx=config.pad_token_id,
+                padding_idx=0,
             )
 
         self.transformer_encoder = nn.ModuleList()
@@ -620,9 +622,8 @@ class NeoBERT(NeoBERTPreTrainedModel):
         # Positional embedding
         if not self.config.rope:
             mask = src.ne(self.config.pad_token_id).int()
-            incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask)) * mask  #
-            incremental_indices = incremental_indices.long() + self.config.pad_token_id
-            x += self.positional_embedding(incremental_indices)
+            incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask)) * mask
+            x += self.positional_embedding(incremental_indices.long())
 
         # Transformer encoder
         for layer in self.transformer_encoder:
@@ -679,10 +680,12 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
                 persistent=False,
             )
         else:
+            # Use a fixed padding index (0) for positional embeddings to decouple
+            # position IDs from token padding IDs.
             self.positional_embedding = nn.Embedding(
                 config.max_length + 1,
                 config.hidden_size,
-                padding_idx=config.pad_token_id,
+                padding_idx=0,
             )
 
         self.transformer_encoder = nn.ModuleList()
@@ -755,9 +758,8 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
         # Positional embedding
         if not self.config.rope:
             mask = src.ne(self.config.pad_token_id).int()
-            incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask)) * mask  #
-            incremental_indices = incremental_indices.long() + self.config.pad_token_id
-            x += self.positional_embedding(incremental_indices)
+            incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask)) * mask
+            x += self.positional_embedding(incremental_indices.long())
 
         # Transformer encoder
         for layer in self.transformer_encoder:

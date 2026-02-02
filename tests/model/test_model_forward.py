@@ -339,6 +339,36 @@ class TestModelForward(unittest.TestCase):
             (input_ids.shape[0], input_ids.shape[1], config.hidden_size),
         )
 
+    def test_hf_positional_embeddings_nonzero_pad_token(self):
+        """Ensure HF positional embeddings handle non-zero pad_token_id."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        config = NeoBERTConfig(
+            hidden_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=32,
+            vocab_size=50,
+            max_length=8,
+            pad_token_id=7,
+            rope=False,
+            hidden_act="gelu",
+            flash_attention=False,
+        )
+        model = NeoBERT(config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 4, 5, 6, 8, 9]])
+        attention_mask = torch.ones_like(input_ids)
+
+        with torch.no_grad():
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+
+        self.assertEqual(
+            outputs.last_hidden_state.shape,
+            (input_ids.shape[0], input_ids.shape[1], config.hidden_size),
+        )
+
     def test_rope_vs_positional_embeddings(self):
         """Test both RoPE and positional embedding modes."""
         # Test with RoPE (default)
@@ -376,6 +406,34 @@ class TestModelForward(unittest.TestCase):
 
         # Outputs should be different (different position encoding methods)
         self.assertFalse(torch.allclose(rope_outputs, pos_outputs, atol=1e-4))
+
+    def test_positional_embeddings_nonzero_pad_token(self):
+        """Ensure positional embeddings handle non-zero pad_token_id."""
+        pos_config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=50,
+            max_length=8,
+            pad_token_id=7,
+            rope=False,
+            flash_attention=False,
+            hidden_act="gelu",
+        )
+        model = NeoBERT(pos_config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 4, 5, 6, 8, 9]])
+        pad_mask = torch.zeros_like(input_ids, dtype=torch.float32)
+
+        with torch.no_grad():
+            outputs = model(input_ids, pad_mask)
+
+        self.assertEqual(
+            outputs.shape,
+            (input_ids.shape[0], input_ids.shape[1], pos_config.hidden_size),
+        )
 
     def test_rope_freqs_cis_is_buffer(self):
         """Ensure RoPE freqs_cis stays registered as a buffer."""

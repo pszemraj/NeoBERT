@@ -512,10 +512,12 @@ class NeoBERT(NeoBERTPreTrainedModel):
             )
             self.register_buffer("freqs_cis", freqs_cis, persistent=False)
         else:
+            # Use a fixed padding index (0) for positional embeddings to decouple
+            # position IDs from token padding IDs.
             self.positional_embedding = nn.Embedding(
                 config.max_length + 1,
                 config.hidden_size,
-                padding_idx=config.pad_token_id,
+                padding_idx=0,
             )
 
         # Stack of transformer encoder blocks
@@ -646,11 +648,11 @@ class NeoBERT(NeoBERTPreTrainedModel):
         # Add learned positional embeddings if RoPE is disabled
         if not self.config.rope:
             if position_ids is not None:
-                pos_ids = position_ids + self.config.pad_token_id
+                pos_ids = position_ids
             else:
                 mask = input_ids.ne(self.config.pad_token_id).int()
                 incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask)) * mask
-                pos_ids = incremental_indices.long() + self.config.pad_token_id
+                pos_ids = incremental_indices.long()
             x = x + self.positional_embedding(pos_ids)
 
         # Pass through transformer encoder blocks
