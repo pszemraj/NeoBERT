@@ -32,6 +32,7 @@ def precompute_freqs_cis(
         theta: Base value for computing rotation frequencies. Higher values lead to
             lower frequencies, affecting how position information decays with distance.
             Default is 10000.0 as used in the original RoPE paper.
+        device: Optional device for precomputation.
 
     Returns:
         Complex tensor of shape (end, dim // 2) containing precomputed rotation

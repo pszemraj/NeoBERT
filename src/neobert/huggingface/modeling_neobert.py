@@ -551,7 +551,12 @@ class NeoBERT(NeoBERTPreTrainedModel):
         attention_mask: torch.Tensor,
         input_ids: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        """Normalize attention masks to SDPA semantics (True = masked)."""
+        """Normalize attention masks to SDPA semantics (True = masked).
+
+        :param torch.Tensor attention_mask: Input attention mask.
+        :param torch.Tensor | None input_ids: Optional input IDs for pad disambiguation.
+        :return torch.Tensor: Boolean mask with True entries masked.
+        """
         if attention_mask.dtype is torch.bool:
             # HF convention: True/1 means "keep". Raise if mask appears inverted.
             if (
