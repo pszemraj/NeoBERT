@@ -27,6 +27,9 @@ python scripts/export-hf/validate.py outputs/neobert_100m_100k/hf/neobert_100m_1
 - Supported activations: `hidden_act: swiglu` or `hidden_act: gelu`.
 - `ngpt` (NormNeoBERT) checkpoints are not exportable via the HF path.
 - SwiGLU weights must be **unpacked** (`w1/w2/w3`); packed `w12` weights are rejected.
+- Packed-sequence inputs (`cu_seqlens`/`max_seqlen` or block masks) are **not**
+  supported in the exported HF model. Vanilla Transformers expects standard
+  attention masks; packing is a training-only feature.
 - `tokenizer_info.json` is validated when present and must match the checkpoint config.
 
 ### Metaspace Tokenizer Handling

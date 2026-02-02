@@ -57,28 +57,31 @@ The exporter writes:
 
 The export script maps NeoBERT config fields to HF config fields, including:
 
-| NeoBERT                   | HF                    | Notes               |
-| ------------------------- | --------------------- | ------------------- |
-| `hidden_size`             | `hidden_size`         | Model dimension     |
-| `num_hidden_layers`       | `num_hidden_layers`   | Layers              |
-| `num_attention_heads`     | `num_attention_heads` | Heads               |
-| `intermediate_size`       | `intermediate_size`   | FFN size            |
-| `max_position_embeddings` | `max_length`          | Max sequence length |
+| NeoBERT                   | HF                        | Notes               |
+| ------------------------- | ------------------------- | ------------------- |
+| `hidden_size`             | `hidden_size`             | Model dimension     |
+| `num_hidden_layers`       | `num_hidden_layers`       | Layers              |
+| `num_attention_heads`     | `num_attention_heads`     | Heads               |
+| `intermediate_size`       | `intermediate_size`       | FFN size            |
+| `max_position_embeddings` | `max_length`              | Max sequence length |
 | `max_position_embeddings` | `max_position_embeddings` | Max sequence length |
-| `norm_eps`                | `norm_eps`            | Norm epsilon        |
-| `vocab_size`              | `vocab_size`          | Vocab size          |
-| `pad_token_id`            | `pad_token_id`        | Padding token       |
-| `rms_norm`                | `rms_norm`            | Norm choice         |
-| `rope`                    | `rope`                | Rotary embeddings   |
-| `hidden_act`              | `hidden_act`          | `swiglu` or `gelu`   |
-| `dropout_prob`            | `dropout`             | Dropout probability |
-| `flash_attention`         | `flash_attention`     | Backend toggle      |
+| `norm_eps`                | `norm_eps`                | Norm epsilon        |
+| `vocab_size`              | `vocab_size`              | Vocab size          |
+| `pad_token_id`            | `pad_token_id`            | Padding token       |
+| `rms_norm`                | `rms_norm`                | Norm choice         |
+| `rope`                    | `rope`                    | Rotary embeddings   |
+| `hidden_act`              | `hidden_act`              | `swiglu` or `gelu`  |
+| `dropout_prob`            | `dropout`                 | Dropout probability |
+| `flash_attention`         | `flash_attention`         | Backend toggle      |
 
 Notes:
 
 - Export supports `hidden_act: swiglu` and `hidden_act: gelu` only.
 - `ngpt` (NormNeoBERT) checkpoints are not exportable via the HF path.
 - The HF export expects **unpacked** SwiGLU weights (`w1/w2/w3`) from training.
+- Packed-sequence inputs are **not** supported in the exported HF model. Vanilla
+  Transformers expect standard (unpadded) batches + attention masks; do not pass
+  `cu_seqlens`/`max_seqlen` or block-diagonal packed masks to the exported model.
 
 ## Validation
 

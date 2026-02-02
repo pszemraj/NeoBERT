@@ -235,20 +235,18 @@ class TestModelForward(unittest.TestCase):
         pad_mask = pad_mask.unsqueeze(1).unsqueeze(2).expand_as(attn_weights)
         self.assertLess(attn_weights.masked_select(pad_mask).max().item(), 1e-6)
 
-    def test_hf_packed_collator_max_seqlen_is_int(self):
-        """Ensure packed collator returns max_seqlen as a Python int."""
+    def test_hf_packed_collator_rejected(self):
+        """Ensure HF collator rejects packed sequences (export-only path)."""
         from neobert.huggingface.modeling_neobert import DataCollatorWithPacking
 
         tokenizer = self._make_tokenizer()
-        collator = DataCollatorWithPacking(
-            pack_sequences=True,
-            tokenizer=tokenizer,
-            mlm=False,
-            return_tensors="pt",
-        )
-        batch = collator([{"input_ids": [2, 3, 2]}, {"input_ids": [2]}])
-        self.assertIsInstance(batch["max_seqlen"], int)
-        self.assertEqual(batch["max_seqlen"], 3)
+        with self.assertRaises(ValueError):
+            DataCollatorWithPacking(
+                pack_sequences=True,
+                tokenizer=tokenizer,
+                mlm=False,
+                return_tensors="pt",
+            )
 
     def test_hf_additive_attention_mask_supported(self):
         """Ensure additive 0/-inf masks are accepted in HF model."""

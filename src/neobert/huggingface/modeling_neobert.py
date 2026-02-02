@@ -8,30 +8,23 @@ Architecture Features:
 - SwiGLU activation function for improved training dynamics
 - Rotary Position Embeddings (RoPE) for better position encoding
 - Pre-RMSNorm for improved training stability
-- Flash Attention support for efficient long-context processing
+- Scaled dot-product attention for efficient long-context processing
 
 Based on: https://github.com/facebookresearch/llama/blob/main/llama/model.py
 
 NOTE: The training-time implementation lives in ``src/neobert/model/model.py`` and
 uses xFormers for flash attention. This HF variant targets export/inference APIs
 and may use different attention backends; keep the math consistent when editing.
+Packed/varlen sequences are intentionally unsupported in this HF export model.
 """
 
 from typing import Any, Dict, List, Optional, Union
 import warnings
 
-import numpy as np
 import torch
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from torch.nn.functional import scaled_dot_product_attention
-
-try:
-    from flash_attn.flash_attn_interface import flash_attn_varlen_func
-
-    FLASH_ATTN_AVAILABLE = True
-except ImportError:
-    FLASH_ATTN_AVAILABLE = False
 
 from transformers import (
     DataCollatorForLanguageModeling,
@@ -49,65 +42,34 @@ from .rotary import apply_rotary_emb, precompute_freqs_cis
 
 
 class DataCollatorWithPacking(DataCollatorForLanguageModeling):
-    """Data collator with optional sequence packing for efficient training.
+    """HF export collator without packing support.
 
-    This collator extends the standard MLM collator with the ability to pack
-    multiple sequences into a single batch for more efficient GPU utilization
-    when using Flash Attention.
-
-    Args:
-        pack_sequences: Whether to pack sequences for Flash Attention.
-        **kwargs: Additional arguments passed to DataCollatorForLanguageModeling.
+    Packing is intentionally unsupported in the HF export path. Use the training
+    collators in ``src/neobert/collator`` for packed batches.
     """
 
     def __init__(self, pack_sequences: bool = False, **kwargs: Any) -> None:
         """Initialize the data collator.
 
-        Args:
-            pack_sequences: Whether to pack multiple sequences together.
-            **kwargs: Additional arguments for the parent collator.
+        :param bool pack_sequences: Whether to pack multiple sequences together.
+        :param Any kwargs: Additional arguments for the parent collator.
+        :raises ValueError: If packing is requested.
         """
+        if pack_sequences:
+            raise ValueError(
+                "Packed sequences are not supported in the HF export collator. "
+                "Use the training collator in src/neobert/collator for packing."
+            )
         super().__init__(**kwargs)
-        self.pack_sequences = pack_sequences
 
     def __call__(self, batch: List[Dict[str, List[int]]]) -> Dict[str, torch.Tensor]:
         """Process a batch of examples.
 
-        Args:
-            batch: List of dictionaries containing tokenized sequences.
-
-        Returns:
-            Dictionary containing processed tensors ready for model input.
-            If packing is enabled, includes cumulative sequence lengths.
+        :param list[dict[str, list[int]]] batch: Tokenized examples.
+        :return dict[str, torch.Tensor]: Batch tensors for HF model input.
         """
-        if self.pack_sequences:
-            # Add position_ids if not present
-            if "position_ids" not in batch[0]:
-                for item in batch:
-                    item["position_ids"] = list(range(len(item["input_ids"])))
-
-            # Pack the sequences into a single list
-            input_ids_list = [item["input_ids"] for item in batch]
-            position_ids_list = [item["position_ids"] for item in batch]
-            seqlens = np.array([0] + [len(ids) for ids in input_ids_list])
-
-            packed_batch = {
-                "position_ids": np.concatenate(position_ids_list, axis=0),
-                "input_ids": np.concatenate(input_ids_list, axis=0),
-                "cu_seqlens": np.cumsum(seqlens),
-                "max_seqlen": max(seqlens),
-            }
-
-            batch = super().__call__([packed_batch])
-            batch["cu_seqlens"] = batch["cu_seqlens"].to(torch.int32).squeeze()
-            max_seqlen = batch.get("max_seqlen")
-            if isinstance(max_seqlen, torch.Tensor):
-                # Flash-attn expects a Python int, not a tensor that might be moved to GPU.
-                batch["max_seqlen"] = int(max_seqlen.max().item())
-        else:
-            batch = super().__call__(batch)
-            batch["attention_mask"] = batch["attention_mask"].to(torch.bool)
-
+        batch = super().__call__(batch)
+        batch["attention_mask"] = batch["attention_mask"].to(torch.bool)
         return batch
 
 
@@ -335,8 +297,6 @@ class EncoderBlock(nn.Module):
         attention_mask: Optional[torch.Tensor],
         freqs_cis: torch.Tensor,
         output_attentions: bool,
-        max_seqlen: Optional[int] = None,
-        cu_seqlens: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Forward pass through the encoder block.
 
@@ -346,9 +306,6 @@ class EncoderBlock(nn.Module):
                 (batch_size, num_heads, seq_len, seq_len).
             freqs_cis: Precomputed rotary position embeddings.
             output_attentions: Whether to return attention weights.
-            max_seqlen: Maximum sequence length for packed sequences.
-            cu_seqlens: Cumulative sequence lengths for packed sequences.
-
         Returns:
             Tuple of:
                 - Output tensor of shape (batch_size, seq_len, hidden_size)
@@ -360,8 +317,6 @@ class EncoderBlock(nn.Module):
             attention_mask,
             freqs_cis,
             output_attentions,
-            max_seqlen,
-            cu_seqlens,
         )
 
         # Residual connection
@@ -378,8 +333,6 @@ class EncoderBlock(nn.Module):
         attention_mask: Optional[torch.Tensor],
         freqs_cis: torch.Tensor,
         output_attentions: bool,
-        max_seqlen: Optional[int] = None,
-        cu_seqlens: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Compute multi-head self-attention.
 
@@ -388,9 +341,6 @@ class EncoderBlock(nn.Module):
             attention_mask: Optional attention mask.
             freqs_cis: Rotary position embeddings.
             output_attentions: Whether to return attention weights.
-            max_seqlen: Maximum sequence length (for packed sequences).
-            cu_seqlens: Cumulative sequence lengths (for packed sequences).
-
         Returns:
             Tuple of:
                 - Attention output of shape (batch_size, seq_len, hidden_size)
@@ -417,21 +367,8 @@ class EncoderBlock(nn.Module):
         # Attention computation
         attn_weights = None
 
-        # Flash attention for packed sequences (most efficient)
-        if cu_seqlens is not None:
-            attn = flash_attn_varlen_func(
-                q=xq.squeeze(0),
-                k=xk.squeeze(0),
-                v=xv.squeeze(0),
-                cu_seqlens_q=cu_seqlens,
-                cu_seqlens_k=cu_seqlens,
-                max_seqlen_q=max_seqlen,
-                max_seqlen_k=max_seqlen,
-                dropout_p=self.config.dropout if self.training else 0.0,
-                causal=False,
-            )
         # Eager attention if attention weights are needed
-        elif output_attentions:
+        if output_attentions:
             attn_weights = (
                 xq.permute(0, 2, 1, 3) @ xk.permute(0, 2, 3, 1) / (xq.size(-1) ** 0.5)
             )
@@ -565,6 +502,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
                 and attention_mask.shape == input_ids.shape
             ):
                 pad_positions = input_ids == self.config.pad_token_id
+                # Only treat equality as inverted masks when padding actually exists.
                 if (
                     torch.equal(attention_mask, pad_positions)
                     and pad_positions.any().item()
@@ -584,8 +522,6 @@ class NeoBERT(NeoBERTPreTrainedModel):
         self,
         input_ids: torch.Tensor,
         position_ids: Optional[torch.Tensor] = None,
-        max_seqlen: Optional[int] = None,
-        cu_seqlens: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         output_hidden_states: bool = False,
         output_attentions: bool = False,
@@ -597,8 +533,6 @@ class NeoBERT(NeoBERTPreTrainedModel):
             input_ids: Token indices of shape (batch_size, seq_len).
             position_ids: Position indices of shape (batch_size, seq_len).
                 If None, positions are assumed to be consecutive starting from 0.
-            max_seqlen: Maximum sequence length in the batch (for packed sequences).
-            cu_seqlens: Cumulative sequence lengths for packed sequences.
             attention_mask: Attention mask of shape (batch_size, seq_len).
                 Values should be 0 for masked positions, 1 for unmasked.
             output_hidden_states: Whether to return hidden states from all layers.
@@ -611,9 +545,6 @@ class NeoBERT(NeoBERTPreTrainedModel):
                 - hidden_states: Hidden states from all layers (if requested)
                 - attentions: Attention weights from all layers (if requested)
 
-        Raises:
-            AssertionError: If packed sequences are used incorrectly or if
-                Flash Attention is required but not available.
         """
         # Initialize containers for outputs
         hidden_states, attentions = [], []
@@ -632,26 +563,6 @@ class NeoBERT(NeoBERTPreTrainedModel):
                     attention_mask.size(-1),
                     attention_mask.size(-1),
                 )
-            )
-
-        # Validate packed sequence configuration
-        if cu_seqlens is not None:
-            assert FLASH_ATTN_AVAILABLE, (
-                "Flash-attention is not available. Please 'pip install flash_attn', "
-                "or provide un-packed sequences."
-            )
-            assert not output_attentions, (
-                "Output attentions is not supported when sequences are packed."
-            )
-            assert max_seqlen is not None, (
-                "Missing max_seqlen. It must be provided when cu_seqlens are not None."
-            )
-            assert input_ids.shape[0] == 1, (
-                "Cumulative sequence lengths are provided but input_ids are not packed."
-            )
-            assert input_ids.is_cuda, (
-                "Packing uses an implementation of flash-attention and is only "
-                "supported on GPU."
             )
 
         # Get rotary position embeddings
@@ -691,9 +602,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
 
         # Pass through transformer encoder blocks
         for layer in self.transformer_encoder:
-            x, attn = layer(
-                x, attention_mask, freqs_cis, output_attentions, max_seqlen, cu_seqlens
-            )
+            x, attn = layer(x, attention_mask, freqs_cis, output_attentions)
             if output_hidden_states:
                 hidden_states.append(x)
             if output_attentions:
@@ -743,8 +652,6 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
         self,
         input_ids: torch.Tensor,
         position_ids: Optional[torch.Tensor] = None,
-        max_seqlen: Optional[int] = None,
-        cu_seqlens: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         output_hidden_states: bool = False,
         output_attentions: bool = False,
@@ -755,8 +662,6 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
         Args:
             input_ids: Token indices of shape (batch_size, seq_len).
             position_ids: Position indices of shape (batch_size, seq_len).
-            max_seqlen: Maximum sequence length (for packed sequences).
-            cu_seqlens: Cumulative sequence lengths (for packed sequences).
             attention_mask: Attention mask of shape (batch_size, seq_len).
             output_hidden_states: Whether to return hidden states from all layers.
             output_attentions: Whether to return attention weights.
@@ -772,8 +677,6 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
         output = self.model.forward(
             input_ids,
             position_ids,
-            max_seqlen,
-            cu_seqlens,
             attention_mask,
             output_hidden_states,
             output_attentions,
@@ -845,8 +748,6 @@ class NeoBERTForSequenceClassification(NeoBERTPreTrainedModel):
         self,
         input_ids: torch.Tensor,
         position_ids: Optional[torch.Tensor] = None,
-        max_seqlen: Optional[int] = None,
-        cu_seqlens: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         output_hidden_states: bool = False,
         output_attentions: bool = False,
@@ -858,8 +759,6 @@ class NeoBERTForSequenceClassification(NeoBERTPreTrainedModel):
         Args:
             input_ids: Token indices of shape (batch_size, seq_len).
             position_ids: Position indices of shape (batch_size, seq_len).
-            max_seqlen: Maximum sequence length (for packed sequences).
-            cu_seqlens: Cumulative sequence lengths (for packed sequences).
             attention_mask: Attention mask of shape (batch_size, seq_len).
             output_hidden_states: Whether to return hidden states from all layers.
             output_attentions: Whether to return attention weights.
@@ -880,8 +779,6 @@ class NeoBERTForSequenceClassification(NeoBERTPreTrainedModel):
         output = self.model.forward(
             input_ids,
             position_ids,
-            max_seqlen,
-            cu_seqlens,
             attention_mask,
             output_hidden_states,
             output_attentions,

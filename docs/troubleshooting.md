@@ -72,6 +72,15 @@ This issue was fixed in `trainer.py` and `trainer_phase_2.py`.
 - Training format: `model.decoder.weight`, `model.decoder.bias`
 - These are mapped to top-level `decoder.*` weights in the HF export
 
+### Packed Sequences Not Supported
+
+**Problem**: Errors or OOMs when passing packed inputs (`cu_seqlens` /
+block-diagonal masks) to an exported model.
+
+**Solution**: Exported HF models are vanilla Transformers and expect standard
+attention masks on unpacked batches. Packing is a training-only feature; unpack
+inputs before export/inference.
+
 ## Inference Issues
 
 ### MLM Always Predicts Same Token
