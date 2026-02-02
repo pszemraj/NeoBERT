@@ -145,30 +145,19 @@ def trainer(cfg: Config) -> None:
     ]
 
     # Model
-    # Calculate optimal vocab_size for GPU efficiency when creating from scratch
-    from ..config import round_up_to_multiple
-
-    actual_vocab_size = len(tokenizer)
-    rounded_vocab_size = round_up_to_multiple(actual_vocab_size, 128)
-
-    # Log warning if vocab_size was rounded for GPU efficiency
-    if actual_vocab_size != rounded_vocab_size:
-        logging.warning(
-            f"Vocab size {actual_vocab_size} is not divisible by 128. "
-            f"Rounding up to {rounded_vocab_size} for GPU efficiency."
-        )
-
-    # Update all config sources with the actual rounded vocab_size BEFORE anything uses them
-    cfg.model.vocab_size = rounded_vocab_size
-    if hasattr(cfg.tokenizer, "vocab_size"):
-        cfg.tokenizer.vocab_size = rounded_vocab_size
-
+    # vocab_size is resolved in ConfigLoader.preprocess_config.
     tokenizer_config = {**cfg.tokenizer.__dict__}
-    tokenizer_config["vocab_size"] = rounded_vocab_size
+    tokenizer_config["vocab_size"] = cfg.model.vocab_size
+
+    model_kwargs = {**cfg.model.__dict__}
+    if "max_position_embeddings" in model_kwargs:
+        model_kwargs["max_length"] = model_kwargs.pop("max_position_embeddings")
+    if "dropout_prob" in model_kwargs:
+        model_kwargs["dropout"] = model_kwargs.pop("dropout_prob")
 
     model = NeoBERTLMHead(
         NeoBERTConfig(
-            **cfg.model.__dict__,
+            **model_kwargs,
             **tokenizer_config,
             pad_token_id=tokenizer.pad_token_id,
         )

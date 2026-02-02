@@ -33,7 +33,7 @@ def get_merged_model(cfg: Config) -> torch.nn.Module:
             intermediate_size=cfg.model.intermediate_size,
             dropout=cfg.model.dropout_prob,
             vocab_size=cfg.model.vocab_size,
-            max_position_embeddings=cfg.model.max_position_embeddings,
+            max_length=cfg.model.max_position_embeddings,
             flash_attention=cfg.model.flash_attention,
             ngpt=cfg.model.ngpt,
             hidden_act=cfg.model.hidden_act,

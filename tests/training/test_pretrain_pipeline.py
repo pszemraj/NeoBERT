@@ -116,9 +116,9 @@ class TestPretrainPipeline(unittest.TestCase):
             num_hidden_layers=config.model.num_hidden_layers,
             num_attention_heads=config.model.num_attention_heads,
             intermediate_size=config.model.intermediate_size,
-            dropout_prob=config.model.dropout_prob,
+            dropout=config.model.dropout_prob,
             vocab_size=config.model.vocab_size,
-            max_position_embeddings=config.model.max_position_embeddings,
+            max_length=config.model.max_position_embeddings,
             flash_attention=config.model.flash_attention,
             ngpt=config.model.ngpt,
             hidden_act="gelu",  # Use GELU to avoid xformers requirement

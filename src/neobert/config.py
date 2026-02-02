@@ -1,6 +1,7 @@
 """Configuration dataclasses and helpers for NeoBERT runs."""
 
 import argparse
+import warnings
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -96,6 +97,21 @@ class MuonConfig:
     polar_express: Optional[bool] = None  # Legacy toggle
     clipping_layers_mapping: Dict[str, str] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        """Warn on legacy alias usage."""
+        if self.algorithm is not None:
+            warnings.warn(
+                "MuonConfig.algorithm is deprecated; use orthogonalization instead.",
+                UserWarning,
+                stacklevel=2,
+            )
+        if self.polar_express is not None:
+            warnings.warn(
+                "MuonConfig.polar_express is deprecated; use orthogonalization instead.",
+                UserWarning,
+                stacklevel=2,
+            )
+
 
 @dataclass
 class OptimizerConfig:
@@ -132,6 +148,7 @@ class TrainerConfig:
     max_steps: int = 1000000
     save_steps: int = 10000
     eval_steps: int = 10000
+    eval_max_batches: Optional[int] = None
     logging_steps: int = 100
     output_dir: str = "./output"
     overwrite_output_dir: bool = True
@@ -627,6 +644,11 @@ def create_argument_parser() -> argparse.ArgumentParser:
         "--trainer.save_steps", type=int, help="Save checkpoint every N steps"
     )
     parser.add_argument("--trainer.eval_steps", type=int, help="Evaluate every N steps")
+    parser.add_argument(
+        "--trainer.eval_max_batches",
+        type=int,
+        help="Maximum eval batches per evaluation (streaming-safe cap)",
+    )
     parser.add_argument("--trainer.output_dir", type=str, help="Output directory")
     parser.add_argument(
         "--trainer.bf16",

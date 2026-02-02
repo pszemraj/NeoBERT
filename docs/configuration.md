@@ -150,6 +150,7 @@ trainer.num_train_epochs: int = 3
 
 trainer.eval_strategy: Literal["steps", "epoch"] = "steps"
 trainer.eval_steps: int = 10000
+trainer.eval_max_batches: int | None = None  # cap eval batches (useful for streaming)
 trainer.save_strategy: Literal["steps", "epoch", "best", "no"] = "steps"
 trainer.save_steps: int = 10000
 trainer.save_total_limit: int | None = 3

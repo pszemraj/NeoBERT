@@ -1,10 +1,11 @@
 """Pretraining loop for masked language modeling."""
 
 import json
+import math
 import logging
 import os
 import re
-from typing import Callable
+from typing import Callable, Optional
 
 # PyTorch
 import torch
@@ -18,7 +19,7 @@ from accelerate.utils import (
 )
 
 # Hugging Face
-from datasets import Dataset, load_dataset, load_from_disk
+from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
 
 # Deepspeed
 from deepspeed.utils import safe_get_full_fp32_param
@@ -56,6 +57,92 @@ def _count_masked_correct(
         return 0
     preds = logits.argmax(dim=-1)
     return (preds[mask] == labels[mask]).sum().item()
+
+
+def _resolve_text_column(dataset: Dataset, is_streaming: bool) -> str:
+    """Resolve the text column for tokenization.
+
+    :param Dataset dataset: Dataset to inspect.
+    :param bool is_streaming: Whether the dataset is streaming.
+    :return str: Name of the text column.
+    """
+    if is_streaming:
+        first_example = next(iter(dataset))
+        columns = list(first_example.keys())
+    else:
+        columns = dataset.column_names
+
+    for col in ["text", "sentence", "content"]:
+        if col in columns:
+            return col
+    raise ValueError(
+        "Could not find text column in dataset. Available columns: "
+        + ", ".join(columns)
+    )
+
+
+def _run_eval(
+    model: torch.nn.Module,
+    eval_dataloader: torch.utils.data.DataLoader,
+    loss_fn: torch.nn.Module,
+    accelerator: Accelerator,
+    model_config: NeoBERTConfig,
+    max_batches: Optional[int] = None,
+) -> dict[str, float]:
+    """Run a lightweight evaluation loop for masked LM perplexity.
+
+    :param torch.nn.Module model: Model to evaluate.
+    :param torch.utils.data.DataLoader eval_dataloader: Evaluation dataloader.
+    :param torch.nn.Module loss_fn: Loss function (sum reduction).
+    :param Accelerator accelerator: Accelerator for distributed reductions.
+    :param NeoBERTConfig model_config: Model config with vocab size.
+    :param int | None max_batches: Optional cap on eval batches.
+    :return dict[str, float]: Evaluation metrics for logging.
+    """
+    was_training = model.training
+    model.eval()
+
+    eval_loss_sum = torch.zeros((), device=accelerator.device)
+    eval_num_pred = torch.zeros((), device=accelerator.device)
+    eval_num_correct = torch.zeros((), device=accelerator.device)
+    eval_batches = 0
+
+    with torch.no_grad():
+        for batch in eval_dataloader:
+            if max_batches is not None and eval_batches >= max_batches:
+                break
+            logits = model(batch["input_ids"], batch.get("attention_mask", None))[
+                "logits"
+            ]
+            loss_sum = loss_fn(
+                logits.view(-1, model_config.vocab_size), batch["labels"].view(-1)
+            )
+            num_pred = (batch["labels"] != -100).sum()
+            eval_loss_sum += loss_sum
+            eval_num_pred += num_pred
+            eval_num_correct += _count_masked_correct(logits, batch["labels"])
+            eval_batches += 1
+
+    total_loss = accelerator.reduce(eval_loss_sum, reduction="sum")
+    total_pred = accelerator.reduce(eval_num_pred, reduction="sum")
+    total_correct = accelerator.reduce(eval_num_correct, reduction="sum")
+    total_batches = accelerator.reduce(
+        torch.tensor(eval_batches, device=accelerator.device), reduction="sum"
+    )
+
+    metrics: dict[str, float] = {
+        "eval/batches": float(total_batches.item()),
+    }
+    if total_pred.item() > 0:
+        eval_loss = (total_loss / total_pred).item()
+        metrics["eval/loss"] = eval_loss
+        metrics["eval/perplexity"] = math.exp(eval_loss)
+        metrics["eval/accuracy"] = (total_correct / total_pred).item()
+
+    if was_training:
+        model.train()
+
+    return metrics
 
 
 def _scale_gradients(model: torch.nn.Module, scale: torch.Tensor) -> None:
@@ -130,7 +217,8 @@ def to_target_batch_size(
                 )
                 batch[key] = torch.cat([batch[key], tmp[key][0]], dim=0)
                 stored_batch[key] = tmp[key][1]
-                # Save on CPU to prevent full GPU memory.
+                # Save on CPU to prevent full GPU memory; this trades extra H2D copies
+                # for lower peak VRAM during uneven batch packing.
                 # Use blocking transfer so buffered batches are ready when reused.
                 stored_batch[key] = stored_batch[key].to("cpu")
 
@@ -417,29 +505,7 @@ def trainer(cfg: Config) -> None:
             train_dataset = load_from_disk(output_dir)
         else:
             # Determine text column
-            text_column = None
-            if is_streaming:
-                # For streaming, check the first example
-                first_example = next(iter(train_dataset))
-                for col in ["text", "sentence", "content"]:
-                    if col in first_example:
-                        text_column = col
-                        break
-                if text_column is None:
-                    raise ValueError(
-                        f"Could not find text column in dataset. "
-                        f"Available columns: {list(first_example.keys())}"
-                    )
-            else:
-                for col in ["text", "sentence", "content"]:
-                    if col in train_dataset.column_names:
-                        text_column = col
-                        break
-                if text_column is None:
-                    raise ValueError(
-                        f"Could not find text column in dataset. "
-                        f"Available columns: {train_dataset.column_names}"
-                    )
+            text_column = _resolve_text_column(train_dataset, is_streaming)
 
             # Tokenize dataset
             train_dataset = tokenize(
@@ -457,6 +523,63 @@ def trainer(cfg: Config) -> None:
             accelerator.print(
                 f"Tokenization complete. Dataset size: {len(train_dataset)}"
             )
+
+    eval_dataset = None
+    if cfg.dataset.eval_split:
+        if cfg.dataset.path:
+            eval_source = load_from_disk(cfg.dataset.path)
+            if isinstance(eval_source, DatasetDict):
+                eval_dataset = eval_source[cfg.dataset.eval_split]
+            else:
+                logger.warning(
+                    "eval_split=%s requested but dataset path is not a DatasetDict; "
+                    "skipping evaluation.",
+                    cfg.dataset.eval_split,
+                )
+        else:
+            eval_dataset = load_dataset(
+                cfg.dataset.name,
+                split=cfg.dataset.eval_split,
+                streaming=cfg.dataset.streaming,
+            )
+    elif cfg.dataset.validation_split:
+        if is_streaming:
+            logger.warning(
+                "validation_split is not supported for streaming datasets; "
+                "provide dataset.eval_split to enable validation."
+            )
+        else:
+            split = train_dataset.train_test_split(
+                test_size=cfg.dataset.validation_split, seed=cfg.trainer.seed
+            )
+            train_dataset = split["train"]
+            eval_dataset = split["test"]
+
+    if eval_dataset is not None:
+        eval_is_streaming = cfg.dataset.streaming
+        eval_needs_tokenization = False
+        if eval_is_streaming:
+            first_example = next(iter(eval_dataset))
+            eval_needs_tokenization = "input_ids" not in first_example
+        else:
+            eval_needs_tokenization = "input_ids" not in eval_dataset.column_names
+
+        if eval_needs_tokenization:
+            from neobert.tokenizer import tokenize
+
+            text_column = _resolve_text_column(eval_dataset, eval_is_streaming)
+            eval_dataset = tokenize(
+                eval_dataset,
+                tokenizer,
+                column_name=text_column,
+                max_length=cfg.dataset.max_seq_length,
+                remove_columns=True,
+                truncation=True,
+                num_proc=cfg.dataset.num_proc if not eval_is_streaming else None,
+            )
+
+        if not eval_is_streaming:
+            accelerator.print(f"Eval dataset size: {len(eval_dataset)}")
 
     if cfg.dataset.streaming and hasattr(cfg.dataset, "shuffle_buffer_size"):
         train_dataset = _maybe_shuffle_streaming_dataset(
@@ -481,6 +604,22 @@ def trainer(cfg: Config) -> None:
         max_length=collator_max_length,
     )
 
+    eval_dataloader = None
+    if eval_dataset is not None:
+        eval_dataloader = get_dataloader(
+            eval_dataset,
+            tokenizer,
+            dtype=dtype_pad_mask,
+            batch_size=cfg.trainer.per_device_eval_batch_size,
+            num_workers=cfg.dataset.num_workers,
+            mlm_probability=cfg.datacollator.mlm_probability,
+            pad_to_multiple_of=cfg.datacollator.pad_to_multiple_of,
+            mask_all=cfg.datacollator.mask_all,
+            pack_sequences=cfg.datacollator.pack_sequences,
+            max_length=collator_max_length,
+            shuffle=False,
+        )
+
     # Model
     # vocab_size is now resolved during config preprocessing
     # Debug print
@@ -495,12 +634,12 @@ def trainer(cfg: Config) -> None:
         num_hidden_layers=cfg.model.num_hidden_layers,
         num_attention_heads=cfg.model.num_attention_heads,
         intermediate_size=cfg.model.intermediate_size,
-        max_position_embeddings=cfg.model.max_position_embeddings,
+        max_length=cfg.model.max_position_embeddings,
         vocab_size=cfg.model.vocab_size,  # Use preprocessed vocab_size
         rope=cfg.model.rope,
         rms_norm=cfg.model.rms_norm,
         hidden_act=cfg.model.hidden_act,
-        dropout_prob=cfg.model.dropout_prob,
+        dropout=cfg.model.dropout_prob,
         norm_eps=cfg.model.norm_eps,
         embedding_init_range=cfg.model.embedding_init_range,
         decoder_init_range=cfg.model.decoder_init_range,
@@ -512,7 +651,8 @@ def trainer(cfg: Config) -> None:
 
     if cfg.trainer.gradient_checkpointing:
         model.gradient_checkpointing_enable()
-        # Track flag on config for downstream logging/debug, mirroring HF behaviour.
+        # Track flag on config for downstream logging/debug; the forward pass reads
+        # the model attribute, so this is purely metadata (HF-compatible).
         setattr(model.config, "gradient_checkpointing", True)
 
     # Print model summary with hierarchical parameter counts
@@ -557,12 +697,27 @@ def trainer(cfg: Config) -> None:
     )
 
     # Prepare with accelerate
-    train_dataloader, model, optimizer, scheduler = accelerator.prepare(
-        train_dataloader,
-        model,
-        optimizer,
-        scheduler,
-    )
+    if eval_dataloader is not None:
+        (
+            train_dataloader,
+            eval_dataloader,
+            model,
+            optimizer,
+            scheduler,
+        ) = accelerator.prepare(
+            train_dataloader,
+            eval_dataloader,
+            model,
+            optimizer,
+            scheduler,
+        )
+    else:
+        train_dataloader, model, optimizer, scheduler = accelerator.prepare(
+            train_dataloader,
+            model,
+            optimizer,
+            scheduler,
+        )
 
     if cfg.wandb.mode != "disabled" and accelerator.is_main_process:
         wandb_watch = os.environ.get("WANDB_WATCH")
@@ -587,7 +742,18 @@ def trainer(cfg: Config) -> None:
                 )
 
     # Loss function
+    # Note: logits are fully materialized; consider fused/chunked CE for very long contexts.
     train_loss_fn = CrossEntropyLoss(reduction="sum")
+    eval_max_batches = getattr(cfg.trainer, "eval_max_batches", None)
+    if isinstance(eval_max_batches, int) and eval_max_batches <= 0:
+        eval_max_batches = None
+    if eval_max_batches is None and eval_dataset is not None and cfg.dataset.streaming:
+        eval_max_batches = 100
+        logger.info(
+            "Streaming eval detected; defaulting eval_max_batches to %s. "
+            "Set trainer.eval_max_batches to override.",
+            eval_max_batches,
+        )
 
     # Resume from the latest checkpoint
     skipped_train_dataloader = None
@@ -703,6 +869,8 @@ def trainer(cfg: Config) -> None:
                     # accelerator.backward() already divides by grad_accumulation_steps, and DDP averages
                     # across processes, so we rescale by (num_processes * grad_accum_steps) / tokens_global
                     # to recover per-token mean gradients for the global batch size.
+                    # This post-accumulation rescale is equivalent to scaling each microbatch loss
+                    # because gradients are linear in the loss scalar.
                     # Ref: Unsloth blog (archived) https://archive.ph/RmO0U
                     scale = (
                         accelerator.num_processes
@@ -939,6 +1107,22 @@ def trainer(cfg: Config) -> None:
                                         f"Removed old checkpoint: {old_path} (limit={limit})"
                                     )
 
+                if (
+                    eval_dataloader is not None
+                    and getattr(cfg.trainer, "eval_strategy", "steps") == "steps"
+                    and cfg.trainer.eval_steps > 0
+                    and metrics["train/steps"] % cfg.trainer.eval_steps == 0
+                ):
+                    eval_metrics = _run_eval(
+                        model,
+                        eval_dataloader,
+                        train_loss_fn,
+                        accelerator,
+                        model_config,
+                        max_batches=eval_max_batches,
+                    )
+                    accelerator.log(eval_metrics, step=metrics["train/steps"])
+
                 # Zero out the optimizer
                 optimizer.zero_grad()
 
@@ -946,6 +1130,20 @@ def trainer(cfg: Config) -> None:
                 if metrics["train/steps"] >= cfg.trainer.max_steps:
                     pbar.close()
                     return
+
+        if (
+            eval_dataloader is not None
+            and getattr(cfg.trainer, "eval_strategy", "steps") == "epoch"
+        ):
+            eval_metrics = _run_eval(
+                model,
+                eval_dataloader,
+                train_loss_fn,
+                accelerator,
+                model_config,
+                max_batches=eval_max_batches,
+            )
+            accelerator.log(eval_metrics, step=metrics["train/steps"])
 
         # Update the number of epochs
         metrics["train/epochs"] += 1

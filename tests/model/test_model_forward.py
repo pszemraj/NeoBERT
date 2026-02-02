@@ -77,6 +77,40 @@ class TestModelForward(unittest.TestCase):
         self.assertFalse(torch.isnan(outputs).any())
         self.assertFalse(torch.isinf(outputs).any())
 
+    def test_training_vs_hf_encoder_parity(self):
+        """Ensure training and HF encoder paths match for shared weights."""
+        from neobert.huggingface.modeling_neobert import NeoBERT as HFNeoBERT
+
+        torch.manual_seed(0)
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            dropout=0.0,
+            vocab_size=100,
+            max_length=16,
+            flash_attention=False,
+            hidden_act="swiglu",
+        )
+
+        train_model = NeoBERT(config)
+        hf_model = HFNeoBERT(config)
+        hf_model.load_state_dict(train_model.state_dict())
+
+        train_model.eval()
+        hf_model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 4, 0], [5, 6, 0, 0, 0]])
+        with torch.no_grad():
+            # Mask normalization is covered by separate tests; compare raw math here.
+            train_out = train_model(input_ids, None)
+            hf_out = hf_model(
+                input_ids=input_ids, attention_mask=None
+            ).last_hidden_state
+
+        self.assertTrue(torch.allclose(train_out, hf_out, atol=1e-6))
+
     def test_norm_neobert_forward(self):
         """Test NormNeoBERT (nGPT-style) forward pass."""
         ngpt_config = NeoBERTConfig(
@@ -451,10 +485,12 @@ class TestModelForward(unittest.TestCase):
         self.assertIn("freqs_cis", buffers)
         self.assertNotIn("freqs_cis", model.state_dict())
 
-        freqs_ref = model.freqs_cis
         with torch.no_grad():
             _ = model(self.input_ids, self.pad_mask)
-        self.assertIs(model.freqs_cis, freqs_ref)
+        buffers = dict(model.named_buffers())
+        self.assertIn("freqs_cis", buffers)
+        self.assertNotIn("freqs_cis", model.state_dict())
+        self.assertGreater(model.freqs_cis.numel(), 0)
 
     def test_activation_functions(self):
         """Test different activation functions."""

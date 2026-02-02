@@ -23,7 +23,7 @@ def validate_basic_functionality():
             num_attention_heads=4,
             intermediate_size=256,
             vocab_size=1000,
-            max_position_embeddings=128,
+            max_length=128,
             flash_attention=False,
             hidden_act="gelu",
             rope=False,
@@ -181,7 +181,7 @@ def validate_hook_system():
             num_attention_heads=4,
             intermediate_size=256,
             vocab_size=1000,
-            max_position_embeddings=128,
+            max_length=128,
             flash_attention=False,
             rope=False,
         )

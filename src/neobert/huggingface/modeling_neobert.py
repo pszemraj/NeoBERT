@@ -18,6 +18,7 @@ and may use different attention backends; keep the math consistent when editing.
 """
 
 from typing import Any, Dict, List, Optional, Union
+import warnings
 
 import numpy as np
 import torch
@@ -43,6 +44,7 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutput,
 )
 
+from ..modeling_utils import swiglu_intermediate_size
 from .rotary import apply_rotary_emb, precompute_freqs_cis
 
 
@@ -196,14 +198,28 @@ class NeoBERTConfig(PretrainedConfig):
                 f"Unsupported hidden_act '{hidden_act}'. Supported: swiglu, gelu."
             )
         self.hidden_act = normalized_act
+        if "dropout_prob" in kwargs and "dropout" not in kwargs:
+            warnings.warn(
+                "NeoBERTConfig: 'dropout_prob' is deprecated; use 'dropout' instead.",
+                UserWarning,
+                stacklevel=2,
+            )
+            dropout = kwargs["dropout_prob"]
         self.dropout = dropout
         self.flash_attention = flash_attention
         self.vocab_size = vocab_size
         self.pad_token_id = pad_token_id
         if "max_position_embeddings" in kwargs and kwargs["max_position_embeddings"]:
+            warnings.warn(
+                "NeoBERTConfig: 'max_position_embeddings' is deprecated; use "
+                "'max_length' when constructing configs.",
+                UserWarning,
+                stacklevel=2,
+            )
             self.max_length = int(kwargs["max_position_embeddings"])
         else:
             self.max_length = max_length
+        self.max_position_embeddings = self.max_length
         self.kwargs = kwargs
 
 
@@ -284,11 +300,7 @@ class EncoderBlock(nn.Module):
         # Feedforward network
         if config.hidden_act == "swiglu":
             # Match training: reduce by 2/3 and round to multiple of 8.
-            multiple_of = 8
-            intermediate_size = int(2 * config.intermediate_size / 3)
-            intermediate_size = multiple_of * (
-                (intermediate_size + multiple_of - 1) // multiple_of
-            )
+            intermediate_size = swiglu_intermediate_size(config.intermediate_size)
             self.ffn = UnpackedSwiGLU(
                 config.hidden_size,
                 intermediate_size,
@@ -507,14 +519,13 @@ class NeoBERT(NeoBERTPreTrainedModel):
         # Precompute rotary position embeddings (or use learned positional embeddings)
         # Non-persistent buffers are not saved in the state_dict
         if self.config.rope:
-            freqs_cis = precompute_freqs_cis(
-                config.hidden_size // config.num_attention_heads, config.max_length
-            )
-            self.register_buffer("freqs_cis", freqs_cis, persistent=False)
+            # Lazy RoPE cache; populated on first forward for the active device/length.
+            self.register_buffer("freqs_cis", torch.empty(0), persistent=False)
         else:
             # Use a fixed padding index (0) for positional embeddings to decouple
             # position IDs from token padding IDs.
             self.positional_embedding = nn.Embedding(
+                # Positions are 1-indexed when using cumsum; reserve 0 for padding.
                 config.max_length + 1,
                 config.hidden_size,
                 padding_idx=0,
@@ -534,6 +545,32 @@ class NeoBERT(NeoBERTPreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
+
+    def _normalize_attention_mask(
+        self,
+        attention_mask: torch.Tensor,
+        input_ids: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Normalize attention masks to SDPA semantics (True = masked)."""
+        if attention_mask.dtype is torch.bool:
+            # HF convention: True/1 means "keep". Raise if mask appears inverted.
+            if (
+                input_ids is not None
+                and self.config.pad_token_id is not None
+                and attention_mask.shape == input_ids.shape
+            ):
+                pad_positions = input_ids == self.config.pad_token_id
+                if torch.equal(attention_mask, pad_positions):
+                    raise ValueError(
+                        "Boolean attention_mask appears to use True=mask. "
+                        "HF-style masks should use True/1 for keep positions."
+                    )
+            return ~attention_mask
+
+        # Accept HF-style 1/0 masks as well as additive 0/-inf masks.
+        if attention_mask.min() < 0:
+            return attention_mask < 0
+        return attention_mask == 0
 
     def forward(
         self,
@@ -577,31 +614,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
         # Shape: (batch, seq_len) -> (batch, heads, seq_len, seq_len)
         # SDPA expects a bool mask where True entries are masked.
         if attention_mask is not None:
-            if attention_mask.dtype is torch.bool:
-                # Normalize to SDPA semantics (True = masked). If input_ids are available,
-                # use pad positions to disambiguate HF-style "True = keep" masks.
-                # Bool masks are ambiguous; prefer HF semantics (True = keep).
-                if (
-                    input_ids is not None
-                    and self.config.pad_token_id is not None
-                    and attention_mask.shape == input_ids.shape
-                ):
-                    pad_positions = input_ids == self.config.pad_token_id
-                    if torch.equal(attention_mask, pad_positions):
-                        # Already in "True = masked" form.
-                        pass
-                    elif torch.equal(attention_mask, ~pad_positions):
-                        attention_mask = ~attention_mask
-                    elif attention_mask.float().mean() > 0.5:
-                        attention_mask = ~attention_mask
-                else:
-                    attention_mask = ~attention_mask
-            else:
-                # Accept HF-style 1/0 masks as well as additive 0/-inf masks.
-                if attention_mask.min() < 0:
-                    attention_mask = attention_mask < 0
-                else:
-                    attention_mask = attention_mask == 0
+            attention_mask = self._normalize_attention_mask(attention_mask, input_ids)
             attention_mask = (
                 attention_mask.unsqueeze(1)
                 .unsqueeze(2)
@@ -636,6 +649,17 @@ class NeoBERT(NeoBERTPreTrainedModel):
         # Get rotary position embeddings
         freqs_cis = None
         if self.config.rope:
+            max_pos = input_ids.shape[1]
+            if position_ids is not None:
+                max_pos = int(position_ids.max().item()) + 1
+            if (
+                self.freqs_cis.numel() == 0
+                or self.freqs_cis.device != input_ids.device
+                or self.freqs_cis.shape[0] < max_pos
+            ):
+                self.freqs_cis = precompute_freqs_cis(
+                    self.config.dim_head, max_pos, device=input_ids.device
+                )
             freqs_cis = (
                 self.freqs_cis[position_ids]
                 if position_ids is not None

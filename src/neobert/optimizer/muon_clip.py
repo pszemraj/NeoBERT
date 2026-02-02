@@ -89,6 +89,19 @@ class MuonClipConfig:
             f"clipping_alpha must be in [0, 1], got {self.clipping_alpha}"
         )
 
+        if self.algorithm is not None:
+            warnings.warn(
+                "MuonClipConfig.algorithm is deprecated; use orthogonalization instead.",
+                UserWarning,
+                stacklevel=2,
+            )
+        if self.polar_express is not None:
+            warnings.warn(
+                "MuonClipConfig.polar_express is deprecated; use orthogonalization instead.",
+                UserWarning,
+                stacklevel=2,
+            )
+
         # Warnings for suboptimal settings
         if self.ns_steps < 3:
             warnings.warn(
@@ -297,7 +310,8 @@ class NeoBERTAttentionHooks:
             if not torch.is_tensor(x):
                 return
             # During gradient accumulation, we intentionally keep only the latest
-            # microbatch activation to bound memory/compute overhead.
+            # microbatch activation to bound memory/compute overhead. This biases
+            # QK clipping stats toward the most recent microbatch by design.
             # Detach keeps storage alive; cloning here would multiply memory usage.
             # Store on CPU to avoid stale device references if the model is moved.
             self.layer_inputs[layer_idx] = x.detach().to("cpu")
@@ -740,7 +754,7 @@ class MuonClipOptimizer(Optimizer):
         if norm == 0:
             return torch.zeros_like(grad)
 
-        # Newton-Schulz iteration
+        # Newton-Schulz iteration coefficients from Polar Express appendix.
         a, b, c = (3.4445, -4.7750, 2.0315)
         X = working / (norm + 1e-7)
 
@@ -750,9 +764,7 @@ class MuonClipOptimizer(Optimizer):
             X = a * X + B @ X
 
         # RMS scaling for Adam lr compatibility
-        # Factor: 0.4 * sqrt(max_dim)
-        # Polar Express heuristic scaling coefficient (see paper appendix).
-        # Polar Express heuristic scaling coefficient (see paper appendix).
+        # Factor: 0.4 * sqrt(max_dim) (Polar Express appendix).
         scale_factor = 0.4 * max(working.size(0), working.size(1)) ** 0.5
         X = scale_factor * X
 
@@ -818,6 +830,8 @@ class MuonClipOptimizer(Optimizer):
 
     def _get_polar_coefficients(self, steps: int) -> List[Tuple[float, float, float]]:
         """Return dampened coefficient schedule for Polar Express.
+
+        Coefficients follow the Polar Express appendix schedule (see module references).
 
         :param int steps: Number of coefficients to return.
         :return list[tuple[float, float, float]]: Coefficient schedule.

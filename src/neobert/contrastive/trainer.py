@@ -260,7 +260,7 @@ def trainer(cfg: Config) -> None:
         rope=cfg.model.rope,
         rms_norm=cfg.model.rms_norm,
         hidden_act=cfg.model.hidden_act,
-        dropout_prob=cfg.model.dropout_prob,
+        dropout=cfg.model.dropout_prob,
         norm_eps=cfg.model.norm_eps,
         embedding_init_range=cfg.model.embedding_init_range,
         decoder_init_range=cfg.model.decoder_init_range,

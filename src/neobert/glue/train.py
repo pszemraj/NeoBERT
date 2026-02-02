@@ -981,15 +981,17 @@ def trainer(cfg: Config) -> None:
                 "intermediate_size": getattr(cfg.model, "intermediate_size", 3072),
                 "vocab_size": getattr(cfg.model, "vocab_size", 30522),
                 "hidden_act": getattr(cfg.model, "hidden_act", "gelu"),
-                "max_position_embeddings": getattr(
-                    cfg.model, "max_position_embeddings", 512
-                ),
+                "max_length": getattr(cfg.model, "max_position_embeddings", 512),
                 "layer_norm_eps": getattr(cfg.model, "layer_norm_eps", 1e-12),
             }
 
         # Map dropout_prob to dropout and remove classifier_init_range from model config
         if "dropout_prob" in model_config_dict:
             model_config_dict["dropout"] = model_config_dict.pop("dropout_prob")
+        if "max_position_embeddings" in model_config_dict:
+            model_config_dict["max_length"] = model_config_dict.pop(
+                "max_position_embeddings"
+            )
         if "classifier_init_range" in model_config_dict:
             model_config_dict.pop("classifier_init_range")
         if "allow_random_weights" in model_config_dict:

@@ -17,7 +17,7 @@ class TestGradientCheckpointing(unittest.TestCase):
             num_hidden_layers=2,
             num_attention_heads=4,
             intermediate_size=64,
-            dropout_prob=0.0,
+            dropout=0.0,
             vocab_size=128,
             max_length=64,
             flash_attention=False,

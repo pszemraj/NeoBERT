@@ -9,6 +9,7 @@
 # From https://github.com/facebookresearch/llama/blob/main/llama/model.py
 
 import math
+import warnings
 from functools import partial
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +30,7 @@ from transformers import (
 )
 from transformers.modeling_outputs import SequenceClassifierOutput
 
+from ..modeling_utils import swiglu_intermediate_size
 from .rmsnorm import RMSNorm
 from .rotary import apply_rotary_emb, precompute_freqs_cis
 
@@ -142,6 +144,11 @@ class NeoBERTConfig(PretrainedConfig):
 
         # Dropout: accept legacy 'dropout_prob' as alias
         if "dropout_prob" in kwargs and "dropout" not in kwargs:
+            warnings.warn(
+                "NeoBERTConfig: 'dropout_prob' is deprecated; use 'dropout' instead.",
+                UserWarning,
+                stacklevel=2,
+            )
             dropout = kwargs["dropout_prob"]
         self.dropout = dropout
 
@@ -164,9 +171,17 @@ class NeoBERTConfig(PretrainedConfig):
             "max_position_embeddings" in kwargs
             and kwargs["max_position_embeddings"] is not None
         ):
+            warnings.warn(
+                "NeoBERTConfig: 'max_position_embeddings' is deprecated for the "
+                "training model; use 'max_length' when constructing configs.",
+                UserWarning,
+                stacklevel=2,
+            )
             self.max_length = int(kwargs["max_position_embeddings"])
         else:
             self.max_length = max_length
+        # Keep the HF-style attribute for compatibility with downstream tooling.
+        self.max_position_embeddings = self.max_length
 
         self.flash_attention = flash_attention
         self.base_scale = base_scale
@@ -207,13 +222,8 @@ class EncoderBlock(nn.Module):
                 # {"silu","swish"}. We currently use a 2/3 reduction + "swiglu" flag, so
                 # a wrapper/adapter will be needed when swapping implementations.
                 # To keep the number of parameters and the amount of computation constant, we reduce the number of
-                # hidden units by a factor of 2/3 (https://arxiv.org/pdf/2002.05202.pdf) and make it a multiple of 8 to
-                # avoid RuntimeError due to misaligned operand
-                multiple_of = 8
-                intermediate_size = int(2 * config.intermediate_size / 3)
-                intermediate_size = multiple_of * (
-                    (intermediate_size + multiple_of - 1) // multiple_of
-                )
+                # hidden units by a factor of 2/3 (https://arxiv.org/pdf/2002.05202.pdf) and make it a multiple of 8.
+                intermediate_size = swiglu_intermediate_size(config.intermediate_size)
                 self.ffn = SwiGLU(
                     config.hidden_size,
                     intermediate_size,
@@ -550,17 +560,13 @@ class NeoBERT(NeoBERTPreTrainedModel):
         )
 
         if self.config.rope:
-            self.register_buffer(
-                "freqs_cis",
-                precompute_freqs_cis(
-                    config.hidden_size // config.num_attention_heads, config.max_length
-                ),
-                persistent=False,
-            )
+            # Lazy RoPE cache; populated on first forward for the active device/length.
+            self.register_buffer("freqs_cis", torch.empty(0), persistent=False)
         else:
             # Use a fixed padding index (0) for positional embeddings to decouple
             # position IDs from token padding IDs.
             self.positional_embedding = nn.Embedding(
+                # Positions are 1-indexed when using cumsum; reserve 0 for padding.
                 config.max_length + 1,
                 config.hidden_size,
                 padding_idx=0,
@@ -594,7 +600,8 @@ class NeoBERT(NeoBERTPreTrainedModel):
             assert pad_mask.dtype != torch.bool and 1.0 not in pad_mask, (
                 "NeoBERT expects an additive pad_mask"
             )
-            # HF export normalizes 1/0 or bool masks to this additive form.
+            # Convert HF-style masks at the data boundary (collator/export wrapper),
+            # then keep additive masks throughout the training model.
             if pad_mask.dim() == 2:
                 pad_mask = (
                     pad_mask.unsqueeze(1)
@@ -613,7 +620,14 @@ class NeoBERT(NeoBERTPreTrainedModel):
         # RoPE
         freqs_cis = None
         if self.config.rope:
-            # Buffer follows the model device; don't reassign self.freqs_cis.
+            if (
+                self.freqs_cis.numel() == 0
+                or self.freqs_cis.device != src.device
+                or self.freqs_cis.shape[0] < src.shape[1]
+            ):
+                self.freqs_cis = precompute_freqs_cis(
+                    self.config.dim_head, src.shape[1], device=src.device
+                )
             freqs_cis = self.freqs_cis[: src.shape[1]]
 
         # Embedding
@@ -672,17 +686,13 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
         )
 
         if self.config.rope:
-            self.register_buffer(
-                "freqs_cis",
-                precompute_freqs_cis(
-                    config.hidden_size // config.num_attention_heads, config.max_length
-                ),
-                persistent=False,
-            )
+            # Lazy RoPE cache; populated on first forward for the active device/length.
+            self.register_buffer("freqs_cis", torch.empty(0), persistent=False)
         else:
             # Use a fixed padding index (0) for positional embeddings to decouple
             # position IDs from token padding IDs.
             self.positional_embedding = nn.Embedding(
+                # Positions are 1-indexed when using cumsum; reserve 0 for padding.
                 config.max_length + 1,
                 config.hidden_size,
                 padding_idx=0,
@@ -730,7 +740,8 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
             assert pad_mask.dtype != torch.bool and 1.0 not in pad_mask, (
                 "NeoBERT expects an additive pad_mask"
             )
-            # HF export normalizes 1/0 or bool masks to this additive form.
+            # Convert HF-style masks at the data boundary (collator/export wrapper),
+            # then keep additive masks throughout the training model.
             if pad_mask.dim() == 2:
                 pad_mask = (
                     pad_mask.unsqueeze(1)
@@ -749,7 +760,14 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
         # RoPE
         freqs_cis = None
         if self.config.rope:
-            # Buffer follows the model device; don't reassign self.freqs_cis.
+            if (
+                self.freqs_cis.numel() == 0
+                or self.freqs_cis.device != src.device
+                or self.freqs_cis.shape[0] < src.shape[1]
+            ):
+                self.freqs_cis = precompute_freqs_cis(
+                    self.config.dim_head, src.shape[1], device=src.device
+                )
             freqs_cis = self.freqs_cis[: src.shape[1]]
 
         # Embedding

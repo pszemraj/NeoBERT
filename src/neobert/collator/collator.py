@@ -142,6 +142,8 @@ class DataCollatorWithPacking(DefaultDataCollator):
                 )
                 seg_tensor = torch.cat([seg_tensor, pad], dim=0)
             valid = seg_tensor != -1
+            # NOTE: This builds a dense block mask (O(seq^2)) for SDPA/xFormers.
+            # For very long sequences, prefer packed cu_seqlens with flash-attn.
             mask = (
                 (seg_tensor[:, None] == seg_tensor[None, :])
                 & valid[:, None]

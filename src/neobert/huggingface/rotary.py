@@ -9,12 +9,17 @@ incorporates explicit relative position dependency in self-attention formulation
 Based on: https://github.com/facebookresearch/llama/blob/main/llama/model.py
 """
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 
 
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
+def precompute_freqs_cis(
+    dim: int,
+    end: int,
+    theta: float = 10000.0,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
     """Precompute the frequency tensor for rotary position embeddings.
 
     This function calculates a frequency tensor with complex exponentials that will
@@ -39,7 +44,9 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Te
         >>> freqs.dtype
         torch.complex64
     """
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    freqs = 1.0 / (
+        theta ** (torch.arange(0, dim, 2, device=device)[: (dim // 2)].float() / dim)
+    )
     t = torch.arange(end, device=freqs.device)
     freqs = torch.outer(t, freqs).float()
     return torch.polar(torch.ones_like(freqs), freqs)

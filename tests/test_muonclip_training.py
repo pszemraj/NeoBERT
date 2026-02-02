@@ -166,7 +166,7 @@ def main():
         num_attention_heads=6,
         intermediate_size=1536,
         vocab_size=tokenizer.vocab_size,
-        max_position_embeddings=seq_len,
+        max_length=seq_len,
         flash_attention=False,  # Disable for compatibility
         hidden_act="gelu",
         rope=False,  # Disable for simplicity
