@@ -845,7 +845,14 @@ def trainer(cfg: Config) -> None:
             i += 1
 
             # Pack or truncate the batch to target batch size (batch size might be variable due to sequence packing).
+            # Skip batch buffering when using packed sequences, as packed_seqlens metadata would be lost.
             if batch["input_ids"].shape[0] != cfg.trainer.per_device_train_batch_size:
+                if batch.get("packed_seqlens") is not None:
+                    raise ValueError(
+                        "Batch size mismatch with packed sequences is not supported. "
+                        "Packed batches cannot be split/merged because packed_seqlens metadata "
+                        "would be lost. Ensure your dataloader produces exact batch sizes."
+                    )
                 batch, stored_batch = to_target_batch_size(
                     batch, stored_batch, cfg.trainer.per_device_train_batch_size
                 )
