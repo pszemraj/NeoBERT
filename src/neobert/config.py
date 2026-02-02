@@ -197,6 +197,7 @@ class DataCollatorConfig:
 class WandbConfig:
     """Weights & Biases logging configuration."""
 
+    enabled: bool = False
     project: str = "neo-bert"
     entity: Optional[str] = None
     name: Optional[str] = None
@@ -398,9 +399,13 @@ class ConfigLoader:
 
         # Update wandb config
         if "wandb" in cfg_dict:
-            for k, v in cfg_dict["wandb"].items():
+            wandb_dict = cfg_dict["wandb"]
+            auto_enable = "enabled" not in wandb_dict
+            for k, v in wandb_dict.items():
                 if hasattr(config.wandb, k):
                     setattr(config.wandb, k, v)
+            if auto_enable:
+                config.wandb.enabled = True
 
         # Update glue config
         if "glue" in cfg_dict:
@@ -675,6 +680,11 @@ def create_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wandb.project", type=str, help="WandB project name")
     parser.add_argument("--wandb.entity", type=str, help="WandB entity")
     parser.add_argument("--wandb.name", type=str, help="WandB run name")
+    parser.add_argument(
+        "--wandb.enabled",
+        type=lambda x: x.lower() == "true",
+        help="Enable Weights & Biases logging",
+    )
     parser.add_argument(
         "--wandb.mode", type=str, help="WandB mode (online/offline/disabled)"
     )

@@ -230,6 +230,7 @@ scheduler.decay_percent: float | None = None
 ### Weights and Biases (`wandb`)
 
 ```
+wandb.enabled: bool = false
 wandb.project: str = "neo-bert"
 wandb.entity: str | None = None
 wandb.name: str | None = None
@@ -239,6 +240,10 @@ wandb.log_interval: int = 100
 wandb.resume: str = "never"
 wandb.dir: str = "logs/wandb"
 ```
+
+If a config file includes a `wandb` section but omits `wandb.enabled`, NeoBERT will
+auto-enable W&B logging for backward compatibility. Set `wandb.enabled: false`
+explicitly to keep W&B disabled.
 
 ### GLUE (`glue`)
 

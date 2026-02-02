@@ -143,16 +143,17 @@ def trainer(cfg: Config) -> None:
         total_limit=save_total_limit or None,
         iteration=iteration,
     )
+    wandb_enabled = cfg.wandb.enabled and cfg.wandb.mode != "disabled"
     accelerator = Accelerator(
         step_scheduler_with_optimizer=False,  # enable manual control of the scheduler
         mixed_precision=cfg.trainer.mixed_precision,
         gradient_accumulation_steps=cfg.trainer.gradient_accumulation_steps,
-        log_with="wandb" if cfg.wandb.mode != "disabled" else None,
+        log_with="wandb" if wandb_enabled else None,
         project_config=project_config,
     )
 
     # Initialise the wandb run and pass wandb parameters
-    if cfg.wandb.mode != "disabled":
+    if wandb_enabled:
         os.makedirs(cfg.wandb.dir, exist_ok=True)
         config_dict = prepare_wandb_config(cfg)
         accelerator.init_trackers(
@@ -390,7 +391,7 @@ def trainer(cfg: Config) -> None:
     for key in keys[1:]:
         dataloaders[key] = accelerator.prepare(dataloaders[key])
 
-    if cfg.wandb.mode != "disabled" and accelerator.is_main_process:
+    if wandb_enabled and accelerator.is_main_process:
         wandb_watch = os.environ.get("WANDB_WATCH")
         if wandb_watch is not None:
             watch_mode = wandb_watch.strip().lower()

@@ -69,50 +69,54 @@ def trainer(cfg: Config) -> None:
         total_limit=cfg.trainer.accelerate.max_ckpt,
         iteration=iteration,
     )
+    wandb_enabled = cfg.wandb.enabled and cfg.wandb.mode != "disabled"
     accelerator = Accelerator(
         step_scheduler_with_optimizer=False,  # enable manual control of the scheduler
         mixed_precision=cfg.trainer.mixed_precision,
         gradient_accumulation_steps=cfg.trainer.gradient_accumulation_steps,
-        log_with="wandb",
+        log_with="wandb" if wandb_enabled else None,
         project_config=project_config,
     )
 
     # Initialise the wandb run and pass wandb parameters
-    os.makedirs(cfg.wandb.dir, exist_ok=True)
-    config_dict = prepare_wandb_config(cfg)
-    tracker_config = config_dict | {"distributed_type": accelerator.distributed_type}
-    accelerator.init_trackers(
-        project_name=cfg.wandb.project,
-        init_kwargs={
-            "wandb": {
-                "name": cfg.wandb.name,
-                "entity": cfg.wandb.entity,
-                "config": tracker_config,
-                "tags": cfg.wandb.tags,
-                "dir": cfg.wandb.dir,
-                "mode": cfg.wandb.mode,
-                "resume": cfg.trainer.resume,
-            }
-        },
-    )
-    if accelerator.is_main_process and wandb.run is not None:
-        wandb.run.config.update(tracker_config, allow_val_change=True)
-        config_path = getattr(cfg, "config_path", None)
-        if config_path:
-            abs_config_path = os.path.abspath(config_path)
-            if os.path.isfile(abs_config_path):
-                artifact = wandb.Artifact(
-                    name=f"{wandb.run.id}-config",
-                    type="config",
-                    metadata={"source": abs_config_path},
-                )
-                artifact.add_file(abs_config_path)
-                wandb.run.log_artifact(artifact)
-            else:
-                logging.warning(
-                    "Configured config_path '%s' not found; skipping wandb artifact upload",
-                    config_path,
-                )
+    if wandb_enabled:
+        os.makedirs(cfg.wandb.dir, exist_ok=True)
+        config_dict = prepare_wandb_config(cfg)
+        tracker_config = config_dict | {
+            "distributed_type": accelerator.distributed_type
+        }
+        accelerator.init_trackers(
+            project_name=cfg.wandb.project,
+            init_kwargs={
+                "wandb": {
+                    "name": cfg.wandb.name,
+                    "entity": cfg.wandb.entity,
+                    "config": tracker_config,
+                    "tags": cfg.wandb.tags,
+                    "dir": cfg.wandb.dir,
+                    "mode": cfg.wandb.mode,
+                    "resume": cfg.trainer.resume,
+                }
+            },
+        )
+        if accelerator.is_main_process and wandb.run is not None:
+            wandb.run.config.update(tracker_config, allow_val_change=True)
+            config_path = getattr(cfg, "config_path", None)
+            if config_path:
+                abs_config_path = os.path.abspath(config_path)
+                if os.path.isfile(abs_config_path):
+                    artifact = wandb.Artifact(
+                        name=f"{wandb.run.id}-config",
+                        type="config",
+                        metadata={"source": abs_config_path},
+                    )
+                    artifact.add_file(abs_config_path)
+                    wandb.run.log_artifact(artifact)
+                else:
+                    logging.warning(
+                        "Configured config_path '%s' not found; skipping wandb artifact upload",
+                        config_path,
+                    )
 
     # Set the seed
     set_seed(cfg.seed)
@@ -215,7 +219,7 @@ def trainer(cfg: Config) -> None:
         *dataloaders,
     )
 
-    if cfg.wandb.mode != "disabled" and accelerator.is_main_process:
+    if wandb_enabled and accelerator.is_main_process:
         wandb_watch = os.environ.get("WANDB_WATCH")
         if wandb_watch is not None:
             watch_mode = wandb_watch.strip().lower()

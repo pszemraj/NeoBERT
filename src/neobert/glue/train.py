@@ -659,30 +659,32 @@ def trainer(cfg: Config) -> None:
     elif mixed_precision == "fp32":
         mixed_precision = "no"
 
+    wandb_enabled = cfg.wandb.enabled and cfg.wandb.mode != "disabled"
     accelerator = Accelerator(
-        log_with="wandb",
+        log_with="wandb" if wandb_enabled else None,
         mixed_precision=mixed_precision,
         project_config=project_config,
     )
 
     # Initialise the wandb run and pass wandb parameters
-    accelerator.init_trackers(
-        project_name=cfg.wandb.project,
-        init_kwargs={
-            "wandb": {
-                "name": cfg.wandb.name,
-                "entity": cfg.wandb.entity,
-                "config": cfg.__dict__,
-                "tags": cfg.wandb.tags,
-                "dir": cfg.wandb.dir,
-                "mode": cfg.wandb.mode,
-                "resume": cfg.wandb.resume,
-            }
-        },
-    )
+    if wandb_enabled:
+        accelerator.init_trackers(
+            project_name=cfg.wandb.project,
+            init_kwargs={
+                "wandb": {
+                    "name": cfg.wandb.name,
+                    "entity": cfg.wandb.entity,
+                    "config": cfg.__dict__,
+                    "tags": cfg.wandb.tags,
+                    "dir": cfg.wandb.dir,
+                    "mode": cfg.wandb.mode,
+                    "resume": cfg.wandb.resume,
+                }
+            },
+        )
 
-    _configure_wandb_metrics(accelerator)
-    _update_wandb_config(accelerator, cfg)
+        _configure_wandb_metrics(accelerator)
+        _update_wandb_config(accelerator, cfg)
 
     set_seed(int(cfg.seed))
 
