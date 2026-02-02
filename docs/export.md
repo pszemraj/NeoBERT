@@ -11,6 +11,7 @@ Your checkpoint directory must contain:
 
 - `state_dict.pt`
 - `config.yaml`
+- `tokenizer_info.json` (recommended; saved by the trainer and validated if present)
 - `tokenizer/` (with `special_tokens_map.json`, vocab, etc.)
 
 Install dependencies:
@@ -63,9 +64,21 @@ The export script maps NeoBERT config fields to HF config fields, including:
 | `num_attention_heads`     | `num_attention_heads` | Heads               |
 | `intermediate_size`       | `intermediate_size`   | FFN size            |
 | `max_position_embeddings` | `max_length`          | Max sequence length |
+| `max_position_embeddings` | `max_position_embeddings` | Max sequence length |
 | `norm_eps`                | `norm_eps`            | Norm epsilon        |
 | `vocab_size`              | `vocab_size`          | Vocab size          |
 | `pad_token_id`            | `pad_token_id`        | Padding token       |
+| `rms_norm`                | `rms_norm`            | Norm choice         |
+| `rope`                    | `rope`                | Rotary embeddings   |
+| `hidden_act`              | `hidden_act`          | `swiglu` or `gelu`   |
+| `dropout_prob`            | `dropout`             | Dropout probability |
+| `flash_attention`         | `flash_attention`     | Backend toggle      |
+
+Notes:
+
+- Export supports `hidden_act: swiglu` and `hidden_act: gelu` only.
+- `ngpt` (NormNeoBERT) checkpoints are not exportable via the HF path.
+- The HF export expects **unpacked** SwiGLU weights (`w1/w2/w3`) from training.
 
 ## Validation
 
@@ -73,7 +86,7 @@ The export script maps NeoBERT config fields to HF config fields, including:
 python scripts/export-hf/validate.py outputs/neobert_pretrain/hf/neobert_pretrain_100000
 ```
 
-The validator checks file presence, model loading, tokenizer loading, MLM head, end-to-end encode, and a cosine-similarity sanity check.
+The validator checks file presence, model loading, tokenizer loading, MLM head, end-to-end encode, and a cosine-similarity sanity check. The exporter also validates tensor shapes and runs a lightweight forward-pass sanity check before writing files.
 
 ## Troubleshooting
 

@@ -25,8 +25,8 @@ NeoBERT is a transformer encoder with modernized components:
 ### Embeddings
 
 - Token embeddings only (no token-type embeddings).
-- Position information is injected with RoPE when enabled.
-- Padding uses `pad_token_id`.
+- Position information is injected with RoPE when enabled; otherwise learned positional embeddings are used.
+- Token embedding padding uses `pad_token_id`. Positional embeddings use a fixed padding index (0), and positions start at 0 for non-pad tokens.
 
 ### Attention
 

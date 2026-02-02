@@ -93,6 +93,7 @@ Notes:
 - Requires the `mteb` package.
 - If `use_deepspeed: true`, the script loads weights via DeepSpeed utilities.
 - Outputs land under `outputs/<pretrain_run>/mteb/<step>/<max_length>/`.
+- The MTEB runner currently reads `tokenizer.name`; if you trained with a local tokenizer, set `tokenizer.name` to that path in the config.
 
 ## Troubleshooting
 

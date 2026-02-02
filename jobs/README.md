@@ -234,13 +234,17 @@ python scripts/pretraining/pretrain.py \
 #!/bin/bash
 # Resume training from checkpoint
 
-CHECKPOINT="./output/pretrain/model_checkpoints/50000"
+OUTPUT_DIR="./output/pretrain"
 
 python scripts/pretraining/pretrain.py \
     --config configs/pretraining/pretrain_neobert.yaml \
-    --trainer.resume_from_checkpoint $CHECKPOINT \
-    --trainer.output_dir ./output/pretrain_continued
+    --trainer.output_dir $OUTPUT_DIR \
+    --trainer.resume_from_checkpoint true
 ```
+
+Notes:
+- `trainer.resume_from_checkpoint` is treated as a flag and resumes from the latest `output_dir/checkpoints/`.
+- To resume a specific step, remove newer checkpoint directories under `output_dir/checkpoints/`.
 
 ### Hyperparameter Sweep
 ```bash

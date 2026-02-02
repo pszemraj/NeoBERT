@@ -55,7 +55,7 @@ See [docs/configuration.md](configuration.md) for the full schema. Key knobs use
 - `model.*`: architecture (e.g., `hidden_size`, `num_hidden_layers`, `rope`, `rms_norm`, `flash_attention`)
 - `dataset.*`: dataset source, streaming, splits, and tokenization settings
 - `tokenizer.*`: tokenizer name/path and max length
-- `datacollator.*`: MLM masking and padding (`mlm_probability`, `pad_to_multiple_of`)
+- `datacollator.*`: MLM masking, padding, and packing (`mlm_probability`, `mask_all`, `pad_to_multiple_of`, `pack_sequences`)
 - `trainer.*`: batch size, steps, logging, checkpointing
 - `optimizer.*` / `scheduler.*`: learning rate and scheduling
 - `wandb.*`: tracking controls
@@ -96,7 +96,7 @@ dataset:
 
 ### Checkpointing
 
-Pretraining checkpoints are written under `trainer.output_dir/model_checkpoints/`:
+Pretraining **model checkpoints** are written under `trainer.output_dir/model_checkpoints/`:
 
 ```
 outputs/neobert_pretrain/
@@ -108,13 +108,29 @@ outputs/neobert_pretrain/
     └── latest
 ```
 
-Resume from a checkpoint:
+Accelerator **training state** (for resumable runs) is written under `trainer.output_dir/checkpoints/`:
+
+```
+outputs/neobert_pretrain/
+└── checkpoints/
+    ├── 10000/
+    ├── 20000/
+    └── 30000/
+```
+
+Resume from the latest accelerator checkpoint:
 
 ```bash
 python scripts/pretraining/pretrain.py \
   --config configs/pretraining/pretrain_neobert.yaml \
-  --trainer.resume_from_checkpoint outputs/neobert_pretrain/model_checkpoints/20000
+  --trainer.resume_from_checkpoint true
 ```
+
+Notes:
+- `trainer.resume_from_checkpoint` is currently treated as a **flag**; the value is not a path.
+- The trainer resumes from the **latest numeric directory** under `output_dir/checkpoints/`.
+- `trainer.output_dir` must point at the original run directory so checkpoints can be found.
+- To resume from a specific step, remove newer checkpoint directories first.
 
 ## Contrastive Learning
 
@@ -123,7 +139,7 @@ python scripts/contrastive/finetune.py \
   --config configs/contrastive/contrastive_neobert.yaml
 ```
 
-For dataset setup, see the configs under `configs/contrastive/` and the scripts in `scripts/contrastive/`.
+For dataset setup, see the configs under `configs/contrastive/` and the scripts in `scripts/contrastive/`. Contrastive training requires `dataset.path` to point to the preprocessed dataset produced by `scripts/contrastive/preprocess.py`.
 
 ## Dataset Preparation
 
@@ -135,6 +151,10 @@ python scripts/pretraining/preprocess.py \
 ```
 
 Tokenizer settings are taken from `tokenizer.*`; the output path comes from `dataset.path`.
+
+Alternatively, set `dataset.pre_tokenize: true` in your pretraining config to have the trainer invoke
+`scripts/pretraining/tokenize_dataset.py` automatically. It will save to `dataset.pre_tokenize_output` if set,
+otherwise to `tokenized_data/<dataset-name>/`.
 
 ## Training Tips
 

@@ -59,14 +59,9 @@ This issue was fixed in `trainer.py` and `trainer_phase_2.py`.
 
 ### HuggingFace Model Fails to Load
 
-**Problem**: `AttributeError: 'NoneType' object has no attribute 'bool()'` when loading exported model.
+**Problem**: `AttributeError: 'NoneType' object has no attribute 'bool()'` or similar mask-handling errors when loading an exported model.
 
-**Solution**: The HF modeling file needs to handle None attention masks properly:
-
-```python
-# In modeling_neobert.py
-attn_mask=attention_mask.bool() if attention_mask is not None else None
-```
+**Solution**: Re-export with the latest `scripts/export-hf/export.py`, which bundles a modeling file that accepts `None`, bool, or additive attention masks. If you manually copied files, ensure `model.py`/`rotary.py` match the current repo versions.
 
 ### Missing Decoder Weights
 
@@ -74,8 +69,8 @@ attn_mask=attention_mask.bool() if attention_mask is not None else None
 
 **Solution**: Check that the export script correctly maps weights:
 
-- Training format: `decoder.weight`, `decoder.bias`
-- These should be preserved at the top level in HF format
+- Training format: `model.decoder.weight`, `model.decoder.bias`
+- These are mapped to top-level `decoder.*` weights in the HF export
 
 ## Inference Issues
 
