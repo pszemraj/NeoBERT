@@ -208,7 +208,12 @@ class NeoBERTConfig(PretrainedConfig):
 
 
 class UnpackedSwiGLU(nn.Module):
-    """Unpacked SwiGLU MLP (w1, w2, w3) matching training fallback."""
+    """Unpacked SwiGLU MLP (w1, w2, w3) matching training fallback.
+
+    Note: Keeps the w1/w2/w3 layout so a future LigerSwiGLUMLP drop-in can
+    replace this class without weight conversion. An adapter will be needed
+    to reconcile Liger's activation flag expectations and intermediate_size.
+    """
 
     def __init__(
         self,

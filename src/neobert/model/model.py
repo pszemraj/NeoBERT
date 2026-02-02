@@ -46,7 +46,12 @@ except (ImportError, RuntimeError) as e:
 
 
 class SwiGLU(nn.Module):
-    """Native SwiGLU implementation (unpacked w1/w2/w3)."""
+    """Native SwiGLU implementation (unpacked w1/w2/w3).
+
+    Note: This layout is intentionally compatible with Liger's SwiGLU modules
+    (gate/up/down projections). A future Liger swap should preserve the reduced
+    2/3 intermediate size and the "swiglu" activation flag used in configs.
+    """
 
     def __init__(
         self,
@@ -197,6 +202,10 @@ class EncoderBlock(nn.Module):
         # Feedforward network
         match config.hidden_act.lower():
             case "swiglu":
+                # Future Liger integration note:
+                # Liger expects config.intermediate_size directly and checks hidden_act in
+                # {"silu","swish"}. We currently use a 2/3 reduction + "swiglu" flag, so
+                # a wrapper/adapter will be needed when swapping implementations.
                 # To keep the number of parameters and the amount of computation constant, we reduce the number of
                 # hidden units by a factor of 2/3 (https://arxiv.org/pdf/2002.05202.pdf) and make it a multiple of 8 to
                 # avoid RuntimeError due to misaligned operand
