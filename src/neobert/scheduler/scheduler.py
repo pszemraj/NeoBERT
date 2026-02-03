@@ -1,7 +1,8 @@
 """Learning-rate scheduler factory for training runs."""
 
-import torch
 from typing import Any, Optional, Tuple
+
+import torch
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
 
 

@@ -9,12 +9,12 @@ import time
 import torch
 import torch.nn.functional as F
 from datasets import load_dataset
+from torch.optim import AdamW
 from transformers import AutoTokenizer
 
 from neobert.collator import get_collator
 from neobert.model import NeoBERT, NeoBERTConfig
-from neobert.optimizer import MuonClipOptimizer, MuonClipConfig
-from torch.optim import AdamW
+from neobert.optimizer import MuonClipConfig, MuonClipOptimizer
 
 
 def build_fineweb_stream(tokenizer: AutoTokenizer, seq_len: int = 128):

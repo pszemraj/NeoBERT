@@ -6,8 +6,9 @@ Run: pytest tests/test_muonclip_unit.py -v
 
 import pytest
 import torch
+
 from neobert.model import NeoBERT, NeoBERTConfig, NeoBERTLMHead
-from neobert.optimizer import MuonClipOptimizer, MuonClipConfig
+from neobert.optimizer import MuonClipConfig, MuonClipOptimizer
 
 
 class TestMuonClipConfig:

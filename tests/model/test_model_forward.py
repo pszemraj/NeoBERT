@@ -653,7 +653,7 @@ class TestModelForward(unittest.TestCase):
 
     def test_hf_init_zeros_linear_biases(self):
         """Ensure HF init matches training bias initialization."""
-        from neobert.huggingface.modeling_neobert import NeoBERTLMHead, NeoBERTConfig
+        from neobert.huggingface.modeling_neobert import NeoBERTConfig, NeoBERTLMHead
 
         hf_config = NeoBERTConfig(
             hidden_size=32,

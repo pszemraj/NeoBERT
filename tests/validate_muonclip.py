@@ -4,9 +4,11 @@ Run: python tests/validate_muonclip.py
 """
 
 import sys
+
 import torch
+
 from neobert.model import NeoBERT, NeoBERTConfig
-from neobert.optimizer import MuonClipOptimizer, MuonClipConfig
+from neobert.optimizer import MuonClipConfig, MuonClipOptimizer
 
 
 def validate_basic_functionality():

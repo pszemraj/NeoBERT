@@ -4,8 +4,8 @@ import math
 from collections import defaultdict
 from typing import Any, Dict
 
-from accelerate import Accelerator
 import torch
+from accelerate import Accelerator
 from torch import Tensor
 
 

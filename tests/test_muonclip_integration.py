@@ -5,8 +5,9 @@ Run: python tests/test_muonclip_integration.py
 """
 
 import torch
+
 from neobert.model import NeoBERT, NeoBERTConfig
-from neobert.optimizer import MuonClipOptimizer, MuonClipConfig
+from neobert.optimizer import MuonClipConfig, MuonClipOptimizer
 
 
 def test_training_loop():

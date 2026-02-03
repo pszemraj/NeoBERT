@@ -157,7 +157,7 @@ if __name__ == "__main__":
     dataset = load_dataset("wikipedia", "20220301.en")["train"]
     dataset = dataset.remove_columns(["url", "title"])
     dataset = dataset.filter(
-        lambda x: (len(x["text"]) < 20000 and len(x["text"]) > 500)
+        lambda x: len(x["text"]) < 20000 and len(x["text"]) > 500
     ).select(range(args.n_sentences))
     dataset = get_data(dataset)
     dataset = dataset.shuffle(seed=42)

@@ -1,8 +1,8 @@
 """Pretraining loop for masked language modeling."""
 
 import json
-import math
 import logging
+import math
 import os
 import re
 from contextlib import nullcontext

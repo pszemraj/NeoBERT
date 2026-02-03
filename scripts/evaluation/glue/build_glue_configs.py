@@ -12,7 +12,6 @@ from typing import Dict, Iterable, Optional
 
 import yaml
 
-
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "configs" / "glue" / "generated"
 DEFAULT_RESULTS_ROOT = Path("outputs/glue")
