@@ -343,6 +343,11 @@ class ConfigLoader:
         normalized: Dict[str, Any] = deepcopy(cfg_dict or {})
 
         def _section(name: str) -> Dict[str, Any]:
+            """Return/create a config section mapping.
+
+            :param str name: Section name to fetch/create.
+            :return dict[str, Any]: Section mapping.
+            """
             section = normalized.get(name)
             if section is None:
                 section = {}
@@ -639,6 +644,11 @@ class ConfigLoader:
                 unknown_keys.append(key)
 
         def _check_section(section: str, cls: type) -> None:
+            """Validate keys for a named config subsection.
+
+            :param str section: Section key to validate.
+            :param type cls: Dataclass type describing valid keys.
+            """
             if section not in cfg_dict:
                 return
             mapping = cfg_dict.get(section)

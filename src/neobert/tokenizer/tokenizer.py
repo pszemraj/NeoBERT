@@ -209,6 +209,8 @@ def single_column_mapping(
     :param str column_name: Column containing text inputs.
     :param int max_length: Maximum sequence length.
     :param bool truncation: Whether to truncate sequences.
+    :param bool add_special_tokens: Whether to add tokenizer special tokens.
+    :param bool return_special_tokens_mask: Whether to return special token masks.
     :return dict[str, Any]: Tokenized outputs for the batch.
     """
     return tokenizer(
@@ -237,6 +239,8 @@ def multi_column_mapping(
     :param tuple[str, ...] column_name: Columns containing text inputs.
     :param int max_length: Maximum sequence length.
     :param bool truncation: Whether to truncate sequences.
+    :param bool add_special_tokens: Whether to add tokenizer special tokens.
+    :param bool return_special_tokens_mask: Whether to return special token masks.
     :return dict[str, Any]: Tokenized outputs for the batch.
     """
     output = {}

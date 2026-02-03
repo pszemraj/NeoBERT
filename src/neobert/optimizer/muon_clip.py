@@ -1163,7 +1163,11 @@ class MuonClipOptimizer(Optimizer):
         sqk = sqk.to(device=xq.device, dtype=xq.dtype)
 
         def _justnorm(x: torch.Tensor) -> torch.Tensor:
-            """Match NormEncoderBlock justnorm behavior."""
+            """Match NormEncoderBlock justnorm behavior.
+
+            :param torch.Tensor x: Input tensor.
+            :return torch.Tensor: L2-normalized tensor.
+            """
             return x / (x.norm(p=2, dim=-1, keepdim=True) + 1e-8)
 
         return sqk * _justnorm(xq), sqk * _justnorm(xk)
