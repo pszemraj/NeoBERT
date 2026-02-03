@@ -67,6 +67,16 @@ def main() -> None:
         default=None,
         help="Maximum number of samples to tokenize (default: all)",
     )
+    parser.add_argument(
+        "--no-special-tokens",
+        action="store_true",
+        help="Disable tokenizer special tokens (useful for packed-sequence pretraining).",
+    )
+    parser.add_argument(
+        "--return-special-tokens-mask",
+        action="store_true",
+        help="Store special_tokens_mask in the tokenized dataset.",
+    )
 
     args = parser.parse_args()
 
@@ -97,13 +107,19 @@ def main() -> None:
         dataset, is_streaming=False, preferred=args.text_column
     )
 
-    print(f"Tokenizing with max_length={args.max_length}...")
+    add_special_tokens = not args.no_special_tokens
+    print(
+        f"Tokenizing with max_length={args.max_length} "
+        f"(add_special_tokens={add_special_tokens})..."
+    )
     tokenized_dataset = tokenize(
         dataset,
         tokenizer,
         column_name=text_column,
         max_length=args.max_length,
         num_proc=args.num_proc,
+        add_special_tokens=add_special_tokens,
+        return_special_tokens_mask=args.return_special_tokens_mask,
     )
 
     print(f"Saving tokenized dataset to: {args.output}")
@@ -115,6 +131,8 @@ def main() -> None:
         f.write(f"Tokenizer: {args.tokenizer}\n")
         f.write(f"Max length: {args.max_length}\n")
         f.write(f"Text column: {text_column}\n")
+        f.write(f"Add special tokens: {add_special_tokens}\n")
+        f.write(f"Return special_tokens_mask: {args.return_special_tokens_mask}\n")
         f.write(f"Dataset: {args.dataset}\n")
         f.write(f"Split: {args.split}\n")
         f.write(f"Samples: {len(tokenized_dataset)}\n")

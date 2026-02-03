@@ -62,6 +62,9 @@ def get_dataloader(
         "batch_size": batch_size,
         "pin_memory": pin_memory,
         "persistent_workers": persistent_workers if num_workers > 0 else False,
+        # Keep tail batches (important for unbiased eval); training logic tolerates
+        # smaller final batches when packing is enabled.
+        "drop_last": False,
     }
 
     # Only add shuffle for non-streaming datasets

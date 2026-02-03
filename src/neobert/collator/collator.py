@@ -60,20 +60,23 @@ class DataCollatorWithPacking(DefaultDataCollator):
 
     def __init__(
         self,
-        sep_token_id: int,
+        start_token_id: Optional[int],
+        end_token_id: Optional[int],
         max_length: int,
         default_data_collator: DefaultDataCollator,
         **kwargs: Any,
     ) -> None:
         """Initialize a sequence-packing collator.
 
-        :param int sep_token_id: Token ID used to separate packed sequences.
+        :param int | None start_token_id: Optional BOS/CLS token to prepend per segment.
+        :param int | None end_token_id: Optional EOS/SEP token to append per segment.
         :param int max_length: Maximum packed sequence length.
         :param DefaultDataCollator default_data_collator: Base collator to apply.
         :param Any kwargs: Forwarded to ``DefaultDataCollator``.
         """
         super().__init__(**kwargs)
-        self.sep_token_id = sep_token_id
+        self.start_token_id = start_token_id
+        self.end_token_id = end_token_id
         self.max_length = max_length
         self.default_data_collator = default_data_collator
 
@@ -85,51 +88,83 @@ class DataCollatorWithPacking(DefaultDataCollator):
         packed_segments = []
         current_sequence: list[int] = []
         current_segments: list[int] = []
+        current_special_mask: list[int] = []
         current_segment_id = 0
 
         for feature in features:
             seq = feature["input_ids"]
-            seq_len = len(seq)
+            if torch.is_tensor(seq):
+                seq = seq.tolist()
+            special_mask = feature.get("special_tokens_mask")
+            if torch.is_tensor(special_mask):
+                special_mask = special_mask.tolist()
+            if special_mask is None:
+                tokenizer = getattr(self.default_data_collator, "tokenizer", None)
+                if tokenizer is not None:
+                    special_mask = tokenizer.get_special_tokens_mask(
+                        seq, already_has_special_tokens=True
+                    )
+                else:
+                    special_mask = [0] * len(seq)
 
-            if current_sequence:
-                sep_len = 1 if self.sep_token_id is not None else 0
-                if len(current_sequence) + sep_len + seq_len > self.max_length:
-                    packed_sequences.append({"input_ids": current_sequence})
-                    packed_segments.append(current_segments)
-                    current_sequence = []
-                    current_segments = []
-                    current_segment_id = 0
+            segment_tokens: list[int] = []
+            segment_mask: list[int] = []
+            if self.start_token_id is not None:
+                segment_tokens.append(self.start_token_id)
+                segment_mask.append(1)
+            segment_tokens.extend(seq)
+            segment_mask.extend(int(val) for val in special_mask)
+            if self.end_token_id is not None:
+                segment_tokens.append(self.end_token_id)
+                segment_mask.append(1)
 
-            if current_sequence and self.sep_token_id is not None:
-                current_sequence.append(self.sep_token_id)
-                current_segments.append(current_segment_id)
-                if len(current_sequence) == self.max_length:
-                    packed_sequences.append({"input_ids": current_sequence})
-                    packed_segments.append(current_segments)
-                    current_sequence = []
-                    current_segments = []
-                    current_segment_id = 0
+            if len(segment_tokens) > self.max_length:
+                raise ValueError(
+                    "Packed segment length "
+                    f"{len(segment_tokens)} exceeds max_length={self.max_length}. "
+                    "Truncate inputs or increase datacollator.max_length."
+                )
 
-            for token in seq:
-                if len(current_sequence) == self.max_length:
-                    packed_sequences.append({"input_ids": current_sequence})
-                    packed_segments.append(current_segments)
-                    current_sequence = []
-                    current_segments = []
-                    current_segment_id = 0
-                current_sequence.append(token)
-                current_segments.append(current_segment_id)
-                if len(current_sequence) == self.max_length:
-                    packed_sequences.append({"input_ids": current_sequence})
-                    packed_segments.append(current_segments)
-                    current_sequence = []
-                    current_segments = []
-                    current_segment_id = 0
+            if current_sequence and (
+                len(current_sequence) + len(segment_tokens) > self.max_length
+            ):
+                packed_sequences.append(
+                    {
+                        "input_ids": current_sequence,
+                        "special_tokens_mask": current_special_mask,
+                    }
+                )
+                packed_segments.append(current_segments)
+                current_sequence = []
+                current_segments = []
+                current_special_mask = []
+                current_segment_id = 0
 
+            current_sequence.extend(segment_tokens)
+            current_special_mask.extend(segment_mask)
+            current_segments.extend([current_segment_id] * len(segment_tokens))
             current_segment_id += 1
 
+            if len(current_sequence) == self.max_length:
+                packed_sequences.append(
+                    {
+                        "input_ids": current_sequence,
+                        "special_tokens_mask": current_special_mask,
+                    }
+                )
+                packed_segments.append(current_segments)
+                current_sequence = []
+                current_segments = []
+                current_special_mask = []
+                current_segment_id = 0
+
         if current_sequence:
-            packed_sequences.append({"input_ids": current_sequence})
+            packed_sequences.append(
+                {
+                    "input_ids": current_sequence,
+                    "special_tokens_mask": current_special_mask,
+                }
+            )
             packed_segments.append(current_segments)
 
         # Pad to a fixed length so batches can be concatenated by to_target_batch_size
@@ -147,9 +182,9 @@ class DataCollatorWithPacking(DefaultDataCollator):
                     f"Packed sequence length {len(seq['input_ids'])} exceeds max_length={self.max_length}."
                 )
             if len(seq["input_ids"]) < self.max_length:
-                seq["input_ids"].extend(
-                    [pad_token_id] * (self.max_length - len(seq["input_ids"]))
-                )
+                pad_len = self.max_length - len(seq["input_ids"])
+                seq["input_ids"].extend([pad_token_id] * pad_len)
+                seq["special_tokens_mask"].extend([1] * pad_len)
 
         batch = self.default_data_collator(packed_sequences, return_tensors)
 
@@ -219,8 +254,19 @@ def get_collator(
     )
 
     if pack_sequences:
+        start_token_id = (
+            tokenizer.cls_token_id
+            if tokenizer.cls_token_id is not None
+            else tokenizer.bos_token_id
+        )
+        end_token_id = (
+            tokenizer.sep_token_id
+            if tokenizer.sep_token_id is not None
+            else tokenizer.eos_token_id
+        )
         collator = DataCollatorWithPacking(
-            sep_token_id=tokenizer.sep_token_id,
+            start_token_id=start_token_id,
+            end_token_id=end_token_id,
             max_length=max_length,
             default_data_collator=mlm_collator,
         )

@@ -52,12 +52,15 @@ class TestStreamingTokenize(unittest.TestCase):
             max_length=4,
             truncation=True,
             remove_columns=True,
+            return_special_tokens_mask=True,
         )
 
         first = next(iter(tokenized))
         self.assertIn("input_ids_text_a", first)
         self.assertIn("attention_mask_text_a", first)
+        self.assertIn("special_tokens_mask_text_a", first)
         self.assertIn("input_ids_text_b", first)
         self.assertIn("attention_mask_text_b", first)
+        self.assertIn("special_tokens_mask_text_b", first)
         self.assertLessEqual(len(first["input_ids_text_a"]), 4)
         self.assertLessEqual(len(first["input_ids_text_b"]), 4)

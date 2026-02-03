@@ -32,7 +32,15 @@ class DummyPadCollator:
         ]
         input_ids = torch.tensor(batch_ids, dtype=torch.long)
         attention_mask = input_ids.ne(self.pad_token_id)
-        return {"input_ids": input_ids, "attention_mask": attention_mask}
+        batch = {"input_ids": input_ids, "attention_mask": attention_mask}
+        if all("special_tokens_mask" in f for f in features):
+            batch_masks = [
+                f["special_tokens_mask"]
+                + [1] * (max_len - len(f["special_tokens_mask"]))
+                for f in features
+            ]
+            batch["special_tokens_mask"] = torch.tensor(batch_masks, dtype=torch.long)
+        return batch
 
 
 class TestCollatorPacking(unittest.TestCase):
@@ -41,8 +49,9 @@ class TestCollatorPacking(unittest.TestCase):
     def test_flushes_before_sep_when_sequence_does_not_fit(self):
         """Ensure sequences are not split across packed buffers."""
         collator = DataCollatorWithPacking(
-            sep_token_id=99,
-            max_length=4,
+            start_token_id=10,
+            end_token_id=11,
+            max_length=6,
             default_data_collator=DummyPadCollator(),
         )
 
@@ -53,19 +62,19 @@ class TestCollatorPacking(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(batch["input_ids"].shape, (2, 4))
-        self.assertEqual(batch["input_ids"][0].tolist(), [1, 2, 3, 0])
-        self.assertEqual(batch["input_ids"][1].tolist(), [4, 5, 0, 0])
-        self.assertNotIn(99, batch["input_ids"][0].tolist())
+        self.assertEqual(batch["input_ids"].shape, (2, 6))
+        self.assertEqual(batch["input_ids"][0].tolist(), [10, 1, 2, 3, 11, 0])
+        self.assertEqual(batch["input_ids"][1].tolist(), [10, 4, 5, 11, 0, 0])
         self.assertIn("attention_mask", batch)
-        self.assertEqual(batch["attention_mask"].shape, (2, 4))
-        self.assertEqual(batch["packed_seqlens"], [[3], [2]])
+        self.assertEqual(batch["attention_mask"].shape, (2, 6))
+        self.assertEqual(batch["packed_seqlens"], [[5], [4]])
 
-    def test_separator_used_when_sequence_fits(self):
-        """Ensure separator is inserted when the next sequence fits."""
+    def test_boundaries_used_when_sequence_fits(self):
+        """Ensure segment boundaries are inserted when packing."""
         collator = DataCollatorWithPacking(
-            sep_token_id=99,
-            max_length=4,
+            start_token_id=10,
+            end_token_id=11,
+            max_length=8,
             default_data_collator=DummyPadCollator(),
         )
 
@@ -76,17 +85,23 @@ class TestCollatorPacking(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(batch["input_ids"].shape, (1, 4))
-        self.assertEqual(batch["input_ids"][0].tolist(), [1, 2, 99, 3])
+        self.assertEqual(batch["input_ids"].shape, (1, 8))
+        self.assertEqual(batch["input_ids"][0].tolist(), [10, 1, 2, 11, 10, 3, 11, 0])
         self.assertIn("attention_mask", batch)
-        self.assertEqual(batch["attention_mask"].shape, (1, 4))
-        self.assertEqual(batch["packed_seqlens"], [[2, 2]])
+        self.assertEqual(batch["attention_mask"].shape, (1, 8))
+        self.assertEqual(batch["packed_seqlens"], [[4, 3]])
+        self.assertIn("special_tokens_mask", batch)
+        self.assertEqual(
+            batch["special_tokens_mask"][0].tolist(),
+            [1, 0, 0, 1, 1, 0, 1, 1],
+        )
 
     def test_packed_lengths_match_nonpad_tokens(self):
         """Ensure packed lengths sum to non-pad token counts."""
         collator = DataCollatorWithPacking(
-            sep_token_id=99,
-            max_length=4,
+            start_token_id=10,
+            end_token_id=11,
+            max_length=6,
             default_data_collator=DummyPadCollator(),
         )
 
@@ -101,4 +116,4 @@ class TestCollatorPacking(unittest.TestCase):
         token_counts = attention_mask.sum(dim=1).tolist()
         packed_counts = [sum(lengths) for lengths in batch["packed_seqlens"]]
         self.assertEqual(token_counts, packed_counts)
-        self.assertEqual(batch["input_ids"].shape[1], 4)
+        self.assertEqual(batch["input_ids"].shape[1], 6)

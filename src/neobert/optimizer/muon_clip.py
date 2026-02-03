@@ -936,6 +936,7 @@ class MuonClipOptimizer(Optimizer):
             inputs, pad_mask, freqs_cis = self.hook_system.get_layer_data(layer_idx)
             if inputs is None:
                 continue
+            layer = self.hook_system.layers.get(layer_idx)
 
             if "qkv" in param_dict:
                 eta_per_head, layer_max = self._compute_eta_for_fused(
@@ -943,6 +944,7 @@ class MuonClipOptimizer(Optimizer):
                     param_dict["qkv"],
                     pad_mask,
                     freqs_cis,
+                    layer,
                 )
                 if eta_per_head is not None:
                     self._scale_qkv_weights(
@@ -969,6 +971,7 @@ class MuonClipOptimizer(Optimizer):
                 k_param,
                 pad_mask,
                 freqs_cis,
+                layer,
             )
             if eta_per_head is None:
                 continue
@@ -1002,6 +1005,7 @@ class MuonClipOptimizer(Optimizer):
         param: torch.nn.Parameter,
         pad_mask: Optional[torch.Tensor],
         freqs_cis: Optional[torch.Tensor],
+        layer: Optional[torch.nn.Module],
     ) -> Tuple[Optional[torch.Tensor], Optional[float]]:
         """Compute per-head scaling factors for fused QKV weights.
 
@@ -1009,6 +1013,7 @@ class MuonClipOptimizer(Optimizer):
         :param torch.nn.Parameter param: Fused QKV weight parameter.
         :param torch.Tensor | None pad_mask: Optional pad mask.
         :param torch.Tensor | None freqs_cis: Optional rotary frequencies.
+        :param torch.nn.Module | None layer: Optional encoder layer (ngpt metadata).
         :return tuple[torch.Tensor | None, float | None]: Eta per head and max logit.
         """
         try:
@@ -1031,14 +1036,12 @@ class MuonClipOptimizer(Optimizer):
         proj = projections.view(
             batch,
             seq_len,
-            3,
             self.model_config.num_attention_heads,
-            self.model_config.dim_head,
+            self.model_config.dim_head * 3,
         )
-        xq = proj[:, :, 0]
-        xk = proj[:, :, 1]
+        xq, xk, _ = proj.chunk(3, dim=-1)
 
-        return self._compute_eta_from_qk(xq, xk, pad_mask, freqs_cis)
+        return self._compute_eta_from_qk(xq, xk, pad_mask, freqs_cis, layer)
 
     def _compute_eta_for_separate(
         self,
@@ -1047,6 +1050,7 @@ class MuonClipOptimizer(Optimizer):
         k_param: torch.nn.Parameter,
         pad_mask: Optional[torch.Tensor],
         freqs_cis: Optional[torch.Tensor],
+        layer: Optional[torch.nn.Module],
     ) -> Tuple[Optional[torch.Tensor], Optional[float]]:
         """Compute per-head scaling factors for separate Q/K projections.
 
@@ -1055,6 +1059,7 @@ class MuonClipOptimizer(Optimizer):
         :param torch.nn.Parameter k_param: Key projection weights.
         :param torch.Tensor | None pad_mask: Optional pad mask.
         :param torch.Tensor | None freqs_cis: Optional rotary frequencies.
+        :param torch.nn.Module | None layer: Optional encoder layer (ngpt metadata).
         :return tuple[torch.Tensor | None, float | None]: Eta per head and max logit.
         """
         try:
@@ -1075,7 +1080,7 @@ class MuonClipOptimizer(Optimizer):
             batch, seq_len, self.model_config.num_attention_heads, head_dim
         )
 
-        return self._compute_eta_from_qk(q_proj, k_proj, pad_mask, freqs_cis)
+        return self._compute_eta_from_qk(q_proj, k_proj, pad_mask, freqs_cis, layer)
 
     def _compute_eta_from_qk(
         self,
@@ -1083,6 +1088,7 @@ class MuonClipOptimizer(Optimizer):
         xk: torch.Tensor,
         pad_mask: Optional[torch.Tensor],
         freqs_cis: Optional[torch.Tensor],
+        layer: Optional[torch.nn.Module],
     ) -> Tuple[Optional[torch.Tensor], Optional[float]]:
         """Derive per-head eta values from Q and K projections.
 
@@ -1090,6 +1096,7 @@ class MuonClipOptimizer(Optimizer):
         :param torch.Tensor xk: Key projections.
         :param torch.Tensor | None pad_mask: Optional pad mask.
         :param torch.Tensor | None freqs_cis: Optional rotary frequencies.
+        :param torch.nn.Module | None layer: Optional encoder layer (ngpt metadata).
         :return tuple[torch.Tensor | None, float | None]: Eta per head and max logit.
         """
         if self.model_config.rope and freqs_cis is not None:
@@ -1098,11 +1105,25 @@ class MuonClipOptimizer(Optimizer):
             freqs_cis = freqs_cis.to(device=xq.device)
             xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
 
+        if self.model_config.ngpt:
+            if layer is None or not hasattr(layer, "sqk"):
+                logger.warning(
+                    "MuonClip QK clipping skipped: ngpt enabled but sqk metadata missing."
+                )
+                return None, None
+            xq, xk = self._apply_ngpt_qk_transform(xq, xk, layer)
+
         xq_heads = xq.transpose(1, 2)
         xk_heads = xk.transpose(1, 2)
 
         attn_logits = torch.matmul(xq_heads, xk_heads.transpose(-2, -1))
-        attn_logits = attn_logits / (self.model_config.dim_head**0.5)
+        if self.model_config.ngpt:
+            softmax_scale = (
+                self.model_config.hidden_size / self.model_config.num_attention_heads
+            ) ** 0.5
+            attn_logits = attn_logits * softmax_scale
+        else:
+            attn_logits = attn_logits / (self.model_config.dim_head**0.5)
 
         if pad_mask is not None:
             attn_logits = attn_logits + pad_mask.to(
@@ -1116,6 +1137,36 @@ class MuonClipOptimizer(Optimizer):
 
         global_max = per_step_max.max().item() if per_step_max.numel() > 0 else None
         return eta_per_head, global_max
+
+    def _apply_ngpt_qk_transform(
+        self,
+        xq: torch.Tensor,
+        xk: torch.Tensor,
+        layer: torch.nn.Module,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Apply NormNeoBERT (nGPT) Q/K normalization and scaling.
+
+        :param torch.Tensor xq: Query projections.
+        :param torch.Tensor xk: Key projections.
+        :param torch.nn.Module layer: Encoder layer with sqk parameters.
+        :return tuple[torch.Tensor, torch.Tensor]: Transformed Q and K tensors.
+        """
+        sqk = layer.sqk
+        sqk_init_value = getattr(layer, "sqk_init_value", 1.0)
+        sqk_init_scaling = getattr(layer, "sqk_init_scaling", 1.0)
+        sqk = (sqk * (sqk_init_value / sqk_init_scaling)).view(
+            1,
+            1,
+            self.model_config.num_attention_heads,
+            self.model_config.dim_head,
+        )
+        sqk = sqk.to(device=xq.device, dtype=xq.dtype)
+
+        def _justnorm(x: torch.Tensor) -> torch.Tensor:
+            """Match NormEncoderBlock justnorm behavior."""
+            return x / (x.norm(p=2, dim=-1, keepdim=True) + 1e-8)
+
+        return sqk * _justnorm(xq), sqk * _justnorm(xk)
 
     def _scale_qkv_weights(
         self, param: torch.nn.Parameter, eta_per_head: torch.Tensor, alpha: float
@@ -1144,13 +1195,14 @@ class MuonClipOptimizer(Optimizer):
         eta_q = eta.pow(alpha).view(num_heads, 1, 1)
         eta_k = eta.pow(1 - alpha).view(num_heads, 1, 1)
 
-        # Reshape parameter to [3, num_heads, head_dim, hidden_size]
-        # In-place scaling keeps the original tensor layout intact.
-        param_view = param.view(3, num_heads, head_dim, hidden_size)
-
-        param_view[0].mul_(eta_q)  # Query rows
-        param_view[1].mul_(eta_k)  # Key rows
-        # Value rows remain unchanged (param_view[2])
+        # Reshape parameter to [num_heads, 3 * head_dim, hidden_size] to match
+        # the model's per-head interleaved fused-QKV layout.
+        param_view = param.view(num_heads, 3 * head_dim, hidden_size)
+        q_slice = slice(0, head_dim)
+        k_slice = slice(head_dim, 2 * head_dim)
+        param_view[:, q_slice].mul_(eta_q)  # Query rows per head
+        param_view[:, k_slice].mul_(eta_k)  # Key rows per head
+        # Value rows remain unchanged (slice 2*head_dim:3*head_dim)
 
     def _scale_separate_projection(
         self,

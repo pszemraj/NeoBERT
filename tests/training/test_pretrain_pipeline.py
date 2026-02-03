@@ -320,6 +320,7 @@ class TestPretrainComponents(unittest.TestCase):
             vocab_size=100,
             flash_attention=False,
             hidden_act="gelu",
+            rms_norm=False,
         )
         model = NeoBERT(model_config)
 
@@ -336,6 +337,17 @@ class TestPretrainComponents(unittest.TestCase):
         self.assertIsNotNone(optimizer)
         # Should be AdamW
         self.assertTrue("AdamW" in str(type(optimizer)))
+        self.assertGreaterEqual(len(optimizer.param_groups), 2)
+        no_decay = [
+            group for group in optimizer.param_groups if group["weight_decay"] == 0.0
+        ]
+        self.assertTrue(no_decay)
+        no_decay_params = set(no_decay[0]["params"])
+        self.assertIn(model.encoder.weight, no_decay_params)
+        bias_params = {
+            p for n, p in model.named_parameters() if n.lower().endswith(".bias")
+        }
+        self.assertTrue(bias_params.issubset(no_decay_params))
 
     def test_scheduler_creation(self):
         """Test scheduler creation from config."""
@@ -348,7 +360,7 @@ class TestPretrainComponents(unittest.TestCase):
 
         from neobert.model import NeoBERT, NeoBERTConfig
         from neobert.optimizer import get_optimizer
-        from neobert.scheduler import get_scheduler
+        from neobert.scheduler import get_scheduler, resolve_scheduler_steps
 
         # Create minimal model and optimizer
         model_config = NeoBERTConfig(
@@ -371,12 +383,22 @@ class TestPretrainComponents(unittest.TestCase):
             weight_decay=config.optimizer.weight_decay,
         )
 
+        _, warmup_steps, decay_steps, constant_steps = resolve_scheduler_steps(
+            trainer_max_steps=config.trainer.max_steps,
+            total_steps=config.scheduler.total_steps,
+            warmup_steps=config.scheduler.warmup_steps,
+            warmup_percent=config.scheduler.warmup_percent,
+            decay_steps=config.scheduler.decay_steps,
+            decay_percent=config.scheduler.decay_percent,
+            constant_steps=0,
+        )
         scheduler = get_scheduler(
             optimizer=optimizer,
             lr=config.optimizer.lr,
             decay=config.scheduler.name,
-            warmup_steps=config.scheduler.warmup_steps,
-            decay_steps=config.scheduler.total_steps,
+            warmup_steps=warmup_steps,
+            decay_steps=decay_steps,
+            constant_steps=constant_steps,
         )
 
         self.assertIsNotNone(scheduler)

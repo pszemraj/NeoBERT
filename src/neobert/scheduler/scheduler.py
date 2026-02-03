@@ -1,7 +1,7 @@
 """Learning-rate scheduler factory for training runs."""
 
 import torch
-from typing import Any
+from typing import Any, Optional, Tuple
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
 
 
@@ -90,3 +90,42 @@ def get_scheduler(
     schedulers.append(LambdaLR(optimizer, lr_lambda=_constant_min_lr))
 
     return SequentialLR(optimizer, schedulers, milestones)
+
+
+def resolve_scheduler_steps(
+    *,
+    trainer_max_steps: int,
+    total_steps: Optional[int],
+    warmup_steps: int,
+    warmup_percent: Optional[float],
+    decay_steps: Optional[int],
+    decay_percent: Optional[float],
+    constant_steps: int = 0,
+) -> Tuple[int, int, int, int]:
+    """Resolve warmup/decay step counts from config inputs.
+
+    :param int trainer_max_steps: Maximum training steps from the trainer config.
+    :param int | None total_steps: Optional total_steps override.
+    :param int warmup_steps: Warmup steps (absolute).
+    :param float | None warmup_percent: Optional warmup percentage of total steps.
+    :param int | None decay_steps: Optional decay steps (absolute).
+    :param float | None decay_percent: Optional decay percentage of total steps.
+    :param int constant_steps: Optional constant steps after warmup.
+    :return tuple[int, int, int, int]: (total_steps, warmup_steps, decay_steps, constant_steps).
+    """
+    total = total_steps or trainer_max_steps
+    if warmup_percent is not None:
+        warmup_steps = int(total * warmup_percent / 100)
+    warmup_steps = max(0, min(warmup_steps, total))
+
+    resolved_decay_steps = decay_steps
+    if decay_percent is not None:
+        resolved_decay_steps = int(total * decay_percent / 100)
+    if resolved_decay_steps is None or resolved_decay_steps <= 0:
+        resolved_decay_steps = total
+
+    min_decay = warmup_steps + constant_steps + 1
+    if resolved_decay_steps < min_decay:
+        resolved_decay_steps = min_decay
+
+    return total, warmup_steps, resolved_decay_steps, constant_steps

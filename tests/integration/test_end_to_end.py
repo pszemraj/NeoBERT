@@ -221,16 +221,24 @@ class TestEndToEndIntegration(unittest.TestCase):
                 self.assertIsNotNone(optimizer)
 
                 # Test scheduler creation
+                from neobert.scheduler import resolve_scheduler_steps
+
+                _, warmup_steps, decay_steps, constant_steps = resolve_scheduler_steps(
+                    trainer_max_steps=config.trainer.max_steps,
+                    total_steps=config.scheduler.total_steps,
+                    warmup_steps=config.scheduler.warmup_steps,
+                    warmup_percent=config.scheduler.warmup_percent,
+                    decay_steps=config.scheduler.decay_steps,
+                    decay_percent=config.scheduler.decay_percent,
+                    constant_steps=0,
+                )
                 scheduler = get_scheduler(
                     optimizer=optimizer,
                     lr=config.optimizer.lr,
                     decay=config.scheduler.name.replace("_decay", ""),
-                    warmup_steps=config.scheduler.warmup_steps,
-                    decay_steps=getattr(
-                        config.scheduler,
-                        "decay_steps",
-                        config.scheduler.total_steps or 1000,
-                    ),
+                    warmup_steps=warmup_steps,
+                    decay_steps=decay_steps,
+                    constant_steps=constant_steps,
                 )
                 self.assertIsNotNone(scheduler)
 

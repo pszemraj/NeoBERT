@@ -199,6 +199,8 @@ def single_column_mapping(
     column_name: str,
     max_length: int,
     truncation: bool,
+    add_special_tokens: bool,
+    return_special_tokens_mask: bool,
 ) -> dict[str, Any]:
     """Tokenize a single text column in a batched mapping call.
 
@@ -214,6 +216,8 @@ def single_column_mapping(
         truncation=truncation,
         max_length=max_length,
         padding=False,  # no padding saves time and memory
+        add_special_tokens=add_special_tokens,
+        return_special_tokens_mask=return_special_tokens_mask,
     )
 
 
@@ -223,6 +227,8 @@ def multi_column_mapping(
     column_name: tuple[str, ...],
     max_length: int,
     truncation: bool,
+    add_special_tokens: bool,
+    return_special_tokens_mask: bool,
 ) -> dict[str, Any]:
     """Tokenize multiple text columns in a batched mapping call.
 
@@ -244,6 +250,8 @@ def multi_column_mapping(
                     padding=False,
                     return_token_type_ids=False,
                     is_split_into_words=False,
+                    add_special_tokens=add_special_tokens,
+                    return_special_tokens_mask=return_special_tokens_mask,
                 )
                 for item in x[col]
             ]
@@ -253,6 +261,10 @@ def multi_column_mapping(
             output[f"attention_mask_{col}"] = [
                 tokenized["attention_mask"] for tokenized in tokenized_list
             ]
+            if return_special_tokens_mask:
+                output[f"special_tokens_mask_{col}"] = [
+                    tokenized["special_tokens_mask"] for tokenized in tokenized_list
+                ]
         else:
             tokenized = tokenizer(
                 x[col],
@@ -261,9 +273,13 @@ def multi_column_mapping(
                 padding=False,
                 return_token_type_ids=False,
                 is_split_into_words=False,
+                add_special_tokens=add_special_tokens,
+                return_special_tokens_mask=return_special_tokens_mask,
             )
             output[f"input_ids_{col}"] = tokenized["input_ids"]
             output[f"attention_mask_{col}"] = tokenized["attention_mask"]
+            if return_special_tokens_mask:
+                output[f"special_tokens_mask_{col}"] = tokenized["special_tokens_mask"]
     return output
 
 
@@ -274,6 +290,8 @@ def tokenize(
     max_length: int = 4096,
     remove_columns: bool = True,
     truncation: bool = True,
+    add_special_tokens: bool = True,
+    return_special_tokens_mask: bool = False,
     **kwargs: Any,
 ) -> Dataset:
     """Tokenize a dataset with a single- or multi-column schema.
@@ -284,6 +302,8 @@ def tokenize(
     :param int max_length: Maximum sequence length.
     :param bool remove_columns: Whether to remove non-token columns.
     :param bool truncation: Whether to truncate sequences.
+    :param bool add_special_tokens: Whether to add tokenizer special tokens.
+    :param bool return_special_tokens_mask: Whether to return special token masks.
     :param Any kwargs: Extra arguments passed to ``Dataset.map``.
     :return Dataset: Tokenized dataset.
     """
@@ -327,12 +347,16 @@ def tokenize(
         test_output = tokenizer("test", truncation=True, max_length=10)
         has_token_type_ids = "token_type_ids" in test_output
 
+        # We deliberately avoid emitting labels here; MLM labels are created
+        # in the data collator to prevent duplicating input_ids on disk.
         feature_dict = {
             "input_ids": Sequence(Value("int32")),
             "attention_mask": Sequence(Value("bool")),
         }
         if has_token_type_ids:
             feature_dict["token_type_ids"] = Sequence(Value("int32"))
+        if return_special_tokens_mask:
+            feature_dict["special_tokens_mask"] = Sequence(Value("bool"))
 
         features = Features(feature_dict)
         mapping = partial(
@@ -341,6 +365,8 @@ def tokenize(
             column_name=column_name,
             max_length=max_length,
             truncation=truncation,
+            add_special_tokens=add_special_tokens,
+            return_special_tokens_mask=return_special_tokens_mask,
         )
 
     # Multi column tokenization
@@ -353,9 +379,15 @@ def tokenize(
                 if isinstance(sample, list):
                     feat[f"input_ids_{col}"] = Sequence(Sequence(Value("int32")))
                     feat[f"attention_mask_{col}"] = Sequence(Sequence(Value("bool")))
+                    if return_special_tokens_mask:
+                        feat[f"special_tokens_mask_{col}"] = Sequence(
+                            Sequence(Value("bool"))
+                        )
                 else:
                     feat[f"input_ids_{col}"] = Sequence(Value("int32"))
                     feat[f"attention_mask_{col}"] = Sequence(Value("bool"))
+                    if return_special_tokens_mask:
+                        feat[f"special_tokens_mask_{col}"] = Sequence(Value("bool"))
             features = Features(feat)
 
         mapping = partial(
@@ -364,6 +396,8 @@ def tokenize(
             column_name=column_name,
             max_length=max_length,
             truncation=truncation,
+            add_special_tokens=add_special_tokens,
+            return_special_tokens_mask=return_special_tokens_mask,
         )
 
     # Tokenize the dataset

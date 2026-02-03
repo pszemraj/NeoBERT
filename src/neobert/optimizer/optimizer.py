@@ -5,6 +5,7 @@ from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, Optional
 
 import torch
+import torch.nn as nn
 from accelerate.utils import DistributedType
 from torch.optim import Adam, AdamW
 
@@ -13,6 +14,43 @@ from .muon_clip import MuonClipConfig, MuonClipOptimizer
 # from .soap.soap import SOAP  # TODO: Add SOAP optimizer implementation
 
 logger = logging.getLogger(__name__)
+
+
+def _build_adamw_param_groups(
+    model: torch.nn.Module, weight_decay: float
+) -> list[dict[str, Any]]:
+    """Split parameters into decay / no-decay groups for AdamW.
+
+    :param torch.nn.Module model: Model whose parameters will be grouped.
+    :param float weight_decay: Weight decay value for decayed parameters.
+    :return list[dict[str, Any]]: Parameter groups for AdamW.
+    """
+    decay_params = []
+    no_decay_params = []
+    embedding_param_ids = {
+        id(param)
+        for module in model.modules()
+        if isinstance(module, nn.Embedding)
+        for param in module.parameters(recurse=False)
+    }
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        name_lower = name.lower()
+        if (
+            param.ndim < 2
+            or name_lower.endswith(".bias")
+            or "norm" in name_lower
+            or id(param) in embedding_param_ids
+        ):
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+
+    return [
+        {"params": decay_params, "weight_decay": weight_decay},
+        {"params": no_decay_params, "weight_decay": 0.0},
+    ]
 
 
 def get_optimizer(
@@ -43,7 +81,9 @@ def get_optimizer(
                 logger.warning(
                     "optimizer.muon_config provided but optimizer is adamw; ignoring"
                 )
-            optimizer = AdamW(model.parameters(), **kwargs)
+            weight_decay = kwargs.pop("weight_decay", 0.0)
+            param_groups = _build_adamw_param_groups(model, weight_decay)
+            optimizer = AdamW(param_groups, **kwargs)
             logger.info(f"AdamW initialized with lr={kwargs.get('lr', 'default')}")
             return optimizer
 

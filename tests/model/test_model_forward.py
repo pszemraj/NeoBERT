@@ -578,6 +578,25 @@ class TestModelForward(unittest.TestCase):
         self.assertNotIn("freqs_cis", model.state_dict())
         self.assertGreater(model.freqs_cis.numel(), 0)
 
+    def test_rotary_accepts_batched_freqs(self):
+        """Ensure rotary helper supports batched frequency tensors."""
+        from neobert.model.rotary import apply_rotary_emb, precompute_freqs_cis
+
+        batch_size = 2
+        seq_len = 4
+        num_heads = 1
+        head_dim = 4
+
+        xq = torch.randn(batch_size, seq_len, num_heads, head_dim)
+        xk = torch.randn(batch_size, seq_len, num_heads, head_dim)
+        freqs = precompute_freqs_cis(head_dim, seq_len)
+        positions = torch.arange(seq_len).unsqueeze(0).repeat(batch_size, 1)
+        batched_freqs = freqs[positions]
+
+        xq_out, xk_out = apply_rotary_emb(xq, xk, batched_freqs)
+        self.assertEqual(xq_out.shape, xq.shape)
+        self.assertEqual(xk_out.shape, xk.shape)
+
     def test_activation_functions(self):
         """Test different activation functions."""
         # Test SwiGLU
@@ -631,6 +650,23 @@ class TestModelForward(unittest.TestCase):
         self.assertTrue(any(".ffn.w2.weight" in key for key in state))
         self.assertTrue(any(".ffn.w3.weight" in key for key in state))
         self.assertFalse(any(".ffn.w12.weight" in key for key in state))
+
+    def test_hf_init_zeros_linear_biases(self):
+        """Ensure HF init matches training bias initialization."""
+        from neobert.huggingface.modeling_neobert import NeoBERTLMHead, NeoBERTConfig
+
+        hf_config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=128,
+            max_length=16,
+            hidden_act="gelu",
+            flash_attention=False,
+        )
+        model = NeoBERTLMHead(hf_config)
+        self.assertTrue(torch.all(model.decoder.bias == 0))
 
     def test_invalid_activation_raises(self):
         """Ensure unsupported activations fail fast."""

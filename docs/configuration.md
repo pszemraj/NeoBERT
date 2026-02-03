@@ -138,6 +138,8 @@ datacollator.max_length: int | None = None
 
 Note: `pack_sequences` uses xFormers block-diagonal attention in pretraining and is
 considered experimental. It requires `model.xformers_attention: true`. See `docs/dev.md`.
+When packing is enabled, tokenization runs with `add_special_tokens=false` and the
+collator injects BOS/CLS and EOS/SEP tokens per segment to avoid duplicated boundaries.
 If `datacollator.max_length` is unset, pretraining uses `dataset.max_seq_length`.
 
 ### Trainer (`trainer`)
@@ -172,7 +174,7 @@ trainer.mixed_precision: Literal["no", "bf16", "fp32"] = "bf16"
 trainer.tf32: bool = True
 trainer.log_weight_norms: bool = False
 
-trainer.resume_from_checkpoint: bool | str | None = None  # treated as a flag; resumes latest from output_dir/checkpoints
+trainer.resume_from_checkpoint: bool | str | None = None  # true/"latest" resumes newest in output_dir/checkpoints; string loads that path
 
 trainer.early_stopping: int = 0
 trainer.metric_for_best_model: str | None = None
@@ -222,8 +224,8 @@ muon_config.clipping_layers_mapping: dict[str, str] = {}
 ```
 scheduler.name: Literal["cosine", "linear"] = "cosine"
 scheduler.warmup_steps: int = 10000
-scheduler.decay_steps: int = 50000
-scheduler.total_steps: int | None = None  # currently unused
+scheduler.decay_steps: int | None = None
+scheduler.total_steps: int | None = None
 scheduler.num_cycles: float = 0.5  # currently unused
 scheduler.warmup_percent: float | None = None
 scheduler.decay_percent: float | None = None
@@ -290,6 +292,7 @@ they are normalized into `glue.*` during config loading with explicit warnings.
 
 - `scheduler.warmup_percent` overrides `scheduler.warmup_steps`.
 - `scheduler.decay_percent` overrides `scheduler.decay_steps`.
+- `scheduler.total_steps` defaults to `trainer.max_steps` when unset.
 - `trainer.eval_strategy: "epoch"` ignores `trainer.eval_steps`.
 - `trainer.save_strategy: "epoch"` ignores `trainer.save_steps`.
 

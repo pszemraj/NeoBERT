@@ -7,6 +7,7 @@ import shutil
 import signal
 import sys
 from types import FrameType
+from typing import Optional, Tuple
 
 import numpy
 
@@ -30,7 +31,7 @@ from transformers import DataCollatorWithPadding
 from ..config import Config
 from ..model import NeoBERT, NeoBERTConfig
 from ..optimizer import get_optimizer
-from ..scheduler import get_scheduler
+from ..scheduler import get_scheduler, resolve_scheduler_steps
 from ..tokenizer import get_tokenizer
 from ..utils import configure_tf32, prepare_wandb_config
 from .datasets import get_bsz
@@ -38,6 +39,55 @@ from .loss import SupConLoss
 from .metrics import Metrics
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_resume_checkpoint(
+    resume_from_checkpoint: Optional[str],
+    checkpoint_dir: str,
+    output_dir: str,
+) -> Tuple[Optional[str], int]:
+    """Resolve an explicit or latest checkpoint path for resuming.
+
+    :param str | None resume_from_checkpoint: Configured resume value.
+    :param str checkpoint_dir: Default checkpoint directory to scan for latest.
+    :param str output_dir: Output directory for relative path resolution.
+    :return tuple[str | None, int]: Resolved checkpoint path and iteration.
+    """
+    if not resume_from_checkpoint:
+        return None, 0
+
+    if isinstance(resume_from_checkpoint, str):
+        resume_value = resume_from_checkpoint.strip()
+        if resume_value.lower() not in {"true", "latest", "auto"}:
+            resume_path = resume_value
+            if not os.path.isabs(resume_path):
+                candidate = os.path.join(output_dir, resume_path)
+                if os.path.exists(candidate):
+                    resume_path = candidate
+            base = os.path.basename(os.path.normpath(resume_path))
+            iteration = int(base) + 1 if base.isdigit() else 0
+            return resume_path, iteration
+
+    if not (os.path.exists(checkpoint_dir) and os.listdir(checkpoint_dir)):
+        return None, 0
+
+    folders = [
+        folder
+        for folder in os.listdir(checkpoint_dir)
+        if os.path.isdir(os.path.join(checkpoint_dir, folder))
+        and re.findall(r"[\/]?([0-9]+)(?=[^\/]*$)", folder)
+    ]
+    if not folders:
+        return None, 0
+
+    iteration = (
+        max(
+            int(re.findall(r"[\/]?([0-9]+)(?=[^\/]*$)", folder)[0])
+            for folder in folders
+        )
+        + 1
+    )
+    return None, iteration
 
 
 class CustomDataCollatorWithPadding(DataCollatorWithPadding):
@@ -112,27 +162,11 @@ def trainer(cfg: Config) -> None:
     checkpoint_dir = os.path.join(cfg.trainer.output_dir, "checkpoints")
     model_checkpoint_dir = os.path.join(cfg.trainer.output_dir, "model_checkpoints")
     os.makedirs(model_checkpoint_dir, exist_ok=True)
-    iteration = 0
-    if (
-        cfg.trainer.resume_from_checkpoint
-        and os.path.exists(checkpoint_dir)
-        and len(os.listdir(checkpoint_dir)) > 0
-    ):
-        # This regular expression was taken from accelerator.load_state()
-        folders = [
-            folder
-            for folder in os.listdir(checkpoint_dir)
-            if os.path.isdir(os.path.join(checkpoint_dir, folder))
-            and re.findall(r"[\/]?([0-9]+)(?=[^\/]*$)", folder)
-        ]
-        if folders:
-            iteration = (
-                max(
-                    int(re.findall(r"[\/]?([0-9]+)(?=[^\/]*$)", folder)[0])
-                    for folder in folders
-                )
-                + 1
-            )
+    resume_checkpoint_path, iteration = _resolve_resume_checkpoint(
+        cfg.trainer.resume_from_checkpoint,
+        checkpoint_dir,
+        cfg.trainer.output_dir,
+    )
 
     save_total_limit = max(
         getattr(cfg.trainer, "save_total_limit", 0), getattr(cfg.trainer, "max_ckpt", 0)
@@ -363,16 +397,23 @@ def trainer(cfg: Config) -> None:
     )
 
     # Scheduler
-    total_steps = cfg.scheduler.total_steps or cfg.trainer.max_steps
-    decay_steps = max(total_steps, cfg.scheduler.warmup_steps + 1)
+    _, warmup_steps, decay_steps, constant_steps = resolve_scheduler_steps(
+        trainer_max_steps=cfg.trainer.max_steps,
+        total_steps=cfg.scheduler.total_steps,
+        warmup_steps=cfg.scheduler.warmup_steps,
+        warmup_percent=cfg.scheduler.warmup_percent,
+        decay_steps=cfg.scheduler.decay_steps,
+        decay_percent=cfg.scheduler.decay_percent,
+        constant_steps=0,
+    )
     scheduler = get_scheduler(
         optimizer=optimizer,
         lr=cfg.optimizer.lr,
         decay=cfg.scheduler.name,
-        warmup_steps=min(cfg.scheduler.warmup_steps, cfg.trainer.max_steps),
+        warmup_steps=warmup_steps,
         decay_steps=decay_steps,
         final_ratio=cfg.scheduler.final_lr_ratio,
-        constant_steps=0,
+        constant_steps=constant_steps,
     )
 
     # Accelerate
@@ -415,12 +456,20 @@ def trainer(cfg: Config) -> None:
     train_loss_fn = SupConLoss(temperature=cfg.contrastive.temperature)
 
     # Resume from the latest checkpoint if available
-    if (
-        cfg.trainer.resume_from_checkpoint
-        and os.path.exists(checkpoint_dir)
-        and len(os.listdir(checkpoint_dir)) > 0
-    ):
-        accelerator.load_state()
+    if cfg.trainer.resume_from_checkpoint:
+        if resume_checkpoint_path is not None:
+            if not os.path.exists(resume_checkpoint_path):
+                raise FileNotFoundError(
+                    f"resume_from_checkpoint path not found: {resume_checkpoint_path}"
+                )
+            accelerator.load_state(resume_checkpoint_path)
+        elif os.path.exists(checkpoint_dir) and os.listdir(checkpoint_dir):
+            accelerator.load_state()
+        else:
+            logger.warning(
+                "resume_from_checkpoint is set but no checkpoints were found in %s",
+                checkpoint_dir,
+            )
 
     # Signal handler that save the accelerate state
     def handler(signum: int, frame: FrameType | None) -> None:

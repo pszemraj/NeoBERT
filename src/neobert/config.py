@@ -138,7 +138,7 @@ class SchedulerConfig:
     warmup_steps: int = 10000
     total_steps: Optional[int] = None
     num_cycles: float = 0.5
-    decay_steps: int = 50000  # For contrastive training
+    decay_steps: Optional[int] = None  # Optional absolute decay end step
     final_lr_ratio: float = 0.1
     warmup_percent: Optional[float] = None
     decay_percent: Optional[float] = None

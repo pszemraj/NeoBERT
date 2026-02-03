@@ -391,6 +391,8 @@ class NeoBERTPreTrainedModel(PreTrainedModel):
             module.weight.data.uniform_(
                 -self.config.decoder_init_range, self.config.decoder_init_range
             )
+            if module.bias is not None:
+                module.bias.data.zero_()
         elif isinstance(module, nn.Embedding):
             module.weight.data.uniform_(
                 -self.config.embedding_init_range, self.config.embedding_init_range

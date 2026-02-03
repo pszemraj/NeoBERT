@@ -6,7 +6,7 @@ Run: pytest tests/test_muonclip_unit.py -v
 
 import pytest
 import torch
-from neobert.model import NeoBERT, NeoBERTConfig
+from neobert.model import NeoBERT, NeoBERTConfig, NeoBERTLMHead
 from neobert.optimizer import MuonClipOptimizer, MuonClipConfig
 
 
@@ -154,6 +154,64 @@ class TestMuonClipOptimizer:
         adam_group = next(g for g in optimizer.param_groups if not g["use_muon"])
         for p in adam_group["params"]:
             assert p.ndim == 1
+
+    def test_interleaved_qkv_scaling(self):
+        """Ensure fused QKV scaling matches per-head interleaved layout."""
+        config = NeoBERTConfig(
+            hidden_size=4,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=16,
+            vocab_size=32,
+            max_length=8,
+            flash_attention=False,
+            hidden_act="gelu",
+            rope=False,
+        )
+        model = NeoBERT(config)
+        optimizer = MuonClipOptimizer(
+            model, config, MuonClipConfig(enable_clipping=False)
+        )
+
+        qkv_param = model.transformer_encoder[0].qkv.weight
+        original = torch.arange(qkv_param.numel(), dtype=qkv_param.dtype).view_as(
+            qkv_param
+        )
+        qkv_param.data.copy_(original)
+
+        eta = torch.tensor([0.5, 0.25], dtype=qkv_param.dtype)
+        with torch.no_grad():
+            optimizer._scale_qkv_weights(qkv_param, eta, alpha=1.0)
+
+        expected = original.clone()
+        view = expected.view(config.num_attention_heads, config.dim_head * 3, -1)
+        view[:, : config.dim_head].mul_(eta.view(-1, 1, 1))
+        assert torch.allclose(qkv_param, expected)
+
+    def test_ngpt_qk_clipping_runs(self):
+        """Ensure ngpt QK clipping path executes without errors."""
+        config = NeoBERTConfig(
+            hidden_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=32,
+            vocab_size=64,
+            max_length=16,
+            flash_attention=False,
+            hidden_act="gelu",
+            rope=False,
+            ngpt=True,
+        )
+        model = NeoBERTLMHead(config)
+        optimizer = MuonClipOptimizer(
+            model, config, MuonClipConfig(enable_clipping=True)
+        )
+
+        input_ids = torch.randint(0, 64, (2, 8))
+        output = model(input_ids)["logits"]
+        loss = output.sum()
+        loss.backward()
+        optimizer.step()
 
     def test_forward_backward_step(self, model):
         """Test full forward/backward/step cycle."""

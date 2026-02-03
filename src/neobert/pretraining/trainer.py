@@ -6,7 +6,7 @@ import logging
 import os
 import re
 from contextlib import nullcontext
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 # PyTorch
 import torch
@@ -26,14 +26,14 @@ from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
 from deepspeed.utils import safe_get_full_fp32_param
 from torch.nn import CrossEntropyLoss
 from tqdm import tqdm
-from transformers import BatchEncoding
+from transformers import BatchEncoding, PreTrainedTokenizerBase
 
 from ..config import Config, ConfigLoader, MuonConfig, round_up_to_multiple
 from ..dataloader import get_dataloader
 from ..model import NeoBERTConfig, NeoBERTLMHead
 from ..model.model import XFORMERS_AVAILABLE, XFORMERS_ERROR
 from ..optimizer import get_optimizer
-from ..scheduler import get_scheduler
+from ..scheduler import get_scheduler, resolve_scheduler_steps
 from ..tokenizer import get_tokenizer, resolve_text_column
 from ..utils import configure_tf32, model_summary, prepare_wandb_config
 
@@ -137,16 +137,87 @@ def _scale_gradients(model: torch.nn.Module, scale: torch.Tensor) -> None:
     :param torch.nn.Module model: Model whose gradients should be scaled.
     :param torch.Tensor scale: Scale factor (scalar tensor).
     """
-    scale_cache: dict[torch.dtype, torch.Tensor] = {}
+    grads_by_key: dict[tuple[torch.device, torch.dtype], list[torch.Tensor]] = {}
     for param in model.parameters():
         if param.grad is None:
             continue
         grad = param.grad
-        scale_value = scale_cache.get(grad.dtype)
-        if scale_value is None:
-            scale_value = scale.to(dtype=grad.dtype)
-            scale_cache[grad.dtype] = scale_value
-        grad.mul_(scale_value)
+        grads_by_key.setdefault((grad.device, grad.dtype), []).append(grad)
+
+    for (device, dtype), grads in grads_by_key.items():
+        scale_value = scale.to(device=device, dtype=dtype)
+        try:
+            torch._foreach_mul_(grads, scale_value)
+        except (AttributeError, RuntimeError):
+            for grad in grads:
+                grad.mul_(scale_value)
+
+
+def _resolve_pack_token_limits(
+    tokenizer: PreTrainedTokenizerBase, max_length: int
+) -> Tuple[int, Optional[int], Optional[int]]:
+    """Compute tokenization limits for packed sequences.
+
+    :param PreTrainedTokenizerBase tokenizer: Tokenizer supplying special tokens.
+    :param int max_length: Target packed sequence length.
+    :return tuple[int, int | None, int | None]: Trimmed max_length and boundary IDs.
+    """
+    start_token_id = (
+        tokenizer.cls_token_id
+        if tokenizer.cls_token_id is not None
+        else tokenizer.bos_token_id
+    )
+    end_token_id = (
+        tokenizer.sep_token_id
+        if tokenizer.sep_token_id is not None
+        else tokenizer.eos_token_id
+    )
+    reserve = int(start_token_id is not None) + int(end_token_id is not None)
+    return max(1, max_length - reserve), start_token_id, end_token_id
+
+
+def _resolve_resume_checkpoint(
+    resume_from_checkpoint: Optional[str],
+    checkpoint_dir: str,
+    output_dir: str,
+) -> Tuple[Optional[str], int]:
+    """Resolve an explicit or latest checkpoint path for resuming.
+
+    :param str | None resume_from_checkpoint: Configured resume value.
+    :param str checkpoint_dir: Default checkpoint directory to scan for latest.
+    :param str output_dir: Output directory for relative path resolution.
+    :return tuple[str | None, int]: Resolved checkpoint path and iteration.
+    """
+    if not resume_from_checkpoint:
+        return None, 0
+
+    if isinstance(resume_from_checkpoint, str):
+        resume_value = resume_from_checkpoint.strip()
+        if resume_value.lower() not in {"true", "latest", "auto"}:
+            resume_path = resume_value
+            if not os.path.isabs(resume_path):
+                candidate = os.path.join(output_dir, resume_path)
+                if os.path.exists(candidate):
+                    resume_path = candidate
+            base = os.path.basename(os.path.normpath(resume_path))
+            iteration = int(base) + 1 if base.isdigit() else 0
+            return resume_path, iteration
+
+    if not (os.path.exists(checkpoint_dir) and os.listdir(checkpoint_dir)):
+        return None, 0
+
+    folders = [
+        folder
+        for folder in os.listdir(checkpoint_dir)
+        if os.path.isdir(os.path.join(checkpoint_dir, folder)) and folder.isdigit()
+    ]
+    if not folders:
+        return None, 0
+
+    latest_step = max(
+        int(re.findall(r"[\/]?([0-9]+)(?=[^\/]*$)", folder)[0]) for folder in folders
+    )
+    return os.path.join(checkpoint_dir, str(latest_step)), latest_step + 1
 
 
 def _resolve_tokenize_num_proc(
@@ -332,28 +403,11 @@ def trainer(cfg: Config) -> None:
     checkpoint_dir = os.path.join(cfg.trainer.output_dir, "checkpoints")
     model_checkpoint_dir = os.path.join(cfg.trainer.output_dir, "model_checkpoints")
     os.makedirs(model_checkpoint_dir, exist_ok=True)
-    iteration = 0
-    resume_checkpoint_path = None
-
-    # Resume is strictly gated by resume_from_checkpoint; DeepSpeed does not force resumes.
-    if (
-        cfg.trainer.resume_from_checkpoint
-        and os.path.exists(checkpoint_dir)
-        and len(os.listdir(checkpoint_dir)) > 0
-    ):
-        # This regular expression was taken from accelerator.load_state()
-        folders = [
-            folder
-            for folder in os.listdir(checkpoint_dir)
-            if os.path.isdir(os.path.join(checkpoint_dir, folder)) and folder.isdigit()
-        ]
-        if folders:
-            latest_step = max(
-                int(re.findall(r"[\/]?([0-9]+)(?=[^\/]*$)", folder)[0])
-                for folder in folders
-            )
-            iteration = latest_step + 1
-            resume_checkpoint_path = os.path.join(checkpoint_dir, str(latest_step))
+    resume_checkpoint_path, iteration = _resolve_resume_checkpoint(
+        cfg.trainer.resume_from_checkpoint,
+        checkpoint_dir,
+        cfg.trainer.output_dir,
+    )
 
     # Accelerator object - disable automatic checkpointing to avoid duplicate checkpoints/ directory
     project_config = ProjectConfiguration(
@@ -466,6 +520,18 @@ def trainer(cfg: Config) -> None:
     cfg.model.vocab_size = rounded_vocab_size
     cfg.tokenizer.vocab_size = rounded_vocab_size
 
+    # Tokenization strategy for packed sequences: strip special tokens and reinsert
+    # boundaries in the collator to avoid duplicate BOS/EOS/SEP tokens.
+    pack_sequences = cfg.datacollator.pack_sequences
+    add_special_tokens = not pack_sequences
+    return_special_tokens_mask = True
+    tokenize_max_length = cfg.dataset.max_seq_length
+    if pack_sequences:
+        pack_target_length = cfg.datacollator.max_length or cfg.dataset.max_seq_length
+        tokenize_max_length, _, _ = _resolve_pack_token_limits(
+            tokenizer, pack_target_length
+        )
+
     # Dataset
     dataset_kwargs = {"name": cfg.dataset.config} if cfg.dataset.config else {}
 
@@ -542,7 +608,7 @@ def trainer(cfg: Config) -> None:
                     "--output",
                     output_dir,
                     "--max-length",
-                    str(cfg.dataset.max_seq_length),
+                    str(tokenize_max_length),
                 ]
 
                 if cfg.dataset.config:
@@ -556,6 +622,10 @@ def trainer(cfg: Config) -> None:
 
                 if cfg.dataset.num_proc:
                     cmd.extend(["--num-proc", str(cfg.dataset.num_proc)])
+                if not add_special_tokens:
+                    cmd.append("--no-special-tokens")
+                if return_special_tokens_mask:
+                    cmd.append("--return-special-tokens-mask")
 
                 # Run the tokenization on the main process only.
                 result = subprocess.run(cmd, capture_output=True, text=True)
@@ -599,10 +669,12 @@ def trainer(cfg: Config) -> None:
                     train_dataset,
                     tokenizer,
                     column_name=text_column,
-                    max_length=cfg.dataset.max_seq_length,
+                    max_length=tokenize_max_length,
                     remove_columns=True,
                     truncation=True,
                     num_proc=tokenize_num_proc,
+                    add_special_tokens=add_special_tokens,
+                    return_special_tokens_mask=return_special_tokens_mask,
                 )
         if cfg.dataset.streaming:
             accelerator.print("Tokenization setup complete for streaming dataset.")
@@ -674,10 +746,12 @@ def trainer(cfg: Config) -> None:
                     eval_dataset,
                     tokenizer,
                     column_name=text_column,
-                    max_length=cfg.dataset.max_seq_length,
+                    max_length=tokenize_max_length,
                     remove_columns=True,
                     truncation=True,
                     num_proc=eval_num_proc,
+                    add_special_tokens=add_special_tokens,
+                    return_special_tokens_mask=return_special_tokens_mask,
                 )
 
         if not eval_is_streaming:
@@ -785,16 +859,23 @@ def trainer(cfg: Config) -> None:
         eps=cfg.optimizer.eps,
         muon_config=cfg.optimizer.muon_config,
     )
+    _, warmup_steps, decay_steps, constant_steps = resolve_scheduler_steps(
+        trainer_max_steps=cfg.trainer.max_steps,
+        total_steps=cfg.scheduler.total_steps,
+        warmup_steps=cfg.scheduler.warmup_steps,
+        warmup_percent=cfg.scheduler.warmup_percent,
+        decay_steps=cfg.scheduler.decay_steps,
+        decay_percent=cfg.scheduler.decay_percent,
+        constant_steps=0,
+    )
     scheduler = get_scheduler(
         optimizer=optimizer,
         lr=cfg.optimizer.lr,
         decay=cfg.scheduler.name,
-        warmup_steps=min(cfg.scheduler.warmup_steps, cfg.trainer.max_steps),
-        decay_steps=max(
-            cfg.trainer.max_steps, cfg.scheduler.warmup_steps + 1
-        ),  # Ensure decay_steps > warmup_steps
+        warmup_steps=warmup_steps,
+        decay_steps=decay_steps,
         final_ratio=cfg.scheduler.final_lr_ratio,
-        constant_steps=0,  # No constant phase for simplicity
+        constant_steps=constant_steps,
     )
 
     # Prepare with accelerate
@@ -859,6 +940,10 @@ def trainer(cfg: Config) -> None:
     # Resume from the latest checkpoint
     skipped_train_dataloader = None
     if cfg.trainer.resume_from_checkpoint and resume_checkpoint_path:
+        if not os.path.exists(resume_checkpoint_path):
+            raise FileNotFoundError(
+                f"resume_from_checkpoint path not found: {resume_checkpoint_path}"
+            )
         accelerator.load_state(resume_checkpoint_path)
         skipped_train_dataloader = _prepare_resume_dataloader(
             train_dataloader, metrics, accelerator, is_streaming
@@ -1082,6 +1167,8 @@ def trainer(cfg: Config) -> None:
                         and os.path.exists(checkpoint_dir)
                         and accelerator.is_main_process
                     ):
+                        # Prune accelerator checkpoints to the same retention policy
+                        # as model_checkpoints to avoid unbounded disk growth.
                         accel_checkpoints = []
                         for item in os.listdir(checkpoint_dir):
                             item_path = os.path.join(checkpoint_dir, item)
@@ -1124,6 +1211,8 @@ def trainer(cfg: Config) -> None:
                     checkpoint_path = tmp_path
                     if accelerator.distributed_type is DistributedType.DEEPSPEED:
                         # DeepSpeed checkpoints are not directly portable; use zero_to_fp32 to export.
+                        # DeepSpeed writes into model_checkpoint_dir/tmp_tag, which we later rename
+                        # atomically alongside config/tokenizer for a single cohesive checkpoint.
                         model.save_checkpoint(model_checkpoint_dir, tag=tmp_tag)
                     else:
                         torch.save(

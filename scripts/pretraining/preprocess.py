@@ -41,6 +41,7 @@ def preprocess(cfg: Any) -> None:
         max_length=cfg.tokenizer.max_length,
         padding=cfg.tokenizer.padding,
         truncation=cfg.tokenizer.truncation,
+        return_special_tokens_mask=True,
     )
 
     # Save the tokenized dataset to disk
