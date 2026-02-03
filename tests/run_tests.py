@@ -30,18 +30,28 @@ def _run_unittest_discovery(test_dir: str | None, pattern: str, verbosity: int) 
 
 def _pytest_args(
     test_dir: str | None, pattern: str, quiet: bool, verbose: bool
-) -> list[str]:
+) -> tuple[list[str], bool]:
     """Build pytest CLI arguments."""
     args: list[str] = []
     if quiet:
         args.append("-q")
     elif verbose:
         args.append("-vv")
-    if pattern != "test_*.py":
-        args.extend(["-k", pattern])
+
+    root = Path(__file__).parent
     if test_dir:
-        args.append(str(Path(__file__).parent / test_dir))
-    return args
+        root = root / test_dir
+
+    if pattern != "test_*.py":
+        matched = sorted(root.rglob(pattern))
+        if not matched:
+            print(f"No tests matched pattern: {pattern}")
+            return args, False
+        args.extend(str(path) for path in matched)
+    elif test_dir:
+        args.append(str(root))
+
+    return args, True
 
 
 def discover_and_run_tests(
@@ -57,7 +67,11 @@ def discover_and_run_tests(
         try:
             import pytest  # type: ignore
 
-            args = _pytest_args(test_dir, pattern, quiet=quiet, verbose=verbose)
+            args, matched = _pytest_args(
+                test_dir, pattern, quiet=quiet, verbose=verbose
+            )
+            if not matched:
+                return False
             return pytest.main(args) == 0
         except Exception:
             # Fall back to unittest discovery if pytest is unavailable.

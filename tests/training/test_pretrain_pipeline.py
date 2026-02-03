@@ -8,6 +8,8 @@ from pathlib import Path
 
 import torch
 from datasets import Dataset
+from tokenizers import Tokenizer, models, pre_tokenizers
+from transformers import PreTrainedTokenizerFast
 
 from neobert.config import ConfigLoader
 from neobert.pretraining.trainer import trainer
@@ -186,49 +188,59 @@ class TestPretrainPipeline(unittest.TestCase):
 class TestPretrainComponents(unittest.TestCase):
     """Test individual pretraining components."""
 
+    def _make_tokenizer(self) -> PreTrainedTokenizerFast:
+        """Build a minimal tokenizer for tests.
+
+        :return PreTrainedTokenizerFast: Tokenizer with a tiny word-level vocab.
+        """
+        vocab = {
+            "[PAD]": 0,
+            "[UNK]": 1,
+            "[MASK]": 2,
+            "[SEP]": 3,
+            "hello": 4,
+            "world": 5,
+            "test": 6,
+            "sentence": 7,
+        }
+        tokenizer = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
+        tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+        return PreTrainedTokenizerFast(
+            tokenizer_object=tokenizer,
+            pad_token="[PAD]",
+            unk_token="[UNK]",
+            mask_token="[MASK]",
+            sep_token="[SEP]",
+        )
+
     def test_mlm_data_collator(self):
         """Test MLM data collator functionality."""
-        from transformers import AutoTokenizer
-
         from neobert.collator import get_collator
 
-        try:
-            # Try to create a simple tokenizer for testing
-            tokenizer = AutoTokenizer.from_pretrained(
-                "bert-base-uncased", use_fast=True
-            )
-            tokenizer.pad_token = tokenizer.eos_token
+        tokenizer = self._make_tokenizer()
 
-            collator = get_collator("mlm", tokenizer, mlm_probability=0.15)
+        collator = get_collator(tokenizer=tokenizer, mlm_probability=0.15)
 
-            # Test with dummy data
-            texts = ["Hello world", "Test sentence"]
-            tokenized = tokenizer(texts, padding=True, return_tensors="pt")
+        # Test with dummy data
+        texts = ["hello world", "test sentence"]
+        tokenized = tokenizer(texts, padding=True, return_tensors="pt")
 
-            batch = [
-                {
-                    "input_ids": tokenized["input_ids"][0],
-                    "attention_mask": tokenized["attention_mask"][0],
-                },
-                {
-                    "input_ids": tokenized["input_ids"][1],
-                    "attention_mask": tokenized["attention_mask"][1],
-                },
-            ]
+        batch = [
+            {
+                "input_ids": tokenized["input_ids"][0],
+                "attention_mask": tokenized["attention_mask"][0],
+            },
+            {
+                "input_ids": tokenized["input_ids"][1],
+                "attention_mask": tokenized["attention_mask"][1],
+            },
+        ]
 
-            collated = collator(batch)
+        collated = collator(batch)
 
-            self.assertIn("input_ids", collated)
-            self.assertIn("labels", collated)
-            self.assertIn("attention_mask", collated)
-
-        except Exception as e:
-            # Skip if tokenizer download fails (expected on CPU-only systems)
-            # Check if it's an expected error
-            if "mask_token" in str(e) or "sentencepiece" in str(e):
-                self.skipTest(f"Tokenizer setup failed (expected on CPU-only): {e}")
-            else:
-                raise
+        self.assertIn("input_ids", collated)
+        self.assertIn("labels", collated)
+        self.assertIn("attention_mask", collated)
 
     def test_masked_correct_count(self):
         """Test masked accuracy counting ignores -100 labels."""
@@ -240,54 +252,30 @@ class TestPretrainComponents(unittest.TestCase):
 
     def test_pack_sequences_collator(self):
         """Ensure packed collator builds a block attention mask."""
-        from transformers import AutoTokenizer
-
         from neobert.collator import get_collator
 
-        try:
-            tokenizer = AutoTokenizer.from_pretrained(
-                "bert-base-uncased", use_fast=True
-            )
-            if tokenizer.pad_token is None:
-                if tokenizer.eos_token is not None:
-                    tokenizer.pad_token = tokenizer.eos_token
-                else:
-                    tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+        tokenizer = self._make_tokenizer()
 
-            collator = get_collator(
-                tokenizer=tokenizer,
-                mlm_probability=0.15,
-                pack_sequences=True,
-                max_length=8,
-            )
+        collator = get_collator(
+            tokenizer=tokenizer,
+            mlm_probability=0.15,
+            pack_sequences=True,
+            max_length=8,
+        )
 
-            batch = [
-                {
-                    "input_ids": tokenizer("hello", add_special_tokens=False)[
-                        "input_ids"
-                    ]
-                },
-                {
-                    "input_ids": tokenizer("world", add_special_tokens=False)[
-                        "input_ids"
-                    ]
-                },
-            ]
+        batch = [
+            {"input_ids": tokenizer("hello", add_special_tokens=False)["input_ids"]},
+            {"input_ids": tokenizer("world", add_special_tokens=False)["input_ids"]},
+        ]
 
-            collated = collator(batch)
+        collated = collator(batch)
 
-            self.assertIn("attention_mask", collated)
-            self.assertEqual(collated["attention_mask"].dim(), 2)
-            self.assertIn("packed_seqlens", collated)
-            self.assertTrue(
-                all(len(seqlens) >= 1 for seqlens in collated["packed_seqlens"])
-            )
-
-        except Exception as e:
-            if "mask_token" in str(e) or "sentencepiece" in str(e):
-                self.skipTest(f"Tokenizer setup failed (expected on CPU-only): {e}")
-            else:
-                raise
+        self.assertIn("attention_mask", collated)
+        self.assertEqual(collated["attention_mask"].dim(), 2)
+        self.assertIn("packed_seqlens", collated)
+        self.assertTrue(
+            all(len(seqlens) >= 1 for seqlens in collated["packed_seqlens"])
+        )
 
     def test_to_target_batch_size_handles_empty_buffer(self):
         """Ensure batch packing handles empty buffers without crashing."""

@@ -116,6 +116,7 @@ model:
 trainer:
   output_dir: "./test"
   learning_rate: 1e-4
+  use_cpu: true
 optimizer:
   name: "adamw"
   lr: 1e-4
