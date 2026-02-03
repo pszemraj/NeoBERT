@@ -70,7 +70,12 @@ def _check_required_config_fields(config: Dict[str, Any]) -> Optional[str]:
 
 
 def _check_swiglu_layout(model: object, config: Dict[str, Any]) -> Optional[str]:
-    """Check that SwiGLU weights are unpacked (w1/w2/w3)."""
+    """Check that SwiGLU weights are unpacked (w1/w2/w3).
+
+    :param object model: Loaded model instance.
+    :param dict[str, Any] config: Loaded config mapping.
+    :return str | None: Issue description if layout is wrong, else None.
+    """
     if not config:
         return None
     if str(config.get("hidden_act", "")).lower() != "swiglu":

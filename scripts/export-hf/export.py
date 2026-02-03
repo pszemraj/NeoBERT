@@ -108,7 +108,13 @@ def _swiglu_intermediate_size(intermediate_size: int, multiple_of: int = 8) -> i
 def _check_shape(
     state_dict: Dict[str, torch.Tensor], key: str, expected: Tuple[int, ...]
 ) -> None:
-    """Verify a tensor exists and matches the expected shape."""
+    """Verify a tensor exists and matches the expected shape.
+
+    :param dict[str, torch.Tensor] state_dict: Model state dict.
+    :param str key: Weight key to check.
+    :param tuple[int, ...] expected: Expected shape tuple.
+    :raises ValueError: If key is missing or shape does not match.
+    """
     if key not in state_dict:
         raise ValueError(f"Missing required weight: {key}")
     actual = tuple(state_dict[key].shape)
@@ -119,7 +125,12 @@ def _check_shape(
 def validate_state_dict_layout(
     state_dict: Dict[str, torch.Tensor], model_config: Dict[str, Any]
 ) -> None:
-    """Validate checkpoint tensors against the training config."""
+    """Validate checkpoint tensors against the training config.
+
+    :param dict[str, torch.Tensor] state_dict: Model state dict.
+    :param dict[str, Any] model_config: Model config mapping.
+    :raises ValueError: If weights are missing, have wrong shapes, or use packed layout.
+    """
     state_dict = maybe_alias_decoder_weights(state_dict)
     hidden_size = model_config["hidden_size"]
     num_layers = model_config["num_hidden_layers"]
@@ -174,7 +185,12 @@ def validate_state_dict_layout(
 def run_forward_sanity_check(
     hf_config: Dict[str, Any], mapped_state_dict: Dict[str, torch.Tensor]
 ) -> None:
-    """Instantiate the HF model and run a lightweight forward pass."""
+    """Instantiate the HF model and run a lightweight forward pass.
+
+    :param dict[str, Any] hf_config: HuggingFace config mapping.
+    :param dict[str, torch.Tensor] mapped_state_dict: Remapped state dict.
+    :raises ValueError: If forward pass fails or produces invalid outputs.
+    """
     repo_root = Path(__file__).resolve().parents[2]
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
