@@ -31,16 +31,12 @@ from transformers.modeling_outputs import (
 )
 
 try:
-    from .modeling_utils import (
-        scaled_dot_product_attention_compat,
-        swiglu_intermediate_size,
-    )
+    from .modeling_utils import scaled_dot_product_attention_compat
+    from .modeling_utils import swiglu_intermediate_size
 except ImportError:  # pragma: no cover - in-package import path.
     try:
-        from ..modeling_utils import (
-            scaled_dot_product_attention_compat,
-            swiglu_intermediate_size,
-        )
+        from ..modeling_utils import scaled_dot_product_attention_compat
+        from ..modeling_utils import swiglu_intermediate_size
     except ImportError:  # pragma: no cover - triggered in exported HF repo layout.
         from modeling_utils import swiglu_intermediate_size
         from modeling_utils import scaled_dot_product_attention_compat
