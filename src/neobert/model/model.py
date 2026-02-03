@@ -825,6 +825,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
                     """Wrap the encoder layer for checkpointing.
 
                     :param torch.Tensor hidden_states: Hidden states to process.
+                    :param EncoderBlock layer: Encoder layer bound for checkpointing.
                     :return torch.Tensor: Updated hidden states.
                     """
                     return layer(hidden_states, pad_mask, freqs_cis, packed_seqlens)
@@ -973,6 +974,7 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
                     """Wrap the encoder layer for checkpointing.
 
                     :param torch.Tensor hidden_states: Hidden states to process.
+                    :param NormEncoderBlock layer: Encoder layer bound for checkpointing.
                     :return torch.Tensor: Updated hidden states.
                     """
                     return layer(hidden_states, pad_mask, freqs_cis, packed_seqlens)
