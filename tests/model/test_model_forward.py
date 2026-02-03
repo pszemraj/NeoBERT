@@ -2,7 +2,6 @@
 """Test NeoBERT model forward passes and functionality."""
 
 import unittest
-import warnings
 from unittest.mock import patch
 
 import torch
@@ -269,7 +268,7 @@ class TestModelForward(unittest.TestCase):
         )
 
     def test_hf_sdpa_bool_mask_without_padding(self):
-        """Ensure SDPA-style bool masks work when there is no padding."""
+        """Ensure HF-style bool masks work when there is no padding."""
         from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
 
         config = NeoBERTConfig(
@@ -285,26 +284,24 @@ class TestModelForward(unittest.TestCase):
         model.eval()
 
         input_ids = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
-        sdpa_mask = torch.zeros_like(input_ids, dtype=torch.bool)
 
-        normalized = model._normalize_attention_mask(sdpa_mask, input_ids)
-        self.assertTrue(torch.isfinite(normalized).all())
-        self.assertFalse(normalized.any().item())
+        # All-False bool mask (HF: keep nothing) -> SDPA: mask all
+        all_false = torch.zeros_like(input_ids, dtype=torch.bool)
+        normalized = model._normalize_attention_mask(all_false)
+        self.assertTrue(normalized.all().item())  # All masked
 
+        # All-True bool mask (HF: keep all) -> SDPA: mask none
         keep_all = torch.ones_like(input_ids, dtype=torch.bool)
-        normalized_keep_all = model._normalize_attention_mask(keep_all, input_ids)
-        self.assertFalse(normalized_keep_all.any().item())
+        normalized_keep_all = model._normalize_attention_mask(keep_all)
+        self.assertFalse(normalized_keep_all.any().item())  # None masked
 
+        # Mixed mask: True=keep, False=mask -> inverted for SDPA
         mixed_mask = torch.tensor(
             [[True, False, True, False], [False, True, False, True]]
         )
-        with self.assertRaises(ValueError):
-            model._normalize_attention_mask(mixed_mask, input_ids)
-
-        normalized_mixed = model._normalize_attention_mask(
-            mixed_mask, input_ids, attention_mask_is_masked=True
-        )
-        self.assertTrue(torch.equal(normalized_mixed, mixed_mask))
+        normalized_mixed = model._normalize_attention_mask(mixed_mask)
+        expected = ~mixed_mask
+        self.assertTrue(torch.equal(normalized_mixed, expected))
 
     def test_hf_bool_attention_mask_supported(self):
         """Ensure HF-style bool masks (True=keep) are accepted."""
@@ -338,28 +335,29 @@ class TestModelForward(unittest.TestCase):
             )
         )
 
-    def test_hf_flash_attention_warning(self):
-        """Ensure flash_attention emits a warning in HF export config."""
-        from neobert.huggingface.modeling_neobert import NeoBERTConfig
+    def test_hf_flash_attention_silently_ignored(self):
+        """Ensure flash_attention=True is silently accepted for config compat."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
 
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            NeoBERTConfig(
-                hidden_size=32,
-                num_hidden_layers=1,
-                num_attention_heads=2,
-                intermediate_size=64,
-                vocab_size=100,
-                max_length=16,
-                flash_attention=True,
-            )
-
-        self.assertTrue(
-            any(
-                "flash_attention' is ignored" in str(warning.message)
-                for warning in caught
-            )
+        # flash_attention=True should be accepted without warning
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=16,
+            flash_attention=True,
         )
+        self.assertTrue(config.flash_attention)
+
+        # Model should still work (uses SDPA regardless)
+        model = NeoBERT(config)
+        model.eval()
+        input_ids = torch.tensor([[1, 2, 3, 4]])
+        with torch.no_grad():
+            outputs = model(input_ids=input_ids)
+        self.assertEqual(outputs.last_hidden_state.shape, (1, 4, 32))
 
     def test_mteb_encode_respects_model_device(self):
         """Ensure MTEB encoder uses the model device over CUDA availability."""
