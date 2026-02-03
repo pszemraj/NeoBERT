@@ -352,6 +352,11 @@ class EncoderBlock(nn.Module):
             if attention_mask is not None:
                 attn_weights = attn_weights.masked_fill(attention_mask, float("-inf"))
             attn_weights = attn_weights.softmax(-1)
+            # Apply attention dropout to match SDPA path.
+            if self.training and self.config.dropout > 0:
+                attn_weights = torch.nn.functional.dropout(
+                    attn_weights, p=self.config.dropout, training=True
+                )
             attn = attn_weights @ xv.permute(0, 2, 1, 3)
             attn = attn.transpose(1, 2)
         # Scaled dot-product attention (default)
