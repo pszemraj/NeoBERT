@@ -390,7 +390,7 @@ class NeoBERTPreTrainedModel(PreTrainedModel):
 
     config_class = NeoBERTConfig
     base_model_prefix = "model"
-    _supports_cache_class = True
+    _supports_cache_class = False  # Encoder-only; no KV cache support.
 
     def _init_weights(self, module: nn.Module) -> None:
         """Initialize the weights of a module.
