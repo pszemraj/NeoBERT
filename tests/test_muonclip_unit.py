@@ -21,16 +21,16 @@ class TestMuonClipConfig:
 
     def test_invalid_lr(self):
         """Test invalid learning rate raises error."""
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             MuonClipConfig(lr=0)
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             MuonClipConfig(lr=-0.1)
 
     def test_invalid_threshold(self):
         """Test invalid clipping threshold raises error."""
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             MuonClipConfig(clipping_threshold=0)
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             MuonClipConfig(clipping_threshold=2000)
 
     def test_warnings_for_suboptimal(self):
@@ -95,12 +95,15 @@ class TestAttentionHooks:
 
         # Check data captured
         for layer_idx in range(2):
-            inputs, pad_mask, freqs = hook_system.get_layer_data(layer_idx)
+            inputs, pad_mask, freqs, packed_seqlens = hook_system.get_layer_data(
+                layer_idx
+            )
             assert inputs is not None
             assert inputs.shape[-1] == model.config.hidden_size
             assert inputs.device.type == "cpu"
             assert pad_mask is None
             assert freqs is None
+            assert packed_seqlens is None
 
 
 class TestMuonClipOptimizer:
@@ -187,6 +190,36 @@ class TestMuonClipOptimizer:
         view = expected.view(config.num_attention_heads, config.dim_head * 3, -1)
         view[:, : config.dim_head].mul_(eta.view(-1, 1, 1))
         assert torch.allclose(qkv_param, expected)
+
+    def test_packed_attention_logit_max_ignores_cross_segment(self):
+        """Cross-segment logits must not affect max in packed mode."""
+        config = NeoBERTConfig(
+            hidden_size=4,
+            num_hidden_layers=1,
+            num_attention_heads=1,
+            intermediate_size=16,
+            vocab_size=32,
+            max_length=8,
+            flash_attention=False,
+            hidden_act="gelu",
+            rope=False,
+        )
+        model = NeoBERT(config)
+        optimizer = MuonClipOptimizer(
+            model, config, MuonClipConfig(enable_clipping=False)
+        )
+
+        xq = torch.tensor([[[[1.0], [1.0], [0.0], [0.0]]]])
+        xk = torch.tensor([[[[1.0], [1.0], [100.0], [100.0]]]])
+        per_step_max = optimizer._packed_attention_logit_max(
+            xq_heads=xq,
+            xk_heads=xk,
+            packed_seqlens=[[2, 2]],
+            scale=1.0,
+        )
+
+        assert per_step_max.shape == (1, 1)
+        assert torch.allclose(per_step_max, torch.tensor([[1.0]]))
 
     def test_ngpt_qk_clipping_runs(self):
         """Ensure ngpt QK clipping path executes without errors."""

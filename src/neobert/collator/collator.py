@@ -81,20 +81,28 @@ class DataCollatorWithPacking(DefaultDataCollator):
         self.default_data_collator = default_data_collator
 
     def __call__(self, features, return_tensors=None):
+        """Pack variable-length segments into fixed-length sequences.
+
+        The MLM collator only infers attention masks from padding it applies. Since
+        we pre-pad here, we must construct an attention_mask explicitly to avoid
+        returning an all-ones mask in packed mode.
+        """
         if return_tensors is None:
             return_tensors = self.return_tensors
 
         packed_sequences = []
         packed_segments = []
         current_sequence: list[int] = []
-        current_segments: list[int] = []
         current_special_mask: list[int] = []
+        current_attention_mask: list[int] = []
+        current_segments: list[int] = []
         current_segment_id = 0
 
         for feature in features:
             seq = feature["input_ids"]
             if torch.is_tensor(seq):
                 seq = seq.tolist()
+
             special_mask = feature.get("special_tokens_mask")
             if torch.is_tensor(special_mask):
                 special_mask = special_mask.tolist()
@@ -108,15 +116,15 @@ class DataCollatorWithPacking(DefaultDataCollator):
                     special_mask = [0] * len(seq)
 
             segment_tokens: list[int] = []
-            segment_mask: list[int] = []
+            segment_special_mask: list[int] = []
             if self.start_token_id is not None:
                 segment_tokens.append(self.start_token_id)
-                segment_mask.append(1)
+                segment_special_mask.append(1)
             segment_tokens.extend(seq)
-            segment_mask.extend(int(val) for val in special_mask)
+            segment_special_mask.extend(int(val) for val in special_mask)
             if self.end_token_id is not None:
                 segment_tokens.append(self.end_token_id)
-                segment_mask.append(1)
+                segment_special_mask.append(1)
 
             if len(segment_tokens) > self.max_length:
                 raise ValueError(
@@ -131,17 +139,20 @@ class DataCollatorWithPacking(DefaultDataCollator):
                 packed_sequences.append(
                     {
                         "input_ids": current_sequence,
+                        "attention_mask": current_attention_mask,
                         "special_tokens_mask": current_special_mask,
                     }
                 )
                 packed_segments.append(current_segments)
                 current_sequence = []
-                current_segments = []
                 current_special_mask = []
+                current_attention_mask = []
+                current_segments = []
                 current_segment_id = 0
 
             current_sequence.extend(segment_tokens)
-            current_special_mask.extend(segment_mask)
+            current_special_mask.extend(segment_special_mask)
+            current_attention_mask.extend([1] * len(segment_tokens))
             current_segments.extend([current_segment_id] * len(segment_tokens))
             current_segment_id += 1
 
@@ -149,27 +160,27 @@ class DataCollatorWithPacking(DefaultDataCollator):
                 packed_sequences.append(
                     {
                         "input_ids": current_sequence,
+                        "attention_mask": current_attention_mask,
                         "special_tokens_mask": current_special_mask,
                     }
                 )
                 packed_segments.append(current_segments)
                 current_sequence = []
-                current_segments = []
                 current_special_mask = []
+                current_attention_mask = []
+                current_segments = []
                 current_segment_id = 0
 
         if current_sequence:
             packed_sequences.append(
                 {
                     "input_ids": current_sequence,
+                    "attention_mask": current_attention_mask,
                     "special_tokens_mask": current_special_mask,
                 }
             )
             packed_segments.append(current_segments)
 
-        # Pad to a fixed length so batches can be concatenated by to_target_batch_size
-        # without shape mismatches across dataloader steps. Packing already fills up
-        # max_length chunks, so this only pads the final fragment when present.
         pad_token_id = getattr(
             getattr(self.default_data_collator, "tokenizer", None), "pad_token_id", None
         )
@@ -184,6 +195,7 @@ class DataCollatorWithPacking(DefaultDataCollator):
             if len(seq["input_ids"]) < self.max_length:
                 pad_len = self.max_length - len(seq["input_ids"])
                 seq["input_ids"].extend([pad_token_id] * pad_len)
+                seq["attention_mask"].extend([0] * pad_len)
                 seq["special_tokens_mask"].extend([1] * pad_len)
 
         batch = self.default_data_collator(packed_sequences, return_tensors)

@@ -31,15 +31,16 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Ten
     :param torch.Tensor freqs_cis: Frequency tensor to reshape.
     :param torch.Tensor x: Target tensor for broadcasting compatibility.
     :return torch.Tensor: Reshaped frequency tensor.
-    :raises AssertionError: If tensor shapes are incompatible.
+    :raises ValueError: If tensor shapes are incompatible.
     """
 
     ndim = x.ndim
-    assert 0 <= 1 < ndim
+    if ndim < 2:
+        raise ValueError(f"Expected x with at least 2 dims, got shape {x.shape}")
 
     if freqs_cis.dim() == 2:
         if freqs_cis.shape != (x.shape[1], x.shape[-1]):
-            raise AssertionError(
+            raise ValueError(
                 f"freqs_cis has shape {freqs_cis.shape}, expected "
                 f"({x.shape[1]}, {x.shape[-1]})"
             )
@@ -51,14 +52,14 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Ten
             freqs_cis.shape[:2] != (x.shape[0], x.shape[1])
             or freqs_cis.shape[-1] != x.shape[-1]
         ):
-            raise AssertionError(
+            raise ValueError(
                 f"freqs_cis has shape {freqs_cis.shape}, expected "
                 f"({x.shape[0]}, {x.shape[1]}, {x.shape[-1]})"
             )
         shape = [d if i in (0, 1, ndim - 1) else 1 for i, d in enumerate(x.shape)]
         return freqs_cis.view(*shape)
 
-    raise AssertionError(f"freqs_cis must have 2 or 3 dims, got {freqs_cis.dim()}")
+    raise ValueError(f"freqs_cis must have 2 or 3 dims, got {freqs_cis.dim()}")
 
 
 def apply_rotary_emb(

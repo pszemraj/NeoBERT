@@ -70,24 +70,29 @@ class MuonClipConfig:
     algorithm: Optional[str] = None  # Alias for orthogonalization
     polar_express: Optional[bool] = None  # Legacy toggle
 
-    def __post_init__(self):
-        """Validate configuration."""
-        assert 0 < self.lr < 1, f"lr must be in (0, 1), got {self.lr}"
-        assert 0 <= self.muon_beta < 1, (
-            f"muon_beta must be in [0, 1), got {self.muon_beta}"
-        )
-        assert 0 <= self.muon_decay < 1, (
-            f"muon_decay must be in [0, 1), got {self.muon_decay}"
-        )
-        assert 1 <= self.ns_steps <= 20, (
-            f"ns_steps must be in [1, 20], got {self.ns_steps}"
-        )
-        assert 0 < self.clipping_threshold <= 1000, (
-            f"clipping_threshold must be in (0, 1000], got {self.clipping_threshold}"
-        )
-        assert 0 <= self.clipping_alpha <= 1, (
-            f"clipping_alpha must be in [0, 1], got {self.clipping_alpha}"
-        )
+    def __post_init__(self) -> None:
+        """Validate configuration.
+
+        IMPORTANT: do not use ``assert`` for runtime validation. Python can be
+        executed with ``-O``, which strips asserts entirely.
+        """
+        if not (0 < self.lr < 1):
+            raise ValueError(f"lr must be in (0, 1), got {self.lr}")
+        if not (0 <= self.muon_beta < 1):
+            raise ValueError(f"muon_beta must be in [0, 1), got {self.muon_beta}")
+        if not (0 <= self.muon_decay < 1):
+            raise ValueError(f"muon_decay must be in [0, 1), got {self.muon_decay}")
+        if not (1 <= self.ns_steps <= 20):
+            raise ValueError(f"ns_steps must be in [1, 20], got {self.ns_steps}")
+        if not (0 < self.clipping_threshold <= 1000):
+            raise ValueError(
+                "clipping_threshold must be in (0, 1000], got "
+                f"{self.clipping_threshold}"
+            )
+        if not (0 <= self.clipping_alpha <= 1):
+            raise ValueError(
+                f"clipping_alpha must be in [0, 1], got {self.clipping_alpha}"
+            )
 
         if self.algorithm is not None:
             warnings.warn(
@@ -105,15 +110,24 @@ class MuonClipConfig:
         # Warnings for suboptimal settings
         if self.ns_steps < 3:
             warnings.warn(
-                f"ns_steps={self.ns_steps} may not provide sufficient orthogonalization. Recommended: 5-9"
+                f"ns_steps={self.ns_steps} may not provide sufficient orthogonalization. "
+                "Recommended: 5-9",
+                UserWarning,
+                stacklevel=2,
             )
         if self.clipping_threshold > 200:
             warnings.warn(
-                f"clipping_threshold={self.clipping_threshold} is very high. You may not see clipping effects."
+                f"clipping_threshold={self.clipping_threshold} is very high. "
+                "You may not see clipping effects.",
+                UserWarning,
+                stacklevel=2,
             )
         if self.clipping_threshold < 30:
             warnings.warn(
-                f"clipping_threshold={self.clipping_threshold} is very low. Risk of over-constraining attention."
+                f"clipping_threshold={self.clipping_threshold} is very low. "
+                "Risk of over-constraining attention.",
+                UserWarning,
+                stacklevel=2,
             )
 
         if self.clipping_layers_mapping is None:
@@ -129,15 +143,23 @@ class MuonClipConfig:
                 warnings.warn(
                     "Unsupported keys in clipping_layers_mapping: "
                     + ", ".join(sorted(unsupported)),
+                    UserWarning,
+                    stacklevel=2,
                 )
             self.clipping_layers_mapping = normalised_mapping
 
+        if not isinstance(self.adam_betas, (tuple, list)) or len(self.adam_betas) != 2:
+            raise TypeError(
+                "adam_betas must be a 2-tuple of floats, got "
+                f"{type(self.adam_betas).__name__}={self.adam_betas!r}"
+            )
         _, beta2 = self.adam_betas
         if beta2 < 0.98:
             warnings.warn(
                 f"adam_betas second moment {beta2} is unusually low; "
                 "encoder pretraining typically uses >= 0.98.",
                 RuntimeWarning,
+                stacklevel=2,
             )
 
         # Resolve orthogonalization algorithm
@@ -181,7 +203,8 @@ class NeoBERTAttentionHooks:
 
     We record:
       - The normalized attention input fed into each layer's QKV (or Q/K) projection.
-      - The pad mask and rotary embeddings passed to the encoder block.
+      - The pad mask, rotary embeddings, and packed sequence metadata passed to the
+        encoder block.
     The expensive QK statistics are computed lazily during the optimizer step.
     """
 
@@ -201,6 +224,7 @@ class NeoBERTAttentionHooks:
         self.layer_inputs: Dict[int, torch.Tensor] = {}
         self.layer_pad_masks: Dict[int, Optional[torch.Tensor]] = {}
         self.layer_freqs: Dict[int, Optional[torch.Tensor]] = {}
+        self.layer_packed_seqlens: Dict[int, Optional[list[list[int]]]] = {}
         self.layers: Dict[int, torch.nn.Module] = {}
 
         self.enabled = True
@@ -359,6 +383,7 @@ class NeoBERTAttentionHooks:
 
             pad_mask = inputs[1] if len(inputs) > 1 else None
             freqs_cis = inputs[2] if len(inputs) > 2 else None
+            packed_seqlens = inputs[3] if len(inputs) > 3 else None
 
             self.layer_pad_masks[layer_idx] = (
                 pad_mask.detach().to("cpu") if torch.is_tensor(pad_mask) else pad_mask
@@ -368,22 +393,34 @@ class NeoBERTAttentionHooks:
                 if torch.is_tensor(freqs_cis)
                 else freqs_cis
             )
+            if packed_seqlens is not None:
+                packed_seqlens = [
+                    list(map(int, seg_lens)) for seg_lens in packed_seqlens
+                ]
+            self.layer_packed_seqlens[layer_idx] = packed_seqlens
 
         return hook_fn
 
     def get_layer_data(
         self, layer_idx: int
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> Tuple[
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+        Optional[list[list[int]]],
+    ]:
         """Return cached tensors for a given layer.
 
         :param int layer_idx: Encoder layer index.
-        :return tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
-            Input, pad mask, and rotary frequencies.
+        :return tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None,
+            list[list[int]] | None]: Input, pad mask, rotary frequencies, and packed
+            sequence lengths.
         """
         return (
             self.layer_inputs.get(layer_idx),
             self.layer_pad_masks.get(layer_idx),
             self.layer_freqs.get(layer_idx),
+            self.layer_packed_seqlens.get(layer_idx),
         )
 
     def clear(self) -> None:
@@ -391,6 +428,7 @@ class NeoBERTAttentionHooks:
         self.layer_inputs.clear()
         self.layer_pad_masks.clear()
         self.layer_freqs.clear()
+        self.layer_packed_seqlens.clear()
 
     def remove_hooks(self) -> None:
         """Remove all registered forward hooks."""
@@ -933,18 +971,24 @@ class MuonClipOptimizer(Optimizer):
             return
 
         for layer_idx, param_dict in layer_entries.items():
-            inputs, pad_mask, freqs_cis = self.hook_system.get_layer_data(layer_idx)
+            (
+                inputs,
+                pad_mask,
+                freqs_cis,
+                packed_seqlens,
+            ) = self.hook_system.get_layer_data(layer_idx)
             if inputs is None:
                 continue
             layer = self.hook_system.layers.get(layer_idx)
 
             if "qkv" in param_dict:
                 eta_per_head, layer_max = self._compute_eta_for_fused(
-                    inputs,
-                    param_dict["qkv"],
-                    pad_mask,
-                    freqs_cis,
-                    layer,
+                    inputs=inputs,
+                    param=param_dict["qkv"],
+                    pad_mask=pad_mask,
+                    freqs_cis=freqs_cis,
+                    packed_seqlens=packed_seqlens,
+                    layer=layer,
                 )
                 if eta_per_head is not None:
                     self._scale_qkv_weights(
@@ -966,12 +1010,13 @@ class MuonClipOptimizer(Optimizer):
                 continue
 
             eta_per_head, layer_max = self._compute_eta_for_separate(
-                inputs,
-                q_param,
-                k_param,
-                pad_mask,
-                freqs_cis,
-                layer,
+                inputs=inputs,
+                q_param=q_param,
+                k_param=k_param,
+                pad_mask=pad_mask,
+                freqs_cis=freqs_cis,
+                packed_seqlens=packed_seqlens,
+                layer=layer,
             )
             if eta_per_head is None:
                 continue
@@ -1005,6 +1050,7 @@ class MuonClipOptimizer(Optimizer):
         param: torch.nn.Parameter,
         pad_mask: Optional[torch.Tensor],
         freqs_cis: Optional[torch.Tensor],
+        packed_seqlens: Optional[list[list[int]]],
         layer: Optional[torch.nn.Module],
     ) -> Tuple[Optional[torch.Tensor], Optional[float]]:
         """Compute per-head scaling factors for fused QKV weights.
@@ -1013,6 +1059,7 @@ class MuonClipOptimizer(Optimizer):
         :param torch.nn.Parameter param: Fused QKV weight parameter.
         :param torch.Tensor | None pad_mask: Optional pad mask.
         :param torch.Tensor | None freqs_cis: Optional rotary frequencies.
+        :param list[list[int]] | None packed_seqlens: Optional packed segment lengths.
         :param torch.nn.Module | None layer: Optional encoder layer (ngpt metadata).
         :return tuple[torch.Tensor | None, float | None]: Eta per head and max logit.
         """
@@ -1041,7 +1088,14 @@ class MuonClipOptimizer(Optimizer):
         )
         xq, xk, _ = proj.chunk(3, dim=-1)
 
-        return self._compute_eta_from_qk(xq, xk, pad_mask, freqs_cis, layer)
+        return self._compute_eta_from_qk(
+            xq=xq,
+            xk=xk,
+            pad_mask=pad_mask,
+            freqs_cis=freqs_cis,
+            packed_seqlens=packed_seqlens,
+            layer=layer,
+        )
 
     def _compute_eta_for_separate(
         self,
@@ -1050,6 +1104,7 @@ class MuonClipOptimizer(Optimizer):
         k_param: torch.nn.Parameter,
         pad_mask: Optional[torch.Tensor],
         freqs_cis: Optional[torch.Tensor],
+        packed_seqlens: Optional[list[list[int]]],
         layer: Optional[torch.nn.Module],
     ) -> Tuple[Optional[torch.Tensor], Optional[float]]:
         """Compute per-head scaling factors for separate Q/K projections.
@@ -1059,6 +1114,7 @@ class MuonClipOptimizer(Optimizer):
         :param torch.nn.Parameter k_param: Key projection weights.
         :param torch.Tensor | None pad_mask: Optional pad mask.
         :param torch.Tensor | None freqs_cis: Optional rotary frequencies.
+        :param list[list[int]] | None packed_seqlens: Optional packed segment lengths.
         :param torch.nn.Module | None layer: Optional encoder layer (ngpt metadata).
         :return tuple[torch.Tensor | None, float | None]: Eta per head and max logit.
         """
@@ -1080,7 +1136,14 @@ class MuonClipOptimizer(Optimizer):
             batch, seq_len, self.model_config.num_attention_heads, head_dim
         )
 
-        return self._compute_eta_from_qk(q_proj, k_proj, pad_mask, freqs_cis, layer)
+        return self._compute_eta_from_qk(
+            xq=q_proj,
+            xk=k_proj,
+            pad_mask=pad_mask,
+            freqs_cis=freqs_cis,
+            packed_seqlens=packed_seqlens,
+            layer=layer,
+        )
 
     def _compute_eta_from_qk(
         self,
@@ -1088,6 +1151,7 @@ class MuonClipOptimizer(Optimizer):
         xk: torch.Tensor,
         pad_mask: Optional[torch.Tensor],
         freqs_cis: Optional[torch.Tensor],
+        packed_seqlens: Optional[list[list[int]]],
         layer: Optional[torch.nn.Module],
     ) -> Tuple[Optional[torch.Tensor], Optional[float]]:
         """Derive per-head eta values from Q and K projections.
@@ -1096,6 +1160,7 @@ class MuonClipOptimizer(Optimizer):
         :param torch.Tensor xk: Key projections.
         :param torch.Tensor | None pad_mask: Optional pad mask.
         :param torch.Tensor | None freqs_cis: Optional rotary frequencies.
+        :param list[list[int]] | None packed_seqlens: Optional packed segment lengths.
         :param torch.nn.Module | None layer: Optional encoder layer (ngpt metadata).
         :return tuple[torch.Tensor | None, float | None]: Eta per head and max logit.
         """
@@ -1116,27 +1181,110 @@ class MuonClipOptimizer(Optimizer):
         xq_heads = xq.transpose(1, 2)
         xk_heads = xk.transpose(1, 2)
 
-        attn_logits = torch.matmul(xq_heads, xk_heads.transpose(-2, -1))
         if self.model_config.ngpt:
-            softmax_scale = (
+            scale = (
                 self.model_config.hidden_size / self.model_config.num_attention_heads
             ) ** 0.5
-            attn_logits = attn_logits * softmax_scale
         else:
-            attn_logits = attn_logits / (self.model_config.dim_head**0.5)
+            scale = 1.0 / (self.model_config.dim_head**0.5)
 
-        if pad_mask is not None:
-            attn_logits = attn_logits + pad_mask.to(
-                device=attn_logits.device, dtype=attn_logits.dtype
+        if packed_seqlens is not None:
+            if pad_mask is not None:
+                raise ValueError(
+                    "packed_seqlens was provided but pad_mask is not None. "
+                    "Packed attention uses block-diagonal bias; pad_mask should be None."
+                )
+            per_step_max = self._packed_attention_logit_max(
+                xq_heads=xq_heads,
+                xk_heads=xk_heads,
+                packed_seqlens=packed_seqlens,
+                scale=scale,
             )
-
-        per_step_max = attn_logits.amax(dim=(-2, -1))  # [batch, heads]
+        else:
+            attn_logits = torch.matmul(xq_heads, xk_heads.transpose(-2, -1)) * scale
+            if pad_mask is not None:
+                attn_logits = attn_logits + pad_mask.to(
+                    device=attn_logits.device, dtype=attn_logits.dtype
+                )
+            per_step_max = attn_logits.amax(dim=(-2, -1))  # [batch, heads]
         mean_per_head = per_step_max.mean(dim=0)
         denom = torch.clamp(mean_per_head, min=1e-6)
         eta_per_head = (self.config.clipping_threshold / denom).clamp(max=1.0)
 
-        global_max = per_step_max.max().item() if per_step_max.numel() > 0 else None
+        global_max: Optional[float] = None
+        if per_step_max.numel() > 0:
+            candidate = per_step_max.max()
+            if torch.isfinite(candidate):
+                global_max = float(candidate.item())
         return eta_per_head, global_max
+
+    def _packed_attention_logit_max(
+        self,
+        xq_heads: torch.Tensor,
+        xk_heads: torch.Tensor,
+        packed_seqlens: list[list[int]],
+        scale: float,
+    ) -> torch.Tensor:
+        """Compute per-sample/per-head max attention logits for packed sequences.
+
+        Packed mode is block-diagonal attention by segment; cross-segment logits
+        must be ignored.
+
+        :param torch.Tensor xq_heads: Query tensor of shape [B, H, S, D].
+        :param torch.Tensor xk_heads: Key tensor of shape [B, H, S, D].
+        :param list[list[int]] packed_seqlens: Segment lengths per batch item.
+        :param float scale: Multiplicative scale applied to QK logits.
+        :return torch.Tensor: Per-sample max logits of shape [B, H].
+        """
+        if xq_heads.ndim != 4 or xk_heads.ndim != 4:
+            raise ValueError(
+                "Expected xq_heads/xk_heads to be rank-4 [B,H,S,D], got "
+                f"xq={tuple(xq_heads.shape)} xk={tuple(xk_heads.shape)}"
+            )
+        if xq_heads.shape != xk_heads.shape:
+            raise ValueError(
+                "xq_heads and xk_heads must have the same shape, got "
+                f"xq={tuple(xq_heads.shape)} xk={tuple(xk_heads.shape)}"
+            )
+
+        batch, heads, seq_len, _ = xq_heads.shape
+        if len(packed_seqlens) != batch:
+            raise ValueError(
+                "packed_seqlens must have length equal to batch size: "
+                f"len(packed_seqlens)={len(packed_seqlens)} vs batch={batch}"
+            )
+
+        per_step_max = torch.full(
+            (batch, heads),
+            float("-inf"),
+            device=xq_heads.device,
+            dtype=xq_heads.dtype,
+        )
+
+        for batch_idx in range(batch):
+            start = 0
+            for seg_len in packed_seqlens[batch_idx]:
+                seg_len_i = int(seg_len)
+                if seg_len_i <= 0:
+                    continue
+                end = start + seg_len_i
+                if end > seq_len:
+                    raise ValueError(
+                        "packed_seqlens contains segment lengths that exceed seq_len: "
+                        f"sample={batch_idx} start={start} seg_len={seg_len_i} "
+                        f"seq_len={seq_len}"
+                    )
+
+                q = xq_heads[batch_idx, :, start:end, :]
+                k = xk_heads[batch_idx, :, start:end, :]
+                logits = torch.matmul(q, k.transpose(-2, -1)) * scale
+                seg_max = logits.amax(dim=(-2, -1))
+                per_step_max[batch_idx] = torch.maximum(
+                    per_step_max[batch_idx], seg_max
+                )
+                start = end
+
+        return per_step_max
 
     def _apply_ngpt_qk_transform(
         self,
