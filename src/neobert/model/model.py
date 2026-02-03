@@ -18,7 +18,6 @@ import torch
 from datasets import Dataset
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
-from torch.nn.functional import scaled_dot_product_attention
 from torch.utils.checkpoint import checkpoint
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -30,7 +29,10 @@ from transformers import (
 )
 from transformers.modeling_outputs import SequenceClassifierOutput
 
-from ..modeling_utils import swiglu_intermediate_size
+from ..modeling_utils import (
+    scaled_dot_product_attention_compat,
+    swiglu_intermediate_size,
+)
 from .rmsnorm import RMSNorm
 from .rotary import apply_rotary_emb, precompute_freqs_cis
 
@@ -129,6 +131,24 @@ def _packed_flash_attention(
             start = end
 
     return attn
+
+
+def _normalize_pad_mask(pad_mask: torch.Tensor) -> torch.Tensor:
+    """Normalize additive pad masks to a broadcast-friendly 4D shape.
+
+    :param torch.Tensor pad_mask: Additive mask in 2D or 3D form.
+    :param int num_heads: Number of attention heads for validation.
+    :return torch.Tensor: Mask shaped (B, 1, 1, S) or (B, 1, S, S).
+    """
+    if pad_mask.dim() == 2:
+        # Key padding mask; broadcast across query positions + heads.
+        return pad_mask[:, None, None, :]
+    if pad_mask.dim() == 3:
+        # Full attention mask per sample; broadcast across heads only.
+        return pad_mask[:, None, :, :]
+    raise ValueError(
+        "pad_mask must have shape (batch, seq_len) or (batch, seq_len, seq_len)"
+    )
 
 
 class SwiGLU(nn.Module):
@@ -402,8 +422,8 @@ class EncoderBlock(nn.Module):
                     xq, xk, xv, packed_seqlens, dropout_p=dropout_p
                 )
             else:
-                # xFormers expects attn_bias shaped [B, H, S, S]; non-multiple-of-8 S is supported
-                # but may be slower on some GPUs.
+                # xFormers expects attn_bias broadcastable to [B, H, S, S]; keep key padding
+                # masks in [B, 1, 1, S] form to avoid O(S^2) materialization.
                 attn = memory_efficient_attention(
                     query=xq, key=xk, value=xv, attn_bias=pad_mask, p=dropout_p
                 )
@@ -415,7 +435,7 @@ class EncoderBlock(nn.Module):
             # Use explicit scale for consistency with NormEncoderBlock.
             softmax_scale = 1.0 / math.sqrt(self.config.dim_head)
             # Input and output are of dimension (B, H, M, K)
-            attn = scaled_dot_product_attention(
+            attn = scaled_dot_product_attention_compat(
                 query=xq.transpose(1, 2),
                 key=xk.transpose(1, 2),
                 value=xv.transpose(1, 2),
@@ -606,8 +626,8 @@ class NormEncoderBlock(nn.Module):
                     scale=softmax_scale,
                 )
             else:
-                # xFormers expects attn_bias shaped [B, H, S, S]; non-multiple-of-8 S is supported
-                # but may be slower on some GPUs.
+                # xFormers expects attn_bias broadcastable to [B, H, S, S]; keep key padding
+                # masks in [B, 1, 1, S] form to avoid O(S^2) materialization.
                 attn = memory_efficient_attention(
                     query=xq,
                     key=xk,
@@ -622,7 +642,7 @@ class NormEncoderBlock(nn.Module):
                     "Packed sequences require flash_attention with xFormers."
                 )
             # Input and output are of dimension (B, H, M, K)
-            attn = scaled_dot_product_attention(
+            attn = scaled_dot_product_attention_compat(
                 query=xq.transpose(1, 2),
                 key=xk.transpose(1, 2),
                 value=xv.transpose(1, 2),
@@ -752,7 +772,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
                     "pad_mask must be None when packed_seqlens is provided."
                 )
 
-        # Expand and repeat: (Batch, Length) -> (Batch, Heads, Length, Length)
+        # Normalize to broadcast-friendly shapes to avoid O(S^2) materialization.
         if pad_mask is not None:
             # Use a tensor reduction instead of Python membership to avoid O(n^2) scans.
             assert pad_mask.dtype != torch.bool and torch.all(pad_mask <= 0).item(), (
@@ -760,20 +780,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
             )
             # Convert HF-style masks at the data boundary (collator/export wrapper),
             # then keep additive masks throughout the training model.
-            if pad_mask.dim() == 2:
-                pad_mask = (
-                    pad_mask.unsqueeze(1)
-                    .unsqueeze(1)
-                    .repeat(1, self.config.num_attention_heads, pad_mask.size(-1), 1)
-                )
-            elif pad_mask.dim() == 3:
-                pad_mask = pad_mask.unsqueeze(1).repeat(
-                    1, self.config.num_attention_heads, 1, 1
-                )
-            else:
-                raise ValueError(
-                    "pad_mask must have shape (batch, seq_len) or (batch, seq_len, seq_len)"
-                )
+            pad_mask = _normalize_pad_mask(pad_mask)
 
         # RoPE
         freqs_cis = None
@@ -803,6 +810,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
         if not self.config.rope:
             # Content-based positions: padding stays at index 0, and left-padding
             # does not shift token positions (padding-invariant positional IDs).
+            # Keep this in sync with the HF create_position_ids_from_input_ids logic.
             mask = src.ne(self.config.pad_token_id).int()
             incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask)) * mask
             x += self.positional_embedding(incremental_indices.long())
@@ -811,7 +819,9 @@ class NeoBERT(NeoBERTPreTrainedModel):
         for layer in self.transformer_encoder:
             if self.gradient_checkpointing and self.training:
                 # Capture mask + rotary frequencies in closure so checkpoint only sees Tensor inputs.
-                def custom_forward(hidden_states: torch.Tensor) -> torch.Tensor:
+                def custom_forward(
+                    hidden_states: torch.Tensor, layer: EncoderBlock = layer
+                ) -> torch.Tensor:
                     """Wrap the encoder layer for checkpointing.
 
                     :param torch.Tensor hidden_states: Hidden states to process.
@@ -870,12 +880,6 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
         for _ in range(config.num_hidden_layers):
             self.transformer_encoder.append(NormEncoderBlock(config))
 
-        self.layer_norm = (
-            RMSNorm(config.hidden_size, config.norm_eps)
-            if config.rms_norm
-            else nn.LayerNorm(config.hidden_size, config.norm_eps)
-        )
-
         # Initialize weights and apply final processing
         self.post_init()
         self.gradient_checkpointing = False
@@ -887,12 +891,6 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
                     mean=0.0,
                     std=config.base_scale / math.sqrt(2 * config.num_hidden_layers),
                 )
-
-        self.sz_init_value = 1.00
-        self.sz_init_scaling = config.base_scale
-        self.sz = torch.nn.Parameter(
-            self.sz_init_scaling * torch.ones(config.vocab_size, dtype=torch.float32)
-        )
 
     def forward(
         self,
@@ -922,7 +920,7 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
                     "pad_mask must be None when packed_seqlens is provided."
                 )
 
-        # Expand and repeat: (Batch, Length) -> (Batch, Heads, Length, Length)
+        # Normalize to broadcast-friendly shapes to avoid O(S^2) materialization.
         if pad_mask is not None:
             # Use a tensor reduction instead of Python membership to avoid O(n^2) scans.
             assert pad_mask.dtype != torch.bool and torch.all(pad_mask <= 0).item(), (
@@ -930,20 +928,7 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
             )
             # Convert HF-style masks at the data boundary (collator/export wrapper),
             # then keep additive masks throughout the training model.
-            if pad_mask.dim() == 2:
-                pad_mask = (
-                    pad_mask.unsqueeze(1)
-                    .unsqueeze(1)
-                    .repeat(1, self.config.num_attention_heads, pad_mask.size(-1), 1)
-                )
-            elif pad_mask.dim() == 3:
-                pad_mask = pad_mask.unsqueeze(1).repeat(
-                    1, self.config.num_attention_heads, 1, 1
-                )
-            else:
-                raise ValueError(
-                    "pad_mask must have shape (batch, seq_len) or (batch, seq_len, seq_len)"
-                )
+            pad_mask = _normalize_pad_mask(pad_mask)
 
         # RoPE
         freqs_cis = None
@@ -973,6 +958,7 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
         if not self.config.rope:
             # Content-based positions: padding stays at index 0, and left-padding
             # does not shift token positions (padding-invariant positional IDs).
+            # Keep this in sync with the HF create_position_ids_from_input_ids logic.
             mask = src.ne(self.config.pad_token_id).int()
             incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask)) * mask
             x += self.positional_embedding(incremental_indices.long())
@@ -981,7 +967,9 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
         for layer in self.transformer_encoder:
             if self.gradient_checkpointing and self.training:
 
-                def custom_forward(hidden_states: torch.Tensor) -> torch.Tensor:
+                def custom_forward(
+                    hidden_states: torch.Tensor, layer: NormEncoderBlock = layer
+                ) -> torch.Tensor:
                     """Wrap the encoder layer for checkpointing.
 
                     :param torch.Tensor hidden_states: Hidden states to process.
@@ -998,6 +986,7 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
             else:
                 x = layer(x, pad_mask, freqs_cis, packed_seqlens)
 
+        # NormNeoBERT applies normalization inside each block; no final norm here.
         # Return the output of the last hidden layer
         return x
 
@@ -1331,10 +1320,11 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
             The encoded sentences.
         """
 
-        # Respect the model's current device/dtype to avoid CPU/GPU mismatches.
+        # Respect the model's current device to avoid CPU/GPU mismatches.
         param = next(self.parameters())
         device = param.device
-        mask_dtype = param.dtype
+        # Keep additive masks in float32 for numerical stability (match training).
+        mask_dtype = torch.float32
 
         def _transform_func(
             tokenizer: PreTrainedTokenizerFast, x: Dict[str, List]

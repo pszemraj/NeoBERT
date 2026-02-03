@@ -77,6 +77,47 @@ class TestModelForward(unittest.TestCase):
         self.assertFalse(torch.isnan(outputs).any())
         self.assertFalse(torch.isinf(outputs).any())
 
+    def test_gradient_checkpointing_matches_baseline(self):
+        """Ensure checkpointed gradients match non-checkpointed forward."""
+        torch.manual_seed(0)
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=2,
+            num_attention_heads=2,
+            intermediate_size=64,
+            dropout=0.0,
+            vocab_size=256,
+            max_length=32,
+            flash_attention=False,
+            ngpt=False,
+            hidden_act="gelu",
+        )
+
+        model_ref = NeoBERT(config)
+        model_ckpt = NeoBERT(config)
+        model_ckpt.load_state_dict(model_ref.state_dict())
+
+        input_ids = torch.randint(0, config.vocab_size, (2, 8))
+        attention_mask = torch.ones_like(input_ids)
+        pad_mask = torch.where(attention_mask == 0, float("-inf"), float(0.0))
+
+        model_ref.train()
+        model_ckpt.train()
+        model_ckpt.gradient_checkpointing_enable()
+
+        loss_ref = model_ref(input_ids, pad_mask).sum()
+        loss_ref.backward()
+        loss_ckpt = model_ckpt(input_ids, pad_mask).sum()
+        loss_ckpt.backward()
+
+        for name, param_ref in model_ref.named_parameters():
+            param_ckpt = dict(model_ckpt.named_parameters())[name]
+            if param_ref.grad is None:
+                continue
+            self.assertTrue(
+                torch.allclose(param_ref.grad, param_ckpt.grad, atol=1e-6, rtol=1e-5)
+            )
+
     def test_training_vs_hf_encoder_parity(self):
         """Ensure training and HF encoder paths match for shared weights."""
         from neobert.huggingface.modeling_neobert import NeoBERT as HFNeoBERT

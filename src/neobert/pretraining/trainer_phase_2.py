@@ -182,10 +182,15 @@ def trainer(cfg: Config) -> None:
         end_factor=1.0,
         total_iters=cfg.scheduler.warmup_steps,
     )
+    decay_duration = cfg.scheduler.decay_steps - cfg.scheduler.warmup_steps
+    if decay_duration <= 0:
+        raise ValueError(
+            "decay_steps must be greater than warmup_steps for SequentialLR."
+        )
     if cfg.scheduler.decay == "cosine":
         scheduler2 = CosineAnnealingLR(
             optimizer,
-            T_max=cfg.scheduler.decay_steps,
+            T_max=decay_duration,
             eta_min=cfg.optimizer.hparams.lr * 0.1,
         )
     else:
@@ -193,7 +198,7 @@ def trainer(cfg: Config) -> None:
             optimizer,
             start_factor=1.0,
             end_factor=0.1,
-            total_iters=cfg.scheduler.decay_steps,
+            total_iters=decay_duration,
         )
 
     def _constant_min_lr(_: int) -> float:

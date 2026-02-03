@@ -20,10 +20,10 @@ def get_scheduler(
     :param torch.optim.Optimizer optimizer: Optimizer to schedule.
     :param float lr: Base learning rate.
     :param str decay: Decay type (``cosine`` or ``linear``).
-    :param int warmup_steps: Steps for linear warmup.
-    :param int decay_steps: Steps for decay schedule.
+    :param int warmup_steps: Number of warmup steps at the start.
+    :param int decay_steps: Final step index where decay should finish.
     :param float final_ratio: Final LR multiplier after decay.
-    :param int constant_steps: Optional constant plateau steps.
+    :param int constant_steps: Optional plateau steps after warmup.
     :param Any kwargs: Unused extra scheduler arguments.
     :return SequentialLR: Configured scheduler.
     """
@@ -33,36 +33,50 @@ def get_scheduler(
             f"Decay {decay} is not a valid type. Options are cosine and linear."
         )
 
-    assert (constant_steps == 0 and warmup_steps < decay_steps) or (
-        warmup_steps < constant_steps and constant_steps < decay_steps
-    ), (
-        "warmup_steps, constant_steps and decay_steps are milestones parameters, not total number of steps for each scheduler."
-    )
+    if warmup_steps < 0 or constant_steps < 0:
+        raise ValueError("warmup_steps and constant_steps must be non-negative.")
+    if decay_steps <= warmup_steps + constant_steps:
+        raise ValueError(
+            "decay_steps must be greater than warmup_steps + constant_steps."
+        )
 
     schedulers = []
     milestones = []
+    current_step = 0
 
     # Warmup scheduler
-    schedulers.append(
-        LinearLR(optimizer, start_factor=1e-4, end_factor=1.0, total_iters=warmup_steps)
-    )
-    milestones.append(warmup_steps)
+    if warmup_steps > 0:
+        schedulers.append(
+            LinearLR(
+                optimizer,
+                start_factor=1e-4,
+                end_factor=1.0,
+                total_iters=warmup_steps,
+            )
+        )
+        current_step += warmup_steps
+        milestones.append(current_step)
 
     # Optional constant scheduler at peak learning rate
-    if constant_steps:
+    if constant_steps > 0:
         schedulers.append(LambdaLR(optimizer, lr_lambda=lambda _: 1))
-        milestones.append(constant_steps)
+        current_step += constant_steps
+        milestones.append(current_step)
 
-    # Decay scheduler
+    # Decay scheduler runs until decay_steps.
+    decay_duration = decay_steps - current_step
     schedulers.append(
-        CosineAnnealingLR(optimizer, T_max=decay_steps, eta_min=lr * final_ratio)
+        CosineAnnealingLR(optimizer, T_max=decay_duration, eta_min=lr * final_ratio)
         if decay == "cosine"
         else LinearLR(
-            optimizer, start_factor=1.0, end_factor=final_ratio, total_iters=decay_steps
+            optimizer,
+            start_factor=1.0,
+            end_factor=final_ratio,
+            total_iters=decay_duration,
         )
     )
-
-    milestones.append(decay_steps)
+    current_step += decay_duration
+    milestones.append(current_step)
 
     # Final constant scheduler at lowest learning rate
     def _constant_min_lr(_: int) -> float:

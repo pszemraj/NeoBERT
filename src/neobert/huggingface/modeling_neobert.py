@@ -23,7 +23,6 @@ from typing import Any, Optional, Union
 import torch
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
-from torch.nn.functional import scaled_dot_product_attention
 
 from transformers import PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import (
@@ -33,9 +32,15 @@ from transformers.modeling_outputs import (
 )
 
 try:
-    from ..modeling_utils import swiglu_intermediate_size
-except ImportError:  # pragma: no cover - triggered in exported HF repo layout.
-    from modeling_utils import swiglu_intermediate_size
+    from .modeling_utils import swiglu_intermediate_size
+    from .modeling_utils import scaled_dot_product_attention_compat
+except ImportError:  # pragma: no cover - in-package import path.
+    try:
+        from ..modeling_utils import swiglu_intermediate_size
+        from ..modeling_utils import scaled_dot_product_attention_compat
+    except ImportError:  # pragma: no cover - triggered in exported HF repo layout.
+        from modeling_utils import swiglu_intermediate_size
+        from modeling_utils import scaled_dot_product_attention_compat
 from .rotary import apply_rotary_emb, precompute_freqs_cis
 
 
@@ -56,6 +61,8 @@ class NeoBERTConfig(PretrainedConfig):
         vocab_size: Size of the vocabulary.
         pad_token_id: Token ID used for padding.
         max_length: Maximum sequence length the model can handle.
+        ngpt: Whether nGPT-style normalization is enabled (unsupported in HF export).
+        base_scale: Base scaling factor for nGPT (retained for config parity).
         **kwargs: Additional configuration parameters.
 
     Attributes:
@@ -82,6 +89,8 @@ class NeoBERTConfig(PretrainedConfig):
         hidden_act: str = "swiglu",
         dropout: float = 0.0,
         flash_attention: bool = False,
+        ngpt: bool = False,
+        base_scale: float = 1.0 / (960.0**0.5),
         **kwargs: Any,
     ) -> None:
         """Initialize the NeoBERT configuration.
@@ -101,6 +110,8 @@ class NeoBERTConfig(PretrainedConfig):
         :param str hidden_act: Activation name ("swiglu" or "gelu").
         :param float dropout: Dropout probability for residual/MLP blocks.
         :param bool flash_attention: Whether to prefer flash attention backends.
+        :param bool ngpt: Whether to enable nGPT-style normalization (unsupported here).
+        :param float base_scale: Base scaling factor for nGPT compatibility.
         :param Any kwargs: Additional configuration parameters.
         """
         super().__init__(**kwargs)
@@ -130,6 +141,8 @@ class NeoBERTConfig(PretrainedConfig):
         self.dropout = dropout
         # Retained for config.json compatibility with training configs; silently ignored.
         self.flash_attention = flash_attention
+        self.ngpt = ngpt
+        self.base_scale = base_scale
         self.vocab_size = vocab_size
         self.pad_token_id = pad_token_id
         self.max_length = max_length
@@ -337,7 +350,7 @@ class EncoderBlock(nn.Module):
             attn = attn.transpose(1, 2)
         # Scaled dot-product attention (default)
         else:
-            attn = scaled_dot_product_attention(
+            attn = scaled_dot_product_attention_compat(
                 query=xq.transpose(1, 2),
                 key=xk.transpose(1, 2),
                 value=xv.transpose(1, 2),
@@ -405,6 +418,11 @@ class NeoBERT(NeoBERTPreTrainedModel):
         super().__init__(config)
 
         self.config = config
+        if getattr(config, "ngpt", False):
+            raise ValueError(
+                "ngpt/NormNeoBERT is not supported in the HF export path. "
+                "Export a non-ngpt checkpoint or use the training model."
+            )
 
         # Token embeddings
         self.encoder = nn.Embedding(

@@ -376,7 +376,7 @@ class TestPretrainComponents(unittest.TestCase):
             lr=config.optimizer.lr,
             decay=config.scheduler.name,
             warmup_steps=config.scheduler.warmup_steps,
-            decay_steps=config.scheduler.total_steps - config.scheduler.warmup_steps,
+            decay_steps=config.scheduler.total_steps,
         )
 
         self.assertIsNotNone(scheduler)

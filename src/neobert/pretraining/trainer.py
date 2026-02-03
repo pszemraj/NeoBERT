@@ -174,6 +174,27 @@ def _scale_gradients(model: torch.nn.Module, scale: torch.Tensor) -> None:
         grad.mul_(scale_value)
 
 
+def _resolve_tokenize_num_proc(
+    requested: Optional[int],
+    num_processes: int,
+    is_main_process: bool,
+) -> int:
+    """Resolve per-rank num_proc for dataset tokenization.
+
+    :param int | None requested: Requested num_proc from config (or None).
+    :param int num_processes: Number of distributed processes.
+    :param bool is_main_process: Whether the caller is the main process.
+    :return int: Effective num_proc for this rank.
+    """
+    if requested is None or requested <= 0:
+        requested = len(os.sched_getaffinity(0))
+    if num_processes > 1:
+        requested = max(1, requested // num_processes)
+        if not is_main_process:
+            requested = 1
+    return max(1, requested)
+
+
 def to_target_batch_size(
     batch: BatchEncoding,
     stored_batch: BatchEncoding,
@@ -364,7 +385,8 @@ def trainer(cfg: Config) -> None:
         automatic_checkpoint_naming=False,  # We handle checkpointing manually in model_checkpoints/
         iteration=iteration,
     )
-    kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    # All parameters participate in the forward graph; keep DDP in fast-path mode.
+    kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
     wandb_enabled = cfg.wandb.enabled and cfg.wandb.mode != "disabled"
     accelerator = Accelerator(
         step_scheduler_with_optimizer=False,  # enable manual control of the scheduler
@@ -505,6 +527,8 @@ def trainer(cfg: Config) -> None:
                 output_dir = f"tokenized_data/{cfg.dataset.name.replace('/', '_')}"
 
             Path(output_dir).mkdir(parents=True, exist_ok=True)
+            success_flag = Path(output_dir) / ".tokenize_complete"
+            failure_flag = Path(output_dir) / ".tokenize_failed"
 
             # Run tokenization script
             accelerator.print(f"Pre-tokenizing dataset to: {output_dir}")
@@ -517,29 +541,41 @@ def trainer(cfg: Config) -> None:
                 / "tokenize_dataset.py"
             )
 
-            cmd = [
-                "python",
-                str(script_path),
-                "--dataset",
-                cfg.dataset.name,
-                "--tokenizer",
-                cfg.tokenizer.path or cfg.tokenizer.name,
-                "--output",
-                output_dir,
-                "--max-length",
-                str(cfg.dataset.max_seq_length),
-            ]
+            if accelerator.is_main_process and not success_flag.exists():
+                cmd = [
+                    "python",
+                    str(script_path),
+                    "--dataset",
+                    cfg.dataset.name,
+                    "--tokenizer",
+                    cfg.tokenizer.path or cfg.tokenizer.name,
+                    "--output",
+                    output_dir,
+                    "--max-length",
+                    str(cfg.dataset.max_seq_length),
+                ]
 
-            if cfg.dataset.train_split:
-                cmd.extend(["--split", cfg.dataset.train_split])
+                if cfg.dataset.train_split:
+                    cmd.extend(["--split", cfg.dataset.train_split])
 
-            if cfg.dataset.num_proc:
-                cmd.extend(["--num-proc", str(cfg.dataset.num_proc)])
+                if cfg.dataset.num_proc:
+                    cmd.extend(["--num-proc", str(cfg.dataset.num_proc)])
 
-            # Run the tokenization
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                raise RuntimeError(f"Tokenization failed: {result.stderr}")
+                # Run the tokenization on the main process only.
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode != 0:
+                    failure_flag.write_text(result.stderr)
+                else:
+                    success_flag.write_text("ok")
+
+            accelerator.wait_for_everyone()
+            if not success_flag.exists():
+                err_msg = (
+                    failure_flag.read_text()
+                    if failure_flag.exists()
+                    else "Pre-tokenization failed; see main process logs."
+                )
+                raise RuntimeError(f"Tokenization failed: {err_msg}")
 
             accelerator.print(f"Pre-tokenization complete. Loading from: {output_dir}")
             # Load the pre-tokenized dataset
@@ -547,17 +583,27 @@ def trainer(cfg: Config) -> None:
         else:
             # Determine text column
             text_column = _resolve_text_column(train_dataset, is_streaming)
+            tokenize_num_proc = (
+                None
+                if is_streaming
+                else _resolve_tokenize_num_proc(
+                    cfg.dataset.num_proc,
+                    accelerator.num_processes,
+                    accelerator.is_main_process,
+                )
+            )
 
             # Tokenize dataset
-            train_dataset = tokenize(
-                train_dataset,
-                tokenizer,
-                column_name=text_column,
-                max_length=cfg.dataset.max_seq_length,
-                remove_columns=True,
-                truncation=True,
-                num_proc=cfg.dataset.num_proc if not cfg.dataset.streaming else None,
-            )
+            with accelerator.main_process_first():
+                train_dataset = tokenize(
+                    train_dataset,
+                    tokenizer,
+                    column_name=text_column,
+                    max_length=cfg.dataset.max_seq_length,
+                    remove_columns=True,
+                    truncation=True,
+                    num_proc=tokenize_num_proc,
+                )
         if cfg.dataset.streaming:
             accelerator.print("Tokenization setup complete for streaming dataset.")
         else:
@@ -609,15 +655,25 @@ def trainer(cfg: Config) -> None:
             from neobert.tokenizer import tokenize
 
             text_column = _resolve_text_column(eval_dataset, eval_is_streaming)
-            eval_dataset = tokenize(
-                eval_dataset,
-                tokenizer,
-                column_name=text_column,
-                max_length=cfg.dataset.max_seq_length,
-                remove_columns=True,
-                truncation=True,
-                num_proc=cfg.dataset.num_proc if not eval_is_streaming else None,
+            eval_num_proc = (
+                None
+                if eval_is_streaming
+                else _resolve_tokenize_num_proc(
+                    cfg.dataset.num_proc,
+                    accelerator.num_processes,
+                    accelerator.is_main_process,
+                )
             )
+            with accelerator.main_process_first():
+                eval_dataset = tokenize(
+                    eval_dataset,
+                    tokenizer,
+                    column_name=text_column,
+                    max_length=cfg.dataset.max_seq_length,
+                    remove_columns=True,
+                    truncation=True,
+                    num_proc=eval_num_proc,
+                )
 
         if not eval_is_streaming:
             accelerator.print(f"Eval dataset size: {len(eval_dataset)}")
@@ -824,6 +880,12 @@ def trainer(cfg: Config) -> None:
     local_num_pred = torch.zeros((), device=accelerator.device, dtype=torch.long)
     local_sum_loss = torch.zeros((), device=accelerator.device, dtype=torch.float32)
     local_num_correct = torch.zeros((), device=accelerator.device, dtype=torch.long)
+    stored_batch = {
+        "input_ids": None,
+        "attention_mask": None,
+        "labels": None,
+        "packed_seqlens": None,
+    }
     while cfg.trainer.max_steps > metrics["train/steps"]:
         # Use skipped_train_dataloader the first epoch after resuming
         dataloader = (
@@ -831,19 +893,7 @@ def trainer(cfg: Config) -> None:
             if skipped_train_dataloader is None
             else skipped_train_dataloader
         )
-
-        stored_batch = {
-            "input_ids": None,
-            "attention_mask": None,
-            "labels": None,
-            "packed_seqlens": None,
-        }
-        i = 0
         for batch in dataloader:
-            # Update number of batches
-            metrics["train/batches"] += 1
-            i += 1
-
             # Pack or truncate the batch to target batch size (batch size might be variable due to sequence packing).
             # Skip batch buffering when using packed sequences, as packed_seqlens metadata would be lost.
             is_packed = batch.get("packed_seqlens") is not None
@@ -865,6 +915,9 @@ def trainer(cfg: Config) -> None:
             ):
                 stored_batch = batch
                 continue
+
+            # Update number of batches only when we will execute a backward pass.
+            metrics["train/batches"] += 1
 
             num_pred = (batch["labels"] != -100).sum()
             num_tokens = (batch["input_ids"] != model_config.pad_token_id).sum()
