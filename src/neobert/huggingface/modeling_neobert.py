@@ -120,6 +120,7 @@ class NeoBERTConfig(PretrainedConfig):
         self.decoder_init_range = decoder_init_range
         self.norm_eps = norm_eps
         self.rms_norm = rms_norm
+        # Keep rope=False for ablations and CPU-only tests; HF export supports it.
         self.rope = rope
         normalized_act = str(hidden_act).lower()
         if normalized_act not in {"swiglu", "gelu"}:
@@ -135,6 +136,7 @@ class NeoBERTConfig(PretrainedConfig):
             )
             dropout = kwargs["dropout_prob"]
         self.dropout = dropout
+        # Retained for config.json compatibility with training configs; ignored here.
         self.flash_attention = flash_attention
         if self.flash_attention:
             warnings.warn(
@@ -244,6 +246,7 @@ class EncoderBlock(nn.Module):
                 bias=False,
             )
         elif config.hidden_act == "gelu":
+            # Keep GELU for CPU-only tests/ablations; SwiGLU is default.
             self.ffn = nn.Sequential(
                 nn.Linear(config.hidden_size, config.intermediate_size, bias=False),
                 nn.GELU(),
@@ -331,7 +334,7 @@ class EncoderBlock(nn.Module):
                 self.config.num_attention_heads,
                 self.config.dim_head * 3,
             )
-            .chunk(3, axis=-1)
+            .chunk(3, dim=-1)
         )
 
         # Apply rotary position embeddings to Q and K
@@ -503,7 +506,8 @@ class NeoBERT(NeoBERTPreTrainedModel):
 
                 # If there's no padding, a fully True mask is the common HF keep-all
                 # convention, while an all-False mask is the SDPA keep-all convention.
-                # Mixed True/False is ambiguous; require callers to disambiguate.
+                # Mixed True/False is ambiguous; require callers to disambiguate
+                # rather than silently invert the meaning.
                 if attention_mask.all().item():
                     return ~attention_mask
                 if not attention_mask.any().item():
@@ -556,7 +560,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
                 - attentions: Attention weights from all layers (if requested)
 
         """
-        # Initialize containers for outputs
+        # Initialize containers for outputs (HF contract, populated only if requested).
         hidden_states, attentions = [], []
 
         # Prepare attention mask for multi-head attention.
@@ -571,6 +575,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
                     "attention_mask must match input_ids shape for HF export "
                     f"(got {attention_mask.shape} vs {input_ids.shape})."
                 )
+            # Encoder-only key padding mask, broadcast across query positions.
             # Keep mask in (B, 1, 1, S) form to avoid O(S^2) materialization.
             attention_mask = attention_mask[:, None, None, :]
 
@@ -599,7 +604,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
         # Token embeddings
         x = self.encoder(input_ids)
 
-        # Add learned positional embeddings if RoPE is disabled
+        # Add learned positional embeddings if RoPE is disabled (ablations/tests).
         if not self.config.rope:
             if position_ids is not None:
                 pos_ids = position_ids

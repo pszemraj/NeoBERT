@@ -384,7 +384,7 @@ class EncoderBlock(nn.Module):
                 self.config.num_attention_heads,
                 self.config.dim_head * 3,
             )
-            .chunk(3, axis=-1)
+            .chunk(3, dim=-1)
         )
 
         if self.config.rope:
@@ -570,7 +570,7 @@ class NormEncoderBlock(nn.Module):
                 self.config.num_attention_heads,
                 self.config.dim_head * 3,
             )
-            .chunk(3, axis=-1)
+            .chunk(3, dim=-1)
         )
 
         if self.config.rope:

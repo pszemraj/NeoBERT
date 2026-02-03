@@ -50,6 +50,7 @@ class CustomCollatorForMLM(DataCollatorForLanguageModeling):
         return inputs, labels
 
 
+# Training-only collator for packed-sequence pretraining (not used in HF export).
 class DataCollatorWithPacking(DefaultDataCollator):
     """Data collator used for padding-free sequence packing.
 
