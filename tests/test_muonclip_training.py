@@ -184,7 +184,6 @@ def main():
     streaming_dataset = build_fineweb_stream(tokenizer, seq_len=seq_len)
     collator = get_collator(
         tokenizer=tokenizer,
-        dtype=torch.float32,
         mlm_probability=0.15,
         pad_to_multiple_of=8,
         max_length=seq_len,

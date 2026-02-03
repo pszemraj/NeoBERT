@@ -21,15 +21,12 @@ bash scripts/evaluation/glue/run_all_glue.sh
 
 ### Config essentials
 
-GLUE configs live in `configs/glue/` and include both **model** and **glue** sections. The GLUE trainer reads a few extra fields from the raw `model` block, so keep these in place:
+GLUE configs live in `configs/glue/` and include both **model** and **glue** sections. Pretrained-model metadata now lives under `glue.*`:
 
 ```yaml
 task: glue
 
 model:
-  pretrained_checkpoint_dir: ./outputs/neobert_pretrain
-  pretrained_checkpoint: 100000  # or "latest"
-  pretrained_config_path: ./outputs/neobert_pretrain/model_checkpoints/100000/config.yaml
   # Optional when testing with random weights:
   hidden_size: 768
   num_hidden_layers: 12
@@ -44,17 +41,17 @@ glue:
   task_name: cola
   num_labels: 2
   max_seq_length: 512
+  pretrained_checkpoint_dir: ./outputs/neobert_pretrain
+  pretrained_checkpoint: 100000  # or "latest"
+  pretrained_model_path: ./outputs/neobert_pretrain/model_checkpoints/100000/config.yaml
   allow_random_weights: false
 ```
 
 ### Random-weights sanity checks
 
-For smoke tests, set **either** of the following:
+For smoke tests, set:
 
 ```yaml
-model:
-  allow_random_weights: true
-# or
 glue:
   allow_random_weights: true
 ```
@@ -99,7 +96,7 @@ Notes:
 
 - Flash attention errors on GLUE: expected (forced off).
 - OOM: lower `trainer.per_device_train_batch_size` and/or enable `trainer.gradient_checkpointing`.
-- Random or flat metrics: verify `pretrained_config_path` and checkpoint paths.
+- Random or flat metrics: verify `glue.pretrained_model_path` and checkpoint paths.
 
 ## Next Steps
 

@@ -32,7 +32,7 @@ from ..model import NeoBERT, NeoBERTConfig
 from ..optimizer import get_optimizer
 from ..scheduler import get_scheduler
 from ..tokenizer import get_tokenizer
-from ..utils import prepare_wandb_config
+from ..utils import configure_tf32, prepare_wandb_config
 from .datasets import get_bsz
 from .loss import SupConLoss
 from .metrics import Metrics
@@ -192,20 +192,18 @@ def trainer(cfg: Config) -> None:
     # Set the seed
     set_seed(cfg.seed)
 
-    # Enable TF32 on matmul and on cuDNN (if available)
-    if torch.cuda.is_available():
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+    # Configure TF32 for supported GPUs
+    configure_tf32(enabled=cfg.trainer.tf32, print_fn=accelerator.print)
 
     # Local and global counters
     metrics = Metrics()
     accelerator.register_for_checkpointing(metrics)
+    log_interval = max(1, cfg.trainer.logging_steps)
 
     # Tokenizer
     tokenizer = get_tokenizer(
         pretrained_model_name_or_path=cfg.tokenizer.path or cfg.tokenizer.name,
         max_length=cfg.tokenizer.max_length,
-        vocab_size=cfg.tokenizer.vocab_size or cfg.model.vocab_size,
     )
 
     # Dataset
@@ -265,7 +263,7 @@ def trainer(cfg: Config) -> None:
         norm_eps=cfg.model.norm_eps,
         embedding_init_range=cfg.model.embedding_init_range,
         decoder_init_range=cfg.model.decoder_init_range,
-        flash_attention=cfg.model.flash_attention,
+        flash_attention=cfg.model.xformers_attention,
         ngpt=cfg.model.ngpt,
         base_scale=cfg.model.base_scale,
         pad_token_id=tokenizer.pad_token_id,
@@ -373,6 +371,7 @@ def trainer(cfg: Config) -> None:
         decay=cfg.scheduler.name,
         warmup_steps=min(cfg.scheduler.warmup_steps, cfg.trainer.max_steps),
         decay_steps=decay_steps,
+        final_ratio=cfg.scheduler.final_lr_ratio,
         constant_steps=0,
     )
 
@@ -589,27 +588,29 @@ def trainer(cfg: Config) -> None:
             metrics["train/local_samples"] += batch["input_ids_queries"].shape[0]
             metrics["train/local_sum_loss"] += train_loss.item()
 
-            if metrics["train/steps"] % cfg.wandb.log_interval == 0:
+            if metrics["train/steps"] % log_interval == 0:
                 # https://deepspeed.readthedocs.io/en/latest/zero3.html#deepspeed.utils.safe_get_full_grad
                 if accelerator.distributed_type is DistributedType.DEEPSPEED:
                     metrics["train/grad_norm"] = model.get_global_grad_norm()  # .item()
-                    metrics["train/weight_norm"] = (
-                        sum(
-                            [
-                                safe_get_full_fp32_param(p).norm(2) ** 2
-                                for p in model.parameters()
-                            ]
-                        )
-                        ** 0.5
-                    ).item()
+                    if cfg.trainer.log_weight_norms and accelerator.is_main_process:
+                        metrics["train/weight_norm"] = (
+                            sum(
+                                [
+                                    safe_get_full_fp32_param(p).norm(2) ** 2
+                                    for p in model.parameters()
+                                ]
+                            )
+                            ** 0.5
+                        ).item()
                 # DDP
                 else:
                     metrics["train/grad_norm"] = (
                         sum([p.grad.norm(2) ** 2 for p in model.parameters()]) ** 0.5
                     ).item()
-                    metrics["train/weight_norm"] = (
-                        sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5
-                    ).item()
+                    if cfg.trainer.log_weight_norms and accelerator.is_main_process:
+                        metrics["train/weight_norm"] = (
+                            sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5
+                        ).item()
 
                 metrics["train/learning_rate"] = optimizer.param_groups[0]["lr"]
                 metrics.log(accelerator)

@@ -52,7 +52,7 @@ python scripts/pretraining/pretrain.py \
 
 See [docs/configuration.md](configuration.md) for the full schema. Key knobs used during pretraining:
 
-- `model.*`: architecture (e.g., `hidden_size`, `num_hidden_layers`, `rope`, `rms_norm`, `flash_attention`)
+- `model.*`: architecture (e.g., `hidden_size`, `num_hidden_layers`, `rope`, `rms_norm`, `xformers_attention`)
 - `dataset.*`: dataset source, streaming, splits, and tokenization settings
 - `tokenizer.*`: tokenizer name/path and max length
 - `datacollator.*`: MLM masking, padding, and packing (`mlm_probability`, `mask_all`, `pad_to_multiple_of`, `pack_sequences`)
@@ -61,16 +61,15 @@ See [docs/configuration.md](configuration.md) for the full schema. Key knobs use
 - `wandb.*`: tracking controls
 
 Note: `datacollator.pack_sequences` uses xFormers block-diagonal attention in pretraining
-and is experimental. It requires `model.flash_attention: true` (xFormers installed).
+and is experimental. It requires `model.xformers_attention: true` (xFormers installed).
 See `docs/dev.md`.
 
 > [!NOTE]
-> Pretraining uses the **top-level** `mixed_precision` field. Other training scripts read `trainer.mixed_precision`. To keep behavior consistent across scripts, set both.
+> All training entrypoints read `trainer.mixed_precision`. Use that field for consistency.
 
 Example (minimal):
 
 ```yaml
-mixed_precision: bf16
 trainer:
   mixed_precision: bf16
   per_device_train_batch_size: 32
@@ -162,8 +161,8 @@ otherwise to `tokenized_data/<dataset-name>/`.
 
 - **Gradient checkpointing**: `trainer.gradient_checkpointing: true`
 - **Gradient clipping**: `trainer.gradient_clipping: 1.0`
-- **Mixed precision**: set `mixed_precision: bf16` (and `trainer.mixed_precision: bf16`)
-- **Flash attention**: `model.flash_attention: true` requires `xformers`
+- **Mixed precision**: set `trainer.mixed_precision: bf16`
+- **xFormers attention**: `model.xformers_attention: true` requires `xformers`
 
 ## Multi-GPU Launches
 

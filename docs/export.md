@@ -72,15 +72,15 @@ The export script maps NeoBERT config fields to HF config fields, including:
 | `rope`                    | `rope`                    | Rotary embeddings   |
 | `hidden_act`              | `hidden_act`              | `swiglu` or `gelu`  |
 | `dropout_prob`            | `dropout`                 | Dropout probability |
-| `flash_attention`         | `flash_attention`         | Backend toggle      |
+| `xformers_attention`      | `flash_attention`         | Backend toggle      |
 
 Notes:
 
 - Export supports `hidden_act: swiglu` and `hidden_act: gelu` only.
 - `ngpt` (NormNeoBERT) checkpoints are not exportable via the HF path.
 - The HF export expects **unpacked** SwiGLU weights (`w1/w2/w3`) from training.
-- `flash_attention` is carried through for config parity but is **ignored** by the
-  exported HF model (it always uses SDPA/eager attention).
+- `xformers_attention` is carried through as `flash_attention` for HF config parity
+  but is **ignored** by the exported HF model (it always uses SDPA/eager attention).
 - Packed-sequence inputs are **not** supported in the exported HF model. Vanilla
   Transformers expect standard (unpadded) batches + attention masks; do not pass
   `cu_seqlens`/`max_seqlen` or block-diagonal packed masks to the exported model.

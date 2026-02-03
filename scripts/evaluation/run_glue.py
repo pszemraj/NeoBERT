@@ -27,7 +27,8 @@ def main() -> None:
     if args.task_name:
         config.glue.task_name = args.task_name
     if args.model_name_or_path:
-        config.model.name_or_path = args.model_name_or_path
+        config.model.name = args.model_name_or_path
+        config.model.from_hub = True
     if args.output_dir:
         config.trainer.output_dir = args.output_dir
 

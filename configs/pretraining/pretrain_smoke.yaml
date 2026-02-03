@@ -1,5 +1,4 @@
 task: "pretraining"
-mixed_precision: "bf16"
 
 model:
   hidden_size: 768
@@ -9,7 +8,7 @@ model:
   dropout_prob: 0.0
   vocab_size: 30522
   max_position_embeddings: 256
-  flash_attention: false
+  xformers_attention: false
   ngpt: false
   hidden_act: "gelu"
   rope: true
@@ -42,7 +41,7 @@ trainer:
   eval_steps: 200
   save_total_limit: 1
   gradient_checkpointing: false
-  bf16: true
+  mixed_precision: "bf16"
 
 optimizer:
   name: "adamw"

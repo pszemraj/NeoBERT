@@ -2,7 +2,8 @@
 
 import argparse
 import warnings
-from dataclasses import asdict, dataclass, field
+from copy import deepcopy
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -23,6 +24,7 @@ def round_up_to_multiple(x: int, N: int = 128) -> int:
 class ModelConfig:
     """Model architecture and initialization settings."""
 
+    name: Optional[str] = None
     hidden_size: int = 768
     num_hidden_layers: int = 12
     num_attention_heads: int = 12
@@ -37,10 +39,11 @@ class ModelConfig:
     embedding_init_range: float = 0.02
     decoder_init_range: float = 0.02
     classifier_init_range: float = 0.02
-    flash_attention: bool = True
+    xformers_attention: bool = True
     ngpt: bool = False
     base_scale: float = 1.0 / (960.0**0.5)
     pad_token_id: int = 0
+    from_hub: bool = False
 
 
 @dataclass
@@ -48,11 +51,13 @@ class DatasetConfig:
     """Dataset loading and preprocessing configuration."""
 
     name: str = "refinedweb"
+    config: Optional[str] = None
     path: str = ""
     num_workers: int = 16
     streaming: bool = True
     cache_dir: Optional[str] = None
     max_seq_length: int = 512
+    text_column: Optional[str] = None
     validation_split: Optional[float] = None
     train_split: Optional[str] = None
     eval_split: Optional[str] = None
@@ -134,6 +139,7 @@ class SchedulerConfig:
     total_steps: Optional[int] = None
     num_cycles: float = 0.5
     decay_steps: int = 50000  # For contrastive training
+    final_lr_ratio: float = 0.1
     warmup_percent: Optional[float] = None
     decay_percent: Optional[float] = None
 
@@ -152,11 +158,9 @@ class TrainerConfig:
     logging_steps: int = 100
     output_dir: str = "./output"
     overwrite_output_dir: bool = True
-    bf16: bool = True
     gradient_checkpointing: bool = False
     gradient_clipping: Optional[float] = None
     mixed_precision: str = "bf16"
-    seed: int = 42
     resume_from_checkpoint: Optional[str] = None
 
     # Training control
@@ -177,6 +181,7 @@ class TrainerConfig:
     report_to: List[str] = field(default_factory=list)
     tf32: bool = True
     max_ckpt: int = 3
+    log_weight_norms: bool = False
     # Legacy batch size fields (use per_device versions instead)
     train_batch_size: Optional[int] = None
     eval_batch_size: Optional[int] = None
@@ -265,7 +270,6 @@ class Config:
 
     # Accelerate config
     accelerate_config_file: Optional[str] = None
-    mixed_precision: str = "bf16"
 
     # MTEB-specific
     mteb_task_type: str = "all"  # all, classification, clustering, etc.
@@ -322,19 +326,373 @@ class ConfigLoader:
         return result
 
     @staticmethod
+    def _warn_legacy(message: str) -> None:
+        """Emit a deprecation warning for legacy config keys.
+
+        :param str message: Warning message.
+        """
+        warnings.warn(message, UserWarning, stacklevel=3)
+
+    @staticmethod
+    def _normalize_legacy_keys(cfg_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize legacy config keys into the canonical schema.
+
+        :param dict[str, Any] cfg_dict: Raw configuration mapping.
+        :return dict[str, Any]: Normalized configuration mapping.
+        """
+        normalized: Dict[str, Any] = deepcopy(cfg_dict or {})
+
+        def _section(name: str) -> Dict[str, Any]:
+            section = normalized.get(name)
+            if section is None:
+                section = {}
+                normalized[name] = section
+            return section
+
+        # Top-level mixed_precision -> trainer.mixed_precision
+        if "mixed_precision" in normalized:
+            mp = normalized.pop("mixed_precision")
+            trainer = _section("trainer")
+            if "mixed_precision" in trainer and trainer["mixed_precision"] != mp:
+                raise ValueError(
+                    "Both top-level 'mixed_precision' and 'trainer.mixed_precision' are set "
+                    "with different values; remove one to avoid ambiguity."
+                )
+            trainer.setdefault("mixed_precision", mp)
+            ConfigLoader._warn_legacy(
+                "Config key 'mixed_precision' is deprecated; use 'trainer.mixed_precision' instead."
+            )
+
+        trainer = normalized.get("trainer", {})
+        if isinstance(trainer, dict):
+            # trainer.bf16 -> trainer.mixed_precision
+            if "bf16" in trainer:
+                bf16 = trainer.pop("bf16")
+                mp = "bf16" if bf16 else "no"
+                if "mixed_precision" in trainer and trainer["mixed_precision"] != mp:
+                    raise ValueError(
+                        "Both 'trainer.bf16' and 'trainer.mixed_precision' are set with "
+                        "different values; remove one to avoid ambiguity."
+                    )
+                trainer.setdefault("mixed_precision", mp)
+                ConfigLoader._warn_legacy(
+                    "Config key 'trainer.bf16' is deprecated; use 'trainer.mixed_precision'."
+                )
+
+            # trainer.seed -> seed
+            if "seed" in trainer:
+                seed = trainer.pop("seed")
+                if "seed" in normalized and normalized["seed"] != seed:
+                    raise ValueError(
+                        "Both top-level 'seed' and 'trainer.seed' are set with different values."
+                    )
+                normalized.setdefault("seed", seed)
+                ConfigLoader._warn_legacy(
+                    "Config key 'trainer.seed' is deprecated; use top-level 'seed'."
+                )
+
+            # trainer.run_name -> wandb.name
+            if "run_name" in trainer:
+                run_name = trainer.pop("run_name")
+                wandb = _section("wandb")
+                if "name" in wandb and wandb["name"] not in (None, run_name):
+                    raise ValueError(
+                        "Both 'trainer.run_name' and 'wandb.name' are set with different values."
+                    )
+                wandb.setdefault("name", run_name)
+                ConfigLoader._warn_legacy(
+                    "Config key 'trainer.run_name' is deprecated; use 'wandb.name'."
+                )
+
+            # trainer.learning_rate -> optimizer.lr
+            if "learning_rate" in trainer:
+                lr = trainer.pop("learning_rate")
+                optimizer = _section("optimizer")
+                if "lr" in optimizer and optimizer["lr"] != lr:
+                    raise ValueError(
+                        "Both 'trainer.learning_rate' and 'optimizer.lr' are set with different values."
+                    )
+                optimizer.setdefault("lr", lr)
+                ConfigLoader._warn_legacy(
+                    "Config key 'trainer.learning_rate' is deprecated; use 'optimizer.lr'."
+                )
+
+            # trainer.warmup_steps -> scheduler.warmup_steps
+            if "warmup_steps" in trainer:
+                warmup = trainer.pop("warmup_steps")
+                scheduler = _section("scheduler")
+                if "warmup_steps" in scheduler and scheduler["warmup_steps"] != warmup:
+                    raise ValueError(
+                        "Both 'trainer.warmup_steps' and 'scheduler.warmup_steps' are set with "
+                        "different values."
+                    )
+                scheduler.setdefault("warmup_steps", warmup)
+                ConfigLoader._warn_legacy(
+                    "Config key 'trainer.warmup_steps' is deprecated; use 'scheduler.warmup_steps'."
+                )
+
+            # trainer.max_grad_norm -> trainer.gradient_clipping
+            if "max_grad_norm" in trainer:
+                max_grad_norm = trainer.pop("max_grad_norm")
+                if (
+                    "gradient_clipping" in trainer
+                    and trainer["gradient_clipping"] != max_grad_norm
+                ):
+                    raise ValueError(
+                        "Both 'trainer.max_grad_norm' and 'trainer.gradient_clipping' are set "
+                        "with different values."
+                    )
+                trainer.setdefault("gradient_clipping", max_grad_norm)
+                ConfigLoader._warn_legacy(
+                    "Config key 'trainer.max_grad_norm' is deprecated; use 'trainer.gradient_clipping'."
+                )
+
+            # trainer.dir -> trainer.output_dir
+            if "dir" in trainer:
+                out_dir = trainer.pop("dir")
+                if "output_dir" in trainer and trainer["output_dir"] != out_dir:
+                    raise ValueError(
+                        "Both 'trainer.dir' and 'trainer.output_dir' are set with different values."
+                    )
+                trainer.setdefault("output_dir", out_dir)
+                ConfigLoader._warn_legacy(
+                    "Config key 'trainer.dir' is deprecated; use 'trainer.output_dir'."
+                )
+
+            # trainer.remove_unused_columns is not used; drop with a warning.
+            if "remove_unused_columns" in trainer:
+                trainer.pop("remove_unused_columns")
+                ConfigLoader._warn_legacy(
+                    "Config key 'trainer.remove_unused_columns' is ignored by NeoBERT; "
+                    "remove it from your config."
+                )
+
+        # dataset.tokenizer_name -> tokenizer.name
+        dataset = normalized.get("dataset", {})
+        if isinstance(dataset, dict):
+            if "tokenizer_name" in dataset:
+                tokenizer_name = dataset.pop("tokenizer_name")
+                tokenizer = _section("tokenizer")
+                if "name" in tokenizer and tokenizer["name"] not in (
+                    None,
+                    tokenizer_name,
+                ):
+                    raise ValueError(
+                        "Both 'dataset.tokenizer_name' and 'tokenizer.name' are set with different values."
+                    )
+                tokenizer.setdefault("name", tokenizer_name)
+                ConfigLoader._warn_legacy(
+                    "Config key 'dataset.tokenizer_name' is deprecated; use 'tokenizer.name'."
+                )
+            if "column" in dataset:
+                column = dataset.pop("column")
+                if "text_column" in dataset and dataset["text_column"] != column:
+                    raise ValueError(
+                        "Both 'dataset.column' and 'dataset.text_column' are set with different values."
+                    )
+                dataset.setdefault("text_column", column)
+                ConfigLoader._warn_legacy(
+                    "Config key 'dataset.column' is deprecated; use 'dataset.text_column'."
+                )
+            if "path_to_disk" in dataset:
+                path_to_disk = dataset.pop("path_to_disk")
+                if "path" in dataset and dataset["path"] != path_to_disk:
+                    raise ValueError(
+                        "Both 'dataset.path_to_disk' and 'dataset.path' are set with different values."
+                    )
+                dataset.setdefault("path", path_to_disk)
+                ConfigLoader._warn_legacy(
+                    "Config key 'dataset.path_to_disk' is deprecated; use 'dataset.path'."
+                )
+
+        # tokenizer.tokenizer_name_or_path -> tokenizer.name
+        tokenizer = normalized.get("tokenizer", {})
+        if isinstance(tokenizer, dict) and "tokenizer_name_or_path" in tokenizer:
+            tokenizer_name = tokenizer.pop("tokenizer_name_or_path")
+            if "name" in tokenizer and tokenizer["name"] not in (
+                None,
+                tokenizer_name,
+            ):
+                raise ValueError(
+                    "Both 'tokenizer.tokenizer_name_or_path' and 'tokenizer.name' are set "
+                    "with different values."
+                )
+            tokenizer.setdefault("name", tokenizer_name)
+            ConfigLoader._warn_legacy(
+                "Config key 'tokenizer.tokenizer_name_or_path' is deprecated; use 'tokenizer.name'."
+            )
+
+        # optimizer.hparams -> optimizer.* fields
+        optimizer = normalized.get("optimizer", {})
+        if isinstance(optimizer, dict) and "hparams" in optimizer:
+            hparams = optimizer.pop("hparams") or {}
+            if not isinstance(hparams, dict):
+                raise TypeError("optimizer.hparams must be a mapping if provided.")
+            for key, value in hparams.items():
+                if key in optimizer and optimizer[key] != value:
+                    raise ValueError(
+                        f"Both 'optimizer.hparams.{key}' and 'optimizer.{key}' are set "
+                        "with different values."
+                    )
+                optimizer.setdefault(key, value)
+            ConfigLoader._warn_legacy(
+                "Config key 'optimizer.hparams' is deprecated; move keys to 'optimizer.*'."
+            )
+
+        # wandb.log_interval -> trainer.logging_steps
+        wandb = normalized.get("wandb", {})
+        if isinstance(wandb, dict) and "log_interval" in wandb:
+            log_interval = wandb["log_interval"]
+            trainer = _section("trainer")
+            if "logging_steps" in trainer and trainer["logging_steps"] != log_interval:
+                raise ValueError(
+                    "Both 'wandb.log_interval' and 'trainer.logging_steps' are set with "
+                    "different values."
+                )
+            trainer.setdefault("logging_steps", log_interval)
+            ConfigLoader._warn_legacy(
+                "Config key 'wandb.log_interval' is deprecated for trainer logging; "
+                "use 'trainer.logging_steps'."
+            )
+
+        # model.flash_attention/use_flash_attention -> model.xformers_attention
+        model = normalized.get("model", {})
+        if isinstance(model, dict):
+            if "name_or_path" in model:
+                name_or_path = model.pop("name_or_path")
+                if "name" in model and model["name"] not in (None, name_or_path):
+                    raise ValueError(
+                        "Both 'model.name_or_path' and 'model.name' are set with different values."
+                    )
+                model.setdefault("name", name_or_path)
+                ConfigLoader._warn_legacy(
+                    "Config key 'model.name_or_path' is deprecated; use 'model.name'."
+                )
+            legacy_keys = [
+                k for k in ("flash_attention", "use_flash_attention") if k in model
+            ]
+            if legacy_keys:
+                legacy_value = model.pop(legacy_keys[0])
+                for key in legacy_keys[1:]:
+                    value = model.pop(key)
+                    if value != legacy_value:
+                        raise ValueError(
+                            "Conflicting values for legacy attention flags: "
+                            f"{legacy_keys[0]}={legacy_value} vs {key}={value}."
+                        )
+                if (
+                    "xformers_attention" in model
+                    and model["xformers_attention"] != legacy_value
+                ):
+                    raise ValueError(
+                        "Both legacy flash_attention flags and 'model.xformers_attention' "
+                        "are set with different values."
+                    )
+                model.setdefault("xformers_attention", legacy_value)
+                ConfigLoader._warn_legacy(
+                    "Config key 'model.flash_attention' is deprecated; use "
+                    "'model.xformers_attention' to indicate xFormers memory-efficient attention."
+                )
+
+            glue = normalized.get("glue", {})
+            if not isinstance(glue, dict):
+                glue = _section("glue")
+            glue_key_map = {
+                "pretrained_config_path": "pretrained_model_path",
+                "pretrained_checkpoint_dir": "pretrained_checkpoint_dir",
+                "pretrained_checkpoint": "pretrained_checkpoint",
+                "allow_random_weights": "allow_random_weights",
+                "classifier_dropout": "classifier_dropout",
+                "classifier_init_range": "classifier_init_range",
+                "transfer_from_task": "transfer_from_task",
+            }
+            for legacy_key, glue_key in glue_key_map.items():
+                if legacy_key in model:
+                    value = model.pop(legacy_key)
+                    if glue_key in glue and glue[glue_key] not in (None, value):
+                        raise ValueError(
+                            f"Both 'model.{legacy_key}' and 'glue.{glue_key}' are set with "
+                            "different values."
+                        )
+                    glue.setdefault(glue_key, value)
+                    ConfigLoader._warn_legacy(
+                        f"Config key 'model.{legacy_key}' is deprecated; use 'glue.{glue_key}'."
+                    )
+
+        return normalized
+
+    @staticmethod
+    def _validate_config_keys(cfg_dict: Dict[str, Any]) -> None:
+        """Validate config keys against dataclass fields.
+
+        :param dict[str, Any] cfg_dict: Normalized configuration mapping.
+        :raises ValueError: When unknown keys are found.
+        """
+        if cfg_dict is None:
+            return
+
+        unknown_keys: list[str] = []
+
+        config_fields = {f.name for f in fields(Config)}
+        for key in cfg_dict:
+            if key not in config_fields:
+                unknown_keys.append(key)
+
+        def _check_section(section: str, cls: type) -> None:
+            if section not in cfg_dict:
+                return
+            mapping = cfg_dict.get(section)
+            if not isinstance(mapping, dict):
+                unknown_keys.append(section)
+                return
+            valid = {f.name for f in fields(cls)}
+            for key in mapping:
+                if key not in valid:
+                    unknown_keys.append(f"{section}.{key}")
+
+        _check_section("model", ModelConfig)
+        _check_section("dataset", DatasetConfig)
+        _check_section("tokenizer", TokenizerConfig)
+        _check_section("optimizer", OptimizerConfig)
+        _check_section("scheduler", SchedulerConfig)
+        _check_section("trainer", TrainerConfig)
+        _check_section("datacollator", DataCollatorConfig)
+        _check_section("wandb", WandbConfig)
+        _check_section("glue", GLUEConfig)
+        _check_section("contrastive", ContrastiveConfig)
+
+        # Validate nested muon_config keys if provided.
+        optimizer_cfg = cfg_dict.get("optimizer", {})
+        if isinstance(optimizer_cfg, dict) and "muon_config" in optimizer_cfg:
+            muon_cfg = optimizer_cfg["muon_config"]
+            if isinstance(muon_cfg, dict):
+                valid_muon = {f.name for f in fields(MuonConfig)}
+                for key in muon_cfg:
+                    if key not in valid_muon:
+                        unknown_keys.append(f"optimizer.muon_config.{key}")
+
+        if unknown_keys:
+            unknown_keys.sort()
+            raise ValueError(
+                "Unknown configuration keys detected: "
+                + ", ".join(unknown_keys)
+                + ". Update your config or remove unused fields."
+            )
+
+    @staticmethod
     def dict_to_config(cfg_dict: Dict[str, Any]) -> Config:
         """Convert dictionary to a ``Config`` dataclass.
 
         :param dict[str, Any] cfg_dict: Nested configuration mapping.
         :return Config: Fully-populated configuration instance.
         """
+        cfg_dict = ConfigLoader._normalize_legacy_keys(cfg_dict or {})
+        ConfigLoader._validate_config_keys(cfg_dict)
+
         config = Config()
 
         # Store raw model dict for GLUE compatibility
-        if "model" in cfg_dict:
-            config._raw_model_dict = cfg_dict["model"]
-        else:
-            config._raw_model_dict = None
+        config._raw_model_dict = cfg_dict.get("model")
 
         # Update model config
         if "model" in cfg_dict:
@@ -438,15 +796,19 @@ class ConfigLoader:
         return config
 
     @staticmethod
-    def preprocess_config(config: Config) -> Config:
+    def preprocess_config(config: Config, resolve_vocab_size: bool = False) -> Config:
         """Preprocess and validate config, resolving any dynamic values.
 
         This should be called after config loading but before any downstream consumers.
         Note: this mutates ``config`` in-place and may load tokenizers/datasets.
 
         :param Config config: Configuration to preprocess.
+        :param bool resolve_vocab_size: Whether to resolve vocab sizes from a tokenizer.
         :return Config: Preprocessed configuration.
         """
+        if not resolve_vocab_size:
+            return config
+
         # Resolve vocab_size for GPU efficiency (skip CPU-only runs/tests).
         use_cpu = getattr(config.trainer, "use_cpu", False)
         if not use_cpu and hasattr(config.tokenizer, "name") and config.tokenizer.name:
@@ -458,7 +820,6 @@ class ConfigLoader:
             tokenizer = get_tokenizer(
                 pretrained_model_name_or_path=tokenizer_source,
                 max_length=config.tokenizer.max_length,
-                vocab_size=config.tokenizer.vocab_size or config.model.vocab_size,
             )
 
             actual_vocab_size = len(tokenizer)
@@ -477,8 +838,11 @@ class ConfigLoader:
 
                 logger = logging.getLogger(__name__)
                 logger.warning(
-                    f"Config preprocessing: vocab_size {actual_vocab_size} rounded to "
-                    f"{rounded_vocab_size} for GPU efficiency (original config: {original_model_vocab_size})"
+                    "Config preprocessing: vocab_size %s rounded to %s for GPU efficiency "
+                    "(original config: %s)",
+                    actual_vocab_size,
+                    rounded_vocab_size,
+                    original_model_vocab_size,
                 )
 
         return config
@@ -487,13 +851,13 @@ class ConfigLoader:
     def load(
         config_file: Optional[Union[str, Path]] = None,
         overrides: Optional[Dict[str, Any]] = None,
-        preprocess: bool = True,
+        preprocess: bool = False,
     ) -> Config:
         """Load configuration from file and apply overrides.
 
         :param str | Path | None config_file: Optional YAML configuration path.
         :param dict[str, Any] | None overrides: Optional override mapping.
-        :param bool preprocess: Whether to run ``preprocess_config``.
+        :param bool preprocess: Whether to resolve dynamic values (e.g., vocab size).
         :return Config: Loaded configuration.
         """
         config_dict = {}
@@ -510,7 +874,7 @@ class ConfigLoader:
 
         # Preprocess config to resolve dynamic values
         if preprocess:
-            config = ConfigLoader.preprocess_config(config)
+            config = ConfigLoader.preprocess_config(config, resolve_vocab_size=True)
 
         return config
 
@@ -535,7 +899,6 @@ class ConfigLoader:
             "contrastive": asdict(config.contrastive),
             "task": config.task,
             "accelerate_config_file": config.accelerate_config_file,
-            "mixed_precision": config.mixed_precision,
             "mteb_task_type": config.mteb_task_type,
             "mteb_batch_size": config.mteb_batch_size,
             "mteb_pooling": config.mteb_pooling,
@@ -586,13 +949,14 @@ def create_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--model.dropout_prob", type=float, help="Dropout probability")
     parser.add_argument(
-        "--model.flash_attention",
+        "--model.xformers_attention",
         type=lambda x: x.lower() == "true",
-        help="Use flash attention",
+        help="Use xFormers memory-efficient attention",
     )
 
     # Dataset arguments
     parser.add_argument("--dataset.name", type=str, help="Dataset name")
+    parser.add_argument("--dataset.config", type=str, help="Dataset config name")
     parser.add_argument("--dataset.path", type=str, help="Dataset path")
     parser.add_argument(
         "--dataset.num_workers", type=int, help="Number of data workers"
@@ -604,6 +968,9 @@ def create_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--dataset.max_seq_length", type=int, help="Maximum sequence length"
+    )
+    parser.add_argument(
+        "--dataset.text_column", type=str, help="Dataset text column name"
     )
     parser.add_argument(
         "--dataset.load_all_from_disk", action="store_true", help="Load all from disk"
@@ -655,12 +1022,6 @@ def create_argument_parser() -> argparse.ArgumentParser:
         help="Maximum eval batches per evaluation (streaming-safe cap)",
     )
     parser.add_argument("--trainer.output_dir", type=str, help="Output directory")
-    parser.add_argument(
-        "--trainer.bf16",
-        type=lambda x: x.lower() == "true",
-        help="Use BF16 (default: True)",
-    )
-    parser.add_argument("--trainer.seed", type=int, help="Random seed")
     parser.add_argument(
         "--trainer.gradient_clipping", type=float, help="Gradient clipping"
     )
@@ -761,6 +1122,6 @@ def load_config_from_args() -> Config:
     config.config_path = args.config
 
     # Preprocess config to resolve dynamic values
-    config = ConfigLoader.preprocess_config(config)
+    config = ConfigLoader.preprocess_config(config, resolve_vocab_size=False)
 
     return config

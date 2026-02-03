@@ -55,7 +55,7 @@ trainer:
 
 GLUE evaluation **requires** a pretrained model. The trainer includes safety checks to prevent accidentally running with random weights:
 
-- Validates `pretrained_config_path` exists
+- Validates `glue.pretrained_model_path` exists
 - Checks checkpoint directory and files
 - Verifies weights loaded properly
 

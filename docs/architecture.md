@@ -33,7 +33,7 @@ NeoBERT is a transformer encoder with modernized components:
 - Single `qkv` projection (`hidden_size -> 3 * hidden_size`) split into Q/K/V.
 - RoPE applied to Q/K when `model.rope: true`.
 - Attention backend:
-  - `model.flash_attention: true` uses `xformers.ops.memory_efficient_attention`.
+  - `model.xformers_attention: true` uses `xformers.ops.memory_efficient_attention`.
   - Otherwise uses PyTorch `scaled_dot_product_attention`.
 - Attention masks are additive (0 = keep, -inf = mask).
 
@@ -64,14 +64,15 @@ model:
   rope: true
   rms_norm: true
   hidden_act: swiglu
-  flash_attention: true
+  xformers_attention: true
   ngpt: false
 ```
 
 Notes:
 
 - RoPE frequency scaling (`theta`) is currently fixed at 10,000 in `src/neobert/model/rotary.py`.
-- Flash attention for training requires `xformers`. Exported HF models use `flash-attn` if installed.
+- xFormers attention for training requires `xformers`. Exported HF models use
+  standard SDPA and ignore `model.xformers_attention`.
 
 ## Differences from BERT (High Level)
 

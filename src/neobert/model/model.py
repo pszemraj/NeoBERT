@@ -230,7 +230,7 @@ class NeoBERTConfig(PretrainedConfig):
         :param int vocab_size: Vocabulary size.
         :param int pad_token_id: Padding token ID.
         :param int max_length: Maximum sequence length.
-        :param bool flash_attention: Whether to use flash attention.
+        :param bool flash_attention: Whether to use xFormers memory-efficient attention.
         :param float base_scale: Base scaling factor for NGPT.
         :param bool ngpt: Whether to enable NGPT mode.
         :param Any kwargs: Additional configuration parameters.
@@ -774,12 +774,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
 
         # Normalize to broadcast-friendly shapes to avoid O(S^2) materialization.
         if pad_mask is not None:
-            # Use a tensor reduction instead of Python membership to avoid O(n^2) scans.
-            assert pad_mask.dtype != torch.bool and torch.all(pad_mask <= 0).item(), (
-                "NeoBERT expects an additive pad_mask"
-            )
-            # Convert HF-style masks at the data boundary (collator/export wrapper),
-            # then keep additive masks throughout the training model.
+            # Expect additive masks (0 for keep, -inf for masked positions).
             pad_mask = _normalize_pad_mask(pad_mask)
 
         # RoPE
@@ -833,7 +828,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
                 x = checkpoint(
                     custom_forward,
                     x,
-                    preserve_rng_state=False,
+                    preserve_rng_state=True,
                     use_reentrant=False,
                 )
             else:
@@ -923,12 +918,7 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
 
         # Normalize to broadcast-friendly shapes to avoid O(S^2) materialization.
         if pad_mask is not None:
-            # Use a tensor reduction instead of Python membership to avoid O(n^2) scans.
-            assert pad_mask.dtype != torch.bool and torch.all(pad_mask <= 0).item(), (
-                "NeoBERT expects an additive pad_mask"
-            )
-            # Convert HF-style masks at the data boundary (collator/export wrapper),
-            # then keep additive masks throughout the training model.
+            # Expect additive masks (0 for keep, -inf for masked positions).
             pad_mask = _normalize_pad_mask(pad_mask)
 
         # RoPE
@@ -982,7 +972,7 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
                 x = checkpoint(
                     custom_forward,
                     x,
-                    preserve_rng_state=False,
+                    preserve_rng_state=True,
                     use_reentrant=False,
                 )
             else:

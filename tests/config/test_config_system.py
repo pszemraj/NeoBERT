@@ -115,7 +115,6 @@ model:
   num_attention_heads: 2
 trainer:
   output_dir: "./test"
-  learning_rate: 1e-4
   use_cpu: true
 optimizer:
   name: "adamw"
@@ -218,6 +217,23 @@ optimizer:
         finally:
             os.unlink(path)
 
+    def test_unknown_keys_raise(self):
+        """Ensure unknown config keys raise a clear error."""
+        config_data = {
+            "model": {"hidden_size": 32, "unknown_key": 123},
+            "trainer": {"output_dir": "./tmp"},
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            path = f.name
+            yaml.safe_dump(config_data, f)
+
+        try:
+            with self.assertRaises(ValueError):
+                ConfigLoader.load(path)
+        finally:
+            os.unlink(path)
+
     def test_preprocess_uses_tokenizer_path(self):
         """Ensure tokenizer path is preferred when provided."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -239,7 +255,7 @@ optimizer:
             config.tokenizer.vocab_size = len(tokenizer)
             config.model.vocab_size = len(tokenizer)
 
-            processed = ConfigLoader.preprocess_config(config)
+            processed = ConfigLoader.preprocess_config(config, resolve_vocab_size=True)
 
             expected_vocab_size = round_up_to_multiple(len(tokenizer), 128)
             self.assertEqual(processed.model.vocab_size, expected_vocab_size)

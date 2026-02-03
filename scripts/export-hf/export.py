@@ -299,7 +299,9 @@ def create_hf_config(
         "rope": model_config.get("rope", True),
         "hidden_act": hidden_act,
         "dropout": model_config.get("dropout", model_config.get("dropout_prob", 0.0)),
-        "flash_attention": model_config.get("flash_attention", False),
+        "flash_attention": model_config.get(
+            "xformers_attention", model_config.get("flash_attention", False)
+        ),
         "pad_token_id": model_config["pad_token_id"],
         "torch_dtype": torch_dtype,
         "transformers_version": transformers.__version__,

@@ -8,7 +8,7 @@ model:
   dropout_prob: 0.0
   vocab_size: 30522
   max_position_embeddings: 128
-  flash_attention: false
+  xformers_attention: false
   ngpt: false
   hidden_act: "gelu"
 
@@ -34,18 +34,14 @@ datacollator:
 
 trainer:
   output_dir: "./test_outputs"
-  run_name: "test_tiny_pretrain"
   max_steps: 50  # Use max_steps instead of epochs for quick test
   per_device_train_batch_size: 2
   per_device_eval_batch_size: 2
   gradient_accumulation_steps: 1
-  learning_rate: 1e-4
-  warmup_steps: 10
   logging_steps: 5
   eval_steps: 25
   save_steps: 25
   dataloader_num_workers: 0
-  remove_unused_columns: false
   report_to: []
   use_cpu: false  # Set to true if no GPU
 

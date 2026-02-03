@@ -708,14 +708,14 @@ def trainer(cfg: Config) -> None:
         os.makedirs(cfg.trainer.output_dir, exist_ok=True)
     accelerator.wait_for_everyone()
 
-    # Override flash attention setting for GLUE - always use eager attention
-    # Flash attention has memory alignment issues with variable-length sequences in GLUE tasks
+    # Override xFormers attention setting for GLUE - always use eager attention
+    # xFormers attention has memory alignment issues with variable-length sequences in GLUE tasks
     # xformers requires sequences to be aligned to multiples of 8, which is incompatible
     # with GLUE's dynamic batching and variable sequence lengths
-    if hasattr(cfg.model, "flash_attention") and cfg.model.flash_attention:
+    if hasattr(cfg.model, "xformers_attention") and cfg.model.xformers_attention:
         logger.warning(
-            "Flash attention is not supported for GLUE evaluation due to memory alignment issues "
-            "with variable-length sequences. Using eager attention instead."
+            "xFormers memory-efficient attention is not supported for GLUE evaluation due to "
+            "memory alignment issues with variable-length sequences. Using eager attention instead."
         )
     flash_attention = False  # Always use eager attention for GLUE
 
@@ -739,15 +739,17 @@ def trainer(cfg: Config) -> None:
 
         # For GLUE, we MUST have pretrained model info
         # Check if we're allowing random weights for testing
-        allow_random_weights = (
-            hasattr(cfg, "_raw_model_dict")
-            and cfg._raw_model_dict
-            and cfg._raw_model_dict.get("allow_random_weights", False)
-        )
+        allow_random_weights = cfg.glue.allow_random_weights
+        if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
+            allow_random_weights = cfg._raw_model_dict.get(
+                "allow_random_weights", allow_random_weights
+            )
 
         if allow_random_weights:
             # Skip pretrained config loading for testing
             pretrained_config_path = None
+        elif cfg.glue.pretrained_model_path:
+            pretrained_config_path = cfg.glue.pretrained_model_path
         elif (
             hasattr(cfg, "_raw_model_dict")
             and cfg._raw_model_dict
@@ -757,12 +759,12 @@ def trainer(cfg: Config) -> None:
         else:
             raise ValueError(
                 "GLUE evaluation requires a pretrained model! "
-                "Please specify 'pretrained_config_path' in the model section of your config, "
+                "Please specify 'glue.pretrained_model_path' in your config, "
                 "or set 'allow_random_weights: true' for testing."
             )
         if pretrained_config_path:
             model_pretraining_config = ConfigLoader.load(pretrained_config_path)
-            model_pretraining_config.model.flash_attention = flash_attention
+            model_pretraining_config.model.xformers_attention = flash_attention
             tokenizer_source = (
                 model_pretraining_config.tokenizer.path
                 or model_pretraining_config.tokenizer.name
@@ -1012,14 +1014,11 @@ def trainer(cfg: Config) -> None:
         combined_config = model_config_dict
 
         # If using random weights (for testing), round vocab_size for GPU efficiency
+        allow_random_weights = cfg.glue.allow_random_weights
         if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
             allow_random_weights = cfg._raw_model_dict.get(
-                "allow_random_weights", False
+                "allow_random_weights", allow_random_weights
             )
-        elif hasattr(cfg, "glue"):
-            allow_random_weights = cfg.glue.allow_random_weights
-        else:
-            allow_random_weights = False
 
         if allow_random_weights and "vocab_size" in combined_config:
             from neobert.config import round_up_to_multiple
@@ -1030,56 +1029,49 @@ def trainer(cfg: Config) -> None:
         model = NeoBERTForSequenceClassification(
             NeoBERTConfig(**combined_config),
             num_labels=num_labels,
-            classifier_dropout=getattr(cfg.model, "classifier_dropout", 0.1),
-            classifier_init_range=getattr(cfg.model, "classifier_init_range", 0.02),
+            classifier_dropout=cfg.glue.classifier_dropout,
+            classifier_init_range=cfg.glue.classifier_init_range,
         )
 
-    if hasattr(cfg.model, "transfer_from_task") and cfg.model.transfer_from_task:
+    if cfg.glue.transfer_from_task:
         task_to_transfer_from = TASK_TO_TRANSFER_FROM.get(cfg.task, None)
         if not task_to_transfer_from:
             raise ValueError(f"Task to transfer from for {cfg.task} is not set.")
-        cfg.model.pretrained_checkpoint_dir, checkpoint_list = get_best_checkpoint_path(
+        cfg.glue.pretrained_checkpoint_dir, checkpoint_list = get_best_checkpoint_path(
             os.path.join(
-                cfg.model.pretrained_checkpoint_dir,
+                cfg.glue.pretrained_checkpoint_dir,
                 "glue",
-                str(cfg.model.pretrained_checkpoint),
+                str(cfg.glue.pretrained_checkpoint),
             ),
             task_to_transfer_from,
         )
-        cfg.model.pretrained_checkpoint = checkpoint_list[-1]
+        cfg.glue.pretrained_checkpoint = checkpoint_list[-1]
         logger.info(
-            f"Transfering from: {cfg.model.pretrained_checkpoint_dir}, {cfg.model.pretrained_checkpoint}"
+            f"Transfering from: {cfg.glue.pretrained_checkpoint_dir}, {cfg.glue.pretrained_checkpoint}"
         )
-        if (
-            not cfg.model.pretrained_checkpoint_dir
-            or not cfg.model.pretrained_checkpoint
-        ):
+        if not cfg.glue.pretrained_checkpoint_dir or not cfg.glue.pretrained_checkpoint:
             raise ValueError("Unable to retrieve checkpoint to transfer from.")
 
     else:
         # Get checkpoint info from raw model dict for GLUE
         logger.info("Looking for pretrained checkpoint info...")
 
-        # Check for checkpoint info in raw model dict
+        # Prefer GLUEConfig for checkpoint info
+        pretrained_checkpoint_dir = cfg.glue.pretrained_checkpoint_dir
+        pretrained_checkpoint = cfg.glue.pretrained_checkpoint
+        allow_random_weights = cfg.glue.allow_random_weights
+
+        # Fall back to raw model dict for legacy configs
         if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
             pretrained_checkpoint_dir = cfg._raw_model_dict.get(
-                "pretrained_checkpoint_dir", None
+                "pretrained_checkpoint_dir", pretrained_checkpoint_dir
             )
             pretrained_checkpoint = cfg._raw_model_dict.get(
-                "pretrained_checkpoint", None
+                "pretrained_checkpoint", pretrained_checkpoint
             )
             allow_random_weights = cfg._raw_model_dict.get(
-                "allow_random_weights", False
+                "allow_random_weights", allow_random_weights
             )
-        # Also check GLUEConfig if available
-        elif hasattr(cfg, "glue"):
-            pretrained_checkpoint_dir = cfg.glue.pretrained_checkpoint_dir
-            pretrained_checkpoint = cfg.glue.pretrained_checkpoint
-            allow_random_weights = cfg.glue.allow_random_weights
-        else:
-            pretrained_checkpoint_dir = None
-            pretrained_checkpoint = None
-            allow_random_weights = False
 
         # Validate checkpoint configuration
         if not pretrained_checkpoint_dir or not pretrained_checkpoint:
@@ -1092,8 +1084,8 @@ def trainer(cfg: Config) -> None:
                 raise ValueError(
                     "GLUE evaluation requires pretrained weights!\n"
                     "Please specify either:\n"
-                    "  1. 'pretrained_checkpoint_dir' and 'pretrained_checkpoint' in model config\n"
-                    "  2. Set 'allow_random_weights: true' for testing with random weights"
+                    "  1. 'glue.pretrained_checkpoint_dir' and 'glue.pretrained_checkpoint' in config\n"
+                    "  2. Set 'glue.allow_random_weights: true' for testing with random weights"
                 )
         else:
             # Ensure we have the full path to model_checkpoints

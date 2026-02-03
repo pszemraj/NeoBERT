@@ -28,13 +28,13 @@ from torch.nn import CrossEntropyLoss
 from tqdm import tqdm
 from transformers import BatchEncoding
 
-from ..config import Config, ConfigLoader, MuonConfig
+from ..config import Config, ConfigLoader, MuonConfig, round_up_to_multiple
 from ..dataloader import get_dataloader
 from ..model import NeoBERTConfig, NeoBERTLMHead
 from ..model.model import XFORMERS_AVAILABLE, XFORMERS_ERROR
 from ..optimizer import get_optimizer
 from ..scheduler import get_scheduler
-from ..tokenizer import get_tokenizer
+from ..tokenizer import get_tokenizer, resolve_text_column
 from ..utils import configure_tf32, model_summary, prepare_wandb_config
 
 # Our metric object and model
@@ -59,28 +59,6 @@ def _count_masked_correct(
         return torch.zeros((), device=logits.device, dtype=torch.long)
     preds = logits.argmax(dim=-1)
     return (preds[mask] == labels[mask]).sum()
-
-
-def _resolve_text_column(dataset: Dataset, is_streaming: bool) -> str:
-    """Resolve the text column for tokenization.
-
-    :param Dataset dataset: Dataset to inspect.
-    :param bool is_streaming: Whether the dataset is streaming.
-    :return str: Name of the text column.
-    """
-    if is_streaming:
-        first_example = next(iter(dataset))
-        columns = list(first_example.keys())
-    else:
-        columns = dataset.column_names
-
-    for col in ["text", "sentence", "content"]:
-        if col in columns:
-            return col
-    raise ValueError(
-        "Could not find text column in dataset. Available columns: "
-        + ", ".join(columns)
-    )
 
 
 def _run_eval(
@@ -137,12 +115,9 @@ def _run_eval(
         total_loss = accelerator.reduce(eval_loss_sum, reduction="sum")
         total_pred = accelerator.reduce(eval_num_pred, reduction="sum")
         total_correct = accelerator.reduce(eval_num_correct, reduction="sum")
-        total_batches = accelerator.reduce(
-            torch.tensor(eval_batches, device=accelerator.device), reduction="sum"
-        )
-
+        # Log per-rank batch count to avoid confusion about summed totals.
         metrics: dict[str, float] = {
-            "eval/batches": float(total_batches.item()),
+            "eval/batches": float(eval_batches),
         }
         if total_pred.item() > 0:
             eval_loss = (total_loss / total_pred).item()
@@ -360,6 +335,7 @@ def trainer(cfg: Config) -> None:
     iteration = 0
     resume_checkpoint_path = None
 
+    # Resume is strictly gated by resume_from_checkpoint; DeepSpeed does not force resumes.
     if (
         cfg.trainer.resume_from_checkpoint
         and os.path.exists(checkpoint_dir)
@@ -390,7 +366,7 @@ def trainer(cfg: Config) -> None:
     wandb_enabled = cfg.wandb.enabled and cfg.wandb.mode != "disabled"
     accelerator = Accelerator(
         step_scheduler_with_optimizer=False,  # enable manual control of the scheduler
-        mixed_precision=cfg.mixed_precision,
+        mixed_precision=cfg.trainer.mixed_precision,
         gradient_accumulation_steps=cfg.trainer.gradient_accumulation_steps,
         log_with="wandb" if wandb_enabled else None,
         project_config=project_config,
@@ -438,17 +414,12 @@ def trainer(cfg: Config) -> None:
     set_seed(cfg.seed)
 
     # Configure TF32 precision for GPUs with compute capability >= 8.0
-    configure_tf32(print_fn=accelerator.print)
+    configure_tf32(enabled=cfg.trainer.tf32, print_fn=accelerator.print)
 
     # Local and global counters
     metrics = Metrics()
     accelerator.register_for_checkpointing(metrics)
-
-    # Get the dtype for the pad_mask
-    dtype_pad_mask = torch.float32
-    # Always use bf16 for mixed precision
-    if accelerator.mixed_precision == "bf16":
-        dtype_pad_mask = torch.bfloat16
+    log_interval = max(1, cfg.trainer.logging_steps)
 
     is_streaming = cfg.dataset.streaming
     if cfg.trainer.resume_from_checkpoint and is_streaming:
@@ -462,9 +433,9 @@ def trainer(cfg: Config) -> None:
         logger.info(
             "Using packed sequences with xFormers block-diagonal attention (experimental)."
         )
-        if not cfg.model.flash_attention:
+        if not cfg.model.xformers_attention:
             raise ValueError(
-                "Packed sequences require model.flash_attention=true (xFormers)."
+                "Packed sequences require model.xformers_attention=true (xFormers)."
             )
         if not XFORMERS_AVAILABLE:
             raise ImportError(
@@ -473,13 +444,31 @@ def trainer(cfg: Config) -> None:
             )
 
     # Tokenizer
-    tokenizer = get_tokenizer(
-        pretrained_model_name_or_path=cfg.tokenizer.path or cfg.tokenizer.name,
-        max_length=cfg.tokenizer.max_length,
-        vocab_size=cfg.tokenizer.vocab_size or cfg.model.vocab_size,
-    )
+    with accelerator.main_process_first():
+        tokenizer = get_tokenizer(
+            pretrained_model_name_or_path=cfg.tokenizer.path or cfg.tokenizer.name,
+            max_length=cfg.tokenizer.max_length,
+        )
+
+    actual_vocab_size = len(tokenizer)
+    rounded_vocab_size = round_up_to_multiple(actual_vocab_size, 128)
+    if (
+        cfg.model.vocab_size != rounded_vocab_size
+        or cfg.tokenizer.vocab_size != rounded_vocab_size
+    ):
+        if accelerator.is_main_process:
+            logger.warning(
+                "Config vocab_size updated: tokenizer=%s rounded to %s (was model=%s).",
+                actual_vocab_size,
+                rounded_vocab_size,
+                cfg.model.vocab_size,
+            )
+    cfg.model.vocab_size = rounded_vocab_size
+    cfg.tokenizer.vocab_size = rounded_vocab_size
 
     # Dataset
+    dataset_kwargs = {"name": cfg.dataset.config} if cfg.dataset.config else {}
+
     if cfg.dataset.path:
         train_dataset = load_from_disk(cfg.dataset.path)
     else:
@@ -489,10 +478,15 @@ def trainer(cfg: Config) -> None:
                 cfg.dataset.name,
                 split=cfg.dataset.train_split,
                 streaming=cfg.dataset.streaming,
+                **dataset_kwargs,
             )
             train_dataset = dataset
         else:
-            dataset = load_dataset(cfg.dataset.name, streaming=cfg.dataset.streaming)
+            dataset = load_dataset(
+                cfg.dataset.name,
+                streaming=cfg.dataset.streaming,
+                **dataset_kwargs,
+            )
             train_dataset = (
                 dataset[cfg.dataset.train_split]
                 if cfg.dataset.train_split
@@ -534,12 +528,8 @@ def trainer(cfg: Config) -> None:
             accelerator.print(f"Pre-tokenizing dataset to: {output_dir}")
 
             # Get absolute path to script
-            script_path = (
-                Path(__file__).parent.parent.parent
-                / "scripts"
-                / "pretraining"
-                / "tokenize_dataset.py"
-            )
+            repo_root = Path(__file__).resolve().parents[3]
+            script_path = repo_root / "scripts" / "pretraining" / "tokenize_dataset.py"
 
             if accelerator.is_main_process and not success_flag.exists():
                 cmd = [
@@ -555,8 +545,14 @@ def trainer(cfg: Config) -> None:
                     str(cfg.dataset.max_seq_length),
                 ]
 
+                if cfg.dataset.config:
+                    cmd.extend(["--dataset-config", cfg.dataset.config])
+
                 if cfg.dataset.train_split:
                     cmd.extend(["--split", cfg.dataset.train_split])
+
+                if cfg.dataset.text_column:
+                    cmd.extend(["--text-column", cfg.dataset.text_column])
 
                 if cfg.dataset.num_proc:
                     cmd.extend(["--num-proc", str(cfg.dataset.num_proc)])
@@ -582,7 +578,11 @@ def trainer(cfg: Config) -> None:
             train_dataset = load_from_disk(output_dir)
         else:
             # Determine text column
-            text_column = _resolve_text_column(train_dataset, is_streaming)
+            text_column = resolve_text_column(
+                train_dataset,
+                is_streaming,
+                preferred=cfg.dataset.text_column,
+            )
             tokenize_num_proc = (
                 None
                 if is_streaming
@@ -628,6 +628,7 @@ def trainer(cfg: Config) -> None:
                 cfg.dataset.name,
                 split=cfg.dataset.eval_split,
                 streaming=cfg.dataset.streaming,
+                **dataset_kwargs,
             )
     elif cfg.dataset.validation_split:
         if is_streaming:
@@ -637,7 +638,7 @@ def trainer(cfg: Config) -> None:
             )
         else:
             split = train_dataset.train_test_split(
-                test_size=cfg.dataset.validation_split, seed=cfg.trainer.seed
+                test_size=cfg.dataset.validation_split, seed=cfg.seed
             )
             train_dataset = split["train"]
             eval_dataset = split["test"]
@@ -654,7 +655,11 @@ def trainer(cfg: Config) -> None:
         if eval_needs_tokenization:
             from neobert.tokenizer import tokenize
 
-            text_column = _resolve_text_column(eval_dataset, eval_is_streaming)
+            text_column = resolve_text_column(
+                eval_dataset,
+                eval_is_streaming,
+                preferred=cfg.dataset.text_column,
+            )
             eval_num_proc = (
                 None
                 if eval_is_streaming
@@ -682,7 +687,7 @@ def trainer(cfg: Config) -> None:
         train_dataset = _maybe_shuffle_streaming_dataset(
             train_dataset,
             cfg.dataset.shuffle_buffer_size,
-            cfg.trainer.seed,
+            cfg.seed,
             print_fn=accelerator.print,
         )
 
@@ -691,7 +696,6 @@ def trainer(cfg: Config) -> None:
     train_dataloader = get_dataloader(
         train_dataset,
         tokenizer,
-        dtype=dtype_pad_mask,
         batch_size=cfg.trainer.per_device_train_batch_size,
         num_workers=cfg.dataset.num_workers,
         mlm_probability=cfg.datacollator.mlm_probability,
@@ -706,7 +710,6 @@ def trainer(cfg: Config) -> None:
         eval_dataloader = get_dataloader(
             eval_dataset,
             tokenizer,
-            dtype=dtype_pad_mask,
             batch_size=cfg.trainer.per_device_eval_batch_size,
             num_workers=cfg.dataset.num_workers,
             mlm_probability=cfg.datacollator.mlm_probability,
@@ -742,7 +745,7 @@ def trainer(cfg: Config) -> None:
         decoder_init_range=cfg.model.decoder_init_range,
         classifier_init_range=cfg.model.classifier_init_range,
         pad_token_id=tokenizer.pad_token_id,
-        flash_attention=cfg.model.flash_attention,
+        flash_attention=cfg.model.xformers_attention,
     )
     model = NeoBERTLMHead(model_config)
 
@@ -790,6 +793,7 @@ def trainer(cfg: Config) -> None:
         decay_steps=max(
             cfg.trainer.max_steps, cfg.scheduler.warmup_steps + 1
         ),  # Ensure decay_steps > warmup_steps
+        final_ratio=cfg.scheduler.final_lr_ratio,
         constant_steps=0,  # No constant phase for simplicity
     )
 
@@ -1000,11 +1004,7 @@ def trainer(cfg: Config) -> None:
                     if grad_norm_sq is not None:
                         grad_norm_value = float(torch.sqrt(grad_norm_sq).item())
 
-                max_grad_norm = (
-                    cfg.trainer.gradient_clipping
-                    if cfg.trainer.gradient_clipping is not None
-                    else (1.0 if cfg.trainer.gradient_checkpointing else None)
-                )
+                max_grad_norm = cfg.trainer.gradient_clipping
 
                 if max_grad_norm is not None and max_grad_norm > 0:
                     grad_norm_pre_clip = accelerator.clip_grad_norm_(
@@ -1026,24 +1026,25 @@ def trainer(cfg: Config) -> None:
                 scheduler.step()
                 accum_tokens.zero_()
 
-                if metrics["train/steps"] % cfg.wandb.log_interval == 0:
+                if metrics["train/steps"] % log_interval == 0:
                     if grad_norm_value is not None:
                         metrics["train/grad_norm"] = grad_norm_value
 
-                    if accelerator.distributed_type is DistributedType.DEEPSPEED:
-                        metrics["train/weight_norm"] = (
-                            sum(
-                                [
-                                    safe_get_full_fp32_param(p).norm(2) ** 2
-                                    for p in model.parameters()
-                                ]
-                            )
-                            ** 0.5
-                        ).item()
-                    else:
-                        metrics["train/weight_norm"] = (
-                            sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5
-                        ).item()
+                    if cfg.trainer.log_weight_norms and accelerator.is_main_process:
+                        if accelerator.distributed_type is DistributedType.DEEPSPEED:
+                            metrics["train/weight_norm"] = (
+                                sum(
+                                    [
+                                        safe_get_full_fp32_param(p).norm(2) ** 2
+                                        for p in model.parameters()
+                                    ]
+                                )
+                                ** 0.5
+                            ).item()
+                        else:
+                            metrics["train/weight_norm"] = (
+                                sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5
+                            ).item()
 
                     # Add MuonClip metrics if available
                     if hasattr(optimizer, "get_metrics"):

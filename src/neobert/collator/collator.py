@@ -182,7 +182,6 @@ class DataCollatorWithPacking(DefaultDataCollator):
 
 def get_collator(
     tokenizer: PreTrainedTokenizerBase,
-    dtype: torch.dtype = torch.float32,
     mlm_probability: float = 0.15,
     pad_to_multiple_of: int = 8,
     mask_all: bool = False,
@@ -192,7 +191,6 @@ def get_collator(
     """Build a collate function for masked language modeling.
 
     :param PreTrainedTokenizerBase tokenizer: Tokenizer used by the collator.
-    :param torch.dtype dtype: Dtype for the attention mask when not packing sequences.
     :param float mlm_probability: Probability of masking tokens.
     :param int pad_to_multiple_of: Pad sequence length to a multiple of this value.
     :param bool mask_all: If True, mask all sampled tokens.

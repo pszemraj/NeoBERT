@@ -121,7 +121,7 @@ class TestPretrainPipeline(unittest.TestCase):
             dropout=config.model.dropout_prob,
             vocab_size=config.model.vocab_size,
             max_length=config.model.max_position_embeddings,
-            flash_attention=config.model.flash_attention,
+            flash_attention=config.model.xformers_attention,
             ngpt=config.model.ngpt,
             hidden_act="gelu",  # Use GELU to avoid xformers requirement
         )

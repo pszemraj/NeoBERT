@@ -5,9 +5,7 @@ import argparse
 from pathlib import Path
 
 from datasets import load_dataset
-from transformers import AutoTokenizer
-
-from neobert.tokenizer import tokenize
+from neobert.tokenizer import get_tokenizer, resolve_text_column, tokenize
 
 
 def main() -> None:
@@ -26,6 +24,12 @@ def main() -> None:
         type=str,
         default="train",
         help="Dataset split to tokenize (default: train)",
+    )
+    parser.add_argument(
+        "--dataset-config",
+        type=str,
+        default=None,
+        help="Optional dataset config name (e.g., wikitext-2-raw-v1)",
     )
     parser.add_argument(
         "--tokenizer",
@@ -48,8 +52,8 @@ def main() -> None:
     parser.add_argument(
         "--text-column",
         type=str,
-        default="text",
-        help="Name of text column in dataset (default: text)",
+        default=None,
+        help="Name of text column in dataset (default: auto-detect)",
     )
     parser.add_argument(
         "--num-proc",
@@ -71,21 +75,33 @@ def main() -> None:
     output_path.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading dataset: {args.dataset}")
+    dataset_kwargs = {"name": args.dataset_config} if args.dataset_config else {}
     if args.max_samples:
-        dataset = load_dataset(args.dataset, split=f"{args.split}[:{args.max_samples}]")
+        dataset = load_dataset(
+            args.dataset,
+            split=f"{args.split}[:{args.max_samples}]",
+            **dataset_kwargs,
+        )
     else:
-        dataset = load_dataset(args.dataset, split=args.split)
+        dataset = load_dataset(args.dataset, split=args.split, **dataset_kwargs)
 
     print(f"Dataset size: {len(dataset)} samples")
 
     print(f"Loading tokenizer: {args.tokenizer}")
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+    tokenizer = get_tokenizer(
+        pretrained_model_name_or_path=args.tokenizer,
+        max_length=args.max_length,
+    )
+
+    text_column = resolve_text_column(
+        dataset, is_streaming=False, preferred=args.text_column
+    )
 
     print(f"Tokenizing with max_length={args.max_length}...")
     tokenized_dataset = tokenize(
         dataset,
         tokenizer,
-        column_name=args.text_column,
+        column_name=text_column,
         max_length=args.max_length,
         num_proc=args.num_proc,
     )
@@ -98,7 +114,7 @@ def main() -> None:
     with open(info_file, "w") as f:
         f.write(f"Tokenizer: {args.tokenizer}\n")
         f.write(f"Max length: {args.max_length}\n")
-        f.write(f"Text column: {args.text_column}\n")
+        f.write(f"Text column: {text_column}\n")
         f.write(f"Dataset: {args.dataset}\n")
         f.write(f"Split: {args.split}\n")
         f.write(f"Samples: {len(tokenized_dataset)}\n")

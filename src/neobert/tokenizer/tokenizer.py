@@ -6,31 +6,44 @@ from typing import Any, Optional, Tuple
 
 from datasets import Dataset, Features, Sequence, Value
 from tokenizers.processors import TemplateProcessing
-from transformers import AutoTokenizer, PreTrainedTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 
 
 def get_tokenizer(
     pretrained_model_name_or_path: str = "meta-llama/Llama-2-7b-hf",
-    vocab_size: int = 32064,
     max_length: int = 4096,
     token: Optional[str] = None,
+    vocab_size: Optional[int] = None,
+    use_fast: bool = True,
     **kwargs: Any,
 ) -> PreTrainedTokenizer:
     """Load and configure a tokenizer for NeoBERT usage.
 
     :param str pretrained_model_name_or_path: Tokenizer model name or path.
-    :param int vocab_size: Target vocabulary size.
     :param int max_length: Maximum sequence length.
     :param str | None token: Optional auth token for gated models.
+    :param int | None vocab_size: Deprecated; tokenizer vocab size is derived from the model.
+    :param bool use_fast: Whether to require a fast tokenizer backend.
     :param Any kwargs: Additional kwargs forwarded to ``from_pretrained``.
     :return PreTrainedTokenizer: Configured tokenizer instance.
     """
+    if vocab_size is not None:
+        import logging
+
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            "get_tokenizer(): 'vocab_size' is deprecated and ignored; "
+            "resize model embeddings instead."
+        )
+    kwargs.pop("vocab_size", None)
+    kwargs.setdefault("use_fast", use_fast)
+
     # Load Tokenizer and replace/add special tokens
     tokenizer = AutoTokenizer.from_pretrained(
         pretrained_model_name_or_path,
-        vocab_size=vocab_size,
         token=token,
         trust_remote_code=True,
+        **kwargs,
     )
 
     # Set model_max_length (not max_length which is deprecated)
@@ -61,6 +74,17 @@ def get_tokenizer(
         should_keep_special_tokens = False
 
     if not should_keep_special_tokens:
+        if not isinstance(tokenizer, PreTrainedTokenizerFast) or not tokenizer.is_fast:
+            raise ValueError(
+                "Tokenizer does not provide a fast backend; cannot override post-processing "
+                "for MLM-style special tokens. Use a fast tokenizer or a model that already "
+                "defines a mask token."
+            )
+        if not hasattr(tokenizer, "_tokenizer") or tokenizer._tokenizer is None:
+            raise ValueError(
+                "Fast tokenizer backend is missing; cannot set post_processor for special tokens."
+            )
+
         # Define special tokens to be consistent with RoBERTa
         special_tokens = {
             "bos_token": "<s>",
@@ -134,6 +158,39 @@ def get_tokenizer(
         )
 
     return tokenizer
+
+
+def resolve_text_column(
+    dataset: Dataset, is_streaming: bool, preferred: Optional[str] = None
+) -> str:
+    """Resolve the text column for tokenization.
+
+    :param Dataset dataset: Dataset to inspect.
+    :param bool is_streaming: Whether the dataset is streaming.
+    :param str | None preferred: Optional preferred column name to validate.
+    :return str: Name of the text column.
+    """
+    if is_streaming:
+        first_example = next(iter(dataset))
+        columns = list(first_example.keys())
+    else:
+        columns = dataset.column_names
+
+    if preferred is not None:
+        if preferred in columns:
+            return preferred
+        raise ValueError(
+            f"Requested text column '{preferred}' not found. Available columns: "
+            + ", ".join(columns)
+        )
+
+    for col in ["text", "sentence", "content"]:
+        if col in columns:
+            return col
+    raise ValueError(
+        "Could not find text column in dataset. Available columns: "
+        + ", ".join(columns)
+    )
 
 
 def single_column_mapping(

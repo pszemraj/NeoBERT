@@ -8,7 +8,7 @@ model:
   dropout_prob: 0.0
   vocab_size: 30522
   max_position_embeddings: 128
-  flash_attention: false
+  xformers_attention: false
   ngpt: false
   hidden_act: "gelu"
 
@@ -30,18 +30,14 @@ datacollator:
 
 trainer:
   output_dir: "./test_outputs/simple_wiki"
-  run_name: "test_simple_wiki"
   max_steps: 20
   per_device_train_batch_size: 4
   per_device_eval_batch_size: 4
   gradient_accumulation_steps: 1
-  learning_rate: 1e-4
-  warmup_steps: 5
   logging_steps: 5
   eval_steps: 10
   save_steps: 20
   dataloader_num_workers: 0
-  remove_unused_columns: false
   report_to: []
   use_cpu: true
 

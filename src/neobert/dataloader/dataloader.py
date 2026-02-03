@@ -14,7 +14,6 @@ from ..collator import get_collator
 def get_dataloader(
     dataset: Dataset,
     tokenizer: PreTrainedTokenizer,
-    dtype: torch.dtype = torch.float32,
     mlm_probability: float = 0.15,
     mask_all: bool = False,
     pad_to_multiple_of: int = 8,
@@ -30,7 +29,6 @@ def get_dataloader(
 
     :param Dataset dataset: Dataset to iterate over.
     :param PreTrainedTokenizer tokenizer: Tokenizer used by the collator.
-    :param torch.dtype dtype: Dtype of the pad mask (defaults to ``torch.float32``).
     :param float mlm_probability: Ratio of tokens to mask.
     :param bool mask_all: Whether to mask all sampled tokens.
     :param int pad_to_multiple_of: Pad length to a multiple of this value.
@@ -45,7 +43,6 @@ def get_dataloader(
     """
 
     collate_fn = get_collator(
-        dtype=dtype,
         tokenizer=tokenizer,
         mlm_probability=mlm_probability,
         pad_to_multiple_of=pad_to_multiple_of,

@@ -14,9 +14,7 @@ class GLUEConfigValidator:
 
     REQUIRED_FIELDS = {
         "task": str,
-        "model": dict,
         "glue": dict,
-        "tokenizer": dict,
         "trainer": dict,
         "optimizer": dict,
         "scheduler": dict,
@@ -24,14 +22,9 @@ class GLUEConfigValidator:
 
     GLUE_TASKS = ["cola", "sst2", "mrpc", "stsb", "qqp", "mnli", "qnli", "rte", "wnli"]
 
-    MODEL_REQUIRED = {
-        "name_or_path": str,
-        "hidden_size": int,
-        "num_hidden_layers": int,
-        "num_attention_heads": int,
-        "intermediate_size": int,
-        "vocab_size": int,
-        "max_position_embeddings": int,
+    MODEL_OPTIONAL = {
+        "name": str,
+        "from_hub": bool,
     }
 
     TRAINER_REQUIRED = {
@@ -101,6 +94,8 @@ class GLUEConfigValidator:
         # Validate model section
         if "model" in config:
             self._validate_model_section(config["model"])
+        elif self.verbose:
+            self.warnings.append("Missing model section (using defaults).")
 
         # Validate trainer section
         if "trainer" in config:
@@ -113,6 +108,8 @@ class GLUEConfigValidator:
         # Validate tokenizer section
         if "tokenizer" in config:
             self._validate_tokenizer_section(config["tokenizer"])
+        elif self.verbose:
+            self.warnings.append("Missing tokenizer section (using defaults).")
 
         return len(self.errors) == 0
 
@@ -121,6 +118,7 @@ class GLUEConfigValidator:
 
         :param dict glue_config: GLUE section mapping.
         """
+        allow_random = glue_config.get("allow_random_weights", False)
         if "task_name" not in glue_config:
             self.errors.append("Missing glue.task_name")
         elif glue_config["task_name"] not in self.GLUE_TASKS:
@@ -137,26 +135,34 @@ class GLUEConfigValidator:
             self.warnings.append(
                 "Missing glue.max_seq_length (will use tokenizer max_length)"
             )
+        if not allow_random and "pretrained_model_path" not in glue_config:
+            self.errors.append(
+                "Missing glue.pretrained_model_path (required unless allow_random_weights is true)."
+            )
+        if "pretrained_model_path" in glue_config:
+            config_path = Path(glue_config["pretrained_model_path"])
+            if not config_path.exists():
+                self.warnings.append(
+                    f"Pretrained config path does not exist: {config_path}"
+                )
+        if "pretrained_checkpoint_dir" in glue_config:
+            checkpoint_dir = Path(glue_config["pretrained_checkpoint_dir"])
+            if not checkpoint_dir.exists():
+                self.warnings.append(
+                    f"Pretrained checkpoint directory does not exist: {checkpoint_dir}"
+                )
 
     def _validate_model_section(self, model_config: Dict) -> None:
         """Validate model configuration.
 
         :param dict model_config: Model section mapping.
         """
-        for field, expected_type in self.MODEL_REQUIRED.items():
-            if field not in model_config:
-                self.errors.append(f"Missing required model field: model.{field}")
-            elif not isinstance(model_config[field], expected_type):
+        for field, expected_type in self.MODEL_OPTIONAL.items():
+            if field in model_config and not isinstance(
+                model_config[field], expected_type
+            ):
                 self.errors.append(
                     f"model.{field} should be {expected_type.__name__}, got {type(model_config[field]).__name__}"
-                )
-
-        # Check for pretrained checkpoint if specified
-        if "pretrained_checkpoint_dir" in model_config:
-            checkpoint_dir = Path(model_config["pretrained_checkpoint_dir"])
-            if not checkpoint_dir.exists():
-                self.warnings.append(
-                    f"Pretrained checkpoint directory does not exist: {checkpoint_dir}"
                 )
 
     def _validate_trainer_section(self, trainer_config: Dict) -> None:

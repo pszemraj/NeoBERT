@@ -1,13 +1,5 @@
-task: "glue"
-
-# Model configuration - pointing to the pretrained 100k checkpoint
+task: glue
 model:
-  name_or_path: "neobert-100m"
-  # Pretrained model checkpoint (100k steps, ~2.0 CE loss)
-  pretrained_checkpoint_dir: "./outputs/neobert_100m_100k"
-  pretrained_checkpoint: 100000
-  pretrained_config_path: "./outputs/neobert_100m_100k/model_checkpoints/100000/config.yaml"
-  # Model architecture (must match pretrained)
   hidden_size: 768
   num_hidden_layers: 12
   num_attention_heads: 12
@@ -15,69 +7,57 @@ model:
   dropout_prob: 0.1
   vocab_size: 30522
   max_position_embeddings: 512
-  hidden_act: "swiglu"
-  # Classifier settings
+  hidden_act: swiglu
+  name: neobert-100m
+glue:
+  task_name: sst2
+  num_labels: 2
+  max_seq_length: 512
+  pretrained_model_path: ./outputs/neobert_100m_100k/model_checkpoints/100000/config.yaml
+  pretrained_checkpoint_dir: ./outputs/neobert_100m_100k
+  pretrained_checkpoint: 100000
   classifier_dropout: 0.1
   classifier_init_range: 0.02
-
-# GLUE-specific configuration
-glue:
-  task_name: "sst2"
-  num_labels: 2
-  max_seq_length: 512  # Standard for SST-2
-
-# Tokenizer
 tokenizer:
-  name: "bert-base-uncased"
+  name: bert-base-uncased
   max_length: 512
-
-# Training configuration - following best practices for GLUE
 trainer:
-  output_dir: "./outputs/glue/neobert-100m/sst2"
-  num_train_epochs: 3  # Standard for GLUE fine-tuning
-  max_steps: -1  # Auto-calculate from epochs
-  per_device_train_batch_size: 32  # Increased from repo default of 8
+  output_dir: ./outputs/glue/neobert-100m/sst2
+  num_train_epochs: 3
+  max_steps: -1
+  per_device_train_batch_size: 32
   per_device_eval_batch_size: 32
   gradient_accumulation_steps: 1
-  # Evaluation and saving
-  eval_strategy: "epoch"
-  eval_steps: 500  # SST-2 is larger than CoLA
-  save_model: false  # Disable model checkpoint saving for GLUE evaluation
-  save_strategy: "no"  # Don't save checkpoints
-  save_steps: -1  # Disabled
-  save_total_limit: 0  # No checkpoints
+  eval_strategy: epoch
+  eval_steps: 500
+  save_model: false
+  save_strategy: 'no'
+  save_steps: -1
+  save_total_limit: 0
   logging_steps: 100
-  # Early stopping
-  early_stopping: 5  # Stop if no improvement for 5 evaluations
-  metric_for_best_model: "eval_accuracy"  # SST-2 uses accuracy
+  early_stopping: 5
+  metric_for_best_model: eval_accuracy
   greater_is_better: true
   load_best_model_at_end: true
-  # Mixed precision
-  mixed_precision: "bf16"  # Using bf16 instead of fp16
+  mixed_precision: bf16
   tf32: true
-  # Misc
-  seed: 42
-  report_to: ["wandb"]
-
-# Optimizer - GLUE best practices
+  report_to:
+  - wandb
 optimizer:
-  name: "adamw"
-  lr: 2e-5  # Standard for GLUE (not 1e-4 from repo)
+  name: adamw
+  lr: 2e-5
   weight_decay: 0.01
-  betas: [0.9, 0.999]  # Standard BERT fine-tuning (not 0.95)
+  betas:
+  - 0.9
+  - 0.999
   eps: 1e-8
-
-# Learning rate scheduler
 scheduler:
-  name: "linear"
-  warmup_percent: 10  # 10% warmup is standard for GLUE
-
-# Data collator
+  name: linear
+  warmup_percent: 10
 datacollator:
   pad_to_multiple_of: 8
-
-# Weights & Biases
 wandb:
-  project: "neobert-glue"
-  name: "neobert-100m-sst2-100k"
-  mode: "online"  # Set to "disabled" to turn off
+  project: neobert-glue
+  name: neobert-100m-sst2-100k
+  mode: online
+seed: 42

@@ -17,14 +17,14 @@ Common issues and their solutions when training and using NeoBERT.
 - **Import errors**: ensure your virtual environment has `pip install -e .[dev]` applied and that you are inside the project root before invoking scripts.
 - **Slow data loading**: increase `trainer.dataloader_num_workers`, place datasets on faster storage, or enable streaming mode for giant corpora.
 
-### Flash Attention Issues During GLUE Evaluation
+### xFormers Attention Issues During GLUE Evaluation
 
-- **Symptom**: Launching GLUE evaluation with Flash Attention enabled produces runtime errors or crashes.
-- **Cause**: GLUE tasks use variable-length batches that are currently incompatible with Flash Attention's alignment requirements.
+- **Symptom**: Launching GLUE evaluation with xFormers memory-efficient attention enabled produces runtime errors or crashes.
+- **Cause**: GLUE tasks use variable-length batches that are currently incompatible with xFormers alignment requirements.
 - **Solution**:
-  1. When using the provided GLUE scripts/configs, no action is needed-Flash Attention is automatically disabled for you.
-  2. If you author custom launchers, set `model.flash_attention: false` (or pass `--model.flash_attention false`) before evaluation.
-  3. Restart the run after toggling the setting; mixed Flash Attention/eager runs in the same process can leave partially initialized CUDA kernels.
+  1. When using the provided GLUE scripts/configs, no action is needed-xFormers attention is automatically disabled for you.
+  2. If you author custom launchers, set `model.xformers_attention: false` (or pass `--model.xformers_attention false`) before evaluation.
+  3. Restart the run after toggling the setting; mixed xFormers/eager runs in the same process can leave partially initialized CUDA kernels.
 
 ### Model Checkpoint Corruption
 
@@ -42,7 +42,7 @@ torch.save(model.state_dict(), "checkpoint.pt")
 torch.save(accelerator.unwrap_model(model).state_dict(), "checkpoint.pt")
 ```
 
-This issue was fixed in `trainer.py` and `trainer_phase_2.py`.
+This issue was fixed in `trainer.py`.
 
 ### OOM During Training
 
@@ -53,7 +53,7 @@ This issue was fixed in `trainer.py` and `trainer_phase_2.py`.
 1. Enable gradient checkpointing: `--trainer.gradient_checkpointing true`
 2. Reduce batch size: `--trainer.per_device_train_batch_size 16`
 3. Use gradient accumulation: `--trainer.gradient_accumulation_steps 4`
-4. Enable mixed precision: `--mixed_precision bf16` (pretraining) or `--trainer.mixed_precision bf16` (GLUE/contrastive)
+4. Enable mixed precision: `--trainer.mixed_precision bf16`
 
 ## Export Issues
 
@@ -143,7 +143,7 @@ inputs before export/inference.
 
 NeoBERT uses different backends depending on the code path:
 
-- **Training** uses `xformers.ops.memory_efficient_attention` when `model.flash_attention: true`.
+- **Training** uses `xformers.ops.memory_efficient_attention` when `model.xformers_attention: true`.
 - **Exported HF models** use `flash-attn` if available.
 
 **If training backend is missing**:

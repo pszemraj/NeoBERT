@@ -46,7 +46,7 @@ Current state:
 - `src/neobert/pretraining/trainer.py` passes `packed_seqlens` into `NeoBERTLMHead`
   and skips additive masks for packed batches.
 - `src/neobert/model/model.py` supports xFormers block-diagonal attention for
-  packed batches when `model.flash_attention: true`.
+  packed batches when `model.xformers_attention: true`.
 - `src/neobert/huggingface/modeling_neobert.py` intentionally **does not**
   support packed/varlen inputs; the exported HF model stays within vanilla
   Transformers expectations.

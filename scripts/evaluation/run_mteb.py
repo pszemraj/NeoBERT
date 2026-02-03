@@ -169,7 +169,6 @@ def evaluate_mteb(cfg: Any) -> None:
     tokenizer = get_tokenizer(
         pretrained_model_name_or_path=cfg.tokenizer.name,
         max_length=cfg.tokenizer.max_length,
-        vocab_size=cfg.tokenizer.vocab_size or cfg.model.vocab_size,
     )
 
     # Instantiate model
@@ -249,7 +248,7 @@ def main() -> None:
 
     # Load configuration
     config = ConfigLoader.load(args.config, remaining)
-    config.model_name_or_path = args.model_name_or_path
+    config.trainer.output_dir = args.model_name_or_path
     config.task_types = args.task_types.split(",") if args.task_types != "all" else None
     config.output_folder = args.output_folder
 

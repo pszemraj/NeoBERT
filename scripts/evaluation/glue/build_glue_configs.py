@@ -105,7 +105,6 @@ BASE_TRAINER = {
     "load_best_model_at_end": True,
     "mixed_precision": "bf16",
     "tf32": True,
-    "seed": 42,
     "report_to": ["wandb"],
 }
 
@@ -376,10 +375,14 @@ def build_configs(args: BuildArgs) -> Dict[str, Dict[str, object]]:
         pretrain_cfg,
     )
 
-    model_section = {
+    model_section: Dict[str, object] = {}
+    if args.model_name:
+        model_section["name"] = args.model_name
+
+    glue_pretrain_section = {
         "pretrained_checkpoint_dir": str(relpath(args.checkpoint_dir, REPO_ROOT)),
         "pretrained_checkpoint": checkpoint_value,
-        "pretrained_config_path": str(relpath(args.pretrain_config_path, REPO_ROOT)),
+        "pretrained_model_path": str(relpath(args.pretrain_config_path, REPO_ROOT)),
     }
 
     output_dir_root = (
@@ -396,6 +399,7 @@ def build_configs(args: BuildArgs) -> Dict[str, Dict[str, object]]:
 
         glue_cfg = {"task_name": task}
         glue_cfg.update(settings.get("glue", {}))
+        glue_cfg.update(glue_pretrain_section)
 
         config_dict: Dict[str, object] = {
             "task": "glue",
@@ -409,6 +413,7 @@ def build_configs(args: BuildArgs) -> Dict[str, Dict[str, object]]:
                 args.wandb_project, args.run_prefix, task, args.checkpoint_step
             ),
             "pretraining_metadata": metadata_block,
+            "seed": 42,
         }
 
         if tokenizer_block:

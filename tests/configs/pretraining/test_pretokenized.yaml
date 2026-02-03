@@ -12,7 +12,7 @@ model:
   rms_norm: true
   hidden_act: "swiglu"
   dropout_prob: 0.0
-  flash_attention: true
+  xformers_attention: true
 
 dataset:
   name: "pszemraj/simple_wikipedia_LM"
@@ -42,9 +42,7 @@ trainer:
   eval_steps: 200
   logging_steps: 10
   output_dir: "./outputs/pretokenized_test"
-  bf16: true
   mixed_precision: "bf16"
-  seed: 42
 
 datacollator:
   mlm_probability: 0.2
@@ -54,4 +52,5 @@ wandb:
   project: "neobert-test"
   name: "pretokenized-200steps-test"
   mode: "online"
-  log_interval: 10
+
+seed: 42

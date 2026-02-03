@@ -37,17 +37,34 @@ def prepare_wandb_config(cfg: Any) -> Dict[str, Any]:
     return config_dict
 
 
-def configure_tf32(print_fn: Optional[Callable[[str], Any]] = None) -> bool:
-    """Enable TF32 precision for GPUs with compute capability >= 8.0 (Ampere+).
+def configure_tf32(
+    enabled: bool, print_fn: Optional[Callable[[str], Any]] = None
+) -> bool:
+    """Enable/disable TF32 precision for GPUs with compute capability >= 8.0 (Ampere+).
 
-    :param print_fn: Optional function to use for printing messages (default: logging.info)
-    :return: True if TF32 was enabled, False otherwise
+    :param bool enabled: Whether TF32 should be enabled.
+    :param print_fn: Optional function to use for printing messages (default: logging.info).
+    :return bool: True if TF32 was enabled, False otherwise.
     """
     # Use provided print function or fall back to logging
     log = print_fn if print_fn else logging.info
 
     if not torch.cuda.is_available():
         log("No GPU detected, running on CPU.")
+        return False
+
+    if not enabled:
+        try:
+            torch.set_float32_matmul_precision("highest")
+            torch.backends.cuda.matmul.allow_tf32 = False
+            torch.backends.cudnn.allow_tf32 = False
+            log("TF32 disabled by config.")
+        except Exception as e:
+            error_msg = f"Failed to disable TF32: {e}"
+            if print_fn:
+                print_fn(error_msg)
+            else:
+                logging.error(error_msg)
         return False
 
     try:

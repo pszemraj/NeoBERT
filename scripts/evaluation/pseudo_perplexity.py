@@ -131,7 +131,7 @@ if __name__ == "__main__":
                 dropout=model_pretraining_config.model.dropout_prob,
                 vocab_size=model_pretraining_config.model.vocab_size,
                 max_position_embeddings=model_pretraining_config.model.max_position_embeddings,
-                flash_attention=model_pretraining_config.model.flash_attention,
+                flash_attention=model_pretraining_config.model.xformers_attention,
                 ngpt=model_pretraining_config.model.ngpt,
                 hidden_act=model_pretraining_config.model.hidden_act,
                 rope=model_pretraining_config.model.rope,
