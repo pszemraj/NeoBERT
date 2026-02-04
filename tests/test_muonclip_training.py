@@ -58,14 +58,14 @@ def train_model(
 
     losses = []
     step_times = []
-    start_time = time.time()
+    start_time = time.perf_counter()
     step = 0
 
     print(f"\nTraining with {optimizer_name} for {duration_seconds} seconds...")
     print("-" * 60)
 
-    while time.time() - start_time < duration_seconds:
-        step_start = time.time()
+    while time.perf_counter() - start_time < duration_seconds:
+        step_start = time.perf_counter()
 
         batch = batch_provider()
         input_ids = batch["input_ids"].to(device)
@@ -101,12 +101,12 @@ def train_model(
 
         # Track metrics
         losses.append(loss.item())
-        step_times.append(time.time() - step_start)
+        step_times.append(time.perf_counter() - step_start)
         step += 1
 
         # Log progress
         if step % 50 == 0:
-            elapsed = time.time() - start_time
+            elapsed = time.perf_counter() - start_time
             avg_loss = sum(losses[-50:]) / min(50, len(losses))
 
             # Get MuonClip metrics if available
@@ -122,7 +122,7 @@ def train_model(
                 f"  Step {step:4d} | Time: {elapsed:5.1f}s | Loss: {avg_loss:.4f}{extra_info}"
             )
 
-    training_time = time.time() - start_time
+    training_time = time.perf_counter() - start_time
 
     # Calculate final metrics
     final_avg_loss = sum(losses[-100:]) / min(100, len(losses))
@@ -198,7 +198,7 @@ def main():
             nonlocal stream_iterator
             samples = list(itertools.islice(stream_iterator, batch_size))
             while len(samples) < batch_size:
-                new_seed = int(time.time())
+                new_seed = time.perf_counter_ns()
                 stream_iterator = iter(
                     streaming_dataset.shuffle(buffer_size=8192, seed=new_seed)
                 )
