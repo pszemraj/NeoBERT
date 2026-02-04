@@ -242,6 +242,37 @@ class TestPretrainComponents(unittest.TestCase):
         self.assertIn("labels", collated)
         self.assertIn("attention_mask", collated)
 
+    def test_mlm_collator_returns_packed_seqlens_metadata(self):
+        """Ensure non-packed collator can emit packed_seqlens metadata."""
+        from neobert.collator import get_collator
+
+        tokenizer = self._make_tokenizer()
+        collator = get_collator(
+            tokenizer=tokenizer, mlm_probability=0.15, return_packed_seqlens=True
+        )
+
+        texts = ["hello world", "test"]
+        tokenized = tokenizer(texts, padding=True, return_tensors="pt")
+        batch = [
+            {
+                "input_ids": tokenized["input_ids"][0],
+                "attention_mask": tokenized["attention_mask"][0],
+            },
+            {
+                "input_ids": tokenized["input_ids"][1],
+                "attention_mask": tokenized["attention_mask"][1],
+            },
+        ]
+
+        collated = collator(batch)
+        packed = collated["packed_seqlens"]
+        self.assertIsInstance(packed, list)
+
+        attention_mask = collated["attention_mask"]
+        keep = torch.isfinite(attention_mask) & (attention_mask == 0)
+        lengths = keep.sum(dim=1).tolist()
+        self.assertEqual(packed, [[int(length)] for length in lengths])
+
     def test_masked_correct_count(self):
         """Test masked accuracy counting ignores -100 labels."""
         from neobert.pretraining.trainer import _count_masked_correct
@@ -274,8 +305,8 @@ class TestPretrainComponents(unittest.TestCase):
         self.assertEqual(collated["attention_mask"].dim(), 2)
         self.assertIn("packed_seqlens", collated)
         packed = collated["packed_seqlens"]
-        self.assertTrue(torch.is_tensor(packed))
-        self.assertTrue(all(row[row > 0].numel() >= 1 for row in packed))
+        self.assertIsInstance(packed, list)
+        self.assertTrue(all(len(row) >= 1 for row in packed))
 
     def test_normalize_packed_seqlens_tensor(self):
         """Ensure packed_seqlens tensors normalize to list-of-lists."""

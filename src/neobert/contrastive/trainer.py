@@ -41,6 +41,34 @@ from .metrics import Metrics
 logger = logging.getLogger(__name__)
 
 
+def _unwrap_optimizer(opt: object) -> object:
+    """Return the underlying optimizer if wrapped by Accelerate.
+
+    :param object opt: Optimizer instance to unwrap.
+    :return object: Unwrapped optimizer.
+    """
+    return getattr(opt, "optimizer", opt)
+
+
+def _maybe_prepare_for_forward(
+    optimizer: object,
+    *,
+    update_step: int,
+    is_last_microbatch: bool,
+) -> None:
+    """Invoke MuonClip hook gating if supported by the optimizer.
+
+    :param object optimizer: Optimizer instance (possibly wrapped).
+    :param int update_step: Current optimizer update step.
+    :param bool is_last_microbatch: Whether this microbatch will sync gradients.
+    """
+    inner = _unwrap_optimizer(optimizer)
+    fn = getattr(inner, "prepare_for_forward", None)
+    if fn is None:
+        return
+    fn(update_step=int(update_step), is_last_microbatch=bool(is_last_microbatch))
+
+
 def _resolve_resume_checkpoint(
     resume_from_checkpoint: Optional[str],
     checkpoint_dir: str,
@@ -556,11 +584,11 @@ def trainer(cfg: Config) -> None:
         is_last_microbatch = (
             metrics["train/batches"] % cfg.trainer.gradient_accumulation_steps == 0
         )
-        if hasattr(optimizer, "prepare_for_forward"):
-            optimizer.prepare_for_forward(
-                update_step=metrics["train/steps"],
-                is_last_microbatch=is_last_microbatch,
-            )
+        _maybe_prepare_for_forward(
+            optimizer,
+            update_step=metrics["train/steps"],
+            is_last_microbatch=is_last_microbatch,
+        )
 
         if not is_last_microbatch:
             with accelerator.no_sync(model):

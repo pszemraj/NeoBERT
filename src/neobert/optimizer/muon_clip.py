@@ -1385,35 +1385,42 @@ class MuonClipOptimizer(Optimizer):
             dtype=xq_heads.dtype,
         )
         k_t = xk_heads.transpose(-2, -1)
-        mask = pad_mask
-        if mask is not None and torch.is_tensor(mask):
-            mask = mask.to(device=xq_heads.device, dtype=xq_heads.dtype)
+        bias = None
+        bias_is_full = False
+        if pad_mask is not None:
+            if not torch.is_tensor(pad_mask):
+                raise TypeError("pad_mask must be a tensor when provided")
+            bias = pad_mask.to(device=xq_heads.device, dtype=xq_heads.dtype)
+            if bias.dim() == 2:
+                bias = bias.view(batch, 1, 1, seq_len)
+            elif bias.dim() == 4:
+                if bias.shape[-1] != seq_len:
+                    raise ValueError(
+                        "pad_mask last dim must equal seq_len "
+                        f"({bias.shape[-1]} != {seq_len})"
+                    )
+                if bias.shape[-2] not in (1, seq_len):
+                    raise ValueError(
+                        "pad_mask must have shape (B,1,1,S) or (B,1,S,S), got "
+                        f"{tuple(bias.shape)}"
+                    )
+                bias_is_full = bias.shape[-2] == seq_len
+            else:
+                raise ValueError(
+                    "pad_mask must have shape (B,S), (B,1,1,S), or (B,1,S,S); got "
+                    f"{tuple(bias.shape)}"
+                )
 
         for start in range(0, seq_len, chunk_size):
             end = min(seq_len, start + chunk_size)
             q = xq_heads[:, :, start:end, :]
             logits = torch.matmul(q, k_t) * scale
 
-            if mask is not None:
-                if mask.dim() != 4:
-                    raise ValueError(
-                        "pad_mask must be 4D when provided to MuonClip, got "
-                        f"{tuple(mask.shape)}"
-                    )
-                if mask.shape[-1] != seq_len:
-                    raise ValueError(
-                        "pad_mask last dim must equal seq_len "
-                        f"({mask.shape[-1]} != {seq_len})"
-                    )
-                if mask.shape[-2] == 1:
-                    logits = logits + mask
-                elif mask.shape[-2] == seq_len:
-                    logits = logits + mask[:, :, start:end, :]
+            if bias is not None:
+                if bias_is_full:
+                    logits = logits + bias[:, :, start:end, :]
                 else:
-                    raise ValueError(
-                        "pad_mask must have shape (B,1,1,S) or (B,1,S,S), got "
-                        f"{tuple(mask.shape)}"
-                    )
+                    logits = logits + bias
 
             chunk_max = logits.amax(dim=(-2, -1))
             per_step_max = torch.maximum(per_step_max, chunk_max)

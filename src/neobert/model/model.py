@@ -8,6 +8,7 @@
 # From https://github.com/pytorch/pytorch/issues/97899
 # From https://github.com/facebookresearch/llama/blob/main/llama/model.py
 
+import logging
 import math
 import warnings
 from functools import partial
@@ -49,6 +50,8 @@ except (ImportError, RuntimeError) as e:
     XFORMERS_ERROR = str(e)
     memory_efficient_attention = None
     BlockDiagonalMask = None
+
+logger = logging.getLogger(__name__)
 
 
 def _packed_flash_attention(
@@ -193,56 +196,113 @@ def _prepare_xformers_bias(
     return mask.to(device=device, dtype=dtype)
 
 
-def _pad_mask_to_packed_seqlens(
+def _infer_single_segment_packed_seqlens_from_pad_mask(
     pad_mask: torch.Tensor, seq_len: int
 ) -> Optional[list[list[int]]]:
-    """Convert a key-padding mask into packed sequence lengths.
+    """Infer packed lengths from an additive pad mask.
 
-    This only works for prefix padding masks shaped (B, 1, 1, S) where tokens
-    are unmasked first and masked only at the tail. Returns None if the mask
-    is not a simple padding mask.
+    This only works for prefix padding masks where tokens are unmasked first and
+    masked only at the tail. Returns None if the mask is not a simple padding mask.
 
     :param torch.Tensor pad_mask: Additive pad mask (0/-inf).
     :param int seq_len: Sequence length for validation.
     :return list[list[int]] | None: Packed lengths per batch item.
     """
-    if pad_mask.dim() != 4 or pad_mask.shape[1] != 1 or pad_mask.shape[2] != 1:
+    if not torch.is_tensor(pad_mask):
+        raise TypeError("pad_mask must be a torch.Tensor")
+
+    mask = pad_mask.detach()
+    if mask.is_cuda:
+        # Sync once per batch to avoid per-layer GPU stalls.
+        mask = mask.cpu()
+
+    if mask.dim() == 2:
+        key_mask = mask
+    elif mask.dim() == 4:
+        key_mask = mask[:, 0, 0, :]
+    else:
         return None
 
-    if pad_mask.shape[-1] != seq_len:
+    if key_mask.shape[-1] != seq_len:
         return None
 
-    key_mask = pad_mask.squeeze(1).squeeze(1)
-    keep = key_mask == 0
+    keep = torch.isfinite(key_mask) & (key_mask == 0)
     keep_int = keep.to(torch.int)
     if not torch.all(keep_int.cummin(dim=-1).values == keep_int):
         return None
 
     lengths = keep_int.sum(dim=-1).tolist()
-    return [[int(length)] for length in lengths]
+    return [[int(min(seq_len, length))] for length in lengths]
 
 
 def _normalize_packed_seqlens(
     packed_seqlens: Any,
+    *,
+    seq_len: Optional[int] = None,
 ) -> Optional[list[list[int]]]:
     """Normalize packed sequence lengths to Python lists.
 
     :param Any packed_seqlens: Packed segment lengths tensor or list.
+    :param int | None seq_len: Optional sequence length for validation.
     :return list[list[int]] | None: Packed segment lengths as Python lists.
     """
     if packed_seqlens is None:
         return None
+
     if torch.is_tensor(packed_seqlens):
         if packed_seqlens.numel() == 0:
             return [[] for _ in range(packed_seqlens.shape[0])]
-        cpu = (
-            packed_seqlens.detach().cpu()
-            if packed_seqlens.device.type != "cpu"
-            else packed_seqlens.detach()
-        )
-        return [[int(x) for x in row[row > 0].tolist()] for row in cpu]
+        tensor = packed_seqlens.detach()
+        if tensor.is_cuda:
+            logger.warning(
+                "packed_seqlens was a CUDA tensor; converting to Python list will sync. "
+                "Prefer emitting packed_seqlens as list-of-lists in the collator."
+            )
+        tensor = tensor.cpu()
 
-    return [[int(x) for x in row if int(x) > 0] for row in packed_seqlens]
+        if tensor.ndim == 1:
+            out: list[list[int]] = []
+            for value in tensor.tolist():
+                length = int(value)
+                segs = [length] if length > 0 else []
+                if seq_len is not None and sum(segs) > seq_len:
+                    raise ValueError(
+                        f"packed_seqlens sums to {sum(segs)} > seq_len={seq_len}: {segs}"
+                    )
+                out.append(segs)
+            return out
+
+        if tensor.ndim == 2:
+            out = []
+            for row in tensor.tolist():
+                segs = [int(x) for x in row if int(x) > 0]
+                if seq_len is not None and sum(segs) > seq_len:
+                    raise ValueError(
+                        f"packed_seqlens sums to {sum(segs)} > seq_len={seq_len}: {segs}"
+                    )
+                out.append(segs)
+            return out
+
+        raise ValueError(
+            "packed_seqlens tensor must be rank 1 or 2, got "
+            f"shape={tuple(tensor.shape)}"
+        )
+
+    if isinstance(packed_seqlens, list):
+        out: list[list[int]] = []
+        for row in packed_seqlens:
+            if row is None:
+                out.append([])
+                continue
+            segs = [int(x) for x in row if int(x) > 0]
+            if seq_len is not None and sum(segs) > seq_len:
+                raise ValueError(
+                    f"packed_seqlens sums to {sum(segs)} > seq_len={seq_len}: {segs}"
+                )
+            out.append(segs)
+        return out
+
+    raise TypeError(f"Unsupported packed_seqlens type: {type(packed_seqlens).__name__}")
 
 
 class SwiGLU(nn.Module):
@@ -517,30 +577,20 @@ class EncoderBlock(nn.Module):
                 )
             else:
                 if pad_mask is not None:
-                    packed_from_pad = _pad_mask_to_packed_seqlens(pad_mask, seq_len)
-                    if packed_from_pad is not None:
-                        attn = _packed_flash_attention(
-                            xq,
-                            xk,
-                            xv,
-                            packed_from_pad,
-                            dropout_p=dropout_p,
-                        )
-                    else:
-                        attn_bias = _prepare_xformers_bias(
-                            pad_mask,
-                            self.config.num_attention_heads,
-                            seq_len,
-                            xq.dtype,
-                            xq.device,
-                        )
-                        attn = memory_efficient_attention(
-                            query=xq,
-                            key=xk,
-                            value=xv,
-                            attn_bias=attn_bias,
-                            p=dropout_p,
-                        )
+                    attn_bias = _prepare_xformers_bias(
+                        pad_mask,
+                        self.config.num_attention_heads,
+                        seq_len,
+                        xq.dtype,
+                        xq.device,
+                    )
+                    attn = memory_efficient_attention(
+                        query=xq,
+                        key=xk,
+                        value=xv,
+                        attn_bias=attn_bias,
+                        p=dropout_p,
+                    )
                 else:
                     attn = memory_efficient_attention(
                         query=xq,
@@ -749,32 +799,21 @@ class NormEncoderBlock(nn.Module):
                 )
             else:
                 if pad_mask is not None:
-                    packed_from_pad = _pad_mask_to_packed_seqlens(pad_mask, seq_len)
-                    if packed_from_pad is not None:
-                        attn = _packed_flash_attention(
-                            xq,
-                            xk,
-                            xv,
-                            packed_from_pad,
-                            dropout_p=dropout_p,
-                            scale=softmax_scale,
-                        )
-                    else:
-                        attn_bias = _prepare_xformers_bias(
-                            pad_mask,
-                            self.config.num_attention_heads,
-                            seq_len,
-                            xq.dtype,
-                            xq.device,
-                        )
-                        attn = memory_efficient_attention(
-                            query=xq,
-                            key=xk,
-                            value=xv,
-                            attn_bias=attn_bias,
-                            p=dropout_p,
-                            scale=softmax_scale,
-                        )
+                    attn_bias = _prepare_xformers_bias(
+                        pad_mask,
+                        self.config.num_attention_heads,
+                        seq_len,
+                        xq.dtype,
+                        xq.device,
+                    )
+                    attn = memory_efficient_attention(
+                        query=xq,
+                        key=xk,
+                        value=xv,
+                        attn_bias=attn_bias,
+                        p=dropout_p,
+                        scale=softmax_scale,
+                    )
                 else:
                     attn = memory_efficient_attention(
                         query=xq,
@@ -905,24 +944,35 @@ class NeoBERT(NeoBERTPreTrainedModel):
         :param list[list[int]] | None packed_seqlens: Packed segment lengths.
         :return torch.Tensor: Encoded hidden states.
         """
-        packed_seqlens = _normalize_packed_seqlens(packed_seqlens)
-        if packed_seqlens is not None:
-            if not self.config.flash_attention:
-                raise ValueError(
-                    "Packed sequences require flash_attention with xFormers."
+        seq_len = src.shape[1]
+        packed_seqlens = _normalize_packed_seqlens(packed_seqlens, seq_len=seq_len)
+        if self.config.flash_attention:
+            if (
+                packed_seqlens is None
+                and pad_mask is not None
+                and torch.is_tensor(pad_mask)
+            ):
+                packed_seqlens = _infer_single_segment_packed_seqlens_from_pad_mask(
+                    pad_mask, seq_len
                 )
-            if not XFORMERS_AVAILABLE:
-                raise ImportError(
-                    "Packed sequences require xformers. Install with: pip install xformers. "
-                    f"Import error: {XFORMERS_ERROR}"
-                )
-            if pad_mask is not None:
-                raise ValueError(
-                    "pad_mask must be None when packed_seqlens is provided."
-                )
+                if packed_seqlens is not None:
+                    pad_mask = None
+            if packed_seqlens is not None:
+                if not XFORMERS_AVAILABLE:
+                    raise ImportError(
+                        "Packed sequences require xformers. Install with: pip install xformers. "
+                        f"Import error: {XFORMERS_ERROR}"
+                    )
+                if pad_mask is not None:
+                    logger.warning(
+                        "packed_seqlens provided; ignoring pad_mask for packed attention."
+                    )
+                    pad_mask = None
+        elif packed_seqlens is not None:
+            raise ValueError("Packed sequences require flash_attention with xFormers.")
 
         # Normalize to broadcast-friendly shapes to avoid O(S^2) materialization.
-        if pad_mask is not None:
+        if pad_mask is not None and torch.is_tensor(pad_mask):
             # Expect additive masks (0 for keep, -inf for masked positions).
             pad_mask = _normalize_pad_mask(pad_mask)
 
@@ -1050,24 +1100,35 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
         :param list[list[int]] | None packed_seqlens: Packed segment lengths.
         :return torch.Tensor: Encoded hidden states.
         """
-        packed_seqlens = _normalize_packed_seqlens(packed_seqlens)
-        if packed_seqlens is not None:
-            if not self.config.flash_attention:
-                raise ValueError(
-                    "Packed sequences require flash_attention with xFormers."
+        seq_len = src.shape[1]
+        packed_seqlens = _normalize_packed_seqlens(packed_seqlens, seq_len=seq_len)
+        if self.config.flash_attention:
+            if (
+                packed_seqlens is None
+                and pad_mask is not None
+                and torch.is_tensor(pad_mask)
+            ):
+                packed_seqlens = _infer_single_segment_packed_seqlens_from_pad_mask(
+                    pad_mask, seq_len
                 )
-            if not XFORMERS_AVAILABLE:
-                raise ImportError(
-                    "Packed sequences require xformers. Install with: pip install xformers. "
-                    f"Import error: {XFORMERS_ERROR}"
-                )
-            if pad_mask is not None:
-                raise ValueError(
-                    "pad_mask must be None when packed_seqlens is provided."
-                )
+                if packed_seqlens is not None:
+                    pad_mask = None
+            if packed_seqlens is not None:
+                if not XFORMERS_AVAILABLE:
+                    raise ImportError(
+                        "Packed sequences require xformers. Install with: pip install xformers. "
+                        f"Import error: {XFORMERS_ERROR}"
+                    )
+                if pad_mask is not None:
+                    logger.warning(
+                        "packed_seqlens provided; ignoring pad_mask for packed attention."
+                    )
+                    pad_mask = None
+        elif packed_seqlens is not None:
+            raise ValueError("Packed sequences require flash_attention with xFormers.")
 
         # Normalize to broadcast-friendly shapes to avoid O(S^2) materialization.
-        if pad_mask is not None:
+        if pad_mask is not None and torch.is_tensor(pad_mask):
             # Expect additive masks (0 for keep, -inf for masked positions).
             pad_mask = _normalize_pad_mask(pad_mask)
 

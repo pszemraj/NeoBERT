@@ -51,6 +51,34 @@ from .metrics import Metrics, format_metrics
 logger = logging.getLogger(__name__)
 
 
+def _unwrap_optimizer(opt: Any) -> Any:
+    """Return the underlying optimizer if wrapped by Accelerate.
+
+    :param Any opt: Optimizer instance to unwrap.
+    :return Any: Unwrapped optimizer.
+    """
+    return getattr(opt, "optimizer", opt)
+
+
+def _maybe_prepare_for_forward(
+    optimizer: Any,
+    *,
+    update_step: int,
+    is_last_microbatch: bool,
+) -> None:
+    """Invoke MuonClip hook gating if supported by the optimizer.
+
+    :param Any optimizer: Optimizer instance (possibly wrapped).
+    :param int update_step: Current optimizer update step.
+    :param bool is_last_microbatch: Whether this microbatch will sync gradients.
+    """
+    inner = _unwrap_optimizer(optimizer)
+    fn = getattr(inner, "prepare_for_forward", None)
+    if fn is None:
+        return
+    fn(update_step=int(update_step), is_last_microbatch=bool(is_last_microbatch))
+
+
 def _parse_split_slice(split: str) -> Tuple[str, Optional[str], Optional[str]]:
     """Parse a split string with optional slice notation.
 
@@ -261,6 +289,11 @@ def _packed_seqlens_to_list(
     if torch.is_tensor(packed_seqlens):
         if packed_seqlens.numel() == 0:
             return [[] for _ in range(packed_seqlens.shape[0])]
+        if packed_seqlens.is_cuda:
+            logger.warning(
+                "packed_seqlens is on CUDA; converting to CPU will synchronize. "
+                "Prefer emitting packed_seqlens as Python metadata in the collator."
+            )
         cpu = packed_seqlens.detach().cpu()
         return [[int(x) for x in row[row > 0].tolist()] for row in cpu]
     return packed_seqlens
@@ -934,6 +967,7 @@ def trainer(cfg: Config) -> None:
         mask_all=cfg.datacollator.mask_all,
         pack_sequences=cfg.datacollator.pack_sequences,
         max_length=collator_max_length,
+        return_packed_seqlens=cfg.model.xformers_attention,
     )
 
     eval_dataloader = None
@@ -949,6 +983,7 @@ def trainer(cfg: Config) -> None:
             pack_sequences=cfg.datacollator.pack_sequences,
             max_length=collator_max_length,
             shuffle=False,
+            return_packed_seqlens=cfg.model.xformers_attention,
         )
 
     # Model
@@ -1182,11 +1217,11 @@ def trainer(cfg: Config) -> None:
             sync_gradients = (
                 metrics["train/batches"] % cfg.trainer.gradient_accumulation_steps == 0
             )
-            if hasattr(optimizer, "prepare_for_forward"):
-                optimizer.prepare_for_forward(
-                    update_step=metrics["train/steps"],
-                    is_last_microbatch=sync_gradients,
-                )
+            _maybe_prepare_for_forward(
+                optimizer,
+                update_step=metrics["train/steps"],
+                is_last_microbatch=sync_gradients,
+            )
             context = nullcontext() if sync_gradients else accelerator.no_sync(model)
             with context:
                 # Forward pass

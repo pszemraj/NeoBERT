@@ -46,15 +46,6 @@ class DummyPadCollator:
 class TestCollatorPacking(unittest.TestCase):
     """Tests for edge cases in sequence packing."""
 
-    @staticmethod
-    def _packed_to_list(packed):
-        """Convert packed_seqlens tensor to list for assertions."""
-        if torch.is_tensor(packed):
-            if packed.numel() == 0:
-                return [[] for _ in range(packed.shape[0])]
-            return [[int(x) for x in row[row > 0].tolist()] for row in packed]
-        return packed
-
     def test_flushes_before_sep_when_sequence_does_not_fit(self):
         """Ensure sequences are not split across packed buffers."""
         collator = DataCollatorWithPacking(
@@ -76,7 +67,7 @@ class TestCollatorPacking(unittest.TestCase):
         self.assertEqual(batch["input_ids"][1].tolist(), [10, 4, 5, 11, 0, 0])
         self.assertIn("attention_mask", batch)
         self.assertEqual(batch["attention_mask"].shape, (2, 6))
-        self.assertEqual(self._packed_to_list(batch["packed_seqlens"]), [[5], [4]])
+        self.assertEqual(batch["packed_seqlens"], [[5], [4]])
 
     def test_boundaries_used_when_sequence_fits(self):
         """Ensure segment boundaries are inserted when packing."""
@@ -98,7 +89,7 @@ class TestCollatorPacking(unittest.TestCase):
         self.assertEqual(batch["input_ids"][0].tolist(), [10, 1, 2, 11, 10, 3, 11, 0])
         self.assertIn("attention_mask", batch)
         self.assertEqual(batch["attention_mask"].shape, (1, 8))
-        self.assertEqual(self._packed_to_list(batch["packed_seqlens"]), [[4, 3]])
+        self.assertEqual(batch["packed_seqlens"], [[4, 3]])
         self.assertIn("special_tokens_mask", batch)
         self.assertEqual(
             batch["special_tokens_mask"][0].tolist(),
@@ -123,8 +114,6 @@ class TestCollatorPacking(unittest.TestCase):
 
         attention_mask = batch["attention_mask"]
         token_counts = attention_mask.sum(dim=1).tolist()
-        packed_counts = [
-            sum(lengths) for lengths in self._packed_to_list(batch["packed_seqlens"])
-        ]
+        packed_counts = [sum(lengths) for lengths in batch["packed_seqlens"]]
         self.assertEqual(token_counts, packed_counts)
         self.assertEqual(batch["input_ids"].shape[1], 6)

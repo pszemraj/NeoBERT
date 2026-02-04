@@ -24,6 +24,7 @@ def get_dataloader(
     persistent_workers: bool = True,
     pack_sequences: bool = False,
     max_length: int = 512,
+    return_packed_seqlens: bool = False,
 ) -> torch.utils.data.DataLoader:
     """Build a ``torch`` dataloader with an MLM collator and pad mask.
 
@@ -39,6 +40,7 @@ def get_dataloader(
     :param bool persistent_workers: Keep workers alive across epochs.
     :param bool pack_sequences: Whether to pack sequences before collation.
     :param int max_length: Maximum sequence length for packing.
+    :param bool return_packed_seqlens: Whether to emit packed_seqlens for non-packed batches.
     :return torch.utils.data.DataLoader: Configured dataloader instance.
     """
 
@@ -49,6 +51,7 @@ def get_dataloader(
         mask_all=mask_all,
         max_length=max_length,
         pack_sequences=pack_sequences,
+        return_packed_seqlens=return_packed_seqlens,
     )
 
     # Check if this is a streaming dataset

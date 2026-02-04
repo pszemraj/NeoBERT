@@ -312,16 +312,15 @@ def get_evaluation(
     sdp_context = (
         sdpa_kernel(SDPBackend.MATH) if torch.cuda.is_available() else nullcontext()
     )
+    if flash_attention:
+        logger.debug(
+            "GLUE attention_mask is already additive; flash_attention flag is ignored."
+        )
     with sdp_context:
         for step, batch in tqdm(enumerate(dataloader)):
             progress_bar.update(1)
             with torch.no_grad(), torch.inference_mode():
-                if flash_attention:
-                    pad_mask = torch.where(
-                        batch["attention_mask"] == 1, float(0.0), float("-inf")
-                    ).type(dtype_pad_mask)
-                else:
-                    pad_mask = batch["attention_mask"].type(dtype_pad_mask)
+                pad_mask = batch["attention_mask"].type(dtype_pad_mask)
                 logits = model(batch["input_ids"], pad_mask)["logits"]
 
             if not is_regression:
@@ -1079,6 +1078,8 @@ def trainer(cfg: Config) -> None:
         # Use model config directly - don't merge with tokenizer config
         # The tokenizer's vocab_size should match the model's anyway
         combined_config = model_config_dict
+        combined_config.pop("xformers_attention", None)
+        combined_config["flash_attention"] = flash_attention
 
         # If using random weights (for testing), round vocab_size for GPU efficiency
         allow_random_weights = cfg.glue.allow_random_weights
