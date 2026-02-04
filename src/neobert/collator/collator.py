@@ -54,9 +54,8 @@ class CustomCollatorForMLM(DataCollatorForLanguageModeling):
 class DataCollatorWithPacking(DefaultDataCollator):
     """Data collator used for padding-free sequence packing.
 
-    Packed batches include a ``packed_seqlens`` entry as a Python list-of-lists
-    listing segment lengths per packed sequence; this avoids GPU syncs when the
-    metadata is later consumed by xFormers' packed attention path.
+    Packed batches include a ``packed_seqlens`` entry as a padded int tensor of
+    shape (batch, max_segments) listing segment lengths per packed sequence.
     """
 
     def __init__(
@@ -205,6 +204,7 @@ class DataCollatorWithPacking(DefaultDataCollator):
             return batch
 
         packed_seqlens: list[list[int]] = []
+        max_segments = 0
         for seg in packed_segments:
             if not seg:
                 packed_seqlens.append([])
@@ -221,10 +221,23 @@ class DataCollatorWithPacking(DefaultDataCollator):
                     count += 1
             if count > 0:
                 lengths.append(count)
+            max_segments = max(max_segments, len(lengths))
             packed_seqlens.append(lengths)
 
-        # Return packed segment lengths as Python metadata (do not tensorize).
-        batch["packed_seqlens"] = packed_seqlens
+        if max_segments == 0:
+            packed_tensor = torch.zeros((len(packed_seqlens), 0), dtype=torch.int32)
+        else:
+            packed_tensor = torch.zeros(
+                (len(packed_seqlens), max_segments), dtype=torch.int32
+            )
+            for idx, lengths in enumerate(packed_seqlens):
+                if lengths:
+                    packed_tensor[idx, : len(lengths)] = torch.tensor(
+                        lengths, dtype=torch.int32
+                    )
+
+        # Return packed segment lengths for efficient block-diagonal attention.
+        batch["packed_seqlens"] = packed_tensor
         return batch
 
 
@@ -254,11 +267,11 @@ def _ensure_attention_mask(
 
 def attention_mask_to_packed_seqlens(
     attention_mask: torch.Tensor,
-) -> list[list[int]]:
-    """Convert a 0/1 attention mask [B,S] into packed_seqlens list-of-lists.
+) -> torch.Tensor:
+    """Convert a 0/1 attention mask [B,S] into packed_seqlens tensor [B,1].
 
     :param torch.Tensor attention_mask: 0/1 mask (CPU).
-    :return list[list[int]]: Per-sample segment lengths.
+    :return torch.Tensor: Per-sample segment lengths tensor.
     """
     if attention_mask.ndim != 2:
         raise ValueError(
@@ -270,8 +283,8 @@ def attention_mask_to_packed_seqlens(
             "Packed seqlens should be derived before moving batches to CUDA."
         )
 
-    lengths = attention_mask.sum(dim=1).tolist()
-    return [[int(length)] for length in lengths]
+    lengths = attention_mask.sum(dim=1, keepdim=True).to(torch.int32)
+    return lengths
 
 
 def get_collator(
@@ -353,7 +366,6 @@ def get_collator(
                 batch, getattr(tokenizer, "pad_token_id", None)
             )
             if return_packed_seqlens:
-                # Keep packed_seqlens as Python metadata to avoid GPU syncs later.
                 batch["packed_seqlens"] = attention_mask_to_packed_seqlens(
                     attention_mask
                 )

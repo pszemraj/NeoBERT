@@ -41,8 +41,8 @@ for packed sequences during pretraining.
 
 Current state:
 
-- `src/neobert/collator/collator.py` emits `packed_seqlens` as Python list-of-lists
-  metadata for packed batches (and optional non-packed xFormers batches) and
+- `src/neobert/collator/collator.py` emits `packed_seqlens` as a padded int
+  tensor for packed batches (and optional non-packed xFormers batches) and
   keeps a 2D padding `attention_mask`; it does **not** build dense block masks.
 - `src/neobert/pretraining/trainer.py` passes `packed_seqlens` into `NeoBERTLMHead`
   and skips additive masks for packed batches.

@@ -266,12 +266,12 @@ class TestPretrainComponents(unittest.TestCase):
 
         collated = collator(batch)
         packed = collated["packed_seqlens"]
-        self.assertIsInstance(packed, list)
+        self.assertTrue(torch.is_tensor(packed))
 
         attention_mask = collated["attention_mask"]
         keep = torch.isfinite(attention_mask) & (attention_mask == 0)
-        lengths = keep.sum(dim=1).tolist()
-        self.assertEqual(packed, [[int(length)] for length in lengths])
+        lengths = keep.sum(dim=1, keepdim=True).to(torch.int32)
+        self.assertTrue(torch.equal(packed, lengths))
 
     def test_masked_correct_count(self):
         """Test masked accuracy counting ignores -100 labels."""
@@ -305,8 +305,8 @@ class TestPretrainComponents(unittest.TestCase):
         self.assertEqual(collated["attention_mask"].dim(), 2)
         self.assertIn("packed_seqlens", collated)
         packed = collated["packed_seqlens"]
-        self.assertIsInstance(packed, list)
-        self.assertTrue(all(len(row) >= 1 for row in packed))
+        self.assertTrue(torch.is_tensor(packed))
+        self.assertTrue(all(row[row > 0].numel() >= 1 for row in packed))
 
     def test_normalize_packed_seqlens_tensor(self):
         """Ensure packed_seqlens tensors normalize to list-of-lists."""

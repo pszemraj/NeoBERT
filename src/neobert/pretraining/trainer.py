@@ -17,6 +17,7 @@ from accelerate.utils import (
     DistributedDataParallelKwargs,
     DistributedType,
     ProjectConfiguration,
+    send_to_device,
     set_seed,
 )
 
@@ -77,6 +78,18 @@ def _maybe_prepare_for_forward(
     if fn is None:
         return
     fn(update_step=int(update_step), is_last_microbatch=bool(is_last_microbatch))
+
+
+def _move_batch_to_device(batch: BatchEncoding, device: torch.device) -> BatchEncoding:
+    """Move batch tensors to device while keeping packed_seqlens on CPU.
+
+    :param BatchEncoding batch: Batch to move.
+    :param torch.device device: Target device.
+    :return BatchEncoding: Batch with tensors on device.
+    """
+    if hasattr(batch, "to") and not torch.is_tensor(batch):
+        batch = dict(batch)
+    return send_to_device(batch, device, skip_keys=["packed_seqlens"])
 
 
 def _parse_split_slice(split: str) -> Tuple[str, Optional[str], Optional[str]]:
@@ -237,6 +250,7 @@ def _run_eval(
             for batch in eval_dataloader:
                 if max_batches is not None and eval_batches >= max_batches:
                     break
+                batch = _move_batch_to_device(batch, accelerator.device)
                 packed_seqlens = _packed_seqlens_to_list(batch.get("packed_seqlens"))
                 pad_mask = (
                     None
@@ -1089,6 +1103,7 @@ def trainer(cfg: Config) -> None:
             model,
             optimizer,
             scheduler,
+            device_placement=[False, False, True, True, True],
         )
     else:
         train_dataloader, model, optimizer, scheduler = accelerator.prepare(
@@ -1096,6 +1111,7 @@ def trainer(cfg: Config) -> None:
             model,
             optimizer,
             scheduler,
+            device_placement=[False, True, True, True],
         )
 
     if wandb_enabled and accelerator.is_main_process:
@@ -1201,6 +1217,8 @@ def trainer(cfg: Config) -> None:
             ):
                 stored_batch = batch
                 continue
+
+            batch = _move_batch_to_device(batch, accelerator.device)
 
             # Update number of batches only when we will execute a backward pass.
             metrics["train/batches"] += 1
