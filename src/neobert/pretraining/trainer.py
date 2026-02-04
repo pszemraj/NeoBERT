@@ -1089,7 +1089,8 @@ def trainer(cfg: Config) -> None:
         constant_steps=constant_steps,
     )
 
-    # Prepare with accelerate
+    # Prepare with accelerate. Keep dataloader batches on CPU so packed_seqlens
+    # stays as CPU metadata (Accelerate dispatch concatenates tensors only).
     if eval_dataloader is not None:
         (
             train_dataloader,
