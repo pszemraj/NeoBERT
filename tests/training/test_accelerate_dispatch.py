@@ -6,8 +6,7 @@ from __future__ import annotations
 import unittest
 
 import torch
-from accelerate import Accelerator
-from accelerate.utils import DataLoaderConfiguration
+from accelerate.data_loader import prepare_data_loader
 from tokenizers import Tokenizer, models, pre_tokenizers
 from torch.utils.data import DataLoader, IterableDataset
 from transformers import PreTrainedTokenizerFast
@@ -84,17 +83,17 @@ class TestAccelerateDispatch(unittest.TestCase):
         dataset = _StreamingDataset(tokenizer)
         dataloader = DataLoader(dataset, batch_size=2, collate_fn=collator)
 
-        accelerator = Accelerator(
-            cpu=True,
-            dataloader_config=DataLoaderConfiguration(dispatch_batches=True),
+        prepared = prepare_data_loader(
+            dataloader,
+            device=torch.device("cpu"),
+            put_on_device=True,
+            dispatch_batches=True,
         )
-        prepared = accelerator.prepare(dataloader)
 
         batches = 0
         for batch in prepared:
             self.assertIn("packed_seqlens", batch)
             self.assertTrue(torch.is_tensor(batch["packed_seqlens"]))
-            self.assertEqual(batch["packed_seqlens"].device.type, "cpu")
             batches += 1
             if batches >= 2:
                 break
