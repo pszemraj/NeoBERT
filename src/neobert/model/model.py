@@ -222,6 +222,29 @@ def _pad_mask_to_packed_seqlens(
     return [[int(length)] for length in lengths]
 
 
+def _normalize_packed_seqlens(
+    packed_seqlens: Any,
+) -> Optional[list[list[int]]]:
+    """Normalize packed sequence lengths to Python lists.
+
+    :param Any packed_seqlens: Packed segment lengths tensor or list.
+    :return list[list[int]] | None: Packed segment lengths as Python lists.
+    """
+    if packed_seqlens is None:
+        return None
+    if torch.is_tensor(packed_seqlens):
+        if packed_seqlens.numel() == 0:
+            return [[] for _ in range(packed_seqlens.shape[0])]
+        cpu = (
+            packed_seqlens.detach().cpu()
+            if packed_seqlens.device.type != "cpu"
+            else packed_seqlens.detach()
+        )
+        return [[int(x) for x in row[row > 0].tolist()] for row in cpu]
+
+    return [[int(x) for x in row if int(x) > 0] for row in packed_seqlens]
+
+
 class SwiGLU(nn.Module):
     """Native SwiGLU implementation (unpacked w1/w2/w3).
 
@@ -441,7 +464,7 @@ class EncoderBlock(nn.Module):
         :param torch.Tensor x: Input tensor.
         :param torch.Tensor pad_mask: Additive attention mask.
         :param torch.Tensor freqs_cis: Rotary embedding frequencies.
-        :param list[list[int]] | None packed_seqlens: Packed segment lengths.
+        :param list[list[int]] | torch.Tensor | None packed_seqlens: Packed segment lengths.
         :return torch.Tensor: Updated hidden states.
         """
         x = x + self._att_block(
@@ -462,7 +485,7 @@ class EncoderBlock(nn.Module):
         :param torch.Tensor x: Normalized hidden states.
         :param torch.Tensor pad_mask: Additive attention mask.
         :param torch.Tensor freqs_cis: Rotary embedding frequencies.
-        :param list[list[int]] | None packed_seqlens: Packed segment lengths.
+        :param list[list[int]] | torch.Tensor | None packed_seqlens: Packed segment lengths.
         :return torch.Tensor: Attention output.
         """
         batch_size, seq_len, _ = x.shape
@@ -882,6 +905,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
         :param list[list[int]] | None packed_seqlens: Packed segment lengths.
         :return torch.Tensor: Encoded hidden states.
         """
+        packed_seqlens = _normalize_packed_seqlens(packed_seqlens)
         if packed_seqlens is not None:
             if not self.config.flash_attention:
                 raise ValueError(
@@ -1026,6 +1050,7 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
         :param list[list[int]] | None packed_seqlens: Packed segment lengths.
         :return torch.Tensor: Encoded hidden states.
         """
+        packed_seqlens = _normalize_packed_seqlens(packed_seqlens)
         if packed_seqlens is not None:
             if not self.config.flash_attention:
                 raise ValueError(
