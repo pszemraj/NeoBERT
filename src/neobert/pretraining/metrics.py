@@ -27,20 +27,15 @@ def format_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
             if "learning_rate" in key:
                 formatted[key] = float(f"{value:.6g}")
                 continue
-            if any(
-                token in key
-                for token in (
-                    "steps_per_sec",
-                    "samples_per_sec",
-                    "tokens_per_sec",
-                    "masked_tokens_per_sec",
-                    "samples_per_step",
-                    "tokens_per_step",
-                    "masked_tokens_per_step",
-                )
-            ):
-                formatted[key] = round(value, 2)
-                continue
+        if any(
+            token in key
+            for token in (
+                "tokens_per_sec",
+                "masked_tokens_per_sec",
+            )
+        ):
+            formatted[key] = round(value, 2)
+            continue
             if any(
                 token in key
                 for token in ("loss", "perplexity", "accuracy", "grad_norm")
@@ -152,25 +147,6 @@ class Metrics(defaultdict):
         if self._last_log_time is not None:
             elapsed = now - self._last_log_time
             if elapsed > 0:
-                steps_in_window = (
-                    current_step - self._last_log_step
-                    if self._last_log_step is not None
-                    else 0
-                )
-                if steps_in_window > 0:
-                    metrics_log["train/steps_per_sec"] = steps_in_window / elapsed
-                    metrics_log["train/samples_per_step"] = (
-                        metrics_agg["train/local_samples"] / steps_in_window
-                    )
-                    metrics_log["train/tokens_per_step"] = (
-                        metrics_agg["train/local_tokens"] / steps_in_window
-                    )
-                    metrics_log["train/masked_tokens_per_step"] = (
-                        metrics_agg["train/local_num_pred"] / steps_in_window
-                    )
-                metrics_log["train/samples_per_sec"] = (
-                    metrics_agg["train/local_samples"] / elapsed
-                )
                 metrics_log["train/tokens_per_sec"] = (
                     metrics_agg["train/local_tokens"] / elapsed
                 )
