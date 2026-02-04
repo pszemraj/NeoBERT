@@ -1332,7 +1332,7 @@ def trainer(cfg: Config) -> None:
             )
             starting_epoch = resume_step // len(train_dataloader)
             resume_step -= starting_epoch * len(train_dataloader)
-            completed_steps = resume_step // cfg.gradient_accumulation_step
+            completed_steps = resume_step // cfg.trainer.gradient_accumulation_steps
 
     # update the progress_bar if load from checkpoint
     progress_bar.update(completed_steps)
