@@ -1,6 +1,7 @@
 """Metric aggregation helpers for pretraining."""
 
 import math
+import time
 from collections import defaultdict
 from typing import Any, Dict
 
@@ -27,6 +28,8 @@ class Metrics(defaultdict):
             self[key] = 0
         for key in self.LOCAL_FLOAT_KEYS:
             self[key] = 0.0
+        self._last_log_time: float | None = None
+        self._last_log_step: int | None = None
 
     def state_dict(self) -> Dict[str, Any]:
         """Return a serializable copy of the metrics.
@@ -42,6 +45,8 @@ class Metrics(defaultdict):
         """
         for k, v in state_dict.items():
             self[k] = v
+        self._last_log_time = None
+        self._last_log_step = None
 
     def log(self, accelerator: Accelerator) -> None:
         """Aggregate and log metrics across devices.
@@ -90,10 +95,42 @@ class Metrics(defaultdict):
                 / metrics_agg["train/local_num_pred"]
             )
 
-        # Log the metrics with the current step
         # Extract the step value to pass separately to accelerator.log
         current_step = self.get("train/steps", 0)
+        now = time.perf_counter()
+        if self._last_log_time is not None:
+            elapsed = now - self._last_log_time
+            if elapsed > 0:
+                steps_in_window = (
+                    current_step - self._last_log_step
+                    if self._last_log_step is not None
+                    else 0
+                )
+                if steps_in_window > 0:
+                    metrics_log["train/steps_per_sec"] = steps_in_window / elapsed
+                    metrics_log["train/samples_per_step"] = (
+                        metrics_agg["train/local_samples"] / steps_in_window
+                    )
+                    metrics_log["train/tokens_per_step"] = (
+                        metrics_agg["train/local_tokens"] / steps_in_window
+                    )
+                    metrics_log["train/masked_tokens_per_step"] = (
+                        metrics_agg["train/local_num_pred"] / steps_in_window
+                    )
+                metrics_log["train/samples_per_sec"] = (
+                    metrics_agg["train/local_samples"] / elapsed
+                )
+                metrics_log["train/tokens_per_sec"] = (
+                    metrics_agg["train/local_tokens"] / elapsed
+                )
+                metrics_log["train/masked_tokens_per_sec"] = (
+                    metrics_agg["train/local_num_pred"] / elapsed
+                )
+
+        # Log the metrics with the current step
         accelerator.log(metrics_log, step=current_step)
+        self._last_log_time = now
+        self._last_log_step = current_step
 
         # Reset the local counters
         for key in self.LOCAL_COUNT_KEYS:
