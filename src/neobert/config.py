@@ -925,20 +925,23 @@ class ConfigLoader:
             yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
 
-def create_argument_parser() -> argparse.ArgumentParser:
+def create_argument_parser(require_config: bool = False) -> argparse.ArgumentParser:
     """Create an argument parser for command line overrides.
 
     :return argparse.ArgumentParser: Configured argument parser.
     """
     parser = argparse.ArgumentParser(description="NeoBERT Configuration")
 
-    parser.add_argument(
-        "config",
-        nargs="?",
-        type=str,
-        default=None,
-        help="Path to configuration YAML file",
-    )
+    if require_config:
+        parser.add_argument("config", type=str, help="Path to configuration YAML file")
+    else:
+        parser.add_argument(
+            "config",
+            nargs="?",
+            type=str,
+            default=None,
+            help="Path to configuration YAML file",
+        )
 
     # Model arguments
     parser.add_argument("--model.hidden_size", type=int, help="Hidden size")
@@ -1124,12 +1127,8 @@ def load_config_from_args(
     :param bool require_config: Whether a config path must be provided.
     :return Config: Loaded configuration with CLI overrides applied.
     """
-    parser = create_argument_parser()
+    parser = create_argument_parser(require_config=require_config)
     args = parser.parse_args(argv[1:] if argv is not None else None)
-    if require_config and not args.config:
-        raise SystemExit(
-            "Config path is required. Usage: script.py <config.yaml> [--overrides]"
-        )
 
     # Load base config from file if provided
     config_dict = {}
