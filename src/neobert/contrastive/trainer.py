@@ -553,7 +553,16 @@ def trainer(cfg: Config) -> None:
         # Under the no_sync context manager, PyTorch will skip synchronizing the gradients when .backward() is
         # called, and the first call to .backward() outside this context manager will trigger the synchronization.
         # Accumulating manually gives more flexibility and is compatible with TPUs.
-        if metrics["train/batches"] % cfg.trainer.gradient_accumulation_steps != 0:
+        is_last_microbatch = (
+            metrics["train/batches"] % cfg.trainer.gradient_accumulation_steps == 0
+        )
+        if hasattr(optimizer, "prepare_for_forward"):
+            optimizer.prepare_for_forward(
+                update_step=metrics["train/steps"],
+                is_last_microbatch=is_last_microbatch,
+            )
+
+        if not is_last_microbatch:
             with accelerator.no_sync(model):
                 # Forward pass
                 queries = model(batch["input_ids_queries"], pad_mask_queries)

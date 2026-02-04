@@ -75,6 +75,8 @@ def train_model(
             pad_mask = pad_mask.to(device)
 
         # Forward pass
+        if hasattr(optimizer, "prepare_for_forward"):
+            optimizer.prepare_for_forward(update_step=step, is_last_microbatch=True)
         hidden_states = model(input_ids, pad_mask)
 
         # Simple MLM head (just a linear projection for testing)

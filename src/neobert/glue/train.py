@@ -1352,6 +1352,11 @@ def trainer(cfg: Config) -> None:
 
     for epoch in range(starting_epoch, cfg.trainer.num_train_epochs):
         for batch in train_dataloader:
+            if hasattr(optimizer, "prepare_for_forward"):
+                optimizer.prepare_for_forward(
+                    update_step=completed_steps,
+                    is_last_microbatch=True,
+                )
             logits = model(batch["input_ids"], batch["attention_mask"])["logits"]
 
             # Debug logging for first few steps

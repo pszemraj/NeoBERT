@@ -1004,6 +1004,10 @@ def trainer(cfg: Config) -> None:
         logger.info(f"Orthogonalization: {muon_cfg.orthogonalization}")
         logger.info(f"Clipping warmup steps: {muon_cfg.clipping_warmup_steps}")
         logger.info(f"Clipping interval: {muon_cfg.clipping_interval}")
+        logger.info(f"QK chunk size: {muon_cfg.clipping_qk_chunk_size}")
+        logger.info(
+            f"Capture last microbatch only: {muon_cfg.capture_last_microbatch_only}"
+        )
         logger.info("=" * 60)
 
     optimizer = get_optimizer(
@@ -1178,6 +1182,11 @@ def trainer(cfg: Config) -> None:
             sync_gradients = (
                 metrics["train/batches"] % cfg.trainer.gradient_accumulation_steps == 0
             )
+            if hasattr(optimizer, "prepare_for_forward"):
+                optimizer.prepare_for_forward(
+                    update_step=metrics["train/steps"],
+                    is_last_microbatch=sync_gradients,
+                )
             context = nullcontext() if sync_gradients else accelerator.no_sync(model)
             with context:
                 # Forward pass

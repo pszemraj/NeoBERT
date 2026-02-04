@@ -59,6 +59,10 @@ class MuonClipConfig:
     clipping_alpha: float = 0.5  # Q/K scaling balance (0.5 = equal)
     clipping_warmup_steps: int = 0  # Disable clipping for N steps
     clipping_interval: int = 10  # Apply clipping every N steps to cap overhead
+    clipping_qk_chunk_size: int = 1024  # Chunk size for QK max to avoid S^2 peaks
+    capture_last_microbatch_only: bool = (
+        True  # Capture activations only on last microbatch
+    )
 
     # Architecture adaptation
     clipping_layers_mapping: Dict[str, str] = field(default_factory=dict)
@@ -97,6 +101,11 @@ class MuonClipConfig:
         if self.clipping_interval < 1:
             raise ValueError(
                 f"clipping_interval must be >= 1, got {self.clipping_interval}"
+            )
+        if self.clipping_qk_chunk_size < 1:
+            raise ValueError(
+                "clipping_qk_chunk_size must be >= 1, got "
+                f"{self.clipping_qk_chunk_size}"
             )
 
         if self.algorithm is not None:
@@ -238,6 +247,22 @@ class NeoBERTAttentionHooks:
                 f"num_attention_heads ({self.config.num_attention_heads})"
             )
 
+    def set_enabled(
+        self, enabled: bool, *, clear_cache_when_disabling: bool = True
+    ) -> None:
+        """Enable/disable activation capture for hooks.
+
+        :param bool enabled: Whether capture should be enabled.
+        :param bool clear_cache_when_disabling: Clear cached tensors when disabling.
+        """
+        enabled = bool(enabled)
+        if self.enabled == enabled:
+            return
+
+        self.enabled = enabled
+        if not enabled and clear_cache_when_disabling:
+            self.clear()
+
     def register_hooks(self, model: torch.nn.Module) -> int:
         """Register hooks across all transformer encoder layers.
 
@@ -352,8 +377,8 @@ class NeoBERTAttentionHooks:
             # During gradient accumulation, we intentionally keep only the latest
             # microbatch activation to bound memory/compute overhead. This biases
             # QK clipping stats toward the most recent microbatch by design.
-            # Detach keeps storage alive; cloning here would multiply memory usage.
-            self.layer_inputs[layer_idx] = x.detach()
+            # Move to CPU to avoid retaining GPU activations when clipping is enabled.
+            self.layer_inputs[layer_idx] = x.detach().to("cpu")
 
         return hook_fn
 
@@ -383,15 +408,26 @@ class NeoBERTAttentionHooks:
             packed_seqlens = inputs[3] if len(inputs) > 3 else None
 
             self.layer_pad_masks[layer_idx] = (
-                pad_mask.detach() if torch.is_tensor(pad_mask) else pad_mask
+                pad_mask.detach().to("cpu") if torch.is_tensor(pad_mask) else pad_mask
             )
             self.layer_freqs[layer_idx] = (
-                freqs_cis.detach() if torch.is_tensor(freqs_cis) else freqs_cis
+                freqs_cis.detach().to("cpu")
+                if torch.is_tensor(freqs_cis)
+                else freqs_cis
             )
             if packed_seqlens is not None:
-                packed_seqlens = [
-                    list(map(int, seg_lens)) for seg_lens in packed_seqlens
-                ]
+                if torch.is_tensor(packed_seqlens):
+                    if packed_seqlens.numel() == 0:
+                        packed_seqlens = [[] for _ in range(packed_seqlens.shape[0])]
+                    else:
+                        cpu = packed_seqlens.detach().cpu()
+                        packed_seqlens = [
+                            [int(x) for x in row[row > 0].tolist()] for row in cpu
+                        ]
+                else:
+                    packed_seqlens = [
+                        list(map(int, seg_lens)) for seg_lens in packed_seqlens
+                    ]
             self.layer_packed_seqlens[layer_idx] = packed_seqlens
 
         return hook_fn
@@ -506,6 +542,49 @@ class MuonClipOptimizer(Optimizer):
             logger.warning(
                 "Gradient anomaly detection enabled - training will be slower"
             )
+
+    def should_clip_update(self, update_step: int) -> bool:
+        """Return True if QK clipping should run on this optimizer update step.
+
+        :param int update_step: Optimizer update index (0-based).
+        :return bool: Whether clipping should run.
+        """
+        if not getattr(self.config, "enable_clipping", False):
+            return False
+
+        warmup = int(getattr(self.config, "clipping_warmup_steps", 0))
+        if update_step < warmup:
+            return False
+
+        interval = int(getattr(self.config, "clipping_interval", 1))
+        if interval <= 0:
+            raise ValueError(f"clipping_interval must be >= 1, got {interval}")
+
+        return ((update_step - warmup) % interval) == 0
+
+    def prepare_for_forward(
+        self, *, update_step: int, is_last_microbatch: bool
+    ) -> bool:
+        """Enable/disable hook capture before a forward pass.
+
+        :param int update_step: Optimizer update index (0-based).
+        :param bool is_last_microbatch: Whether this microbatch completes an update.
+        :return bool: Whether capture is enabled for this forward.
+        """
+        if self.hook_system is None:
+            return False
+
+        should_clip = self.should_clip_update(int(update_step))
+        capture_last_only = bool(
+            getattr(self.config, "capture_last_microbatch_only", True)
+        )
+        capture_enabled = (
+            should_clip and bool(is_last_microbatch)
+            if capture_last_only
+            else should_clip
+        )
+        self.hook_system.set_enabled(capture_enabled, clear_cache_when_disabling=True)
+        return capture_enabled
 
     def _validate_model(self, model: torch.nn.Module) -> None:
         """Validate model architecture compatibility.
@@ -685,17 +764,14 @@ class MuonClipOptimizer(Optimizer):
 
         # Apply QK-clipping
         if self.config.enable_clipping and self.hook_system:
-            # Run clipping intermittently to avoid O(L*H*S^2) dense QK work every step.
-            should_clip = self._step >= self.config.clipping_warmup_steps and (
-                (self._step - self.config.clipping_warmup_steps)
-                % self.config.clipping_interval
-                == 0
-            )
+            should_clip = self.should_clip_update(self._step)
             if should_clip:
                 self._apply_qk_clipping()
             else:
-                self.hook_system.clear()
                 self._last_metrics.clear()
+
+            # Always clear cached activations to avoid stale reuse.
+            self.hook_system.clear()
 
         self._step += 1
         return loss
@@ -1202,12 +1278,12 @@ class MuonClipOptimizer(Optimizer):
                 scale=scale,
             )
         else:
-            attn_logits = torch.matmul(xq_heads, xk_heads.transpose(-2, -1)) * scale
-            if pad_mask is not None:
-                attn_logits = attn_logits + pad_mask.to(
-                    device=attn_logits.device, dtype=attn_logits.dtype
-                )
-            per_step_max = attn_logits.amax(dim=(-2, -1))  # [batch, heads]
+            per_step_max = self._attention_logit_max(
+                xq_heads=xq_heads,
+                xk_heads=xk_heads,
+                scale=scale,
+                pad_mask=pad_mask,
+            )
         mean_per_head = per_step_max.mean(dim=0)
         denom = torch.clamp(mean_per_head, min=1e-6)
         eta_per_head = (self.config.clipping_threshold / denom).clamp(max=1.0)
@@ -1218,6 +1294,82 @@ class MuonClipOptimizer(Optimizer):
             if torch.isfinite(candidate):
                 global_max = float(candidate.item())
         return eta_per_head, global_max
+
+    def _attention_logit_max(
+        self,
+        xq_heads: torch.Tensor,
+        xk_heads: torch.Tensor,
+        scale: float,
+        pad_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Compute per-sample/per-head max attention logits with chunking.
+
+        :param torch.Tensor xq_heads: Query tensor of shape [B, H, S, D].
+        :param torch.Tensor xk_heads: Key tensor of shape [B, H, S, D].
+        :param float scale: Multiplicative scale applied to QK logits.
+        :param torch.Tensor | None pad_mask: Optional additive pad mask.
+        :return torch.Tensor: Per-sample max logits of shape [B, H].
+        """
+        if xq_heads.ndim != 4 or xk_heads.ndim != 4:
+            raise ValueError(
+                "Expected xq_heads/xk_heads to be rank-4 [B,H,S,D], got "
+                f"xq={tuple(xq_heads.shape)} xk={tuple(xk_heads.shape)}"
+            )
+        if xq_heads.shape != xk_heads.shape:
+            raise ValueError(
+                "xq_heads and xk_heads must have the same shape, got "
+                f"xq={tuple(xq_heads.shape)} xk={tuple(xk_heads.shape)}"
+            )
+
+        batch, heads, seq_len, _ = xq_heads.shape
+        chunk_size = min(int(self.config.clipping_qk_chunk_size), seq_len)
+        if chunk_size <= 0:
+            raise ValueError(
+                "clipping_qk_chunk_size must be >= 1, got "
+                f"{self.config.clipping_qk_chunk_size}"
+            )
+
+        per_step_max = torch.full(
+            (batch, heads),
+            float("-inf"),
+            device=xq_heads.device,
+            dtype=xq_heads.dtype,
+        )
+        k_t = xk_heads.transpose(-2, -1)
+        mask = pad_mask
+        if mask is not None and torch.is_tensor(mask):
+            mask = mask.to(device=xq_heads.device, dtype=xq_heads.dtype)
+
+        for start in range(0, seq_len, chunk_size):
+            end = min(seq_len, start + chunk_size)
+            q = xq_heads[:, :, start:end, :]
+            logits = torch.matmul(q, k_t) * scale
+
+            if mask is not None:
+                if mask.dim() != 4:
+                    raise ValueError(
+                        "pad_mask must be 4D when provided to MuonClip, got "
+                        f"{tuple(mask.shape)}"
+                    )
+                if mask.shape[-1] != seq_len:
+                    raise ValueError(
+                        "pad_mask last dim must equal seq_len "
+                        f"({mask.shape[-1]} != {seq_len})"
+                    )
+                if mask.shape[-2] == 1:
+                    logits = logits + mask
+                elif mask.shape[-2] == seq_len:
+                    logits = logits + mask[:, :, start:end, :]
+                else:
+                    raise ValueError(
+                        "pad_mask must have shape (B,1,1,S) or (B,1,S,S), got "
+                        f"{tuple(mask.shape)}"
+                    )
+
+            chunk_max = logits.amax(dim=(-2, -1))
+            per_step_max = torch.maximum(per_step_max, chunk_max)
+
+        return per_step_max
 
     def _packed_attention_logit_max(
         self,
@@ -1262,6 +1414,13 @@ class MuonClipOptimizer(Optimizer):
             dtype=xq_heads.dtype,
         )
 
+        chunk_size = min(int(self.config.clipping_qk_chunk_size), seq_len)
+        if chunk_size <= 0:
+            raise ValueError(
+                "clipping_qk_chunk_size must be >= 1, got "
+                f"{self.config.clipping_qk_chunk_size}"
+            )
+
         for batch_idx in range(batch):
             start = 0
             for seg_len in packed_seqlens[batch_idx]:
@@ -1278,11 +1437,15 @@ class MuonClipOptimizer(Optimizer):
 
                 q = xq_heads[batch_idx, :, start:end, :]
                 k = xk_heads[batch_idx, :, start:end, :]
-                logits = torch.matmul(q, k.transpose(-2, -1)) * scale
-                seg_max = logits.amax(dim=(-2, -1))
-                per_step_max[batch_idx] = torch.maximum(
-                    per_step_max[batch_idx], seg_max
-                )
+                k_t = k.transpose(-2, -1)
+                for q_start in range(0, seg_len_i, chunk_size):
+                    q_end = min(seg_len_i, q_start + chunk_size)
+                    q_chunk = q[:, q_start:q_end, :]
+                    logits = torch.matmul(q_chunk, k_t) * scale
+                    seg_max = logits.amax(dim=(-2, -1))
+                    per_step_max[batch_idx] = torch.maximum(
+                        per_step_max[batch_idx], seg_max
+                    )
                 start = end
 
         return per_step_max

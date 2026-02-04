@@ -41,6 +41,11 @@ class TestMuonClipConfig:
         with pytest.raises(ValueError):
             MuonClipConfig(clipping_interval=-3)
 
+    def test_invalid_chunk_size(self):
+        """Test invalid chunk size raises error."""
+        with pytest.raises(ValueError):
+            MuonClipConfig(clipping_qk_chunk_size=0)
+
     def test_warnings_for_suboptimal(self):
         """Test warnings for suboptimal settings."""
         with pytest.warns(UserWarning):
@@ -286,6 +291,46 @@ class TestMuonClipOptimizer:
         metrics = optimizer.get_metrics()
         if muon_config.enable_clipping:
             assert "train/max_attention_logit" in metrics
+
+    def test_hook_capture_gating_last_microbatch_only(self, model):
+        """Hooks should only capture on the last microbatch when enabled."""
+        model_instance, config = model
+        muon_config = MuonClipConfig(
+            enable_clipping=True,
+            clipping_interval=1,
+            capture_last_microbatch_only=True,
+        )
+        optimizer = MuonClipOptimizer(model_instance, config, muon_config)
+        hook_system = optimizer.hook_system
+        assert hook_system is not None
+
+        optimizer.prepare_for_forward(update_step=0, is_last_microbatch=False)
+        _ = model_instance(torch.randint(0, 1000, (2, 64)))
+        assert hook_system.layer_inputs == {}
+
+        optimizer.prepare_for_forward(update_step=0, is_last_microbatch=True)
+        _ = model_instance(torch.randint(0, 1000, (2, 64)))
+        assert len(hook_system.layer_inputs) > 0
+
+        optimizer.step()
+        assert hook_system.layer_inputs == {}
+
+    def test_chunked_logit_max_matches_full(self, model):
+        """Chunked logit max should match the full matmul result."""
+        model_instance, config = model
+        muon_config = MuonClipConfig(enable_clipping=False, clipping_qk_chunk_size=2)
+        optimizer = MuonClipOptimizer(model_instance, config, muon_config)
+
+        xq = torch.randn(1, config.num_attention_heads, 4, config.dim_head)
+        xk = torch.randn_like(xq)
+        scale = 1.0
+        full = torch.matmul(xq, xk.transpose(-2, -1)) * scale
+        full_max = full.amax(dim=(-2, -1))
+        chunked_max = optimizer._attention_logit_max(
+            xq_heads=xq, xk_heads=xk, scale=scale, pad_mask=None
+        )
+
+        assert torch.allclose(full_max, chunked_max)
 
     def test_clipping_applied(self, model):
         """Test QK-clipping actually modifies weights."""
