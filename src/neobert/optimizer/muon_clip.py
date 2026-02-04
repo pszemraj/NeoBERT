@@ -574,6 +574,14 @@ class MuonClipOptimizer(Optimizer):
         if self.hook_system is None:
             return False
 
+        if int(update_step) != int(self._step):
+            logger.warning(
+                "MuonClip step desync: trainer update_step=%s != optimizer._step=%s. "
+                "Clipping/capture schedules may misalign.",
+                int(update_step),
+                int(self._step),
+            )
+
         should_clip = self.should_clip_update(int(update_step))
         capture_last_only = bool(
             getattr(self.config, "capture_last_microbatch_only", True)
@@ -770,11 +778,43 @@ class MuonClipOptimizer(Optimizer):
             else:
                 self._last_metrics.clear()
 
-            # Always clear cached activations to avoid stale reuse.
+            # Always clear cached activations and disable capture between steps.
             self.hook_system.clear()
+            self.hook_system.set_enabled(False, clear_cache_when_disabling=False)
 
         self._step += 1
         return loss
+
+    def state_dict(self) -> Dict[str, Any]:
+        """Return optimizer state including the MuonClip update counter.
+
+        :return dict[str, Any]: Optimizer state dictionary.
+        """
+        base = super().state_dict()
+        base["muonclip_step"] = int(self._step)
+        return base
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        """Load optimizer state including the MuonClip update counter.
+
+        :param dict[str, Any] state_dict: Optimizer state dictionary.
+        """
+        payload = dict(state_dict)
+        muonclip_step = payload.pop("muonclip_step", None)
+        super().load_state_dict(payload)
+
+        if muonclip_step is not None:
+            self._step = int(muonclip_step)
+            return
+
+        inferred = 0
+        for state in self.state.values():
+            if isinstance(state, dict) and "step" in state:
+                try:
+                    inferred = max(inferred, int(state["step"]))
+                except Exception:
+                    continue
+        self._step = inferred
 
     def _muon_step(self, group: Dict[str, Any]) -> None:
         """Apply Muon update with orthogonalization.

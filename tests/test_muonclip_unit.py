@@ -332,6 +332,28 @@ class TestMuonClipOptimizer:
 
         assert torch.allclose(full_max, chunked_max)
 
+    def test_state_dict_persists_step(self, model):
+        """Ensure MuonClip step counter persists across state dicts."""
+        model_instance, config = model
+        muon_config = MuonClipConfig(enable_clipping=False)
+        optimizer = MuonClipOptimizer(model_instance, config, muon_config)
+
+        for _ in range(3):
+            input_ids = torch.randint(0, 1000, (2, 64))
+            output = model_instance(input_ids)
+            loss = output.sum()
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+
+        state = optimizer.state_dict()
+
+        model_clone = NeoBERT(config)
+        optimizer_clone = MuonClipOptimizer(model_clone, config, muon_config)
+        optimizer_clone.load_state_dict(state)
+
+        assert optimizer_clone._step == optimizer._step
+
     def test_clipping_applied(self, model):
         """Test QK-clipping actually modifies weights."""
         model_instance, config = model
@@ -367,6 +389,9 @@ class TestMuonClipOptimizer:
         optimizer = MuonClipOptimizer(model_instance, config, muon_config)
 
         for step in range(3):
+            optimizer.prepare_for_forward(
+                update_step=optimizer._step, is_last_microbatch=True
+            )
             input_ids = torch.randint(0, 1000, (2, 64))
             output = model_instance(input_ids)
             loss = output.sum()
