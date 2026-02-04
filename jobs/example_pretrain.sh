@@ -1,26 +1,29 @@
-#!/bin/bash
-# Example pretraining script using new configuration system
+#!/usr/bin/env bash
+# Example pretraining commands.
+#
+# Run from the repository root.
 
-# Basic pretraining with config file
-python scripts/pretraining/pretrain.py \
-    --config configs/pretraining/pretrain_neobert.yaml
+set -euo pipefail
 
-# Pretraining with command-line overrides
-python scripts/pretraining/pretrain.py \
-    --config configs/pretraining/pretrain_neobert.yaml \
-    --trainer.per_device_train_batch_size 32 \
-    --trainer.max_steps 500000 \
-    --optimizer.lr 2e-4 \
-    --wandb.project my-neobert-project \
-    --wandb.name neobert-test-run
+PYTHON=(conda run --name neobert python)
 
-# Small test run for CPU
-python scripts/pretraining/pretrain.py \
-    --config tests/configs/pretraining/test_tiny_pretrain.yaml \
-    --trainer.per_device_train_batch_size 2 \
-    --trainer.max_steps 10 \
-    --trainer.save_steps 5 \
-    --trainer.eval_steps 5 \
-    --trainer.logging_steps 1 \
-    --wandb.mode disabled \
-    --debug
+# ----------------------------
+# 1) Small smoke test (safe)
+# ----------------------------
+"${PYTHON[@]}" scripts/pretraining/pretrain.py \
+  --config tests/configs/pretraining/test_tiny_pretrain.yaml \
+  --wandb.mode disabled
+
+# ----------------------------
+# 2) Real runs (opt-in)
+# ----------------------------
+# Set RUN_FULL=1 to actually launch a longer pretraining job.
+if [[ "${RUN_FULL:-0}" == "1" ]]; then
+  # Basic pretraining with config file
+  "${PYTHON[@]}" scripts/pretraining/pretrain.py \
+    --config configs/pretraining/pretrain_neobert100m_smollm2data.yaml
+
+  # MuonClip variant
+  "${PYTHON[@]}" scripts/pretraining/pretrain.py \
+    --config configs/pretraining/pretrain_neobert100m_smollm2data_muonclip.yaml
+fi
