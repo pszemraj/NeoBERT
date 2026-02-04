@@ -72,6 +72,7 @@ optimizer:
     clipping_threshold: 50.0 # Conservative for encoders (decoder default: 100)
     clipping_alpha: 0.5 # Q/K scaling balance (0.5 = equal)
     clipping_warmup_steps: 0 # Steps before enabling clipping
+    clipping_interval: 10 # Run clipping every N steps to cap dense QK overhead
 
     # Debugging helpers
     detect_anomalies: false # Enable for debugging (slow)

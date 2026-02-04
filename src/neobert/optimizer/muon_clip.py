@@ -58,6 +58,7 @@ class MuonClipConfig:
     clipping_threshold: float = 50.0  # Conservative for encoders
     clipping_alpha: float = 0.5  # Q/K scaling balance (0.5 = equal)
     clipping_warmup_steps: int = 0  # Disable clipping for N steps
+    clipping_interval: int = 10  # Apply clipping every N steps to cap overhead
 
     # Architecture adaptation
     clipping_layers_mapping: Dict[str, str] = field(default_factory=dict)
@@ -92,6 +93,10 @@ class MuonClipConfig:
         if not (0 <= self.clipping_alpha <= 1):
             raise ValueError(
                 f"clipping_alpha must be in [0, 1], got {self.clipping_alpha}"
+            )
+        if self.clipping_interval < 1:
+            raise ValueError(
+                f"clipping_interval must be >= 1, got {self.clipping_interval}"
             )
 
         if self.algorithm is not None:
@@ -680,7 +685,13 @@ class MuonClipOptimizer(Optimizer):
 
         # Apply QK-clipping
         if self.config.enable_clipping and self.hook_system:
-            if self._step >= self.config.clipping_warmup_steps:
+            # Run clipping intermittently to avoid O(L*H*S^2) dense QK work every step.
+            should_clip = self._step >= self.config.clipping_warmup_steps and (
+                (self._step - self.config.clipping_warmup_steps)
+                % self.config.clipping_interval
+                == 0
+            )
+            if should_clip:
                 self._apply_qk_clipping()
             else:
                 self.hook_system.clear()

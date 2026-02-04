@@ -34,6 +34,13 @@ class TestMuonClipConfig:
         with pytest.raises(ValueError):
             MuonClipConfig(clipping_threshold=2000)
 
+    def test_invalid_clipping_interval(self):
+        """Test invalid clipping interval raises error."""
+        with pytest.raises(ValueError):
+            MuonClipConfig(clipping_interval=0)
+        with pytest.raises(ValueError):
+            MuonClipConfig(clipping_interval=-3)
+
     def test_warnings_for_suboptimal(self):
         """Test warnings for suboptimal settings."""
         with pytest.warns(UserWarning):
@@ -307,6 +314,26 @@ class TestMuonClipOptimizer:
         # Check weight changed
         final_weight = qkv_param.data
         assert not torch.allclose(initial_weight, final_weight)
+
+    def test_clipping_interval_skips_steps(self, model):
+        """Ensure clipping only runs on the configured interval."""
+        model_instance, config = model
+        muon_config = MuonClipConfig(enable_clipping=True, clipping_interval=2)
+        optimizer = MuonClipOptimizer(model_instance, config, muon_config)
+
+        for step in range(3):
+            input_ids = torch.randint(0, 1000, (2, 64))
+            output = model_instance(input_ids)
+            loss = output.sum()
+            loss.backward()
+            optimizer.step()
+            metrics = optimizer.get_metrics()
+            optimizer.zero_grad()
+
+            if step % 2 == 0:
+                assert "train/max_attention_logit" in metrics
+            else:
+                assert "train/max_attention_logit" not in metrics
 
     def test_muon_only(self, model):
         """Test Muon-only mode (no clipping)."""

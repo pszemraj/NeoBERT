@@ -212,6 +212,7 @@ muon_config.enable_clipping: bool = True
 muon_config.clipping_threshold: float = 50.0
 muon_config.clipping_alpha: float = 0.5
 muon_config.clipping_warmup_steps: int = 0
+muon_config.clipping_interval: int = 10
 muon_config.detect_anomalies: bool = False
 muon_config.orthogonalization: str = "polar_express"
 muon_config.algorithm: str | None = None  # alias; optional

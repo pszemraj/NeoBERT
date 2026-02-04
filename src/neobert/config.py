@@ -97,6 +97,7 @@ class MuonConfig:
     clipping_threshold: float = 50.0
     clipping_alpha: float = 0.5
     clipping_warmup_steps: int = 0
+    clipping_interval: int = 10
     detect_anomalies: bool = False
     orthogonalization: str = "polar_express"
     algorithm: Optional[str] = None  # Alias for orthogonalization
