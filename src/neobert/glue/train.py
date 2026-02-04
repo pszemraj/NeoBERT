@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import random
+import re
 import shutil
 from contextlib import nullcontext
 from functools import partial
@@ -76,6 +77,71 @@ TASK_TO_TRANSFER_FROM = {
     "mrpc": "mnli",
     "rte": "mnli",
 }
+
+_STEP_RE = re.compile(r"(?:^|/)(?:step|checkpoint)_(\d+)(?:$|/)")
+_EPOCH_RE = re.compile(r"(?:^|/)(?:epoch)_(\d+)(?:$|/)")
+
+
+def _unwrap_optimizer(optimizer: Any) -> Any:
+    """Return the underlying optimizer (handles Accelerate wrappers).
+
+    :param Any optimizer: Possibly wrapped optimizer.
+    :return Any: Unwrapped optimizer.
+    """
+    return getattr(optimizer, "optimizer", optimizer)
+
+
+def _maybe_prepare_for_forward(
+    optimizer: Any, *, update_step: int, is_last_microbatch: bool
+) -> None:
+    """Invoke MuonClip hook gating if supported by the optimizer.
+
+    :param Any optimizer: Optimizer or wrapped optimizer.
+    :param int update_step: Optimizer update index (0-based).
+    :param bool is_last_microbatch: Whether this microbatch completes an update.
+    """
+    inner = _unwrap_optimizer(optimizer)
+    fn = getattr(inner, "prepare_for_forward", None)
+    if fn is None:
+        return
+    fn(update_step=int(update_step), is_last_microbatch=bool(is_last_microbatch))
+
+
+def _get_optimizer_update_step(optimizer: Any) -> Optional[int]:
+    """Return the optimizer update counter if available.
+
+    :param Any optimizer: Optimizer or wrapped optimizer.
+    :return int | None: Update step counter.
+    """
+    inner = _unwrap_optimizer(optimizer)
+    step = getattr(inner, "_step", None)
+    if step is None:
+        return None
+    try:
+        return int(step)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_checkpoint_progress(path: str) -> tuple[Optional[str], Optional[int]]:
+    """Parse step/epoch metadata from a checkpoint path.
+
+    :param str path: Checkpoint path or directory name.
+    :return tuple[str | None, int | None]: ("step" or "epoch", value) if detected.
+    """
+    name = os.path.basename(path.rstrip(os.sep))
+    if name.isdigit():
+        return "step", int(name)
+
+    match = _STEP_RE.search(name)
+    if match:
+        return "step", int(match.group(1))
+
+    match = _EPOCH_RE.search(name)
+    if match:
+        return "epoch", int(match.group(1))
+
+    return None, None
 
 
 def _to_serializable(value: Any) -> Any:
@@ -664,6 +730,7 @@ def trainer(cfg: Config) -> None:
         log_with="wandb" if wandb_enabled else None,
         mixed_precision=mixed_precision,
         project_config=project_config,
+        gradient_accumulation_steps=int(cfg.trainer.gradient_accumulation_steps),
     )
 
     # Initialise the wandb run and pass wandb parameters
@@ -1244,10 +1311,10 @@ def trainer(cfg: Config) -> None:
         )
     elif eval_strategy == "steps":
         # Use the provided eval_steps or default to min of provided and epoch size
-        if hasattr(cfg.trainer, "eval_steps"):
+        if hasattr(cfg.trainer, "eval_steps") and cfg.trainer.eval_steps:
             cfg.trainer.eval_steps = min(
                 cfg.trainer.eval_steps,
-                len(train_dataset) // train_batch_size,
+                num_update_steps_per_epoch,
             )
         else:
             cfg.trainer.eval_steps = min(500, num_update_steps_per_epoch)
@@ -1301,38 +1368,42 @@ def trainer(cfg: Config) -> None:
     )
     completed_steps = 0
     starting_epoch = 0
+    resume_microbatch_in_epoch = 0
+
     # Potentially load in the weights and states from a previous save
     if cfg.trainer.resume_from_checkpoint:
         if (
             cfg.trainer.resume_from_checkpoint is not None
             or cfg.trainer.resume_from_checkpoint != ""
         ):
-            accelerator.print(f"Resumed from checkpoint: {cfg.trainer.checkpoint_dir}")
-            accelerator.load_state(cfg.trainer.checkpoint_dir)
-            path = os.path.basename(cfg.trainer.checkpoint_dir)
+            checkpoint_dir = cfg.trainer.checkpoint_dir
         else:
             # Get the most recent checkpoint
             dirs = [f.name for f in os.scandir(os.getcwd()) if f.is_dir()]
             dirs.sort(key=os.path.getctime)
-            path = dirs[
+            checkpoint_dir = dirs[
                 -1
             ]  # Sorts folders by date modified, most recent checkpoint is the last
-        # Extract `epoch_{i}` or `step_{i}`
-        training_difference = os.path.splitext(path)[0]
 
-        if "epoch" in training_difference:
-            starting_epoch = int(training_difference.replace("epoch_", "")) + 1
-            resume_step = None
-            completed_steps = starting_epoch * num_update_steps_per_epoch
+        accelerator.print(f"Resumed from checkpoint: {checkpoint_dir}")
+        accelerator.load_state(checkpoint_dir)
+        path = os.path.basename(checkpoint_dir)
+
+        step_from_optimizer = _get_optimizer_update_step(optimizer)
+        if step_from_optimizer is not None and step_from_optimizer > 0:
+            completed_steps = step_from_optimizer
         else:
-            # need to multiply `gradient_accumulation_steps` to reflect real steps
-            resume_step = (
-                int(training_difference.replace("step_", ""))
-                * cfg.trainer.gradient_accumulation_steps
-            )
-            starting_epoch = resume_step // len(train_dataloader)
-            resume_step -= starting_epoch * len(train_dataloader)
-            completed_steps = resume_step // cfg.trainer.gradient_accumulation_steps
+            kind, value = _parse_checkpoint_progress(path)
+            if kind == "epoch" and value is not None:
+                completed_steps = (value + 1) * num_update_steps_per_epoch
+            elif kind == "step" and value is not None:
+                completed_steps = value
+
+        starting_epoch = completed_steps // num_update_steps_per_epoch
+        resume_update_in_epoch = completed_steps % num_update_steps_per_epoch
+        resume_microbatch_in_epoch = (
+            resume_update_in_epoch * cfg.trainer.gradient_accumulation_steps
+        )
 
     # update the progress_bar if load from checkpoint
     progress_bar.update(completed_steps)
@@ -1340,6 +1411,8 @@ def trainer(cfg: Config) -> None:
     # Initialize all training loop variables upfront
     results = {}
     total_loss = 0.0
+    micro_loss_sum = 0.0
+    micro_loss_count = 0
     early_stop = False
     prev_accuracy = 0.0
     early_stopping_counter = 1
@@ -1351,262 +1424,306 @@ def trainer(cfg: Config) -> None:
     evaluation_round = 0
 
     for epoch in range(starting_epoch, cfg.trainer.num_train_epochs):
-        for batch in train_dataloader:
-            if hasattr(optimizer, "prepare_for_forward"):
-                optimizer.prepare_for_forward(
+        sampler = getattr(train_dataloader, "sampler", None)
+        if sampler is not None and hasattr(sampler, "set_epoch"):
+            sampler.set_epoch(epoch)
+
+        for micro_step, batch in enumerate(train_dataloader):
+            if epoch == starting_epoch and micro_step < resume_microbatch_in_epoch:
+                continue
+
+            with accelerator.accumulate(model):
+                is_last_microbatch = bool(accelerator.sync_gradients)
+                _maybe_prepare_for_forward(
+                    optimizer,
                     update_step=completed_steps,
-                    is_last_microbatch=True,
+                    is_last_microbatch=is_last_microbatch,
                 )
-            logits = model(batch["input_ids"], batch["attention_mask"])["logits"]
 
-            # Debug logging for first few steps
-            if completed_steps < 3:
-                logger.info(
-                    f"Step {completed_steps}: logits shape: {logits.shape}, logits mean: {logits.mean().item():.6f}, std: {logits.std().item():.6f}"
-                )
-                logger.info(
-                    f"Step {completed_steps}: logits sample: {logits[0].detach().cpu()}"
-                )
-                logger.info(f"Step {completed_steps}: labels: {batch['labels'][:5]}")
+                logits = model(batch["input_ids"], batch["attention_mask"])["logits"]
 
-            if not is_regression:
-                loss = loss_fct(logits.view(-1, num_labels), batch["labels"].view(-1))
-            else:
-                if num_labels == 1:
-                    loss = loss_fct(logits.squeeze(), batch["labels"].squeeze())
-                else:
-                    loss = loss_fct(logits, batch["labels"])
-
-            # Compute train accuracy
-            predictions = (
-                logits.argmax(dim=-1)
-                if not is_regression
-                else (logits.squeeze() if logits.size() != torch.Size([1]) else logits)
-            )
-            predictions, references = accelerator.gather((predictions, batch["labels"]))
-
-            # print(logits, loss)
-
-            metric.add_batch(
-                predictions=predictions,
-                references=references,
-            )
-
-            accelerator.backward(loss)
-            optimizer.step()
-            scheduler.step()
-
-            progress_bar.update(1)
-            completed_steps += 1
-
-            # We keep track of the loss at each epoch
-            total_loss += loss.item()
-
-            # Run evaluation
-            if (
-                completed_steps
-                % min(
-                    cfg.trainer.eval_steps,
-                    len(train_dataloader) * train_batch_size // 10,
-                )
-                == 0
-            ):
-                train_metric = metric.compute()
-                if len(train_metric) > 1:
-                    train_metric["combined_score"] = np.mean(
-                        list(train_metric.values())
-                    ).item()
-
-                model.eval()
-                eval_metric = get_evaluation(
-                    model=model,
-                    dataloader=eval_dataloader,
-                    accelerator=accelerator,
-                    metric=metric,
-                    dtype_pad_mask=dtype_pad_mask,
-                    is_regression=is_regression,
-                    return_predictions=False,
-                    flash_attention=flash_attention,
-                )["eval_metric"]
-
-                # Log all metrics properly for STS-B (both Pearson and Spearman)
-                if cfg.task == "stsb" and "spearmanr" in eval_metric:
+                # Debug logging for first few steps
+                if completed_steps < 3 and is_last_microbatch:
                     logger.info(
-                        f"step {completed_steps} eval pearson: {eval_metric.get('pearson', 0):.4f}"
+                        f"Step {completed_steps}: logits shape: {logits.shape}, logits mean: {logits.mean().item():.6f}, std: {logits.std().item():.6f}"
                     )
                     logger.info(
-                        f"step {completed_steps} eval spearmanr: {eval_metric.get('spearmanr', 0):.4f}"
+                        f"Step {completed_steps}: logits sample: {logits[0].detach().cpu()}"
                     )
-                else:
-                    logger.info(f"step {completed_steps} eval metric: {eval_metric}")
-
-                logger.info(f"step {completed_steps} train metric: {train_metric}")
-                logger.info(
-                    f"step {completed_steps} train loss: {total_loss / completed_steps}"
-                )
-
-                if cfg.task == "mnli":
-                    # Evaluation on matched MNLI
-                    results["accuracy"] = eval_metric["accuracy"]
-
-                    # Evaluation on mismatched MNLI
-                    mm_eval_metric = get_evaluation(
-                        model=model,
-                        dataloader=mm_eval_dataloader,
-                        accelerator=accelerator,
-                        metric=mm_metric,
-                        dtype_pad_mask=dtype_pad_mask,
-                        is_regression=is_regression,
-                        return_predictions=False,
-                        flash_attention=flash_attention,
-                    )["eval_metric"]
-                    results["accuracy_mm"] = mm_eval_metric["accuracy"]
-
-                    res_mm = results["accuracy_mm"]
                     logger.info(
-                        f"step {completed_steps} eval metric mismatched: {res_mm}"
+                        f"Step {completed_steps}: labels: {batch['labels'][:5]}"
                     )
 
-                train_epoch_pos = completed_steps / max(1, num_update_steps_per_epoch)
-                train_avg_loss = (
-                    total_loss / completed_steps if completed_steps > 0 else loss.item()
-                )
-
-                log_payload = {
-                    "train/step": completed_steps,
-                    "train/epoch": train_epoch_pos,
-                    "train/loss": train_avg_loss,
-                    "train/lr": optimizer.param_groups[0]["lr"],
-                }
-
-                if train_metric:
-                    for key, value in train_metric.items():
-                        log_payload[f"train/{key}"] = value
-
-                val_metrics = eval_metric if cfg.task != "mnli" else results
-                val_epoch = train_epoch_pos
-                log_payload["val/epoch"] = val_epoch
-                for key, value in val_metrics.items():
-                    log_payload[f"val/{key}"] = value
-
-                score_for_early_stop = compute_glue_score(cfg.task, val_metrics)
-                if score_for_early_stop is not None:
-                    log_payload["val/score"] = score_for_early_stop
-
-                log_payload = {k: _to_serializable(v) for k, v in log_payload.items()}
-
-                evaluation_round += 1
-                accelerator.log(log_payload, step=completed_steps)
-
-                last_train_metrics = {
-                    "step": completed_steps,
-                    "epoch": train_epoch_pos,
-                    "loss": train_avg_loss,
-                    "lr": optimizer.param_groups[0]["lr"],
-                }
-                if train_metric:
-                    last_train_metrics.update(
-                        {k: _to_serializable(v) for k, v in train_metric.items()}
+                if not is_regression:
+                    loss = loss_fct(
+                        logits.view(-1, num_labels), batch["labels"].view(-1)
                     )
-
-                last_val_metrics = {
-                    "step": completed_steps,
-                    "epoch": val_epoch,
-                }
-                last_val_metrics.update(
-                    {k: _to_serializable(v) for k, v in val_metrics.items()}
-                )
-                if score_for_early_stop is not None:
-                    last_val_metrics["score"] = _to_serializable(score_for_early_stop)
-
-                _save_metrics(cfg.trainer.output_dir, "train", last_train_metrics)
-                _save_metrics(cfg.trainer.output_dir, "val", last_val_metrics)
-
-                all_results = {
-                    f"eval_{k}": _to_serializable(v) for k, v in eval_metric.items()
-                }
-                if cfg.task == "mnli":
-                    all_results = {
-                        f"eval_{k}": _to_serializable(v) for k, v in results.items()
-                    }
-
-                with open(
-                    os.path.join(
-                        cfg.trainer.output_dir,
-                        f"all_results_step_{completed_steps}.json",
-                    ),
-                    "w",
-                ) as f:
-                    print(
-                        "dumping in",
-                        os.path.join(
-                            cfg.trainer.output_dir,
-                            f"all_results_step_{completed_steps}.json",
-                        ),
-                    )
-                    json.dump(all_results, f)
-
-                fallback_metric = next(iter(val_metrics.values()), 0.0)
-                curr_accuracy = (
-                    score_for_early_stop
-                    if score_for_early_stop is not None
-                    else fallback_metric
-                )
-                metric_improved = curr_accuracy > prev_accuracy
-
-                # Update early stopping counter
-                if metric_improved:
-                    prev_accuracy = curr_accuracy
-                    early_stopping_counter = 0
-
                 else:
-                    early_stopping_counter += 1
+                    if num_labels == 1:
+                        loss = loss_fct(logits.squeeze(), batch["labels"].squeeze())
+                    else:
+                        loss = loss_fct(logits, batch["labels"])
 
-                if early_stopping > 0 and early_stopping_counter >= early_stopping:
-                    print(
-                        f"Evaluation accuracy has not improved in {early_stopping} cycles of {cfg.trainer.eval_steps} evaluation steps, stopping the training."
+                # Compute train accuracy
+                predictions = (
+                    logits.argmax(dim=-1)
+                    if not is_regression
+                    else (
+                        logits.squeeze() if logits.size() != torch.Size([1]) else logits
                     )
-                    early_stop = True
+                )
+                predictions, references = accelerator.gather(
+                    (predictions, batch["labels"])
+                )
 
-                # Save model checkpoint based on save_strategy
-                save_strategy = getattr(cfg.trainer, "save_strategy", "steps")
-                should_save = False
+                metric.add_batch(
+                    predictions=predictions,
+                    references=references,
+                )
 
-                if (
-                    save_strategy == "epoch"
-                    and completed_steps % num_update_steps_per_epoch == 0
-                ):
-                    should_save = True
-                elif save_strategy == "steps" and hasattr(cfg.trainer, "save_steps"):
-                    if completed_steps % cfg.trainer.save_steps == 0:
-                        should_save = True
-                elif save_strategy == "best":
-                    # Save only if this is the best model so far
-                    if metric_improved:
-                        should_save = True
-                elif save_strategy != "no":
-                    # Default to saving at eval steps if strategy is not 'no'
-                    should_save = True
+                accelerator.backward(loss)
+                micro_loss_sum += float(loss.item())
+                micro_loss_count += 1
 
-                # Only save checkpoint if explicitly enabled
-                save_model = getattr(cfg.trainer, "save_model", True)
-                save_total_limit = getattr(cfg.trainer, "save_total_limit", None)
+                if is_last_microbatch:
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad()
 
-                # Save if either save_total_limit>0 or max_ckpt>0 is configured
-                limit_enabled = (
-                    save_total_limit is not None and save_total_limit > 0
-                ) or (max_ckpt is not None and max_ckpt > 0)
+                    progress_bar.update(1)
+                    completed_steps += 1
 
-                if should_save and save_model and limit_enabled:
-                    save_training_checkpoint(cfg, model, accelerator, completed_steps)
+                    if micro_loss_count > 0:
+                        total_loss += micro_loss_sum / micro_loss_count
+                    micro_loss_sum = 0.0
+                    micro_loss_count = 0
 
-                model.train()
+                    # Run evaluation
+                    if (
+                        cfg.trainer.eval_steps
+                        and completed_steps % cfg.trainer.eval_steps == 0
+                    ):
+                        train_metric = metric.compute()
+                        if len(train_metric) > 1:
+                            train_metric["combined_score"] = np.mean(
+                                list(train_metric.values())
+                            ).item()
+
+                        model.eval()
+                        eval_metric = get_evaluation(
+                            model=model,
+                            dataloader=eval_dataloader,
+                            accelerator=accelerator,
+                            metric=metric,
+                            dtype_pad_mask=dtype_pad_mask,
+                            is_regression=is_regression,
+                            return_predictions=False,
+                            flash_attention=flash_attention,
+                        )["eval_metric"]
+
+                        # Log all metrics properly for STS-B (both Pearson and Spearman)
+                        if cfg.task == "stsb" and "spearmanr" in eval_metric:
+                            logger.info(
+                                f"step {completed_steps} eval pearson: {eval_metric.get('pearson', 0):.4f}"
+                            )
+                            logger.info(
+                                f"step {completed_steps} eval spearmanr: {eval_metric.get('spearmanr', 0):.4f}"
+                            )
+                        else:
+                            logger.info(
+                                f"step {completed_steps} eval metric: {eval_metric}"
+                            )
+
+                        logger.info(
+                            f"step {completed_steps} train metric: {train_metric}"
+                        )
+                        logger.info(
+                            f"step {completed_steps} train loss: {total_loss / completed_steps}"
+                        )
+
+                        if cfg.task == "mnli":
+                            # Evaluation on matched MNLI
+                            results["accuracy"] = eval_metric["accuracy"]
+
+                            # Evaluation on mismatched MNLI
+                            mm_eval_metric = get_evaluation(
+                                model=model,
+                                dataloader=mm_eval_dataloader,
+                                accelerator=accelerator,
+                                metric=mm_metric,
+                                dtype_pad_mask=dtype_pad_mask,
+                                is_regression=is_regression,
+                                return_predictions=False,
+                                flash_attention=flash_attention,
+                            )["eval_metric"]
+                            results["accuracy_mm"] = mm_eval_metric["accuracy"]
+
+                            res_mm = results["accuracy_mm"]
+                            logger.info(
+                                f"step {completed_steps} eval metric mismatched: {res_mm}"
+                            )
+
+                        train_epoch_pos = completed_steps / max(
+                            1, num_update_steps_per_epoch
+                        )
+                        train_avg_loss = (
+                            total_loss / completed_steps
+                            if completed_steps > 0
+                            else loss.item()
+                        )
+
+                        log_payload = {
+                            "train/step": completed_steps,
+                            "train/epoch": train_epoch_pos,
+                            "train/loss": train_avg_loss,
+                            "train/lr": optimizer.param_groups[0]["lr"],
+                        }
+
+                        if train_metric:
+                            for key, value in train_metric.items():
+                                log_payload[f"train/{key}"] = value
+
+                        val_metrics = eval_metric if cfg.task != "mnli" else results
+                        val_epoch = train_epoch_pos
+                        log_payload["val/epoch"] = val_epoch
+                        for key, value in val_metrics.items():
+                            log_payload[f"val/{key}"] = value
+
+                        score_for_early_stop = compute_glue_score(cfg.task, val_metrics)
+                        if score_for_early_stop is not None:
+                            log_payload["val/score"] = score_for_early_stop
+
+                        log_payload = {
+                            k: _to_serializable(v) for k, v in log_payload.items()
+                        }
+
+                        evaluation_round += 1
+                        accelerator.log(log_payload, step=completed_steps)
+
+                        last_train_metrics = {
+                            "step": completed_steps,
+                            "epoch": train_epoch_pos,
+                            "loss": train_avg_loss,
+                            "lr": optimizer.param_groups[0]["lr"],
+                        }
+                        if train_metric:
+                            last_train_metrics.update(
+                                {
+                                    k: _to_serializable(v)
+                                    for k, v in train_metric.items()
+                                }
+                            )
+
+                        last_val_metrics = {
+                            "step": completed_steps,
+                            "epoch": val_epoch,
+                        }
+                        last_val_metrics.update(
+                            {k: _to_serializable(v) for k, v in val_metrics.items()}
+                        )
+                        if score_for_early_stop is not None:
+                            last_val_metrics["score"] = _to_serializable(
+                                score_for_early_stop
+                            )
+
+                        _save_metrics(
+                            cfg.trainer.output_dir, "train", last_train_metrics
+                        )
+                        _save_metrics(cfg.trainer.output_dir, "val", last_val_metrics)
+
+                        all_results = {
+                            f"eval_{k}": _to_serializable(v)
+                            for k, v in eval_metric.items()
+                        }
+                        if cfg.task == "mnli":
+                            all_results = {
+                                f"eval_{k}": _to_serializable(v)
+                                for k, v in results.items()
+                            }
+
+                        with open(
+                            os.path.join(
+                                cfg.trainer.output_dir,
+                                f"all_results_step_{completed_steps}.json",
+                            ),
+                            "w",
+                        ) as f:
+                            print(
+                                "dumping in",
+                                os.path.join(
+                                    cfg.trainer.output_dir,
+                                    f"all_results_step_{completed_steps}.json",
+                                ),
+                            )
+                            json.dump(all_results, f)
+
+                        fallback_metric = next(iter(val_metrics.values()), 0.0)
+                        curr_accuracy = (
+                            score_for_early_stop
+                            if score_for_early_stop is not None
+                            else fallback_metric
+                        )
+                        metric_improved = curr_accuracy > prev_accuracy
+
+                        # Update early stopping counter
+                        if metric_improved:
+                            prev_accuracy = curr_accuracy
+                            early_stopping_counter = 0
+
+                        else:
+                            early_stopping_counter += 1
+
+                        if (
+                            early_stopping > 0
+                            and early_stopping_counter >= early_stopping
+                        ):
+                            print(
+                                f"Evaluation accuracy has not improved in {early_stopping} cycles of {cfg.trainer.eval_steps} evaluation steps, stopping the training."
+                            )
+                            early_stop = True
+
+                        # Save model checkpoint based on save_strategy
+                        save_strategy = getattr(cfg.trainer, "save_strategy", "steps")
+                        should_save = False
+
+                        if (
+                            save_strategy == "epoch"
+                            and completed_steps % num_update_steps_per_epoch == 0
+                        ):
+                            should_save = True
+                        elif save_strategy == "steps" and hasattr(
+                            cfg.trainer, "save_steps"
+                        ):
+                            if completed_steps % cfg.trainer.save_steps == 0:
+                                should_save = True
+                        elif save_strategy == "best":
+                            # Save only if this is the best model so far
+                            if metric_improved:
+                                should_save = True
+                        elif save_strategy != "no":
+                            # Default to saving at eval steps if strategy is not 'no'
+                            should_save = True
+
+                        # Only save checkpoint if explicitly enabled
+                        save_model = getattr(cfg.trainer, "save_model", True)
+                        save_total_limit = getattr(
+                            cfg.trainer, "save_total_limit", None
+                        )
+
+                        # Save if either save_total_limit>0 or max_ckpt>0 is configured
+                        limit_enabled = (
+                            save_total_limit is not None and save_total_limit > 0
+                        ) or (max_ckpt is not None and max_ckpt > 0)
+
+                        if should_save and save_model and limit_enabled:
+                            save_training_checkpoint(
+                                cfg, model, accelerator, completed_steps
+                            )
+
+                        model.train()
 
             if completed_steps >= cfg.trainer.max_steps or early_stop:
                 break
-
-            # Reset the gradient
-            optimizer.zero_grad()
 
         if completed_steps >= cfg.trainer.max_steps or early_stop:
             break
