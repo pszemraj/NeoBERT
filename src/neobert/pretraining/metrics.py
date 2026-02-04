@@ -27,15 +27,9 @@ def format_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
             if "learning_rate" in key:
                 formatted[key] = float(f"{value:.6g}")
                 continue
-        if any(
-            token in key
-            for token in (
-                "tokens_per_sec",
-                "masked_tokens_per_sec",
-            )
-        ):
-            formatted[key] = round(value, 2)
-            continue
+            if "tokens_per_sec" in key:
+                formatted[key] = round(value, 2)
+                continue
             if any(
                 token in key
                 for token in ("loss", "perplexity", "accuracy", "grad_norm")
@@ -149,9 +143,6 @@ class Metrics(defaultdict):
             if elapsed > 0:
                 metrics_log["train/tokens_per_sec"] = (
                     metrics_agg["train/local_tokens"] / elapsed
-                )
-                metrics_log["train/masked_tokens_per_sec"] = (
-                    metrics_agg["train/local_num_pred"] / elapsed
                 )
 
         # Log the metrics with the current step

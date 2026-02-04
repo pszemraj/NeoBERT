@@ -153,14 +153,7 @@ class MuonClipConfig:
                 "adam_betas must be a 2-tuple of floats, got "
                 f"{type(self.adam_betas).__name__}={self.adam_betas!r}"
             )
-        _, beta2 = self.adam_betas
-        if beta2 < 0.98:
-            warnings.warn(
-                f"adam_betas second moment {beta2} is unusually low; "
-                "encoder pretraining typically uses >= 0.98.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+        _ = self.adam_betas[1]
 
         # Resolve orthogonalization algorithm
         algo_source = self.algorithm or self.orthogonalization
