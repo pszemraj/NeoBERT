@@ -10,6 +10,57 @@ from accelerate import Accelerator
 from torch import Tensor
 
 
+def format_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
+    """Format metrics for logging with sensible precision.
+
+    :param dict[str, Any] metrics: Raw metrics dictionary.
+    :return dict[str, Any]: Metrics with rounded floats for logging.
+    """
+    formatted: Dict[str, Any] = {}
+    for key, value in metrics.items():
+        if torch.is_tensor(value):
+            value = value.item()
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                formatted[key] = value
+                continue
+            if "learning_rate" in key:
+                formatted[key] = float(f"{value:.6g}")
+                continue
+            if any(
+                token in key
+                for token in (
+                    "steps_per_sec",
+                    "samples_per_sec",
+                    "tokens_per_sec",
+                    "masked_tokens_per_sec",
+                    "samples_per_step",
+                    "tokens_per_step",
+                    "masked_tokens_per_step",
+                )
+            ):
+                formatted[key] = round(value, 2)
+                continue
+            if any(
+                token in key
+                for token in ("loss", "perplexity", "accuracy", "grad_norm")
+            ):
+                formatted[key] = round(value, 4)
+                continue
+            abs_val = abs(value)
+            if abs_val >= 1000:
+                formatted[key] = round(value, 1)
+            elif abs_val >= 100:
+                formatted[key] = round(value, 2)
+            elif abs_val >= 10:
+                formatted[key] = round(value, 3)
+            else:
+                formatted[key] = round(value, 4)
+        else:
+            formatted[key] = value
+    return formatted
+
+
 class Metrics(defaultdict):
     """Dictionary-like metrics container with distributed aggregation helpers."""
 
@@ -128,7 +179,7 @@ class Metrics(defaultdict):
                 )
 
         # Log the metrics with the current step
-        accelerator.log(metrics_log, step=current_step)
+        accelerator.log(format_metrics(metrics_log), step=current_step)
         self._last_log_time = now
         self._last_log_step = current_step
 

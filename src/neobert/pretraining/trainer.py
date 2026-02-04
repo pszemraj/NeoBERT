@@ -45,7 +45,7 @@ from ..tokenizer import get_tokenizer, resolve_text_column
 from ..utils import configure_tf32, model_summary, prepare_wandb_config
 
 # Our metric object and model
-from .metrics import Metrics
+from .metrics import Metrics, format_metrics
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -1469,7 +1469,9 @@ def trainer(cfg: Config) -> None:
                         model_config,
                         max_batches=eval_max_batches,
                     )
-                    accelerator.log(eval_metrics, step=metrics["train/steps"])
+                    accelerator.log(
+                        format_metrics(eval_metrics), step=metrics["train/steps"]
+                    )
 
                 # Zero out the optimizer
                 optimizer.zero_grad()
@@ -1491,7 +1493,7 @@ def trainer(cfg: Config) -> None:
                 model_config,
                 max_batches=eval_max_batches,
             )
-            accelerator.log(eval_metrics, step=metrics["train/steps"])
+            accelerator.log(format_metrics(eval_metrics), step=metrics["train/steps"])
 
         # Update the number of epochs
         metrics["train/epochs"] += 1
