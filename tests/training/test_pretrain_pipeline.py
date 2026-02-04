@@ -403,6 +403,38 @@ class TestPretrainComponents(unittest.TestCase):
 
         self.assertIsNotNone(scheduler)
 
+    def test_scheduler_case_insensitive_decay(self):
+        """Scheduler decay selection should be case-insensitive."""
+        from torch.optim import AdamW
+        from torch.optim.lr_scheduler import CosineAnnealingLR
+
+        from neobert.model import NeoBERT, NeoBERTConfig
+        from neobert.scheduler import get_scheduler
+
+        model_config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            vocab_size=100,
+            flash_attention=False,
+            hidden_act="gelu",
+        )
+        model = NeoBERT(model_config)
+        optimizer = AdamW(model.parameters(), lr=1e-4)
+
+        scheduler = get_scheduler(
+            optimizer=optimizer,
+            lr=1e-4,
+            decay="CoSiNe",
+            warmup_steps=0,
+            decay_steps=10,
+            constant_steps=0,
+        )
+
+        self.assertTrue(
+            any(isinstance(s, CosineAnnealingLR) for s in scheduler._schedulers)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
