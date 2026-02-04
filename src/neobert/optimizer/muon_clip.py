@@ -355,8 +355,7 @@ class NeoBERTAttentionHooks:
             # microbatch activation to bound memory/compute overhead. This biases
             # QK clipping stats toward the most recent microbatch by design.
             # Detach keeps storage alive; cloning here would multiply memory usage.
-            # Store on CPU to avoid stale device references if the model is moved.
-            self.layer_inputs[layer_idx] = x.detach().to("cpu")
+            self.layer_inputs[layer_idx] = x.detach()
 
         return hook_fn
 
@@ -386,12 +385,10 @@ class NeoBERTAttentionHooks:
             packed_seqlens = inputs[3] if len(inputs) > 3 else None
 
             self.layer_pad_masks[layer_idx] = (
-                pad_mask.detach().to("cpu") if torch.is_tensor(pad_mask) else pad_mask
+                pad_mask.detach() if torch.is_tensor(pad_mask) else pad_mask
             )
             self.layer_freqs[layer_idx] = (
-                freqs_cis.detach().to("cpu")
-                if torch.is_tensor(freqs_cis)
-                else freqs_cis
+                freqs_cis.detach() if torch.is_tensor(freqs_cis) else freqs_cis
             )
             if packed_seqlens is not None:
                 packed_seqlens = [
