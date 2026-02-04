@@ -33,7 +33,6 @@ class TestEndToEndIntegration(unittest.TestCase):
         # Simulate command line args
         test_args = [
             "script.py",
-            "--config",
             str(config_path),
             "--trainer.output_dir",
             self.temp_dir,
@@ -312,7 +311,7 @@ class TestEndToEndIntegration(unittest.TestCase):
 
         for overrides in test_cases:
             with self.subTest(overrides=overrides):
-                test_args = ["script.py", "--config", str(config_path)] + overrides
+                test_args = ["script.py", str(config_path)] + overrides
 
                 original_argv = sys.argv
                 sys.argv = test_args

@@ -10,7 +10,7 @@ This guide covers evaluating NeoBERT on GLUE and MTEB.
 ### Run a single task
 
 ```bash
-python scripts/evaluation/run_glue.py --config configs/glue/cola.yaml
+python scripts/evaluation/run_glue.py configs/glue/cola.yaml
 ```
 
 ### Run the full suite
@@ -80,7 +80,7 @@ bash scripts/evaluation/glue/build_configs.sh outputs/my_sweep neobert/glue \
 
 ```bash
 python scripts/evaluation/run_mteb.py \
-  --config outputs/<pretrain_run>/model_checkpoints/<step>/config.yaml \
+  outputs/<pretrain_run>/model_checkpoints/<step>/config.yaml \
   --model_name_or_path outputs/<pretrain_run> \
   --task_types retrieval,sts
 ```

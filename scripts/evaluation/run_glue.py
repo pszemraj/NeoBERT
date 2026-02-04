@@ -10,7 +10,7 @@ from neobert.glue import trainer
 def main() -> None:
     """Run GLUE evaluation from a config file."""
     parser = argparse.ArgumentParser(description="Run GLUE evaluation")
-    parser.add_argument("--config", type=str, required=True, help="Path to config file")
+    parser.add_argument("config", type=str, help="Path to config file")
     parser.add_argument("--task_name", type=str, default=None, help="GLUE task name")
     parser.add_argument(
         "--model_name_or_path", type=str, default=None, help="Model path"

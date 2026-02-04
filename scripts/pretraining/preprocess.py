@@ -61,7 +61,7 @@ def preprocess(cfg: Any) -> None:
 
 def main() -> None:
     """Run the preprocessing CLI."""
-    config = load_config_from_args()
+    config = load_config_from_args(require_config=True)
     preprocess(config)
 
 

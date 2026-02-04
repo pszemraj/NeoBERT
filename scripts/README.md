@@ -14,7 +14,7 @@ Entry points for NeoBERT training, evaluation, contrastive learning, and export 
 
 ## Shared Conventions
 
-- Training/evaluation entry points accept `--config` plus dot-notation overrides. Export utilities typically take a checkpoint path instead. The config hierarchy is documented in [docs/configuration.md](../docs/configuration.md).
+- Training/evaluation entry points take a positional config path plus dot-notation overrides. Export utilities typically take a checkpoint path instead. The config hierarchy is documented in [docs/configuration.md](../docs/configuration.md).
 - `--debug` enables verbose logging across scripts.
 - Environment variables are the preferred way to pass secrets (e.g., `WANDB_API_KEY`, `HF_TOKEN`). See [docs/training.md](../docs/training.md) for examples.
 - Helper shell wrappers live under `jobs/` for batch systems, and tiny smoke-test configs live in `tests/configs/`.

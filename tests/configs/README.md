@@ -21,13 +21,13 @@ Test configs live here and are optimized for quick runs and regression coverage.
 
 ```bash
 # Pretraining smoke test
-python scripts/pretraining/pretrain.py --config tests/configs/pretraining/test_tiny_pretrain.yaml
+python scripts/pretraining/pretrain.py tests/configs/pretraining/test_tiny_pretrain.yaml
 
 # GLUE evaluation smoke test
-python scripts/evaluation/run_glue.py --config tests/configs/evaluation/test_tiny_glue.yaml
+python scripts/evaluation/run_glue.py tests/configs/evaluation/test_tiny_glue.yaml
 
 # Contrastive fine-tuning smoke test
-python scripts/contrastive/finetune.py --config tests/configs/contrastive/test_tiny_contrastive.yaml
+python scripts/contrastive/finetune.py tests/configs/contrastive/test_tiny_contrastive.yaml
 ```
 
 ## Notes

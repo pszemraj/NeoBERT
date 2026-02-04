@@ -233,7 +233,7 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="Run MTEB evaluation")
-    parser.add_argument("--config", type=str, required=True, help="Path to config file")
+    parser.add_argument("config", type=str, help="Path to config file")
     parser.add_argument(
         "--model_name_or_path", type=str, required=True, help="Model path"
     )

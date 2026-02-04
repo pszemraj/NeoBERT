@@ -933,7 +933,11 @@ def create_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="NeoBERT Configuration")
 
     parser.add_argument(
-        "--config", type=str, default=None, help="Path to configuration YAML file"
+        "config",
+        nargs="?",
+        type=str,
+        default=None,
+        help="Path to configuration YAML file",
     )
 
     # Model arguments
@@ -1111,13 +1115,21 @@ def parse_args_to_dict(args: argparse.Namespace) -> Dict[str, Any]:
     return config_dict
 
 
-def load_config_from_args() -> Config:
+def load_config_from_args(
+    argv: Optional[List[str]] = None, require_config: bool = False
+) -> Config:
     """Load configuration from command line arguments.
 
+    :param list[str] | None argv: Raw argv including script name (defaults to sys.argv).
+    :param bool require_config: Whether a config path must be provided.
     :return Config: Loaded configuration with CLI overrides applied.
     """
     parser = create_argument_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv[1:] if argv is not None else None)
+    if require_config and not args.config:
+        raise SystemExit(
+            "Config path is required. Usage: script.py <config.yaml> [--overrides]"
+        )
 
     # Load base config from file if provided
     config_dict = {}

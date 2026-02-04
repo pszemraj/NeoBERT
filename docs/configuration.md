@@ -15,10 +15,10 @@ Use dot-notation overrides on the CLI (e.g., `--trainer.max_steps 1000`).
 
 ```bash
 # Pretraining
-python scripts/pretraining/pretrain.py --config configs/pretraining/pretrain_neobert.yaml
+python scripts/pretraining/pretrain.py configs/pretraining/pretrain_neobert.yaml
 
 # GLUE
-python scripts/evaluation/run_glue.py --config configs/glue/cola.yaml
+python scripts/evaluation/run_glue.py configs/glue/cola.yaml
 ```
 
 ## Task Requirements and Gotchas

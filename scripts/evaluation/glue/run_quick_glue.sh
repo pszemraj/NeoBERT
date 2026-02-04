@@ -81,7 +81,7 @@ PY
     # Run the evaluation
     cmd=(
         python "${SCRIPT_DIR}/../run_glue.py"
-        --config "${CONFIG_PATH}"
+        "${CONFIG_PATH}"
     )
 
     if ( set -o pipefail; "${cmd[@]}" 2>&1 | tee "${LOG_PATH}" ); then

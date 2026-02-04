@@ -47,7 +47,7 @@ def longer_seq(cfg: Any) -> None:
 def main() -> None:
     """Run the longer sequence filtering CLI."""
     # Load configuration from command line arguments
-    config = load_config_from_args()
+    config = load_config_from_args(require_config=True)
 
     # Run sequence length filtering
     longer_seq(config)

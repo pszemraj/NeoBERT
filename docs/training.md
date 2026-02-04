@@ -26,11 +26,11 @@ This guide covers pretraining and fine-tuning NeoBERT models. It focuses on **ho
 ```bash
 # Standard pretraining config
 python scripts/pretraining/pretrain.py \
-  --config configs/pretraining/pretrain_neobert.yaml
+  configs/pretraining/pretrain_neobert.yaml
 
 # Override a few settings
 python scripts/pretraining/pretrain.py \
-  --config configs/pretraining/pretrain_neobert.yaml \
+  configs/pretraining/pretrain_neobert.yaml \
   --trainer.per_device_train_batch_size 64 \
   --optimizer.lr 2e-4 \
   --trainer.max_steps 100000
@@ -41,7 +41,7 @@ python scripts/pretraining/pretrain.py \
 ```bash
 # Short smoke test without writing a new config file
 python scripts/pretraining/pretrain.py \
-  --config configs/pretraining/pretrain_smoke.yaml \
+  configs/pretraining/pretrain_smoke.yaml \
   --dataset.streaming false \
   --datacollator.pack_sequences false \
   --trainer.max_steps 50 \
@@ -123,7 +123,7 @@ Resume from the latest accelerator checkpoint:
 
 ```bash
 python scripts/pretraining/pretrain.py \
-  --config configs/pretraining/pretrain_neobert.yaml \
+  configs/pretraining/pretrain_neobert.yaml \
   --trainer.resume_from_checkpoint true
 ```
 
@@ -138,7 +138,7 @@ Notes:
 
 ```bash
 python scripts/contrastive/finetune.py \
-  --config configs/contrastive/contrastive_neobert.yaml
+  configs/contrastive/contrastive_neobert.yaml
 ```
 
 For dataset setup, see the configs under `configs/contrastive/` and the scripts in `scripts/contrastive/`. Contrastive training requires `dataset.path` to point to the preprocessed dataset produced by `scripts/contrastive/preprocess.py`.
@@ -149,7 +149,7 @@ For dataset setup, see the configs under `configs/contrastive/` and the scripts 
 
 ```bash
 python scripts/pretraining/preprocess.py \
-  --config configs/pretraining/pretrain_neobert.yaml
+  configs/pretraining/pretrain_neobert.yaml
 ```
 
 Tokenizer settings are taken from `tokenizer.*`; the output path comes from `dataset.path`.
@@ -171,7 +171,7 @@ The training scripts use `accelerate` under the hood. For multi-GPU runs, use `a
 
 ```bash
 accelerate launch scripts/pretraining/pretrain.py \
-  --config configs/pretraining/pretrain_neobert.yaml \
+  configs/pretraining/pretrain_neobert.yaml \
   --trainer.per_device_train_batch_size 16 \
   --trainer.gradient_accumulation_steps 4
 ```

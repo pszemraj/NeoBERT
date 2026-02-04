@@ -109,7 +109,7 @@ def pipeline(cfg: Any) -> DatasetDict:
 def main() -> None:
     """Run preprocessing from a CLI config."""
     # Load configuration from command line arguments
-    config = load_config_from_args()
+    config = load_config_from_args(require_config=True)
 
     # Run contrastive preprocessing
     pipeline(config)

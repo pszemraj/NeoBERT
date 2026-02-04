@@ -70,7 +70,6 @@ class TestConfigSystem(unittest.TestCase):
         # Simulate command line args
         test_args = [
             "script.py",
-            "--config",
             str(config_path),
             "--model.hidden_size",
             "128",
@@ -125,7 +124,6 @@ optimizer:
         try:
             test_args = [
                 "script.py",
-                "--config",
                 temp_config_path,
                 "--model.hidden_size",
                 "256",
