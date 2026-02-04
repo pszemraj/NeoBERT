@@ -54,8 +54,9 @@ class CustomCollatorForMLM(DataCollatorForLanguageModeling):
 class DataCollatorWithPacking(DefaultDataCollator):
     """Data collator used for padding-free sequence packing.
 
-    Packed batches include a ``packed_seqlens`` entry that lists segment lengths
-    per packed sequence; this enables block-diagonal attention without dense masks.
+    Packed batches include a ``packed_seqlens`` entry as a padded int tensor of
+    shape (batch, max_segments) listing segment lengths per packed sequence;
+    this enables block-diagonal attention without dense masks.
     """
 
     def __init__(
@@ -204,6 +205,7 @@ class DataCollatorWithPacking(DefaultDataCollator):
             return batch
 
         packed_seqlens: list[list[int]] = []
+        max_segments = 0
         for seg in packed_segments:
             if not seg:
                 packed_seqlens.append([])
@@ -220,10 +222,23 @@ class DataCollatorWithPacking(DefaultDataCollator):
                     count += 1
             if count > 0:
                 lengths.append(count)
+            max_segments = max(max_segments, len(lengths))
             packed_seqlens.append(lengths)
 
+        if max_segments == 0:
+            packed_tensor = torch.zeros((len(packed_seqlens), 0), dtype=torch.int32)
+        else:
+            packed_tensor = torch.zeros(
+                (len(packed_seqlens), max_segments), dtype=torch.int32
+            )
+            for idx, lengths in enumerate(packed_seqlens):
+                if lengths:
+                    packed_tensor[idx, : len(lengths)] = torch.tensor(
+                        lengths, dtype=torch.int32
+                    )
+
         # Return packed segment lengths for efficient block-diagonal attention.
-        batch["packed_seqlens"] = packed_seqlens
+        batch["packed_seqlens"] = packed_tensor
         return batch
 
 

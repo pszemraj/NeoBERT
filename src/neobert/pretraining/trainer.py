@@ -7,7 +7,7 @@ import os
 import re
 from pathlib import Path
 from contextlib import nullcontext
-from typing import Callable, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple
 
 # PyTorch
 import torch
@@ -209,7 +209,7 @@ def _run_eval(
             for batch in eval_dataloader:
                 if max_batches is not None and eval_batches >= max_batches:
                     break
-                packed_seqlens = batch.get("packed_seqlens")
+                packed_seqlens = _packed_seqlens_to_list(batch.get("packed_seqlens"))
                 pad_mask = (
                     None
                     if packed_seqlens is not None
@@ -246,6 +246,24 @@ def _run_eval(
     finally:
         if was_training:
             model.train()
+
+
+def _packed_seqlens_to_list(
+    packed_seqlens: Any,
+) -> Optional[list[list[int]]]:
+    """Normalize packed sequence lengths to Python lists.
+
+    :param Any packed_seqlens: Packed segment lengths tensor or list.
+    :return list[list[int]] | None: Packed segment lengths as Python lists.
+    """
+    if packed_seqlens is None:
+        return None
+    if torch.is_tensor(packed_seqlens):
+        if packed_seqlens.numel() == 0:
+            return [[] for _ in range(packed_seqlens.shape[0])]
+        cpu = packed_seqlens.detach().cpu()
+        return [[int(x) for x in row[row > 0].tolist()] for row in cpu]
+    return packed_seqlens
 
 
 def _scale_gradients(model: torch.nn.Module, scale: torch.Tensor) -> None:
@@ -1149,7 +1167,7 @@ def trainer(cfg: Config) -> None:
 
             num_pred = (batch["labels"] != -100).sum()
             num_tokens = (batch["input_ids"] != model_config.pad_token_id).sum()
-            packed_seqlens = batch.get("packed_seqlens")
+            packed_seqlens = _packed_seqlens_to_list(batch.get("packed_seqlens"))
             pad_mask = (
                 None
                 if packed_seqlens is not None

@@ -273,9 +273,9 @@ class TestPretrainComponents(unittest.TestCase):
         self.assertIn("attention_mask", collated)
         self.assertEqual(collated["attention_mask"].dim(), 2)
         self.assertIn("packed_seqlens", collated)
-        self.assertTrue(
-            all(len(seqlens) >= 1 for seqlens in collated["packed_seqlens"])
-        )
+        packed = collated["packed_seqlens"]
+        self.assertTrue(torch.is_tensor(packed))
+        self.assertTrue(all(row[row > 0].numel() >= 1 for row in packed))
 
     def test_to_target_batch_size_handles_empty_buffer(self):
         """Ensure batch packing handles empty buffers without crashing."""
