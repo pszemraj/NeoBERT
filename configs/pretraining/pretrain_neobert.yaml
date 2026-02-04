@@ -17,6 +17,8 @@ model:
 dataset:
   name: "wikipedia"  # Change to your dataset
   path: null
+  config: "20220301.en"
+  trust_remote_code: true
   streaming: true
   num_proc: 16
   num_workers: 4

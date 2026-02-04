@@ -56,6 +56,7 @@ class DatasetConfig:
     num_workers: int = 16
     streaming: bool = True
     cache_dir: Optional[str] = None
+    trust_remote_code: bool = False
     max_seq_length: int = 512
     text_column: Optional[str] = None
     validation_split: Optional[float] = None

@@ -151,6 +151,77 @@ def _normalize_pad_mask(pad_mask: torch.Tensor) -> torch.Tensor:
     )
 
 
+def _prepare_xformers_bias(
+    pad_mask: Optional[torch.Tensor],
+    num_heads: int,
+    seq_len: int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> Optional[torch.Tensor]:
+    """Expand an additive pad mask into xFormers' expected bias shape.
+
+    xFormers currently requires a full (B, H, S, S) bias tensor for key padding
+    masks. We expand and materialize the broadcasted mask to avoid shape errors.
+
+    :param torch.Tensor | None pad_mask: Additive pad mask (0/-inf).
+    :param int num_heads: Number of attention heads.
+    :param int seq_len: Sequence length (S).
+    :param torch.dtype dtype: Target dtype for the bias tensor.
+    :param torch.device device: Target device for the bias tensor.
+    :return torch.Tensor | None: Expanded bias tensor or None.
+    """
+    if pad_mask is None or not torch.is_tensor(pad_mask):
+        return pad_mask
+
+    mask = pad_mask
+    if mask.dim() == 2:
+        mask = mask[:, None, None, :]
+    elif mask.dim() == 3:
+        mask = mask[:, None, :, :]
+    elif mask.dim() != 4:
+        raise ValueError(
+            "pad_mask must have shape (batch, seq_len), (batch, seq_len, seq_len), "
+            f"or (batch, 1, 1, seq_len); got {tuple(mask.shape)}"
+        )
+
+    if mask.shape[-1] != seq_len:
+        raise ValueError(
+            f"pad_mask last dim ({mask.shape[-1]}) must equal seq_len ({seq_len})"
+        )
+
+    mask = mask.expand(-1, num_heads, seq_len, seq_len).contiguous()
+    return mask.to(device=device, dtype=dtype)
+
+
+def _pad_mask_to_packed_seqlens(
+    pad_mask: torch.Tensor, seq_len: int
+) -> Optional[list[list[int]]]:
+    """Convert a key-padding mask into packed sequence lengths.
+
+    This only works for prefix padding masks shaped (B, 1, 1, S) where tokens
+    are unmasked first and masked only at the tail. Returns None if the mask
+    is not a simple padding mask.
+
+    :param torch.Tensor pad_mask: Additive pad mask (0/-inf).
+    :param int seq_len: Sequence length for validation.
+    :return list[list[int]] | None: Packed lengths per batch item.
+    """
+    if pad_mask.dim() != 4 or pad_mask.shape[1] != 1 or pad_mask.shape[2] != 1:
+        return None
+
+    if pad_mask.shape[-1] != seq_len:
+        return None
+
+    key_mask = pad_mask.squeeze(1).squeeze(1)
+    keep = key_mask == 0
+    keep_int = keep.to(torch.int)
+    if not torch.all(keep_int.cummin(dim=-1).values == keep_int):
+        return None
+
+    lengths = keep_int.sum(dim=-1).tolist()
+    return [[int(length)] for length in lengths]
+
+
 class SwiGLU(nn.Module):
     """Native SwiGLU implementation (unpacked w1/w2/w3).
 
@@ -422,11 +493,39 @@ class EncoderBlock(nn.Module):
                     xq, xk, xv, packed_seqlens, dropout_p=dropout_p
                 )
             else:
-                # xFormers expects attn_bias broadcastable to [B, H, S, S]; keep key padding
-                # masks in [B, 1, 1, S] form to avoid O(S^2) materialization.
-                attn = memory_efficient_attention(
-                    query=xq, key=xk, value=xv, attn_bias=pad_mask, p=dropout_p
-                )
+                if pad_mask is not None:
+                    packed_from_pad = _pad_mask_to_packed_seqlens(pad_mask, seq_len)
+                    if packed_from_pad is not None:
+                        attn = _packed_flash_attention(
+                            xq,
+                            xk,
+                            xv,
+                            packed_from_pad,
+                            dropout_p=dropout_p,
+                        )
+                    else:
+                        attn_bias = _prepare_xformers_bias(
+                            pad_mask,
+                            self.config.num_attention_heads,
+                            seq_len,
+                            xq.dtype,
+                            xq.device,
+                        )
+                        attn = memory_efficient_attention(
+                            query=xq,
+                            key=xk,
+                            value=xv,
+                            attn_bias=attn_bias,
+                            p=dropout_p,
+                        )
+                else:
+                    attn = memory_efficient_attention(
+                        query=xq,
+                        key=xk,
+                        value=xv,
+                        attn_bias=None,
+                        p=dropout_p,
+                    )
         else:
             if packed_seqlens is not None:
                 raise ValueError(
@@ -626,16 +725,42 @@ class NormEncoderBlock(nn.Module):
                     scale=softmax_scale,
                 )
             else:
-                # xFormers expects attn_bias broadcastable to [B, H, S, S]; keep key padding
-                # masks in [B, 1, 1, S] form to avoid O(S^2) materialization.
-                attn = memory_efficient_attention(
-                    query=xq,
-                    key=xk,
-                    value=xv,
-                    attn_bias=pad_mask,
-                    p=dropout_p,
-                    scale=softmax_scale,
-                )
+                if pad_mask is not None:
+                    packed_from_pad = _pad_mask_to_packed_seqlens(pad_mask, seq_len)
+                    if packed_from_pad is not None:
+                        attn = _packed_flash_attention(
+                            xq,
+                            xk,
+                            xv,
+                            packed_from_pad,
+                            dropout_p=dropout_p,
+                            scale=softmax_scale,
+                        )
+                    else:
+                        attn_bias = _prepare_xformers_bias(
+                            pad_mask,
+                            self.config.num_attention_heads,
+                            seq_len,
+                            xq.dtype,
+                            xq.device,
+                        )
+                        attn = memory_efficient_attention(
+                            query=xq,
+                            key=xk,
+                            value=xv,
+                            attn_bias=attn_bias,
+                            p=dropout_p,
+                            scale=softmax_scale,
+                        )
+                else:
+                    attn = memory_efficient_attention(
+                        query=xq,
+                        key=xk,
+                        value=xv,
+                        attn_bias=None,
+                        p=dropout_p,
+                        scale=softmax_scale,
+                    )
         else:
             if packed_seqlens is not None:
                 raise ValueError(

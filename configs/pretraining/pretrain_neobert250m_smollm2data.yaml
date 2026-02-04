@@ -35,9 +35,9 @@ datacollator:
 trainer:
   output_dir: "./outputs/smollm2_custom_tokenizer"
   max_steps: 100000  # 100k steps as requested
-  per_device_train_batch_size: 16  # Reduced for 250M model
-  per_device_eval_batch_size: 16
-  gradient_accumulation_steps: 4  # Increased to maintain effective batch size
+  per_device_train_batch_size: 8  # Fit 250M model on single 32GB GPU
+  per_device_eval_batch_size: 8
+  gradient_accumulation_steps: 8  # Keep effective batch size similar
   logging_steps: 25
   eval_steps: 5000
   save_steps: 10000

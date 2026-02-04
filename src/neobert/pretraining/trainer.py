@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import re
+from pathlib import Path
 from contextlib import nullcontext
 from typing import Callable, Optional, Tuple
 
@@ -20,7 +21,13 @@ from accelerate.utils import (
 )
 
 # Hugging Face
-from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
+from datasets import (
+    Dataset,
+    DatasetDict,
+    load_dataset,
+    load_dataset_builder,
+    load_from_disk,
+)
 
 # Deepspeed
 from deepspeed.utils import safe_get_full_fp32_param
@@ -42,6 +49,116 @@ from .metrics import Metrics
 
 # Set up logger
 logger = logging.getLogger(__name__)
+
+
+def _parse_split_slice(split: str) -> Tuple[str, Optional[str], Optional[str]]:
+    """Parse a split string with optional slice notation.
+
+    Examples
+    --------
+    - "train[:1%]" -> ("train", "", "1%")
+    - "train[99%:]" -> ("train", "99%", "")
+    - "train[:1000]" -> ("train", "", "1000")
+
+    :param str split: Split string to parse.
+    :return tuple[str, str | None, str | None]: Base split and slice bounds.
+    """
+    match = re.match(r"^([^\[]+)\[([^\]]+)\]$", split)
+    if not match:
+        return split, None, None
+    base = match.group(1)
+    inner = match.group(2)
+    if ":" not in inner:
+        return split, None, None
+    start_str, end_str = inner.split(":", 1)
+    start = start_str.strip() or None
+    end = end_str.strip() or None
+    return base, start, end
+
+
+def _resolve_slice_index(value: Optional[str], total: Optional[int]) -> Optional[int]:
+    """Resolve a slice value (int or percent) to an integer index.
+
+    :param str | None value: Slice token (e.g., "1000" or "1%").
+    :param int | None total: Total number of examples (required for %).
+    :return int | None: Resolved index or None if not applicable.
+    """
+    if value is None:
+        return None
+    if value.endswith("%"):
+        if total is None:
+            return None
+        pct = float(value[:-1])
+        return int(total * pct / 100.0)
+    return int(value)
+
+
+def _load_streaming_split(
+    dataset_name: str,
+    split: str,
+    dataset_kwargs: dict[str, object],
+) -> Dataset:
+    """Load a streaming dataset split with optional slice notation.
+
+    Streaming datasets do not support slice notation in ``load_dataset`` directly,
+    so we emulate it using ``skip``/``take`` when possible.
+
+    :param str dataset_name: Dataset identifier.
+    :param str split: Split string (e.g., "train[:1%]").
+    :param dict[str, object] dataset_kwargs: Additional kwargs for HF datasets.
+    :return Dataset: Streaming dataset (IterableDataset).
+    """
+    base, start_token, end_token = _parse_split_slice(split)
+    dataset = load_dataset(
+        dataset_name,
+        split=base,
+        streaming=True,
+        **dataset_kwargs,
+    )
+
+    if start_token is None and end_token is None:
+        return dataset
+
+    needs_total = (start_token is not None and start_token.endswith("%")) or (
+        end_token is not None and end_token.endswith("%")
+    )
+    total_examples: Optional[int] = None
+    if needs_total:
+        try:
+            builder = load_dataset_builder(dataset_name, **dataset_kwargs)
+            if base in builder.info.splits:
+                total_examples = builder.info.splits[base].num_examples
+        except Exception as exc:
+            logger.warning(
+                "Unable to resolve streaming split size for %s (%s): %s",
+                dataset_name,
+                split,
+                exc,
+            )
+
+    if needs_total and total_examples is None:
+        logger.warning(
+            "Streaming split %s uses percent slicing but total size is unknown. "
+            "Falling back to full split '%s'.",
+            split,
+            base,
+        )
+        return dataset
+
+    start_idx = _resolve_slice_index(start_token, total_examples)
+    end_idx = _resolve_slice_index(end_token, total_examples)
+
+    if start_idx and start_idx > 0:
+        dataset = dataset.skip(start_idx)
+
+    if end_idx is not None:
+        take_n = end_idx - (start_idx or 0)
+        if take_n <= 0:
+            logger.warning("Resolved split %s is empty after slicing.", split)
+            return dataset.take(0)
+        dataset = dataset.take(take_n)
+
+    return dataset
 
 
 def _count_masked_correct(
@@ -533,37 +650,53 @@ def trainer(cfg: Config) -> None:
         )
 
     # Dataset
-    dataset_kwargs = {"name": cfg.dataset.config} if cfg.dataset.config else {}
+    dataset_kwargs: dict[str, object] = {}
+    if cfg.dataset.config:
+        dataset_kwargs["name"] = cfg.dataset.config
+    if cfg.dataset.cache_dir:
+        dataset_kwargs["cache_dir"] = cfg.dataset.cache_dir
+    if getattr(cfg.dataset, "trust_remote_code", False):
+        dataset_kwargs["trust_remote_code"] = True
 
+    train_dataset = None
     if cfg.dataset.path:
-        train_dataset = load_from_disk(cfg.dataset.path)
-    else:
-        # Parse split if it contains slice notation (e.g., "train[:1000]")
-        if cfg.dataset.train_split and "[" in cfg.dataset.train_split:
-            dataset = load_dataset(
-                cfg.dataset.name,
-                split=cfg.dataset.train_split,
-                streaming=cfg.dataset.streaming,
-                **dataset_kwargs,
+        dataset_path = Path(cfg.dataset.path)
+        if dataset_path.exists():
+            train_dataset = load_from_disk(dataset_path)
+        else:
+            logger.warning(
+                "Dataset path %s not found; falling back to load_dataset().",
+                dataset_path,
             )
-            train_dataset = dataset
+
+    if train_dataset is None:
+        if cfg.dataset.train_split:
+            if cfg.dataset.streaming:
+                train_dataset = _load_streaming_split(
+                    cfg.dataset.name,
+                    cfg.dataset.train_split,
+                    dataset_kwargs,
+                )
+            else:
+                train_dataset = load_dataset(
+                    cfg.dataset.name,
+                    split=cfg.dataset.train_split,
+                    streaming=False,
+                    **dataset_kwargs,
+                )
         else:
             dataset = load_dataset(
                 cfg.dataset.name,
                 streaming=cfg.dataset.streaming,
                 **dataset_kwargs,
             )
-            train_dataset = (
-                dataset[cfg.dataset.train_split]
-                if cfg.dataset.train_split
-                else dataset["train"]
-            )
+            train_dataset = dataset["train"]
 
     # Check if dataset needs tokenization
     # For streaming datasets, we need to check differently
     needs_tokenization = False
 
-    if train_dataset:
+    if train_dataset is not None:
         if is_streaming:
             # For streaming datasets, peek at the first example
             first_example = next(iter(train_dataset))
@@ -578,7 +711,6 @@ def trainer(cfg: Config) -> None:
         # For non-streaming datasets, check if pre-tokenization is requested
         if not is_streaming and cfg.dataset.pre_tokenize:
             import subprocess
-            from pathlib import Path
 
             # Create output directory
             if cfg.dataset.pre_tokenize_output:
@@ -685,7 +817,7 @@ def trainer(cfg: Config) -> None:
 
     eval_dataset = None
     if cfg.dataset.eval_split:
-        if cfg.dataset.path:
+        if cfg.dataset.path and Path(cfg.dataset.path).exists():
             eval_source = load_from_disk(cfg.dataset.path)
             if isinstance(eval_source, DatasetDict):
                 eval_dataset = eval_source[cfg.dataset.eval_split]
@@ -696,12 +828,19 @@ def trainer(cfg: Config) -> None:
                     cfg.dataset.eval_split,
                 )
         else:
-            eval_dataset = load_dataset(
-                cfg.dataset.name,
-                split=cfg.dataset.eval_split,
-                streaming=cfg.dataset.streaming,
-                **dataset_kwargs,
-            )
+            if cfg.dataset.streaming:
+                eval_dataset = _load_streaming_split(
+                    cfg.dataset.name,
+                    cfg.dataset.eval_split,
+                    dataset_kwargs,
+                )
+            else:
+                eval_dataset = load_dataset(
+                    cfg.dataset.name,
+                    split=cfg.dataset.eval_split,
+                    streaming=False,
+                    **dataset_kwargs,
+                )
     elif cfg.dataset.validation_split:
         if is_streaming:
             logger.warning(
