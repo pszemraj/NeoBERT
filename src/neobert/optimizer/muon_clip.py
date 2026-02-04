@@ -774,7 +774,16 @@ class MuonClipOptimizer(Optimizer):
         if self.config.enable_clipping and self.hook_system:
             should_clip = self.should_clip_update(self._step)
             if should_clip:
-                self._apply_qk_clipping()
+                if not self.hook_system.layer_inputs:
+                    logger.warning(
+                        "MuonClip scheduled at update_step=%d but no activations were captured. "
+                        "Clipping will be skipped. This usually means prepare_for_forward() "
+                        "was not called on the correct microbatch (or hooks were disabled/wrapped).",
+                        self._step,
+                    )
+                    self._last_metrics.clear()
+                else:
+                    self._apply_qk_clipping()
             else:
                 self._last_metrics.clear()
 
