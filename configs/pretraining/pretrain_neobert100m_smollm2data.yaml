@@ -10,18 +10,18 @@ model:
   max_position_embeddings: 4096
   xformers_attention: true
   ngpt: false
-  hidden_act: "swiglu"  # Requires xformers
+  hidden_act: "swiglu" # Requires xformers
   rope: true
   rms_norm: true
 
 dataset:
   name: "EleutherAI/SmolLM2-1.7B-stage-4-100B"
-  streaming: true  # Stream this large dataset
+  streaming: true # Stream this large dataset
   num_proc: 8
   num_workers: 4
   max_seq_length: 1024
   train_split: "train"
-  eval_split: "train[:1%]"  # Use small subset for eval
+  eval_split: "train[:1%]" # Use small subset for eval
 
 tokenizer:
   name: "BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp"
@@ -31,6 +31,7 @@ tokenizer:
 datacollator:
   mlm_probability: 0.2
   pad_to_multiple_of: 8
+  pack_sequences: true
 
 trainer:
   output_dir: "./outputs/neobert-100m-wordpc_msp_32k_tok-adamw"
@@ -41,7 +42,7 @@ trainer:
   logging_steps: 25
   eval_steps: 5000
   save_steps: 10000
-  save_total_limit: 3  # Keep only last 3 checkpoints
+  save_total_limit: 3 # Keep only last 3 checkpoints
   report_to: ["wandb"]
   mixed_precision: "bf16"
   gradient_checkpointing: false
