@@ -650,6 +650,11 @@ def trainer(cfg: Config) -> None:
         project_config=project_config,
         kwargs_handlers=[kwargs],
     )
+    if accelerator.distributed_type is DistributedType.MEGATRON_LM:
+        raise RuntimeError(
+            "Megatron-LM backend is not supported by this training loop. "
+            "Use DDP or DeepSpeed instead."
+        )
 
     # Initialise the wandb run and pass wandb parameters
     if wandb_enabled:
@@ -1133,24 +1138,44 @@ def trainer(cfg: Config) -> None:
 
     # Prepare with accelerate. Keep dataloader batches on CPU so packed_seqlens
     # stays as CPU metadata (Accelerate dispatch concatenates tensors only).
+    disable_dispatch = bool(
+        cfg.datacollator.pack_sequences or cfg.model.xformers_attention
+    )
     if hasattr(accelerator, "prepare_data_loader"):
-        train_dataloader = accelerator.prepare_data_loader(
-            train_dataloader, device_placement=False
-        )
+
+        def _prepare_loader(
+            dataloader: torch.utils.data.DataLoader,
+        ) -> torch.utils.data.DataLoader:
+            kwargs = {"device_placement": False}
+            if disable_dispatch:
+                kwargs["dispatch_batches"] = False
+            try:
+                return accelerator.prepare_data_loader(dataloader, **kwargs)
+            except TypeError:
+                if disable_dispatch:
+                    raise RuntimeError(
+                        "Accelerate version too old to disable dispatch_batches. "
+                        "Upgrade accelerate or disable dispatch in your config."
+                    )
+                return accelerator.prepare_data_loader(
+                    dataloader, device_placement=False
+                )
+
+        train_dataloader = _prepare_loader(train_dataloader)
         if eval_dataloader is not None:
-            eval_dataloader = accelerator.prepare_data_loader(
-                eval_dataloader, device_placement=False
-            )
+            eval_dataloader = _prepare_loader(eval_dataloader)
         model, optimizer, scheduler = accelerator.prepare(
             model,
             optimizer,
             scheduler,
         )
     else:
-        if accelerator.distributed_type in {
-            DistributedType.DEEPSPEED,
-            DistributedType.MEGATRON_LM,
-        }:
+        if disable_dispatch:
+            raise RuntimeError(
+                "Accelerate version too old to configure dispatch_batches. "
+                "Upgrade accelerate when using packed_seqlens."
+            )
+        if accelerator.distributed_type is DistributedType.DEEPSPEED:
             logger.warning(
                 "Accelerate backend does not support per-object device placement; "
                 "falling back to default dataloader placement."

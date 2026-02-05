@@ -76,6 +76,10 @@ class DataCollatorWithPacking(DefaultDataCollator):
         self.end_token_id = end_token_id
         self.max_length = max_length
         self.default_data_collator = default_data_collator
+        reserve = int(start_token_id is not None) + int(end_token_id is not None)
+        min_segment_len = max(1, reserve)
+        # Fixed-width packed_seqlens avoids shape mismatches in dispatch/concatenate.
+        self.max_segments = max(1, max_length // min_segment_len)
 
     def __call__(self, features, return_tensors=None):
         """Pack segments into fixed-length sequences and build attention masks."""
@@ -198,7 +202,6 @@ class DataCollatorWithPacking(DefaultDataCollator):
             return batch
 
         packed_seqlens: list[list[int]] = []
-        max_segments = 0
         for seg in packed_segments:
             if not seg:
                 packed_seqlens.append([])
@@ -215,8 +218,16 @@ class DataCollatorWithPacking(DefaultDataCollator):
                     count += 1
             if count > 0:
                 lengths.append(count)
-            max_segments = max(max_segments, len(lengths))
             packed_seqlens.append(lengths)
+
+        max_segments = self.max_segments if packed_seqlens else 0
+        if max_segments and any(
+            len(lengths) > max_segments for lengths in packed_seqlens
+        ):
+            raise ValueError(
+                "Packed segment count exceeds fixed packed_seqlens width. "
+                "Increase datacollator.max_length or reduce segment sizes."
+            )
 
         if max_segments == 0:
             packed_tensor = torch.zeros((len(packed_seqlens), 0), dtype=torch.int32)

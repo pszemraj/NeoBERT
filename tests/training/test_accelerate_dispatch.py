@@ -99,3 +99,30 @@ class TestAccelerateDispatch(unittest.TestCase):
                 break
 
         self.assertGreater(batches, 0)
+
+    def test_packed_seqlens_fixed_width_concat(self):
+        """Ensure packed_seqlens has stable width across packed batches."""
+        tokenizer = _make_tokenizer()
+        collator = get_collator(
+            tokenizer=tokenizer,
+            mlm_probability=0.15,
+            pack_sequences=True,
+            max_length=8,
+        )
+
+        batch_a = collator(
+            [
+                {"input_ids": [4, 5, 6]},
+                {"input_ids": [4]},
+            ]
+        )
+        batch_b = collator(
+            [
+                {"input_ids": [4]},
+            ]
+        )
+
+        self.assertEqual(
+            batch_a["packed_seqlens"].shape[1], batch_b["packed_seqlens"].shape[1]
+        )
+        _ = torch.cat([batch_a["packed_seqlens"], batch_b["packed_seqlens"]], dim=0)
