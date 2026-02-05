@@ -1360,9 +1360,18 @@ class NeoBERTHFForSequenceClassification(NeoBERTPreTrainedModel):
         :param bool | None return_dict: Whether to return dict outputs.
         :return SequenceClassifierOutput | tuple: Model outputs.
         """
-        # Convert HuggingFace attention mask (1s and 0s) to additive mask (-inf and 0)
+        # Convert attention masks to additive mask (-inf for masked, 0 for keep).
         if attention_mask is not None:
-            additive_mask = torch.where(attention_mask == 0, float("-inf"), float(0.0))
+            if attention_mask.dtype is torch.bool:
+                additive_mask = torch.where(attention_mask, float(0.0), float("-inf"))
+            elif attention_mask.is_floating_point() and attention_mask.min() < 0:
+                additive_mask = attention_mask
+            else:
+                additive_mask = torch.where(
+                    attention_mask == 0, float("-inf"), float(0.0)
+                )
+            if additive_mask.dtype != torch.float32:
+                additive_mask = additive_mask.to(torch.float32)
         else:
             additive_mask = None
         hidden_representation = self.model.forward(input_ids, additive_mask)

@@ -213,6 +213,42 @@ class TestModelForward(unittest.TestCase):
         expected_logits_shape = (self.batch_size, num_labels)
         self.assertEqual(outputs["logits"].shape, expected_logits_shape)
 
+    def test_sequence_classification_accepts_additive_mask(self):
+        """Ensure additive attention masks are preserved for classification."""
+        import types
+
+        num_labels = 2
+        model = NeoBERTForSequenceClassification(
+            self.tiny_config, num_labels=num_labels
+        )
+        model.eval()
+
+        attention_mask = torch.tensor(
+            [
+                [1, 1, 1, 0, 0, 1, 1, 1, 1, 1],
+                [1, 1, 1, 1, 1, 1, 0, 0, 0, 0],
+            ],
+            dtype=torch.long,
+        )
+        additive_mask = torch.where(attention_mask == 1, float(0.0), float("-inf"))
+
+        captured = {}
+
+        def _fake_forward(self, src, pad_mask=None, packed_seqlens=None):
+            captured["mask"] = pad_mask
+            return torch.zeros(
+                (src.shape[0], src.shape[1], self.config.hidden_size),
+                device=src.device,
+            )
+
+        model.model.forward = types.MethodType(_fake_forward, model.model)
+
+        with torch.no_grad():
+            outputs = model(self.input_ids, additive_mask)
+
+        self.assertIn("logits", outputs)
+        self.assertTrue(torch.equal(captured["mask"], additive_mask.to(torch.float32)))
+
     def test_neobert_hf_sequence_classification(self):
         """Test HuggingFace-compatible sequence classification."""
         hf_config = NeoBERTConfig(
