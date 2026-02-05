@@ -1,5 +1,6 @@
 """Pretraining loop for masked language modeling."""
 
+import inspect
 import json
 import logging
 import math
@@ -14,6 +15,7 @@ import torch
 import wandb
 from accelerate import Accelerator
 from accelerate.utils import (
+    DataLoaderConfiguration,
     DistributedDataParallelKwargs,
     DistributedType,
     ProjectConfiguration,
@@ -642,6 +644,16 @@ def trainer(cfg: Config) -> None:
     # All parameters participate in the forward graph; keep DDP in fast-path mode.
     kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
     wandb_enabled = cfg.wandb.enabled and cfg.wandb.mode != "disabled"
+    # Keep dataloader batches on CPU so packed_seqlens stays as CPU metadata.
+    disable_dispatch = bool(
+        cfg.datacollator.pack_sequences or cfg.model.xformers_attention
+    )
+    dataloader_config = None
+    if disable_dispatch:
+        dataloader_config = DataLoaderConfiguration(dispatch_batches=False)
+        logger.info(
+            "Disabling Accelerate dispatch_batches because packed_seqlens must stay on CPU."
+        )
     accelerator = Accelerator(
         step_scheduler_with_optimizer=False,  # enable manual control of the scheduler
         mixed_precision=cfg.trainer.mixed_precision,
@@ -649,6 +661,7 @@ def trainer(cfg: Config) -> None:
         log_with="wandb" if wandb_enabled else None,
         project_config=project_config,
         kwargs_handlers=[kwargs],
+        dataloader_config=dataloader_config,
     )
     if accelerator.distributed_type is DistributedType.MEGATRON_LM:
         raise RuntimeError(
@@ -1136,31 +1149,21 @@ def trainer(cfg: Config) -> None:
         constant_steps=constant_steps,
     )
 
-    # Prepare with accelerate. Keep dataloader batches on CPU so packed_seqlens
-    # stays as CPU metadata (Accelerate dispatch concatenates tensors only).
-    disable_dispatch = bool(
-        cfg.datacollator.pack_sequences or cfg.model.xformers_attention
-    )
-    if disable_dispatch:
-        logger.info(
-            "Disabling Accelerate dispatch_batches because packed_seqlens must stay on CPU."
-        )
     if hasattr(accelerator, "prepare_data_loader"):
 
         def _prepare_loader(
             dataloader: torch.utils.data.DataLoader,
         ) -> torch.utils.data.DataLoader:
             kwargs = {"device_placement": False}
-            if disable_dispatch:
-                kwargs["dispatch_batches"] = False
             try:
+                supports_dispatch = (
+                    "dispatch_batches"
+                    in inspect.signature(accelerator.prepare_data_loader).parameters
+                )
+                if supports_dispatch:
+                    kwargs["dispatch_batches"] = not disable_dispatch
                 return accelerator.prepare_data_loader(dataloader, **kwargs)
             except TypeError:
-                if disable_dispatch:
-                    raise RuntimeError(
-                        "Accelerate version too old to disable dispatch_batches. "
-                        "Upgrade accelerate or disable dispatch in your config."
-                    )
                 return accelerator.prepare_data_loader(
                     dataloader, device_placement=False
                 )
