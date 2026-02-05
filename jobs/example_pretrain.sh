@@ -11,7 +11,7 @@ PYTHON=(conda run --name neobert python)
 # 1) Small smoke test (safe)
 # ----------------------------
 "${PYTHON[@]}" scripts/pretraining/pretrain.py \
-  --config tests/configs/pretraining/test_tiny_pretrain.yaml \
+  tests/configs/pretraining/test_tiny_pretrain.yaml \
   --wandb.mode disabled
 
 # ----------------------------
@@ -21,9 +21,9 @@ PYTHON=(conda run --name neobert python)
 if [[ "${RUN_FULL:-0}" == "1" ]]; then
   # Basic pretraining with config file
   "${PYTHON[@]}" scripts/pretraining/pretrain.py \
-    --config configs/pretraining/pretrain_neobert100m_smollm2data.yaml
+    configs/pretraining/pretrain_neobert100m_smollm2data.yaml
 
   # MuonClip variant
   "${PYTHON[@]}" scripts/pretraining/pretrain.py \
-    --config configs/pretraining/pretrain_neobert100m_smollm2data_muonclip.yaml
+    configs/pretraining/pretrain_neobert100m_smollm2data_muonclip.yaml
 fi

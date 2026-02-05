@@ -56,9 +56,9 @@ glue:
   allow_random_weights: true
 ```
 
-### Flash Attention behavior
+### Attention backend behavior
 
-GLUE runs always force eager attention (Flash Attention is disabled) to avoid variable-length alignment issues.
+GLUE runs always force eager attention (xFormers is disabled) to avoid variable-length alignment issues.
 
 ### Summarize results
 
@@ -81,8 +81,7 @@ bash scripts/evaluation/glue/build_configs.sh outputs/my_sweep neobert/glue \
 ```bash
 python scripts/evaluation/run_mteb.py \
   outputs/<pretrain_run>/model_checkpoints/<step>/config.yaml \
-  --model_name_or_path outputs/<pretrain_run> \
-  --task_types retrieval,sts
+  --model_name_or_path outputs/<pretrain_run>
 ```
 
 Notes:
@@ -91,11 +90,12 @@ Notes:
 - If `use_deepspeed: true`, the script loads weights via DeepSpeed utilities.
 - Outputs land under `outputs/<pretrain_run>/mteb/<step>/<max_length>/`.
 - The MTEB runner currently reads `tokenizer.name`; if you trained with a local tokenizer, set `tokenizer.name` to that path in the config.
+- To filter task families, set `mteb_task_type` in the config (`all`, `classification`, `retrieval`, etc.). The `--task_types` CLI flag is currently unused.
 - For direct `NeoBERTForMTEB.encode(...)` usage, you can override DataLoader settings with `num_workers` (default `0`) and `pin_memory` (defaults to `True` only on CUDA).
 
 ## Troubleshooting
 
-- Flash attention errors on GLUE: expected (forced off).
+- xFormers attention errors on GLUE: expected (xFormers forced off).
 - OOM: lower `trainer.per_device_train_batch_size` and/or enable `trainer.gradient_checkpointing`.
 - Random or flat metrics: verify `glue.pretrained_model_path` and checkpoint paths.
 

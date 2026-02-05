@@ -53,7 +53,7 @@ See [docs/troubleshooting.md](docs/troubleshooting.md) for help with common inst
 ```bash
 # 5-minute smoke test (tiny model, CPU-friendly)
 python scripts/pretraining/pretrain.py \
-    --config tests/configs/pretraining/test_tiny_pretrain.yaml
+    tests/configs/pretraining/test_tiny_pretrain.yaml
 
 # Optional: run the full regression suite
 python tests/run_tests.py
@@ -63,8 +63,8 @@ python tests/run_tests.py
 
 | Task           | Command                                                                                     |
 | -------------- | ------------------------------------------------------------------------------------------- |
-| Pretrain       | `python scripts/pretraining/pretrain.py --config configs/pretraining/pretrain_neobert.yaml` |
-| GLUE eval      | `python scripts/evaluation/run_glue.py --config configs/glue/{task}.yaml`                   |
+| Pretrain       | `python scripts/pretraining/pretrain.py configs/pretraining/pretrain_neobert.yaml`          |
+| GLUE eval      | `python scripts/evaluation/run_glue.py configs/glue/{task}.yaml`                            |
 | Summarize GLUE | `python scripts/evaluation/glue/summarize_glue.py {results_path}`                           |
 | Run tests      | `python tests/run_tests.py`                                                                 |
 
@@ -142,6 +142,10 @@ For detailed guides and documentation, see the **[Documentation](docs/README.md)
 
 ## Features
 
+> [!NOTE]
+> The table below reflects the 250M NeoBERT configuration from the original paper.
+> Other sizes live under `configs/pretraining/`.
+
 | **Feature**             | **NeoBERT**    |
 | ----------------------- | -------------- |
 | `Depth-to-width`        | 28 × 768       |
@@ -157,7 +161,7 @@ For detailed guides and documentation, see the **[Documentation](docs/README.md)
 | `Optimizer`             | AdamW          |
 | `Scheduler`             | CosineDecay    |
 | `Training Tokens`       | 2.1 T          |
-| `Efficiency`            | FlashAttention |
+| `Efficiency`            | xFormers memory-efficient attention |
 
 ## License
 
@@ -191,12 +195,6 @@ This repository includes the complete training and evaluation codebase for NeoBE
 - **`tests/`** - Automated regression suite and tiny configs
 - **`src/neobert/`** - Core model, trainer, and utilities
 
-Additional guidance lives in:
-
-- [`docs/training.md`](docs/training.md) for full training workflows
-- [`docs/evaluation.md`](docs/evaluation.md) for benchmark recipes
-- [`docs/testing.md`](docs/testing.md) for extending the test suite
-- [`docs/export.md`](docs/export.md) for Hugging Face conversion
-- [`docs/troubleshooting.md`](docs/troubleshooting.md) for debugging tips
+Additional guidance lives in the **Documentation** section above (or `docs/README.md` for the full index).
 
 ---

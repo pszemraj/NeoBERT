@@ -29,22 +29,22 @@ python -c "import torch; print(torch.__version__)"
 ## Pretraining
 
 Primary entry point:
-- `scripts/pretraining/pretrain.py` (loads a YAML config via `--config`)
+- `scripts/pretraining/pretrain.py` (loads a YAML config via a positional config path)
 
 Examples:
 ```bash
 # Small smoke test (CPU-friendly)
 conda run --name neobert python scripts/pretraining/pretrain.py \
-  --config tests/configs/pretraining/test_tiny_pretrain.yaml \
+  tests/configs/pretraining/test_tiny_pretrain.yaml \
   --wandb.mode disabled
 
 # Real streaming pretraining config
 conda run --name neobert python scripts/pretraining/pretrain.py \
-  --config configs/pretraining/pretrain_neobert100m_smollm2data.yaml
+  configs/pretraining/pretrain_neobert100m_smollm2data.yaml
 
 # MuonClip variant
 conda run --name neobert python scripts/pretraining/pretrain.py \
-  --config configs/pretraining/pretrain_neobert100m_smollm2data_muonclip.yaml
+  configs/pretraining/pretrain_neobert100m_smollm2data_muonclip.yaml
 ```
 
 ### Multi-GPU (Accelerate)
@@ -52,14 +52,14 @@ conda run --name neobert python scripts/pretraining/pretrain.py \
 Pretraining uses `accelerate`. For multi-GPU:
 ```bash
 accelerate launch scripts/pretraining/pretrain.py \
-  --config configs/pretraining/pretrain_neobert100m_smollm2data.yaml
+  configs/pretraining/pretrain_neobert100m_smollm2data.yaml
 ```
 
 If you have an accelerate config file:
 ```bash
 accelerate launch --config_file path/to/accelerate.yaml \
   scripts/pretraining/pretrain.py \
-  --config configs/pretraining/pretrain_neobert100m_smollm2data.yaml
+  configs/pretraining/pretrain_neobert100m_smollm2data.yaml
 ```
 
 ### Resume
@@ -74,7 +74,7 @@ Pretraining checkpoints are stored under:
 
 ```bash
 conda run --name neobert python scripts/pretraining/pretrain.py \
-  --config configs/pretraining/pretrain_neobert100m_smollm2data.yaml \
+  configs/pretraining/pretrain_neobert100m_smollm2data.yaml \
   --trainer.resume_from_checkpoint latest
 ```
 
@@ -105,7 +105,7 @@ Common dataset tokenization entry point:
 
 ```bash
 conda run --name neobert python scripts/pretraining/preprocess.py \
-  --config configs/pretraining/pretrain_neobert.yaml
+  configs/pretraining/pretrain_neobert.yaml
 ```
 
 ## Using The Example Scripts

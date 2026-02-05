@@ -51,8 +51,8 @@ Current state:
 - `src/neobert/huggingface/modeling_neobert.py` intentionally **does not**
   support packed/varlen inputs; the exported HF model stays within vanilla
   Transformers expectations.
-- `src/neobert/huggingface/modeling_neobert.py::DataCollatorWithPacking` raises
-  if `pack_sequences=True`; use `src/neobert/collator/collator.py` for training.
+- `src/neobert/collator/collator.py::DataCollatorWithPacking` is the training-only
+  collator; exported HF models expect standard (unpacked) attention masks.
 
 Implementation plan:
 

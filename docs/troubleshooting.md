@@ -13,16 +13,16 @@ Common issues and their solutions when training and using NeoBERT.
 
 ### Configuration & CLI Issues
 
-- **Config validation errors**: verify YAML indentation, required fields, and value types. Run with `--debug` to print the resolved config and validation warnings.
+- **Config validation errors**: verify YAML indentation, required fields, and value types. Unknown keys are reported explicitly during config load; fix/remove those keys. `--debug` (pretraining only) prints vocab/tokenizer diagnostics, not a full config dump.
 - **Import errors**: ensure your virtual environment has `pip install -e .[dev]` applied and that you are inside the project root before invoking scripts.
-- **Slow data loading**: increase `trainer.dataloader_num_workers`, place datasets on faster storage, or enable streaming mode for giant corpora.
+- **Slow data loading**: increase `dataset.num_workers`, place datasets on faster storage, or enable streaming mode for giant corpora.
 
 ### xFormers Attention Issues During GLUE Evaluation
 
 - **Symptom**: Launching GLUE evaluation with xFormers memory-efficient attention enabled produces runtime errors or crashes.
 - **Cause**: GLUE tasks use variable-length batches that are currently incompatible with xFormers alignment requirements.
 - **Solution**:
-  1. When using the provided GLUE scripts/configs, no action is needed-xFormers attention is automatically disabled for you.
+  1. When using the provided GLUE scripts/configs, no action is needed; xFormers attention is automatically disabled for you.
   2. If you author custom launchers, set `model.xformers_attention: false` (or pass `--model.xformers_attention false`) before evaluation.
   3. Restart the run after toggling the setting; mixed xFormers/eager runs in the same process can leave partially initialized CUDA kernels.
 
@@ -126,7 +126,7 @@ inputs before export/inference.
 3. Use half precision: `model.half()` or `torch.autocast`
 4. Install the appropriate attention backend:
    - Training: `pip install xformers`
-   - Exported HF models: `pip install flash-attn`
+   - Exported HF models: rely on PyTorch SDPA (flash/mem-efficient kernels are selected by PyTorch when available)
 
 ### High Memory Usage
 
@@ -139,12 +139,13 @@ inputs before export/inference.
 
 ## Environment Issues
 
-### Flash Attention Backends
+### Attention Backends
 
 NeoBERT uses different backends depending on the code path:
 
 - **Training** uses `xformers.ops.memory_efficient_attention` when `model.xformers_attention: true`.
-- **Exported HF models** use `flash-attn` if available.
+- **Exported HF models** use PyTorch `scaled_dot_product_attention`; kernel selection
+  (flash/mem-efficient/math) is handled by PyTorch.
 
 **If training backend is missing**:
 
@@ -152,11 +153,8 @@ NeoBERT uses different backends depending on the code path:
 pip install xformers
 ```
 
-**If HF flash-attn is missing**:
-
-```bash
-pip install flash-attn --no-build-isolation
-```
+**If you want faster HF inference**: use a recent PyTorch build with SDPA/flash kernels.
+No extra dependency is required by default.
 
 ## Validation Tools
 

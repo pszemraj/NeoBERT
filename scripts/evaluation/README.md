@@ -19,27 +19,13 @@ Scripts for evaluating NeoBERT models on benchmarks.
 - **`glue/summarize_glue.py`** - Aggregate GLUE metrics across runs
 - **`glue/validate_glue_config.py`** - Sanity-check GLUE configs before launching jobs
 
-## Quick Start
-
-```bash
-# Run GLUE evaluation
-python scripts/evaluation/run_glue.py configs/glue/cola.yaml
-
-# Run MTEB evaluation
-python scripts/evaluation/run_mteb.py outputs/<pretrain_run>/model_checkpoints/<step>/config.yaml --model_name_or_path outputs/<pretrain_run>
-
-# Run all GLUE tasks
-bash scripts/evaluation/glue/run_all_glue.sh
-
-# Generate GLUE configs from a sweep directory
-bash scripts/evaluation/glue/build_configs.sh /checkpoints/sweep neobert/glue
-```
+For quick-start commands, see [docs/evaluation.md](../../docs/evaluation.md).
 
 ## Implementation Notes
 
-### Flash Attention Compatibility
+### xFormers Compatibility
 
-GLUE evaluation always runs with eager attention. See [Flash Attention issues during GLUE evaluation](../../docs/troubleshooting.md#flash-attention-issues-during-glue-evaluation) for background and mitigation steps.
+GLUE evaluation always runs with eager attention (xFormers disabled). See [xFormers attention issues during GLUE evaluation](../../docs/troubleshooting.md#xformers-attention-issues-during-glue-evaluation) for background and mitigation steps.
 
 ### Model Checkpoint Saving
 
@@ -53,7 +39,7 @@ trainer:
 
 ### Pretrained Model Requirements
 
-GLUE evaluation **requires** a pretrained model. The trainer includes safety checks to prevent accidentally running with random weights:
+GLUE evaluation **requires** a pretrained model unless `glue.allow_random_weights: true` is set. The trainer includes safety checks to prevent accidentally running with random weights:
 
 - Validates `glue.pretrained_model_path` exists
 - Checks checkpoint directory and files

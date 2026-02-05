@@ -10,7 +10,7 @@ NeoBERT is a transformer encoder with modernized components:
 - **RoPE positional embeddings** (optional)
 - **RMSNorm or LayerNorm** (configurable)
 - **SwiGLU or GELU** feed-forward (configurable)
-- **Flash attention** via xformers when enabled
+- **xFormers memory-efficient attention** when enabled (training path)
 - **Optional nGPT-style normalization** (NormNeoBERT)
 
 ## Source of Truth

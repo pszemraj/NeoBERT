@@ -128,7 +128,7 @@ python scripts/pretraining/pretrain.py \
 ```
 
 Notes:
-- `trainer.resume_from_checkpoint` may be `true`/`"latest"` to resume the newest
+- `trainer.resume_from_checkpoint` may be `true`/`"latest"`/`"auto"` to resume the newest
   checkpoint under `output_dir/checkpoints`, or a string path to load directly.
 - The trainer resumes from the **latest numeric directory** under `output_dir/checkpoints/`.
 - `trainer.output_dir` must point at the original run directory so checkpoints can be found.

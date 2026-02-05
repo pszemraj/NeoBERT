@@ -63,8 +63,7 @@ The export script maps NeoBERT config fields to HF config fields, including:
 | `num_hidden_layers`       | `num_hidden_layers`       | Layers              |
 | `num_attention_heads`     | `num_attention_heads`     | Heads               |
 | `intermediate_size`       | `intermediate_size`       | FFN size            |
-| `max_position_embeddings` | `max_length`              | Max sequence length |
-| `max_position_embeddings` | `max_position_embeddings` | Max sequence length |
+| `max_position_embeddings` | `max_length` + `max_position_embeddings` | HF config sets both length fields |
 | `norm_eps`                | `norm_eps`                | Norm epsilon        |
 | `vocab_size`              | `vocab_size`              | Vocab size          |
 | `pad_token_id`            | `pad_token_id`            | Padding token       |
@@ -97,7 +96,9 @@ The validator checks file presence, model loading, tokenizer loading, MLM head, 
 
 - **Missing tokenizer files**: ensure the checkpoint has a complete `tokenizer/` directory.
 - **Missing required config fields**: confirm `config.yaml` includes the `model` section with required keys.
-- **Flash-attn warnings**: exported HF models use `flash-attn` if installed; install it if you want faster inference.
+- **Attention backend confusion**: exported HF models use PyTorch SDPA. It will select
+  flash/mem-efficient kernels if your PyTorch build supports them; installing `flash-attn`
+  does not change behavior unless you modify the exported model code.
 
 ## Next Steps
 

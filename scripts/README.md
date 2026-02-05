@@ -14,8 +14,9 @@ Entry points for NeoBERT training, evaluation, contrastive learning, and export 
 
 ## Shared Conventions
 
-- Training/evaluation entry points take a positional config path plus dot-notation overrides. Export utilities typically take a checkpoint path instead. The config hierarchy is documented in [docs/configuration.md](../docs/configuration.md).
-- `--debug` enables verbose logging across scripts.
+- Pretraining/contrastive/preprocess scripts accept a positional config path plus dot-notation overrides (via `load_config_from_args`). Export utilities take a checkpoint path instead. The config hierarchy is documented in [docs/configuration.md](../docs/configuration.md).
+- Evaluation scripts (`run_glue.py`, `run_mteb.py`) accept positional config paths and their own flags; they do **not** support dot-notation overrides.
+- `--debug` is consumed by pretraining for vocab/tokenizer diagnostics; other scripts may ignore it.
 - Environment variables are the preferred way to pass secrets (e.g., `WANDB_API_KEY`, `HF_TOKEN`). See [docs/training.md](../docs/training.md) for examples.
 - Helper shell wrappers live under `jobs/` for batch systems, and tiny smoke-test configs live in `tests/configs/`.
 
