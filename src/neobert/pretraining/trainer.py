@@ -1103,29 +1103,73 @@ def trainer(cfg: Config) -> None:
 
     # Prepare with accelerate. Keep dataloader batches on CPU so packed_seqlens
     # stays as CPU metadata (Accelerate dispatch concatenates tensors only).
-    if eval_dataloader is not None:
-        (
-            train_dataloader,
-            eval_dataloader,
+    if hasattr(accelerator, "prepare_data_loader"):
+        train_dataloader = accelerator.prepare_data_loader(
+            train_dataloader, device_placement=False
+        )
+        if eval_dataloader is not None:
+            eval_dataloader = accelerator.prepare_data_loader(
+                eval_dataloader, device_placement=False
+            )
+        model, optimizer, scheduler = accelerator.prepare(
             model,
             optimizer,
             scheduler,
-        ) = accelerator.prepare(
-            train_dataloader,
-            eval_dataloader,
-            model,
-            optimizer,
-            scheduler,
-            device_placement=[False, False, True, True, True],
         )
     else:
-        train_dataloader, model, optimizer, scheduler = accelerator.prepare(
-            train_dataloader,
-            model,
-            optimizer,
-            scheduler,
-            device_placement=[False, True, True, True],
-        )
+        if accelerator.distributed_type in {
+            DistributedType.DEEPSPEED,
+            DistributedType.MEGATRON_LM,
+        }:
+            logger.warning(
+                "Accelerate backend does not support per-object device placement; "
+                "falling back to default dataloader placement."
+            )
+            if eval_dataloader is not None:
+                (
+                    train_dataloader,
+                    eval_dataloader,
+                    model,
+                    optimizer,
+                    scheduler,
+                ) = accelerator.prepare(
+                    train_dataloader,
+                    eval_dataloader,
+                    model,
+                    optimizer,
+                    scheduler,
+                )
+            else:
+                train_dataloader, model, optimizer, scheduler = accelerator.prepare(
+                    train_dataloader,
+                    model,
+                    optimizer,
+                    scheduler,
+                )
+        else:
+            if eval_dataloader is not None:
+                (
+                    train_dataloader,
+                    eval_dataloader,
+                    model,
+                    optimizer,
+                    scheduler,
+                ) = accelerator.prepare(
+                    train_dataloader,
+                    eval_dataloader,
+                    model,
+                    optimizer,
+                    scheduler,
+                    device_placement=[False, False, True, True, True],
+                )
+            else:
+                train_dataloader, model, optimizer, scheduler = accelerator.prepare(
+                    train_dataloader,
+                    model,
+                    optimizer,
+                    scheduler,
+                    device_placement=[False, True, True, True],
+                )
 
     if wandb_enabled and accelerator.is_main_process:
         wandb_watch = os.environ.get("WANDB_WATCH")
