@@ -1,7 +1,6 @@
 """Comprehensive validation for GLUE configurations."""
 
 import logging
-import os
 from pathlib import Path
 from typing import Any, Dict
 
@@ -42,7 +41,7 @@ def validate_glue_config(cfg: Any) -> None:
                         "GLUE requires pretrained weights. Specify 'pretrained_checkpoint_dir' "
                         "and 'pretrained_checkpoint' or set 'allow_random_weights: true'"
                     )
-                elif checkpoint_dir and not os.path.exists(checkpoint_dir):
+                elif checkpoint_dir and not Path(checkpoint_dir).exists():
                     errors.append(f"Checkpoint directory not found: {checkpoint_dir}")
 
         if hasattr(cfg.model, "hidden_size") and hasattr(
@@ -170,19 +169,20 @@ def validate_checkpoint_compatibility(
     """
     import torch
 
-    if not os.path.exists(checkpoint_path):
+    checkpoint_dir = Path(checkpoint_path)
+    if not checkpoint_dir.exists():
         raise ValidationError(f"Checkpoint not found: {checkpoint_path}")
 
-    is_deepspeed = os.path.exists(os.path.join(checkpoint_path, "zero_to_fp32.py"))
+    is_deepspeed = (checkpoint_dir / "zero_to_fp32.py").exists()
 
     if is_deepspeed:
         required_files = ["zero_to_fp32.py", "latest"]
         for file in required_files:
-            if not os.path.exists(os.path.join(checkpoint_path, file)):
+            if not (checkpoint_dir / file).exists():
                 logger.warning(f"DeepSpeed checkpoint missing {file}")
     else:
-        state_dict_path = os.path.join(checkpoint_path, "state_dict.pt")
-        if not os.path.exists(state_dict_path):
+        state_dict_path = checkpoint_dir / "state_dict.pt"
+        if not state_dict_path.exists():
             raise ValidationError(f"No state_dict.pt found at {state_dict_path}")
 
         try:

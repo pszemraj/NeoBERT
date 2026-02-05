@@ -24,7 +24,7 @@ def _load_summarizer():
 
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload))
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 @pytest.mark.parametrize(

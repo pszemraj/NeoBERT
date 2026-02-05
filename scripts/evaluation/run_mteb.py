@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-import os
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -134,7 +134,7 @@ def evaluate_mteb(cfg: Any) -> None:
     mteb_pooling = getattr(cfg, "mteb_pooling", "mean")
     mteb_overwrite_results = getattr(cfg, "mteb_overwrite_results", False)
     pretrained_checkpoint = getattr(cfg, "pretrained_checkpoint", "latest")
-    pretrained_checkpoint_dir = cfg.trainer.output_dir
+    pretrained_checkpoint_dir = Path(cfg.trainer.output_dir)
     use_deepspeed = getattr(cfg, "use_deepspeed", True)
 
     # Check if task type is valid
@@ -145,21 +145,15 @@ def evaluate_mteb(cfg: Any) -> None:
     if pretrained_checkpoint != "latest":
         ckpt = pretrained_checkpoint
     else:
-        latest_path = os.path.join(
-            pretrained_checkpoint_dir, "model_checkpoints", "latest"
-        )
-        if os.path.isfile(latest_path):
-            with open(latest_path, "r") as fd:
-                ckpt = fd.read().strip()
+        latest_path = pretrained_checkpoint_dir / "model_checkpoints" / "latest"
+        if latest_path.is_file():
+            ckpt = latest_path.read_text(encoding="utf-8").strip()
         else:
             raise ValueError(f"Unable to find 'latest' file at {latest_path}")
 
     # Define path to store results
-    output_folder = os.path.join(
-        pretrained_checkpoint_dir,
-        "mteb",
-        str(ckpt),
-        str(cfg.tokenizer.max_length),
+    output_folder = (
+        pretrained_checkpoint_dir / "mteb" / str(ckpt) / str(cfg.tokenizer.max_length)
     )
 
     # Cuda
@@ -202,12 +196,15 @@ def evaluate_mteb(cfg: Any) -> None:
     if use_deepspeed:
         model = load_state_dict_from_zero_checkpoint(
             model,
-            os.path.join(pretrained_checkpoint_dir, "model_checkpoints"),
+            pretrained_checkpoint_dir / "model_checkpoints",
             tag=str(ckpt),
         )
     else:
-        checkpoint_path = os.path.join(
-            pretrained_checkpoint_dir, "model_checkpoints", str(ckpt), "state_dict.pt"
+        checkpoint_path = (
+            pretrained_checkpoint_dir
+            / "model_checkpoints"
+            / str(ckpt)
+            / "state_dict.pt"
         )
         model.load_state_dict(torch.load(checkpoint_path, map_location=device))
 

@@ -1,8 +1,8 @@
 """Compute pseudo-perplexity scores for masked language models."""
 
-import os
 from argparse import ArgumentParser
 from functools import partial
+from pathlib import Path
 from typing import Any, Iterator, Tuple
 
 import numpy as np
@@ -204,18 +204,16 @@ if __name__ == "__main__":
     pbar = tqdm(total=len(dataset))
 
     # Save the pseudo-perplexities into a csv
-    output_path = os.path.join(
-        args.output_path, args.model_name.replace("/", "_"), args.checkpoint
+    output_path = (
+        Path(args.output_path) / args.model_name.replace("/", "_") / args.checkpoint
     )
-    os.makedirs(output_path, exist_ok=True)
-    output_file = os.path.join(
-        output_path, f"{args.data_name}_ppl_{str(args.dataset_shard)}.csv"
-    )
-    if not os.path.exists(output_file):
-        with open(output_file, "a") as file:
+    output_path.mkdir(parents=True, exist_ok=True)
+    output_file = output_path / f"{args.data_name}_ppl_{str(args.dataset_shard)}.csv"
+    if not output_file.exists():
+        with output_file.open("a", encoding="utf-8") as file:
             file.write("name,pseudo-perplexity,per-residue-cross-entropy...\n")
     else:
-        with open(output_file, "r") as file:
+        with output_file.open("r", encoding="utf-8") as file:
             line_count = len(file.readlines()) - 1
         num_batches_to_skip = line_count // args.batch_size
         print(f"Skipping first {num_batches_to_skip} batches...")
@@ -245,7 +243,7 @@ if __name__ == "__main__":
             else:
                 pbar.update(1)
 
-                with open(output_file, "a") as file:
+                with output_file.open("a", encoding="utf-8") as file:
                     for k, v in losses.items():
                         file.write(
                             f"{k},{np.exp(np.mean(v))},{','.join(map(str, v))}\n"
