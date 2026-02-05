@@ -955,10 +955,8 @@ def trainer(cfg: Config) -> None:
     # DataLoaders creation:
     data_collator = DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)
 
-    # Get the dtype for the pad_mask
+    # Keep pad masks in float32 for numerical stability (match pretraining).
     dtype_pad_mask = torch.float32
-    if accelerator.mixed_precision == "bf16":
-        dtype_pad_mask = torch.bfloat16
 
     def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
         """Apply padding collator and build additive attention mask.
