@@ -1173,6 +1173,19 @@ def trainer(cfg: Config) -> None:
             model, pretrained_checkpoint_dir, pretrained_checkpoint, logger
         )
 
+    if getattr(cfg.trainer, "torch_compile", False):
+        if not hasattr(torch, "compile"):
+            logger.warning(
+                "trainer.torch_compile is enabled but torch.compile is unavailable; skipping."
+            )
+        elif accelerator.distributed_type is DistributedType.DEEPSPEED:
+            logger.warning(
+                "trainer.torch_compile is enabled but DeepSpeed is active; skipping torch.compile."
+            )
+        else:
+            logger.info("Compiling model with torch.compile.")
+            model = torch.compile(model)
+
     # Optimizer
     optimizer_name = cfg.optimizer.name.lower()
     optimizer_params = {"lr": cfg.optimizer.lr}

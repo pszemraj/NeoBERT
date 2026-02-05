@@ -79,7 +79,9 @@ if __name__ == "__main__":
     )
     parser.add_argument("--batch_size", type=int, default=1, help="")
     parser.add_argument("--device", type=str, default="cuda", help="")
-    parser.add_argument("--compile", action="store_true", help="")
+    parser.add_argument(
+        "--compile", action="store_true", help="Enable torch.compile for inference"
+    )
     parser.add_argument("--bf16", action="store_true", help="Use bfloat16 precision")
     parser.add_argument("--max_length", type=int, default=4096, help="")
     # Dataset
@@ -151,7 +153,11 @@ if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
     tokenizer.model_max_length = max(args.max_length, tokenizer.model_max_length)
     model.to(args.device)
-    torch.compile(model, disable=compile)
+    if args.compile:
+        if hasattr(torch, "compile"):
+            model = torch.compile(model)
+        else:
+            print("torch.compile is not available; continuing without compilation.")
 
     # Prepare the dataset
     dataset = load_dataset("wikipedia", "20220301.en")["train"]

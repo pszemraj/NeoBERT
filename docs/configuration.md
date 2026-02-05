@@ -34,6 +34,7 @@ python scripts/evaluation/run_glue.py configs/glue/cola.yaml
 - **Model shape sanity**: `model.hidden_size` must be divisible by `model.num_attention_heads`.
 - **Dropout bounds**: `model.dropout_prob` must be between 0 and 1.
 - **Vocab rounding**: during training startup, vocab size is rounded to a multiple of 128 for GPU efficiency unless `trainer.use_cpu: true`.
+- **`torch.compile`**: opt-in via `trainer.torch_compile: true`; skipped if `torch.compile` is unavailable or DeepSpeed is active.
 - **Unknown keys raise errors** at config load time; legacy keys are mapped with explicit warnings.
 
 ## Field Reference
@@ -172,6 +173,7 @@ trainer.gradient_checkpointing: bool = False
 trainer.gradient_clipping: float | None = None
 trainer.mixed_precision: Literal["no", "bf16", "fp32"] = "bf16"
 trainer.tf32: bool = True
+trainer.torch_compile: bool = False
 trainer.log_weight_norms: bool = False
 
 trainer.resume_from_checkpoint: bool | str | None = None  # true/"latest" resumes newest in output_dir/checkpoints; string loads that path

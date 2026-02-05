@@ -411,6 +411,19 @@ def trainer(cfg: Config) -> None:
     model_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     accelerator.print(f"Model parameters: {model_params:,}")
 
+    if getattr(cfg.trainer, "torch_compile", False):
+        if not hasattr(torch, "compile"):
+            logger.warning(
+                "trainer.torch_compile is enabled but torch.compile is unavailable; skipping."
+            )
+        elif accelerator.distributed_type is DistributedType.DEEPSPEED:
+            logger.warning(
+                "trainer.torch_compile is enabled but DeepSpeed is active; skipping torch.compile."
+            )
+        else:
+            logger.info("Compiling model with torch.compile.")
+            model = torch.compile(model)
+
     # Optimizer
     optimizer = get_optimizer(
         model,

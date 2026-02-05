@@ -1187,6 +1187,19 @@ def trainer(cfg: Config) -> None:
     if accelerator.is_main_process:
         model_summary(model, max_depth=3, show_param_shapes=True)
 
+    if getattr(cfg.trainer, "torch_compile", False):
+        if not hasattr(torch, "compile"):
+            logger.warning(
+                "trainer.torch_compile is enabled but torch.compile is unavailable; skipping."
+            )
+        elif accelerator.distributed_type is DistributedType.DEEPSPEED:
+            logger.warning(
+                "trainer.torch_compile is enabled but DeepSpeed is active; skipping torch.compile."
+            )
+        else:
+            logger.info("Compiling model with torch.compile.")
+            model = torch.compile(model)
+
     # Optimizer and Scheduler
     # Log if using MuonClip optimizer
     if cfg.optimizer.name.lower() in ["muonclip", "muon-clip", "muon_clip"]:

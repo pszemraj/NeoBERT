@@ -168,6 +168,7 @@ class TrainerConfig:
     gradient_checkpointing: bool = False
     gradient_clipping: Optional[float] = None
     mixed_precision: str = "bf16"
+    torch_compile: bool = False
     resume_from_checkpoint: Optional[str] = None
 
     # Training control
@@ -1052,6 +1053,11 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         "--trainer.gradient_clipping", type=float, help="Gradient clipping"
     )
     parser.add_argument("--trainer.mixed_precision", type=str, help="Mixed precision")
+    parser.add_argument(
+        "--trainer.torch_compile",
+        type=lambda x: x.lower() == "true",
+        help="Enable torch.compile for model forward",
+    )
 
     # Data collator arguments
     parser.add_argument(
