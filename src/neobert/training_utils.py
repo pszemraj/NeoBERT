@@ -1,8 +1,8 @@
 """Shared helpers for training loops (pretraining, GLUE, contrastive)."""
 
 import logging
-import os
 import re
+from pathlib import Path
 from typing import Any, Optional, Tuple
 
 import torch
@@ -85,30 +85,34 @@ def _resolve_resume_checkpoint(
     if not resume_from_checkpoint:
         return None, 0
 
+    checkpoint_dir_path = Path(checkpoint_dir)
+    output_dir_path = Path(output_dir)
+
     if isinstance(resume_from_checkpoint, str):
         resume_value = resume_from_checkpoint.strip()
         if resume_value.lower() not in {"true", "latest", "auto"}:
-            resume_path = resume_value
-            if not os.path.isabs(resume_path):
-                candidate = os.path.join(output_dir, resume_path)
-                if os.path.exists(candidate):
+            resume_path = Path(resume_value)
+            if not resume_path.is_absolute():
+                candidate = output_dir_path / resume_path
+                if candidate.exists():
                     resume_path = candidate
-            base = os.path.basename(os.path.normpath(resume_path))
+            base = resume_path.name
             iteration = int(base) + 1 if base.isdigit() else 0
-            return resume_path, iteration
+            return str(resume_path), iteration
 
-    if not (os.path.exists(checkpoint_dir) and os.listdir(checkpoint_dir)):
+    if not checkpoint_dir_path.exists() or not any(checkpoint_dir_path.iterdir()):
         return None, 0
 
     folders = [
         folder
-        for folder in os.listdir(checkpoint_dir)
-        if os.path.isdir(os.path.join(checkpoint_dir, folder)) and folder.isdigit()
+        for folder in checkpoint_dir_path.iterdir()
+        if folder.is_dir() and folder.name.isdigit()
     ]
     if not folders:
         return None, 0
 
     latest_step = max(
-        int(re.findall(r"[\/]?([0-9]+)(?=[^\/]*$)", folder)[0]) for folder in folders
+        int(re.findall(r"[\/]?([0-9]+)(?=[^\/]*$)", folder.name)[0])
+        for folder in folders
     )
-    return os.path.join(checkpoint_dir, str(latest_step)), latest_step + 1
+    return str(checkpoint_dir_path / str(latest_step)), latest_step + 1

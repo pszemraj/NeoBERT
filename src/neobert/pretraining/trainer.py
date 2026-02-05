@@ -633,18 +633,19 @@ def trainer(cfg: Config) -> None:
     :param Config cfg: Training configuration.
     """
     # Get the last checkpoint id
-    checkpoint_dir = os.path.join(cfg.trainer.output_dir, "checkpoints")
-    model_checkpoint_dir = os.path.join(cfg.trainer.output_dir, "model_checkpoints")
-    os.makedirs(model_checkpoint_dir, exist_ok=True)
+    output_dir = Path(cfg.trainer.output_dir)
+    checkpoint_dir = output_dir / "checkpoints"
+    model_checkpoint_dir = output_dir / "model_checkpoints"
+    model_checkpoint_dir.mkdir(parents=True, exist_ok=True)
     resume_checkpoint_path, iteration = _resolve_resume_checkpoint(
         cfg.trainer.resume_from_checkpoint,
-        checkpoint_dir,
-        cfg.trainer.output_dir,
+        str(checkpoint_dir),
+        str(output_dir),
     )
 
     # Accelerator object - disable automatic checkpointing to avoid duplicate checkpoints/ directory
     project_config = ProjectConfiguration(
-        cfg.trainer.output_dir,
+        str(output_dir),
         automatic_checkpoint_naming=False,  # We handle checkpointing manually in model_checkpoints/
         iteration=iteration,
     )
@@ -693,7 +694,7 @@ def trainer(cfg: Config) -> None:
 
     # Initialise the wandb run and pass wandb parameters
     if wandb_enabled:
-        os.makedirs(cfg.wandb.dir, exist_ok=True)
+        Path(cfg.wandb.dir).mkdir(parents=True, exist_ok=True)
         config_dict = prepare_wandb_config(cfg)
         accelerator.init_trackers(
             project_name=cfg.wandb.project,
@@ -713,14 +714,14 @@ def trainer(cfg: Config) -> None:
             wandb.run.config.update(config_dict, allow_val_change=True)
             config_path = getattr(cfg, "config_path", None)
             if config_path:
-                abs_config_path = os.path.abspath(config_path)
-                if os.path.isfile(abs_config_path):
+                abs_config_path = Path(config_path).expanduser().resolve()
+                if abs_config_path.is_file():
                     artifact = wandb.Artifact(
                         name=f"{wandb.run.id}-config",
                         type="config",
-                        metadata={"source": abs_config_path},
+                        metadata={"source": str(abs_config_path)},
                     )
-                    artifact.add_file(abs_config_path)
+                    artifact.add_file(str(abs_config_path))
                     wandb.run.log_artifact(artifact)
                 else:
                     logger.warning(
@@ -1301,11 +1302,12 @@ def trainer(cfg: Config) -> None:
     # Resume from the latest checkpoint
     skipped_train_dataloader = None
     if cfg.trainer.resume_from_checkpoint and resume_checkpoint_path:
-        if not os.path.exists(resume_checkpoint_path):
+        resume_checkpoint = Path(resume_checkpoint_path)
+        if not resume_checkpoint.exists():
             raise FileNotFoundError(
                 f"resume_from_checkpoint path not found: {resume_checkpoint_path}"
             )
-        accelerator.load_state(resume_checkpoint_path)
+        accelerator.load_state(str(resume_checkpoint))
         skipped_train_dataloader = _prepare_resume_dataloader(
             train_dataloader, metrics, accelerator, is_streaming
         )
@@ -1511,10 +1513,8 @@ def trainer(cfg: Config) -> None:
 
                 # Save accelerator state for resumable training
                 if metrics["train/steps"] % cfg.trainer.save_steps == 0:
-                    state_checkpoint_path = os.path.join(
-                        checkpoint_dir, str(metrics["train/steps"])
-                    )
-                    accelerator.save_state(output_dir=state_checkpoint_path)
+                    state_checkpoint_path = checkpoint_dir / str(metrics["train/steps"])
+                    accelerator.save_state(output_dir=str(state_checkpoint_path))
                     accelerator.wait_for_everyone()
 
                     # Accelerator checkpoints are the source of truth for resuming.
@@ -1523,23 +1523,22 @@ def trainer(cfg: Config) -> None:
                     limit = max(save_total_limit, max_ckpt)
                     if (
                         limit > 0
-                        and os.path.exists(checkpoint_dir)
+                        and checkpoint_dir.exists()
                         and accelerator.is_main_process
                     ):
                         # Prune accelerator checkpoints to the same retention policy
                         # as model_checkpoints to avoid unbounded disk growth.
                         accel_checkpoints = []
-                        for item in os.listdir(checkpoint_dir):
-                            item_path = os.path.join(checkpoint_dir, item)
-                            if os.path.isdir(item_path) and item.isdigit():
-                                accel_checkpoints.append(int(item))
+                        for item_path in checkpoint_dir.iterdir():
+                            if item_path.is_dir() and item_path.name.isdigit():
+                                accel_checkpoints.append(int(item_path.name))
                         if len(accel_checkpoints) > limit:
                             accel_checkpoints.sort()
                             for old_ckpt in accel_checkpoints[
                                 : len(accel_checkpoints) - limit
                             ]:
-                                old_path = os.path.join(checkpoint_dir, str(old_ckpt))
-                                if os.path.exists(old_path):
+                                old_path = checkpoint_dir / str(old_ckpt)
+                                if old_path.exists():
                                     import shutil
 
                                     shutil.rmtree(old_path)
@@ -1555,16 +1554,16 @@ def trainer(cfg: Config) -> None:
                     # Save the checkpoint
                     step_tag = str(metrics["train/steps"])
                     tmp_tag = f"{step_tag}.tmp"
-                    tmp_path = os.path.join(model_checkpoint_dir, tmp_tag)
+                    tmp_path = model_checkpoint_dir / tmp_tag
 
                     # Clean up any stale tmp directory from a previous failed save.
                     # Use exist_ok pattern to avoid TOCTOU race conditions in distributed setting.
                     if accelerator.is_main_process:
                         import shutil
 
-                        if os.path.exists(tmp_path):
+                        if tmp_path.exists():
                             shutil.rmtree(tmp_path)
-                        os.makedirs(tmp_path, exist_ok=True)
+                        tmp_path.mkdir(parents=True, exist_ok=True)
                     accelerator.wait_for_everyone()
 
                     checkpoint_path = tmp_path
@@ -1576,14 +1575,14 @@ def trainer(cfg: Config) -> None:
                     else:
                         torch.save(
                             accelerator.unwrap_model(model).state_dict(),
-                            os.path.join(checkpoint_path, "state_dict.pt"),
+                            checkpoint_path / "state_dict.pt",
                         )
 
                     # Save config and tokenizer info (only from main process)
                     if accelerator.is_main_process:
                         # Save config as YAML
-                        config_path = os.path.join(checkpoint_path, "config.yaml")
-                        ConfigLoader.save(cfg, config_path)
+                        config_path = checkpoint_path / "config.yaml"
+                        ConfigLoader.save(cfg, str(config_path))
 
                         # Save tokenizer info as JSON
                         tokenizer_info = {
@@ -1591,15 +1590,13 @@ def trainer(cfg: Config) -> None:
                             "vocab_size": cfg.model.vocab_size,
                             "pad_token_id": tokenizer.pad_token_id,
                         }
-                        tokenizer_info_path = os.path.join(
-                            checkpoint_path, "tokenizer_info.json"
-                        )
-                        with open(tokenizer_info_path, "w") as f:
+                        tokenizer_info_path = checkpoint_path / "tokenizer_info.json"
+                        with tokenizer_info_path.open("w", encoding="utf-8") as f:
                             json.dump(tokenizer_info, f, indent=2)
 
                         # Save full tokenizer with save_pretrained
-                        tokenizer_dir = os.path.join(checkpoint_path, "tokenizer")
-                        os.makedirs(tokenizer_dir, exist_ok=True)
+                        tokenizer_dir = checkpoint_path / "tokenizer"
+                        tokenizer_dir.mkdir(parents=True, exist_ok=True)
 
                         # Ensure tokenizer.model_max_length matches model's max_position_embeddings
                         tokenizer.model_max_length = cfg.model.max_position_embeddings
@@ -1608,12 +1605,12 @@ def trainer(cfg: Config) -> None:
                     accelerator.wait_for_everyone()
 
                     if accelerator.is_main_process:
-                        final_path = os.path.join(model_checkpoint_dir, step_tag)
-                        if os.path.exists(final_path):
+                        final_path = model_checkpoint_dir / step_tag
+                        if final_path.exists():
                             import shutil
 
                             shutil.rmtree(final_path)
-                        os.replace(checkpoint_path, final_path)
+                        checkpoint_path.replace(final_path)
                         checkpoint_path = final_path
                         # Use logger instead of accelerator.print to avoid progress bar interference
                         logger.info(
@@ -1630,25 +1627,22 @@ def trainer(cfg: Config) -> None:
 
                     if (
                         limit > 0
-                        and os.path.exists(model_checkpoint_dir)
+                        and model_checkpoint_dir.exists()
                         and accelerator.is_main_process
                     ):
                         # Get all checkpoint directories
                         checkpoints = []
-                        for item in os.listdir(model_checkpoint_dir):
-                            item_path = os.path.join(model_checkpoint_dir, item)
-                            if os.path.isdir(item_path) and item.isdigit():
-                                checkpoints.append(int(item))
+                        for item_path in model_checkpoint_dir.iterdir():
+                            if item_path.is_dir() and item_path.name.isdigit():
+                                checkpoints.append(int(item_path.name))
 
                         # Sort and remove oldest checkpoints if over limit
                         if len(checkpoints) > limit:
                             checkpoints.sort()
                             # Remove oldest checkpoints
                             for old_ckpt in checkpoints[: len(checkpoints) - limit]:
-                                old_path = os.path.join(
-                                    model_checkpoint_dir, str(old_ckpt)
-                                )
-                                if os.path.exists(old_path):
+                                old_path = model_checkpoint_dir / str(old_ckpt)
+                                if old_path.exists():
                                     import shutil
 
                                     shutil.rmtree(old_path)

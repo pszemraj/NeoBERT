@@ -1,8 +1,8 @@
 """Preprocess and tokenize contrastive datasets."""
 
 import json
-import os
 import shutil
+from pathlib import Path
 from typing import Any
 
 from datasets import DatasetDict, load_from_disk
@@ -56,29 +56,27 @@ def pipeline(cfg: Any) -> DatasetDict:
     :param Any cfg: Configuration object with dataset/tokenizer settings.
     :return DatasetDict: Prepared dataset dictionary.
     """
+    dataset_root = Path(cfg.datasets.path)
+    all_dir = dataset_root / "all"
+
     if cfg.datasets.load_all_from_disk:
-        dataset = load_from_disk(os.path.join(cfg.datasets.path, "all"))
+        dataset = load_from_disk(all_dir)
 
     else:
+        all_dir.mkdir(parents=True, exist_ok=True)
         # Tokenizer
         tokenizer = get_tokenizer(**cfg.tokenizer)
 
         # Load and tokenize subdatasets if necessary
         dataset_dict = {}
         for name in DATASETS.keys():
-            if (
-                os.path.isdir(os.path.join(cfg.datasets.path, "all", name))
-                and not cfg.datasets.force_redownload
-            ):
+            dataset_dir = all_dir / name
+            if dataset_dir.is_dir() and not cfg.datasets.force_redownload:
                 print(f"Loading tokenized {name} from disk...")
-                subdataset = (
-                    DATASETS[name]
-                    .from_disk(os.path.join(cfg.datasets.path, "all", name))
-                    .dataset
-                )
+                subdataset = DATASETS[name].from_disk(dataset_dir).dataset
             else:
-                if os.path.isdir(os.path.join(cfg.datasets.path, "all", name)):
-                    shutil.rmtree(os.path.join(cfg.datasets.path, "all", name))
+                if dataset_dir.is_dir():
+                    shutil.rmtree(dataset_dir)
                 print(f"Loading {name} from huggingface and preprocessing...")
                 subdataset = DATASETS[name]().dataset
                 print(f"Tokenizing {name}...")
@@ -88,7 +86,7 @@ def pipeline(cfg: Any) -> DatasetDict:
                     column_name=subdataset.column_names,
                     **cfg.tokenizer,
                 )
-                subdataset.save_to_disk(os.path.join(cfg.datasets.path, "all", name))
+                subdataset.save_to_disk(dataset_dir)
 
             dataset_dict[name] = subdataset
 
@@ -98,9 +96,7 @@ def pipeline(cfg: Any) -> DatasetDict:
             f"Global dataset is ready ! It contains subdatasets {list(DATASETS.keys())}."
         )
 
-        with open(
-            os.path.join(cfg.datasets.path, "all", "dataset_dict.json"), mode="w"
-        ) as f:
+        with (all_dir / "dataset_dict.json").open("w", encoding="utf-8") as f:
             json.dump({"splits": list(dataset.keys())}, f)
 
     return dataset

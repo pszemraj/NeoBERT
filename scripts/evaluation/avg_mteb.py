@@ -2,7 +2,7 @@
 
 import argparse
 import json
-import os
+from pathlib import Path
 
 import mteb
 
@@ -119,55 +119,55 @@ def compute_table() -> None:
 
     all_results = {}
 
-    result_file = os.path.join(args.result_folder, f"{args.model_name}_avg_table.json")
+    result_dir = Path(args.result_folder)
+    result_file = result_dir / f"{args.model_name}_avg_table.json"
 
-    if os.path.exists(result_file):
+    if result_file.exists():
         UserWarning("Overwriting existing result file.")
-        os.remove(result_file)
+        result_file.unlink()
 
-    def explore(path: str) -> list[str]:
+    def explore(path: Path) -> list[Path]:
         """Collect leaf directories containing result JSON files.
 
-        :param str path: Root path to search.
-        :return list[str]: Leaf directories with JSON files.
+        :param Path path: Root path to search.
+        :return list[Path]: Leaf directories with JSON files.
         """
         paths = []
         file_level = False
-        files = os.listdir(path)
-        if len(files) == 0:
+        files = list(path.iterdir())
+        if not files:
             UserWarning(f"Empty folder path: {path}.")
         for file in files:
-            if os.path.isdir(os.path.join(path, file)):
-                paths.extend(explore(os.path.join(path, file)))
+            if file.is_dir():
+                paths.extend(explore(file))
             else:
                 file_level = True
         if file_level:
             paths.append(path)
         return paths
 
-    for checkpoint in os.listdir(args.result_folder):
-        path = os.path.join(args.result_folder, checkpoint)
-        paths = explore(path)
+    for checkpoint in result_dir.iterdir():
+        paths = explore(checkpoint)
+        checkpoint_name = checkpoint.name
 
         for path in paths:
-            i = path.find(checkpoint) + len(checkpoint)
-            j = path.find("no_model_name_available")
-            model_name = f"{args.model_name}_{checkpoint}_{path[i + 1 : j - 1] if j != -1 else path[i + 1 :]}"
+            path_str = path.as_posix()
+            i = path_str.find(checkpoint_name) + len(checkpoint_name)
+            j = path_str.find("no_model_name_available")
+            model_name = f"{args.model_name}_{checkpoint_name}_{path_str[i + 1 : j - 1] if j != -1 else path_str[i + 1 :]}"
 
             all_results.setdefault(model_name, {})
 
-            for file_name in os.listdir(path):
-                if not file_name.endswith(".json"):
-                    print(f"Skipping non-json {file_name}")
+            for file_path in path.iterdir():
+                if not file_path.name.endswith(".json"):
+                    print(f"Skipping non-json {file_path.name}")
                     continue
                 else:
-                    with open(
-                        os.path.join(path, file_name), "r", encoding="utf-8"
-                    ) as f:
+                    with file_path.open("r", encoding="utf-8") as f:
                         results = json.load(f)
                         all_results[model_name] = {
                             **all_results[model_name],
-                            **{file_name.replace(".json", ""): results},
+                            **{file_path.stem: results},
                         }
 
     avg_results = {}
@@ -201,7 +201,7 @@ def compute_table() -> None:
             else:
                 avg_results[model][task_type] = 0
 
-    with open(result_file, "w") as f:
+    with result_file.open("w", encoding="utf-8") as f:
         json.dump(avg_results, f)
 
 

@@ -5,6 +5,7 @@ import os
 import shutil
 import signal
 import sys
+from pathlib import Path
 from types import FrameType
 
 import numpy
@@ -138,20 +139,21 @@ def trainer(cfg: Config) -> None:
         )
 
     # Get the last checkpoint id
-    checkpoint_dir = os.path.join(cfg.trainer.output_dir, "checkpoints")
-    model_checkpoint_dir = os.path.join(cfg.trainer.output_dir, "model_checkpoints")
-    os.makedirs(model_checkpoint_dir, exist_ok=True)
+    output_dir = Path(cfg.trainer.output_dir)
+    checkpoint_dir = output_dir / "checkpoints"
+    model_checkpoint_dir = output_dir / "model_checkpoints"
+    model_checkpoint_dir.mkdir(parents=True, exist_ok=True)
     resume_checkpoint_path, iteration = _resolve_resume_checkpoint(
         cfg.trainer.resume_from_checkpoint,
-        checkpoint_dir,
-        cfg.trainer.output_dir,
+        str(checkpoint_dir),
+        str(output_dir),
     )
 
     save_total_limit = max(
         getattr(cfg.trainer, "save_total_limit", 0), getattr(cfg.trainer, "max_ckpt", 0)
     )
     project_config = ProjectConfiguration(
-        cfg.trainer.output_dir,
+        str(output_dir),
         automatic_checkpoint_naming=True,
         total_limit=save_total_limit or None,
         iteration=iteration,
@@ -167,7 +169,7 @@ def trainer(cfg: Config) -> None:
 
     # Initialise the wandb run and pass wandb parameters
     if wandb_enabled:
-        os.makedirs(cfg.wandb.dir, exist_ok=True)
+        Path(cfg.wandb.dir).mkdir(parents=True, exist_ok=True)
         config_dict = prepare_wandb_config(cfg)
         accelerator.init_trackers(
             project_name=cfg.wandb.project,
@@ -187,14 +189,14 @@ def trainer(cfg: Config) -> None:
             wandb.run.config.update(config_dict, allow_val_change=True)
             config_path = getattr(cfg, "config_path", None)
             if config_path:
-                abs_config_path = os.path.abspath(config_path)
-                if os.path.isfile(abs_config_path):
+                abs_config_path = Path(config_path).expanduser().resolve()
+                if abs_config_path.is_file():
                     artifact = wandb.Artifact(
                         name=f"{wandb.run.id}-config",
                         type="config",
-                        metadata={"source": abs_config_path},
+                        metadata={"source": str(abs_config_path)},
                     )
-                    artifact.add_file(abs_config_path)
+                    artifact.add_file(str(abs_config_path))
                     wandb.run.log_artifact(artifact)
                 else:
                     logger.warning(
@@ -228,10 +230,10 @@ def trainer(cfg: Config) -> None:
         use_xformers = False
 
     # Dataset
-    dataset_path = str(cfg.dataset.path)
-    dataset = load_from_disk(os.path.join(dataset_path, "all"))
+    dataset_path = Path(cfg.dataset.path)
+    dataset = load_from_disk(os.fspath(dataset_path / "all"))
     pretraining_dataset = load_from_disk(
-        dataset_path
+        os.fspath(dataset_path)
     )  # Base dataset for pretraining SimCSE
 
     data_collator = CustomDataCollatorWithPadding(
@@ -292,24 +294,22 @@ def trainer(cfg: Config) -> None:
     model = NeoBERT(config=model_config)
 
     def _resolve_checkpoint_tag(
-        checkpoint_dir: str, checkpoint: str | int | None
+        checkpoint_dir: Path, checkpoint: str | int | None
     ) -> str:
         """Resolve a checkpoint tag to a concrete step directory name.
 
-        :param str checkpoint_dir: Base directory that holds checkpoint step folders.
+        :param Path checkpoint_dir: Base directory that holds checkpoint step folders.
         :param str | int | None checkpoint: Tag or step to resolve, or ``None``/"latest".
         :return str: Resolved checkpoint step tag.
         """
         if checkpoint is None or str(checkpoint).lower() == "latest":
-            latest_path = os.path.join(checkpoint_dir, "latest")
-            if os.path.isfile(latest_path):
-                with open(latest_path, "r") as fd:
-                    return fd.read().strip()
+            latest_path = checkpoint_dir / "latest"
+            if latest_path.is_file():
+                return latest_path.read_text(encoding="utf-8").strip()
             steps = [
-                int(entry)
-                for entry in os.listdir(checkpoint_dir)
-                if entry.isdigit()
-                and os.path.isdir(os.path.join(checkpoint_dir, entry))
+                int(entry.name)
+                for entry in checkpoint_dir.iterdir()
+                if entry.is_dir() and entry.name.isdigit()
             ]
             if not steps:
                 raise ValueError(
@@ -331,10 +331,9 @@ def trainer(cfg: Config) -> None:
             use_deepspeed = cfg._raw_model_dict.get("deepspeed")
 
     if pretrained_checkpoint_dir:
-        if not pretrained_checkpoint_dir.endswith("model_checkpoints"):
-            pretrained_checkpoint_dir = os.path.join(
-                pretrained_checkpoint_dir, "model_checkpoints"
-            )
+        pretrained_checkpoint_dir = Path(pretrained_checkpoint_dir)
+        if pretrained_checkpoint_dir.name != "model_checkpoints":
+            pretrained_checkpoint_dir = pretrained_checkpoint_dir / "model_checkpoints"
         tag = _resolve_checkpoint_tag(
             pretrained_checkpoint_dir,
             pretrained_checkpoint or cfg.pretrained_checkpoint,
@@ -344,10 +343,8 @@ def trainer(cfg: Config) -> None:
                 model, pretrained_checkpoint_dir, tag=str(tag)
             )
         else:
-            state_dict_path = os.path.join(
-                pretrained_checkpoint_dir, str(tag), "state_dict.pt"
-            )
-            if not os.path.exists(state_dict_path):
+            state_dict_path = pretrained_checkpoint_dir / str(tag) / "state_dict.pt"
+            if not state_dict_path.exists():
                 raise ValueError(
                     f"Expected state_dict.pt at {state_dict_path}. "
                     "Set pretrained_checkpoint_dir or enable DeepSpeed loading."
@@ -447,12 +444,13 @@ def trainer(cfg: Config) -> None:
     # Resume from the latest checkpoint if available
     if cfg.trainer.resume_from_checkpoint:
         if resume_checkpoint_path is not None:
-            if not os.path.exists(resume_checkpoint_path):
+            resume_checkpoint = Path(resume_checkpoint_path)
+            if not resume_checkpoint.exists():
                 raise FileNotFoundError(
                     f"resume_from_checkpoint path not found: {resume_checkpoint_path}"
                 )
-            accelerator.load_state(resume_checkpoint_path)
-        elif os.path.exists(checkpoint_dir) and os.listdir(checkpoint_dir):
+            accelerator.load_state(str(resume_checkpoint))
+        elif checkpoint_dir.exists() and any(checkpoint_dir.iterdir()):
             accelerator.load_state()
         else:
             logger.warning(
@@ -710,16 +708,14 @@ def trainer(cfg: Config) -> None:
                 limit = max(save_total_limit, max_ckpt)
                 if limit > 0:
                     # Delete checkpoints if there are too many
-                    files = os.listdir(model_checkpoint_dir)
-                    iterations = [int(f) for f in files if f.isdigit()]
+                    files = list(model_checkpoint_dir.iterdir())
+                    iterations = [int(f.name) for f in files if f.name.isdigit()]
                     iterations.sort()
 
                     # Remove files with the smallest iterations until the limit is met
                     while iterations and len(iterations) >= limit:
                         file_to_remove = iterations.pop(0)
-                        shutil.rmtree(
-                            os.path.join(model_checkpoint_dir, str(file_to_remove))
-                        )
+                        shutil.rmtree(model_checkpoint_dir / str(file_to_remove))
                         print(
                             f"Deleted old model checkpoint {file_to_remove} due to limit "
                             f"(limit = {limit})"
@@ -730,13 +726,11 @@ def trainer(cfg: Config) -> None:
                         model_checkpoint_dir, tag=metrics["train/steps"]
                     )
                 else:
-                    path = os.path.join(
-                        model_checkpoint_dir, str(metrics["train/steps"])
-                    )
-                    os.makedirs(path, exist_ok=True)
+                    path = model_checkpoint_dir / str(metrics["train/steps"])
+                    path.mkdir(parents=True, exist_ok=True)
                     torch.save(
                         model.state_dict(),
-                        os.path.join(path, "state_dict.pt"),
+                        path / "state_dict.pt",
                     )
 
             if metrics["train/steps"] >= cfg.trainer.max_steps:

@@ -110,7 +110,7 @@ def _parse_checkpoint_progress(path: str) -> tuple[Optional[str], Optional[int]]
     :param str path: Checkpoint path or directory name.
     :return tuple[str | None, int | None]: ("step" or "epoch", value) if detected.
     """
-    name = os.path.basename(path.rstrip(os.sep))
+    name = Path(path).name
     if name.isdigit():
         return "step", int(name)
 
@@ -255,7 +255,7 @@ def _save_metrics(output_dir: str, split: str, metrics: dict[str, Any]) -> None:
     path = Path(output_dir)
     path.mkdir(parents=True, exist_ok=True)
     serializable = {k: _to_serializable(v) for k, v in metrics.items()}
-    with (path / f"{split}_results.json").open("w") as fp:
+    with (path / f"{split}_results.json").open("w", encoding="utf-8") as fp:
         json.dump(serializable, fp, indent=2, sort_keys=True)
 
 
@@ -475,10 +475,10 @@ def run_evaluation_and_save(
     if cfg.task == "mnli":
         all_results = {f"eval_{k}": v for k, v in results.items()}
 
-    output_file = os.path.join(
-        cfg.trainer.output_dir, f"all_results_step_{completed_steps}.json"
+    output_file = (
+        Path(cfg.trainer.output_dir) / f"all_results_step_{completed_steps}.json"
     )
-    with open(output_file, "w") as f:
+    with output_file.open("w", encoding="utf-8") as f:
         json.dump(all_results, f)
     logger.info(f"Saved evaluation results to {output_file}")
 
@@ -507,48 +507,41 @@ def get_best_checkpoint_path(
     best_checkpoint_path = None
     best_checkpoint = None
 
+    base_path = Path(base_dir)
     # Explore all directories in the given structure
-    for root, _, files in os.walk(base_dir):
-        if task in root:
-            # Filter out the JSON files following the naming convention
-            json_files = [
-                f
-                for f in files
-                if f.startswith("all_results_step_") and f.endswith(".json")
-            ]
+    for json_path in base_path.rglob("all_results_step_*.json"):
+        if task not in json_path.as_posix():
+            continue
 
-            for json_file in json_files:
-                json_path = os.path.join(root, json_file)
+        # Read the eval accuracy from the JSON file
+        with json_path.open("r", encoding="utf-8") as f:
+            results = json.load(f)
+            eval_accuracy = compute_glue_score(task, results) or results.get(
+                TASK_TO_METRIC.get(task, ""), 0
+            )
 
-                # Read the eval accuracy from the JSON file
-                with open(json_path, "r") as f:
-                    results = json.load(f)
-                    eval_accuracy = compute_glue_score(task, results) or results.get(
-                        TASK_TO_METRIC.get(task, ""), 0
+            # Extract step number from the file name (e.g., all_results_step_{i}.json)
+            step_number = int(json_path.stem.split("_")[3])
+
+            # Update if a higher eval_accuracy is found
+            if eval_accuracy > best_accuracy:
+                best_accuracy = eval_accuracy
+
+                # Construct the corresponding checkpoint folder path
+                checkpoint_folder = json_path.parent / "model_checkpoints"
+                checkpoint = step_number
+                if (checkpoint_folder / str(checkpoint)).exists():
+                    best_checkpoint_path, best_checkpoint = (
+                        checkpoint_folder,
+                        checkpoint,
                     )
-
-                    # Extract step number from the file name (e.g., all_results_step_{i}.json)
-                    step_number = int(json_file.split("_")[3].split(".")[0])
-
-                    # Update if a higher eval_accuracy is found
-                    if eval_accuracy > best_accuracy:
-                        best_accuracy = eval_accuracy
-
-                        # Construct the corresponding checkpoint folder path
-                        checkpoint_folder = os.path.join(root, "model_checkpoints")
-                        checkpoint = step_number
-                        if os.path.exists(
-                            os.path.join(checkpoint_folder, str(checkpoint))
-                        ):
-                            best_checkpoint_path, best_checkpoint = (
-                                checkpoint_folder,
-                                checkpoint,
-                            )
 
     checkpoint_list = [best_checkpoint]
     if num_checkpoints_to_merge > 1:
-        ckpts = list(os.listdir(best_checkpoint_path))
-        ckpts = [int(ckpt) for ckpt in ckpts if int(ckpt) <= int(best_checkpoint)]
+        ckpts = list(Path(best_checkpoint_path).iterdir())
+        ckpts = [
+            int(ckpt.name) for ckpt in ckpts if int(ckpt.name) <= int(best_checkpoint)
+        ]
         ckpts.sort()
 
         checkpoint_list = (
@@ -557,7 +550,10 @@ def get_best_checkpoint_path(
             else ckpts[-num_checkpoints_to_merge:]
         )
 
-    return best_checkpoint_path, checkpoint_list
+    return (
+        str(best_checkpoint_path) if best_checkpoint_path is not None else None,
+        checkpoint_list,
+    )
 
 
 def load_pretrained_weights(
@@ -574,10 +570,10 @@ def load_pretrained_weights(
     :param logging.Logger logger: Logger for output.
     :return torch.nn.Module: Model with loaded weights.
     """
-    checkpoint_path = os.path.join(checkpoint_dir, str(checkpoint_id))
+    checkpoint_path = Path(checkpoint_dir) / str(checkpoint_id)
 
     # Check if it's a DeepSpeed checkpoint
-    is_deepspeed = os.path.exists(os.path.join(checkpoint_path, "zero_to_fp32.py"))
+    is_deepspeed = (checkpoint_path / "zero_to_fp32.py").exists()
 
     if is_deepspeed:
         logger.info(f"Loading DeepSpeed checkpoint from {checkpoint_path}")
@@ -593,8 +589,8 @@ def load_pretrained_weights(
             raise
     else:
         # Load state_dict directly
-        state_dict_path = os.path.join(checkpoint_path, "state_dict.pt")
-        if not os.path.exists(state_dict_path):
+        state_dict_path = checkpoint_path / "state_dict.pt"
+        if not state_dict_path.exists():
             raise FileNotFoundError(f"No state_dict.pt found at {state_dict_path}")
 
         logger.info(f"Loading state dict from {state_dict_path}")
@@ -639,7 +635,7 @@ def save_training_checkpoint(
     :param Accelerator accelerator: Accelerator instance.
     :param int completed_steps: Current training step.
     """
-    model_checkpoint_dir = os.path.join(cfg.trainer.output_dir, "model_checkpoints")
+    model_checkpoint_dir = Path(cfg.trainer.output_dir) / "model_checkpoints"
 
     max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
     save_total_limit = getattr(cfg.trainer, "save_total_limit", None)
@@ -651,14 +647,14 @@ def save_training_checkpoint(
     elif max_ckpt is not None and max_ckpt > 0:
         effective_limit = max_ckpt
 
-    if effective_limit is not None and os.path.isdir(model_checkpoint_dir):
-        files = os.listdir(model_checkpoint_dir)
-        iterations = sorted([int(f) for f in files if f.isdigit()])
+    if effective_limit is not None and model_checkpoint_dir.is_dir():
+        files = list(model_checkpoint_dir.iterdir())
+        iterations = sorted([int(f.name) for f in files if f.name.isdigit()])
 
         # Remove oldest checkpoints until under limit
         while iterations and len(iterations) >= effective_limit:
             file_to_remove = iterations.pop(0)
-            shutil.rmtree(os.path.join(model_checkpoint_dir, str(file_to_remove)))
+            shutil.rmtree(model_checkpoint_dir / str(file_to_remove))
             print(
                 f"Deleted old model checkpoint {file_to_remove} due to limit "
                 f"(limit = {effective_limit})"
@@ -668,11 +664,11 @@ def save_training_checkpoint(
     if accelerator.distributed_type is DistributedType.DEEPSPEED:
         model.save_checkpoint(model_checkpoint_dir, tag=completed_steps)
     else:
-        path = os.path.join(model_checkpoint_dir, str(completed_steps))
-        os.makedirs(path, exist_ok=True)
+        path = model_checkpoint_dir / str(completed_steps)
+        path.mkdir(parents=True, exist_ok=True)
         torch.save(
             model.state_dict(),
-            os.path.join(path, "state_dict.pt"),
+            path / "state_dict.pt",
         )
 
 
@@ -693,6 +689,7 @@ def trainer(cfg: Config) -> None:
     cfg.mode = getattr(cfg, "mode", "eval")  # Default to eval mode
     cfg.num_labels = cfg.glue.num_labels if hasattr(cfg, "glue") else 2
     cfg.max_seq_len = cfg.glue.max_seq_length if hasattr(cfg, "glue") else 128
+    output_dir = Path(cfg.trainer.output_dir)
     # Accelerator object
     project_config = ProjectConfiguration(
         cfg.trainer.output_dir,
@@ -747,11 +744,11 @@ def trainer(cfg: Config) -> None:
 
     # Handle the repository creation
     if accelerator.is_main_process:
-        if os.path.isdir(cfg.trainer.output_dir):
-            for file in os.listdir(cfg.trainer.output_dir):
-                if os.path.isfile(os.path.join(cfg.trainer.output_dir, str(file))):
-                    os.remove(os.path.join(cfg.trainer.output_dir, str(file)))
-        os.makedirs(cfg.trainer.output_dir, exist_ok=True)
+        if output_dir.is_dir():
+            for file_path in output_dir.iterdir():
+                if file_path.is_file():
+                    file_path.unlink()
+        output_dir.mkdir(parents=True, exist_ok=True)
     accelerator.wait_for_everyone()
 
     # Override xFormers attention setting for GLUE - always use eager attention
@@ -881,9 +878,7 @@ def trainer(cfg: Config) -> None:
     else:
         raw_datasets = load_dataset(
             "json",
-            data_dir=os.path.join(
-                os.environ["HF_DATASETS_CACHE"], "super_glue", cfg.task
-            ),
+            data_dir=Path(os.environ["HF_DATASETS_CACHE"]) / "super_glue" / cfg.task,
         )
 
     # Split between train and validation for datasets that don't have it natively
@@ -1084,10 +1079,10 @@ def trainer(cfg: Config) -> None:
         if not task_to_transfer_from:
             raise ValueError(f"Task to transfer from for {cfg.task} is not set.")
         cfg.glue.pretrained_checkpoint_dir, checkpoint_list = get_best_checkpoint_path(
-            os.path.join(
-                cfg.glue.pretrained_checkpoint_dir,
-                "glue",
-                str(cfg.glue.pretrained_checkpoint),
+            str(
+                Path(cfg.glue.pretrained_checkpoint_dir)
+                / "glue"
+                / str(cfg.glue.pretrained_checkpoint)
             ),
             task_to_transfer_from,
         )
@@ -1135,9 +1130,10 @@ def trainer(cfg: Config) -> None:
                 )
         else:
             # Ensure we have the full path to model_checkpoints
-            if not pretrained_checkpoint_dir.endswith("model_checkpoints"):
-                pretrained_checkpoint_dir = os.path.join(
-                    pretrained_checkpoint_dir, "model_checkpoints"
+            pretrained_checkpoint_dir = Path(pretrained_checkpoint_dir)
+            if pretrained_checkpoint_dir.name != "model_checkpoints":
+                pretrained_checkpoint_dir = (
+                    pretrained_checkpoint_dir / "model_checkpoints"
                 )
             logger.info(
                 f"Will load checkpoint {pretrained_checkpoint} from {pretrained_checkpoint_dir}"
@@ -1150,7 +1146,7 @@ def trainer(cfg: Config) -> None:
         and pretrained_checkpoint is not None
     ):
         model = load_pretrained_weights(
-            model, pretrained_checkpoint_dir, pretrained_checkpoint, logger
+            model, str(pretrained_checkpoint_dir), pretrained_checkpoint, logger
         )
 
     model = _maybe_compile_model(model, cfg, accelerator, logger)
@@ -1319,15 +1315,15 @@ def trainer(cfg: Config) -> None:
             checkpoint_dir = cfg.trainer.checkpoint_dir
         else:
             # Get the most recent checkpoint
-            dirs = [f.name for f in os.scandir(os.getcwd()) if f.is_dir()]
-            dirs.sort(key=os.path.getctime)
-            checkpoint_dir = dirs[
-                -1
-            ]  # Sorts folders by date modified, most recent checkpoint is the last
+            dirs = [path for path in Path.cwd().iterdir() if path.is_dir()]
+            dirs.sort(key=lambda path: path.stat().st_ctime)
+            checkpoint_dir = str(
+                dirs[-1]
+            )  # Sorts folders by date modified, most recent checkpoint is the last
 
         accelerator.print(f"Resumed from checkpoint: {checkpoint_dir}")
         accelerator.load_state(checkpoint_dir)
-        path = os.path.basename(checkpoint_dir)
+        path = Path(checkpoint_dir).name
 
         step_from_optimizer = _get_optimizer_update_step(optimizer)
         if step_from_optimizer is not None and step_from_optimizer > 0:
@@ -1581,20 +1577,11 @@ def trainer(cfg: Config) -> None:
                                 for k, v in results.items()
                             }
 
-                        with open(
-                            os.path.join(
-                                cfg.trainer.output_dir,
-                                f"all_results_step_{completed_steps}.json",
-                            ),
-                            "w",
-                        ) as f:
-                            print(
-                                "dumping in",
-                                os.path.join(
-                                    cfg.trainer.output_dir,
-                                    f"all_results_step_{completed_steps}.json",
-                                ),
-                            )
+                        result_path = (
+                            output_dir / f"all_results_step_{completed_steps}.json"
+                        )
+                        with result_path.open("w", encoding="utf-8") as f:
+                            print("dumping in", result_path)
                             json.dump(all_results, f)
 
                         fallback_metric = next(iter(val_metrics.values()), 0.0)
@@ -1747,15 +1734,12 @@ def trainer(cfg: Config) -> None:
         f"eval_{k}": _to_serializable(v) for k, v in final_metrics.items()
     }
 
-    with open(os.path.join(cfg.trainer.output_dir, "all_results.json"), "w") as f:
+    with (output_dir / "all_results.json").open("w", encoding="utf-8") as f:
         json.dump(final_eval_dump, f)
 
     # Also save to timestamped file for clarity
-    with open(
-        os.path.join(
-            cfg.trainer.output_dir, f"all_results_step_{completed_steps}.json"
-        ),
-        "w",
+    with (output_dir / f"all_results_step_{completed_steps}.json").open(
+        "w", encoding="utf-8"
     ) as f:
         json.dump(final_eval_dump, f)
         logger.info(
