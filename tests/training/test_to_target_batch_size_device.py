@@ -101,3 +101,39 @@ class TestToTargetBatchSizeKeys(unittest.TestCase):
 
         self.assertEqual(out["input_ids"].shape[0], 1)
         self.assertIn("token_type_ids", stored)
+
+
+class TestStoredBatchListConcat(unittest.TestCase):
+    """Validate list concatenation (non-tensor path) in to_target_batch_size."""
+
+    def test_stored_batch_list_concat_on_split(self):
+        """Ensure non-tensor values are list-concatenated when batch is split."""
+        batch = {
+            "input_ids": torch.zeros((4, 3), dtype=torch.long),
+            "tags": ["a", "b", "c", "d"],
+        }
+        stored_batch: dict = {"input_ids": None, "tags": None}
+
+        out, stored = to_target_batch_size(batch, stored_batch, target_size=2)
+
+        self.assertEqual(out["input_ids"].shape[0], 2)
+        self.assertEqual(out["tags"], ["a", "b"])
+        self.assertEqual(stored["tags"], ["c", "d"])
+
+    def test_stored_batch_list_concat_on_undersized(self):
+        """Ensure non-tensor values are list-concatenated when batch is undersized."""
+        batch = {
+            "input_ids": torch.zeros((1, 3), dtype=torch.long),
+            "tags": ["x"],
+        }
+        stored_batch: dict = {
+            "input_ids": torch.zeros((1, 3), dtype=torch.long),
+            "tags": ["y"],
+        }
+
+        out, stored = to_target_batch_size(batch, stored_batch, target_size=4)
+
+        self.assertEqual(out["input_ids"].shape[0], 2)
+        # Merge path puts stored_batch first: stored + batch
+        self.assertEqual(out["tags"], ["y", "x"])
+        self.assertIsNone(stored["tags"])

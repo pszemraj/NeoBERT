@@ -853,6 +853,132 @@ class TestModelForward(unittest.TestCase):
         # Outputs should be identical for same random seed
         self.assertTrue(torch.allclose(outputs1, outputs2, atol=1e-6))
 
+    def test_seq_class_init_preserves_backbone_weights(self):
+        """Ensure _init_weights does not overwrite backbone linear weights."""
+        # Use a very large classifier_init_range so we can distinguish it from backbone init.
+        large_range = 0.5
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=8,
+            flash_attention=False,
+            hidden_act="gelu",
+            decoder_init_range=0.02,
+        )
+        model = NeoBERTForSequenceClassification(
+            config, num_labels=2, classifier_init_range=large_range
+        )
+        # Backbone QKV weights should be initialized with decoder_init_range (0.02),
+        # NOT with classifier_init_range (0.5).
+        for layer in model.model.transformer_encoder:
+            qkv_weight = layer.qkv.weight
+            max_val = qkv_weight.abs().max().item()
+            self.assertLessEqual(
+                max_val,
+                config.decoder_init_range + 0.01,
+                f"Backbone QKV weight max {max_val} exceeds decoder_init_range "
+                f"({config.decoder_init_range}); _init_weights may be overwriting backbone.",
+            )
+
+    def test_seq_class_disables_flash_attention(self):
+        """Ensure NeoBERTForSequenceClassification forces flash_attention=False."""
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=8,
+            flash_attention=True,
+            hidden_act="gelu",
+        )
+        model = NeoBERTForSequenceClassification(config, num_labels=2)
+        self.assertFalse(model.model.config.flash_attention)
+
+    def test_hf_seq_class_disables_flash_attention(self):
+        """Ensure NeoBERTHFForSequenceClassification forces flash_attention=False."""
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=8,
+            flash_attention=True,
+            hidden_act="gelu",
+            num_labels=3,
+        )
+        model = NeoBERTHFForSequenceClassification(config)
+        self.assertFalse(model.model.config.flash_attention)
+
+    def test_mteb_encode_with_flash_off(self):
+        """Ensure MTEB encode works with flash_attention=False."""
+        from neobert.model import NeoBERTConfig, NeoBERTForMTEB
+
+        tokenizer = self._make_tokenizer()
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=10,
+            max_length=8,
+            flash_attention=False,
+            ngpt=False,
+            hidden_act="gelu",
+        )
+        model = NeoBERTForMTEB(
+            config=config,
+            tokenizer=tokenizer,
+            max_length=8,
+            batch_size=2,
+            pooling="avg",
+        )
+        model.eval()
+        embeddings = model.encode(["hello world", "hello"])
+        self.assertEqual(embeddings.shape[0], 2)
+        self.assertEqual(embeddings.shape[1], config.hidden_size)
+
+    @unittest.skipUnless(
+        torch.cuda.is_available(), "CUDA required for flash_attention MTEB test"
+    )
+    def test_mteb_encode_flash_attention_no_crash(self):
+        """Ensure MTEB encode does not crash with flash_attention=True on CUDA."""
+        from neobert.model import NeoBERTConfig, NeoBERTForMTEB
+        from neobert.model.model import XFORMERS_AVAILABLE
+
+        if not XFORMERS_AVAILABLE:
+            self.skipTest("xFormers not installed; flash_attention MTEB test skipped.")
+
+        tokenizer = self._make_tokenizer()
+        device = torch.device("cuda")
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=10,
+            max_length=8,
+            flash_attention=True,
+            ngpt=False,
+            hidden_act="gelu",
+        )
+        model = NeoBERTForMTEB(
+            config=config,
+            tokenizer=tokenizer,
+            max_length=8,
+            batch_size=2,
+            pooling="avg",
+        )
+        model.to(device)
+        model.eval()
+        embeddings = model.encode(["hello world", "hello"])
+        self.assertEqual(embeddings.shape[0], 2)
+        self.assertEqual(embeddings.shape[1], config.hidden_size)
+
 
 if __name__ == "__main__":
     unittest.main()

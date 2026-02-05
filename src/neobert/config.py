@@ -177,9 +177,13 @@ class TrainerConfig:
     save_strategy: str = "steps"  # "steps", "epoch", "best", or "no"
     save_total_limit: Optional[int] = 3
     early_stopping: int = 0
-    metric_for_best_model: Optional[str] = None
-    greater_is_better: bool = True
-    load_best_model_at_end: bool = False
+    metric_for_best_model: Optional[str] = (
+        None  # NOTE: reserved, not yet implemented in pretraining
+    )
+    greater_is_better: bool = True  # NOTE: reserved, not yet implemented in pretraining
+    load_best_model_at_end: bool = (
+        False  # NOTE: reserved, not yet implemented in pretraining
+    )
     save_model: bool = True
 
     # For backwards compatibility with old configs

@@ -180,13 +180,11 @@ def _load_streaming_split(
             )
 
     if needs_total and total_examples is None:
-        logger.warning(
-            "Streaming split %s uses percent slicing but total size is unknown. "
-            "Falling back to full split '%s'.",
-            split,
-            base,
+        raise ValueError(
+            f"Streaming split '{split}' uses percent slicing but total size is "
+            f"unknown. Use absolute indices (e.g., '{base}[:500]') instead of "
+            f"percentages for streaming datasets."
         )
-        return dataset
 
     start_idx = _resolve_slice_index(start_token, total_examples)
     end_idx = _resolve_slice_index(end_token, total_examples)
@@ -529,7 +527,9 @@ def to_target_batch_size(
                     stored_value = stored_value.to(value.device)
                 merged[key] = torch.cat([stored_value, value], dim=0)
             else:
-                merged[key] = stored_value + value
+                merged[key] = (
+                    stored_value + value
+                )  # list concatenation (non-tensor path)
         for key in merged.keys():
             stored_batch[key] = None
         batch = merged
@@ -566,7 +566,9 @@ def to_target_batch_size(
                 if stored_batch[key] is None:
                     stored_batch[key] = leftover
                 else:
-                    stored_batch[key] = stored_batch[key] + leftover
+                    stored_batch[key] = (
+                        stored_batch[key] + leftover
+                    )  # list concatenation (non-tensor path)
 
     # If the batch is too small, we had some stored_batch
     elif batch_size < target_size:
@@ -606,7 +608,9 @@ def to_target_batch_size(
                     stored_batch[key] = stored_batch[key].to("cpu")
                 else:
                     take = target_size - batch_size
-                    batch[key] = batch[key] + stored_batch[key][:take]
+                    batch[key] = (
+                        batch[key] + stored_batch[key][:take]
+                    )  # list concatenation (non-tensor path)
                     stored_batch[key] = stored_batch[key][take:]
 
         # Concatenate otherwise
@@ -621,7 +625,9 @@ def to_target_batch_size(
                         stored_batch[key] = stored_batch[key].to(batch[key].device)
                     batch[key] = torch.cat([batch[key], stored_batch[key]], dim=0)
                 else:
-                    batch[key] = batch[key] + stored_batch[key]
+                    batch[key] = (
+                        batch[key] + stored_batch[key]
+                    )  # list concatenation (non-tensor path)
                 stored_batch[key] = None
 
     return batch, stored_batch
@@ -1396,7 +1402,7 @@ def trainer(cfg: Config) -> None:
         disable=(not accelerator.is_main_process),
     )
 
-    accum_tokens = torch.zeros((), device=accelerator.device)
+    accum_tokens = torch.zeros((), device=accelerator.device, dtype=torch.long)
     local_samples = torch.zeros((), device=accelerator.device, dtype=torch.long)
     local_tokens = torch.zeros((), device=accelerator.device, dtype=torch.long)
     local_num_pred = torch.zeros((), device=accelerator.device, dtype=torch.long)

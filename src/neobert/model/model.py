@@ -1299,22 +1299,28 @@ class NeoBERTForSequenceClassification(NeoBERTPreTrainedModel):
         self.classifier_init_range = classifier_init_range
 
         self.model = NeoBERT(config)
+        if config.flash_attention:
+            logger.warning(
+                "NeoBERTForSequenceClassification does not support flash_attention; "
+                "disabling for this instance."
+            )
+            self.model.config.flash_attention = False
 
         self.dense = nn.Linear(self.config.hidden_size, self.config.hidden_size)
         self.dropout = nn.Dropout(self.classifier_dropout)
         self.classifier = nn.Linear(self.config.hidden_size, self.num_labels)
 
         self.post_init()
-
-    def _init_weights(self, module: nn.Module) -> None:
-        """Initialize classifier weights.
-
-        :param nn.Module module: Module to initialize.
-        """
-        if isinstance(module, nn.Linear):
-            module.weight.data.normal_(mean=0.0, std=self.classifier_init_range)
-            if module.bias is not None:
-                module.bias.data.zero_()
+        # Only reinitialize the classification head; backbone was already
+        # initialized by NeoBERTPreTrainedModel._init_weights via post_init().
+        nn.init.normal_(self.dense.weight, mean=0.0, std=self.classifier_init_range)
+        if self.dense.bias is not None:
+            nn.init.zeros_(self.dense.bias)
+        nn.init.normal_(
+            self.classifier.weight, mean=0.0, std=self.classifier_init_range
+        )
+        if self.classifier.bias is not None:
+            nn.init.zeros_(self.classifier.bias)
 
     def forward(
         self, src: torch.Tensor, pad_mask: Optional[torch.Tensor] = None
@@ -1357,22 +1363,28 @@ class NeoBERTHFForSequenceClassification(NeoBERTPreTrainedModel):
         self.classifier_init_range = getattr(config, "classifier_init_range", 0.02)
 
         self.model = NeoBERT(config)
+        if config.flash_attention:
+            logger.warning(
+                "NeoBERTHFForSequenceClassification does not support flash_attention; "
+                "disabling for this instance."
+            )
+            self.model.config.flash_attention = False
 
         self.dense = nn.Linear(self.config.hidden_size, self.config.hidden_size)
         self.dropout = nn.Dropout(self.classifier_dropout)
         self.classifier = nn.Linear(self.config.hidden_size, self.num_labels)
 
         self.post_init()
-
-    def _init_weights(self, module: nn.Module) -> None:
-        """Initialize classifier weights.
-
-        :param nn.Module module: Module to initialize.
-        """
-        if isinstance(module, nn.Linear):
-            module.weight.data.normal_(mean=0.0, std=self.classifier_init_range)
-            if module.bias is not None:
-                module.bias.data.zero_()
+        # Only reinitialize the classification head; backbone was already
+        # initialized by NeoBERTPreTrainedModel._init_weights via post_init().
+        nn.init.normal_(self.dense.weight, mean=0.0, std=self.classifier_init_range)
+        if self.dense.bias is not None:
+            nn.init.zeros_(self.dense.bias)
+        nn.init.normal_(
+            self.classifier.weight, mean=0.0, std=self.classifier_init_range
+        )
+        if self.classifier.bias is not None:
+            nn.init.zeros_(self.classifier.bias)
 
     def forward(
         self,
@@ -1626,21 +1638,28 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
             dataloader, desc="encoding", mininterval=10, disable=len(sentences) < 128
         ):
             input_ids = batch["input_ids"].to(device)
+            int_mask = batch["attention_mask"]
 
-            pad_mask = batch["attention_mask"].to(device)
-            xformers_mask = torch.where(pad_mask == 1, float(0.0), float("-inf")).type(
-                mask_dtype
-            )
-
-            outputs = self.model(input_ids, xformers_mask)
+            if self.config.flash_attention:
+                # Flash path: compute packed_seqlens on CPU to avoid CUDA sync,
+                # then pass pad_mask=None so the model uses block-diagonal attention.
+                seqlens = int_mask.sum(dim=1).tolist()
+                packed_seqlens = [[int(s)] for s in seqlens]
+                outputs = self.model(input_ids, None, packed_seqlens=packed_seqlens)
+                # Keep a device-side 0/1 mask only for avg pooling.
+                pool_mask = int_mask.to(device=device, dtype=mask_dtype)
+            else:
+                pool_mask = int_mask.to(device=device, dtype=mask_dtype)
+                xformers_mask = torch.where(
+                    pool_mask == 1, float(0.0), float("-inf")
+                ).type(mask_dtype)
+                outputs = self.model(input_ids, xformers_mask)
 
             if self.pooling == "avg":
-                outputs = outputs * pad_mask.unsqueeze(-1).expand(
+                outputs = outputs * pool_mask.unsqueeze(-1).expand(
                     -1, -1, outputs.shape[-1]
                 )
-                outputs = outputs.sum(dim=1) / pad_mask.to(device).sum(dim=1).unsqueeze(
-                    -1
-                )
+                outputs = outputs.sum(dim=1) / pool_mask.sum(dim=1).unsqueeze(-1)
             else:
                 outputs = outputs[:, 0, :]
 

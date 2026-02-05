@@ -113,3 +113,31 @@ class TestStreamingShuffle(unittest.TestCase):
         self.assertTrue(dataloader.set_epoch_called)
         self.assertTrue(accelerator.skip_called)
         self.assertEqual(accelerator.last_skip, 7)
+
+
+class TestStreamingPercentSlice(unittest.TestCase):
+    """Validate that percent slicing on streaming datasets fails fast."""
+
+    def test_percent_slice_raises_without_total(self):
+        """Ensure ValueError is raised when percent slicing cannot resolve total."""
+        from unittest.mock import MagicMock, patch
+
+        from neobert.pretraining.trainer import _load_streaming_split
+
+        mock_dataset = MagicMock()
+        mock_builder = MagicMock()
+        mock_builder.info.splits = {}  # No split info available
+
+        with (
+            patch(
+                "neobert.pretraining.trainer.load_dataset", return_value=mock_dataset
+            ),
+            patch(
+                "neobert.pretraining.trainer.load_dataset_builder",
+                return_value=mock_builder,
+            ),
+        ):
+            with self.assertRaises(ValueError) as ctx:
+                _load_streaming_split("dummy_dataset", "train[:1%]", {})
+
+            self.assertIn("percent slicing", str(ctx.exception))
