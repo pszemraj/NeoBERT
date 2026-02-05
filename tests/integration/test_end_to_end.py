@@ -55,7 +55,7 @@ class TestEndToEndIntegration(unittest.TestCase):
                 dropout=config.model.dropout_prob,
                 vocab_size=config.model.vocab_size,
                 max_length=config.model.max_position_embeddings,
-                flash_attention=config.model.xformers_attention,
+                attn_backend=config.model.attn_backend,
                 ngpt=config.model.ngpt,
                 hidden_act=config.model.hidden_act,
             )
@@ -82,7 +82,7 @@ class TestEndToEndIntegration(unittest.TestCase):
             "num_hidden_layers": 1,
             "num_attention_heads": 2,
             "vocab_size": 100,
-            "flash_attention": False,
+            "attn_backend": "sdpa",
             "hidden_act": "gelu",
         }
 
@@ -136,7 +136,7 @@ class TestEndToEndIntegration(unittest.TestCase):
                     dropout=config.model.dropout_prob,
                     vocab_size=config.model.vocab_size,
                     max_length=config.model.max_position_embeddings,
-                    flash_attention=config.model.xformers_attention,
+                    attn_backend=config.model.attn_backend,
                     ngpt=config.model.ngpt,
                     hidden_act=config.model.hidden_act,
                 )
@@ -191,7 +191,7 @@ class TestEndToEndIntegration(unittest.TestCase):
             num_hidden_layers=1,
             num_attention_heads=2,
             vocab_size=50,
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="gelu",
         )
         model = NeoBERT(model_config)
@@ -257,7 +257,7 @@ class TestEndToEndIntegration(unittest.TestCase):
             hidden_size=config.model.hidden_size,
             vocab_size=config.model.vocab_size,
             num_attention_heads=config.model.num_attention_heads,
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="gelu",
         )
         model = NeoBERT(model_config)
@@ -304,7 +304,7 @@ class TestEndToEndIntegration(unittest.TestCase):
             # Nested overrides
             ["--trainer.per_device_train_batch_size", "1"],
             # Boolean overrides
-            ["--model.xformers_attention", "true"],
+            ["--model.attn_backend", "flash_attn_varlen"],
             # Float overrides
             ["--optimizer.weight_decay", "0.02"],
         ]
@@ -340,7 +340,7 @@ class TestEndToEndIntegration(unittest.TestCase):
             NeoBERTConfig(
                 hidden_size=65,  # Not divisible by 12
                 num_attention_heads=12,
-                flash_attention=False,
+                attn_backend="sdpa",
             )
 
 

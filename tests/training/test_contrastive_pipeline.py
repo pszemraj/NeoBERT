@@ -82,9 +82,9 @@ class TestContrastivePipeline(unittest.TestCase):
             dropout=config.model.dropout_prob,
             vocab_size=config.model.vocab_size,
             max_length=config.model.max_position_embeddings,
-            flash_attention=config.model.xformers_attention,
+            attn_backend=config.model.attn_backend,
             ngpt=config.model.ngpt,
-            hidden_act="gelu",  # Use GELU to avoid xformers requirement
+            hidden_act="gelu",  # Use GELU to avoid flash_attn requirement
         )
 
         # Test model creation
@@ -113,7 +113,7 @@ class TestContrastivePipeline(unittest.TestCase):
             num_hidden_layers=1,
             num_attention_heads=2,
             vocab_size=100,
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="gelu",
         )
 

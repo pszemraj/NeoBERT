@@ -53,7 +53,7 @@ class TestGLUEPipeline(unittest.TestCase):
             dropout=config.model.dropout_prob,
             vocab_size=config.model.vocab_size,
             max_length=config.model.max_position_embeddings,
-            flash_attention=config.model.xformers_attention,
+            attn_backend=config.model.attn_backend,
             ngpt=config.model.ngpt,
             num_labels=config.glue.num_labels,
             hidden_act=config.model.hidden_act,
@@ -133,7 +133,7 @@ class TestGLUEPipeline(unittest.TestCase):
                     num_attention_heads=2,
                     vocab_size=100,
                     num_labels=info["num_labels"],
-                    flash_attention=False,
+                    attn_backend="sdpa",
                     hidden_act="gelu",
                 )
 
@@ -163,7 +163,7 @@ class TestGLUEPipeline(unittest.TestCase):
             num_attention_heads=2,
             vocab_size=100,
             num_labels=2,
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="gelu",
         )
 
@@ -213,7 +213,7 @@ class TestGLUETaskSpecific(unittest.TestCase):
             num_attention_heads=2,
             vocab_size=100,
             num_labels=2,  # Binary classification
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="gelu",
         )
 
@@ -241,7 +241,7 @@ class TestGLUETaskSpecific(unittest.TestCase):
             num_attention_heads=2,
             vocab_size=100,
             num_labels=2,
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="gelu",
         )
 

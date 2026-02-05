@@ -79,7 +79,7 @@ class TestAttentionHooks:
             intermediate_size=512,
             vocab_size=1000,
             max_length=128,
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="gelu",
             rope=False,
         )
@@ -132,7 +132,7 @@ class TestMuonClipOptimizer:
             intermediate_size=512,
             vocab_size=1000,
             max_length=128,
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="gelu",
             rope=False,
         )
@@ -180,7 +180,7 @@ class TestMuonClipOptimizer:
             intermediate_size=16,
             vocab_size=32,
             max_length=8,
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="gelu",
             rope=False,
         )
@@ -213,7 +213,7 @@ class TestMuonClipOptimizer:
             intermediate_size=16,
             vocab_size=32,
             max_length=8,
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="gelu",
             rope=False,
         )
@@ -243,7 +243,7 @@ class TestMuonClipOptimizer:
             intermediate_size=32,
             vocab_size=64,
             max_length=16,
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="gelu",
             rope=False,
             ngpt=True,
@@ -444,7 +444,7 @@ class TestNewtonSchulz:
             hidden_size=128,
             num_hidden_layers=2,
             num_attention_heads=4,
-            flash_attention=False,
+            attn_backend="sdpa",
         )
         model = NeoBERT(config)
         muon_config = MuonClipConfig()
@@ -469,7 +469,7 @@ class TestMemoryLeaks:
             hidden_size=128,
             num_hidden_layers=2,
             num_attention_heads=4,
-            flash_attention=False,
+            attn_backend="sdpa",
         )
         model = NeoBERT(config)
 

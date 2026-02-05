@@ -43,7 +43,7 @@ class TestModelForward(unittest.TestCase):
             dropout=0.1,
             vocab_size=1000,
             max_length=128,
-            flash_attention=False,  # Use regular attention for CPU testing
+            attn_backend="sdpa",  # Use SDPA attention for CPU testing
             ngpt=False,
             hidden_act="gelu",  # Use GELU instead of SwiGLU for CPU testing
         )
@@ -88,7 +88,7 @@ class TestModelForward(unittest.TestCase):
             dropout=0.0,
             vocab_size=256,
             max_length=32,
-            flash_attention=False,
+            attn_backend="sdpa",
             ngpt=False,
             hidden_act="gelu",
         )
@@ -131,7 +131,7 @@ class TestModelForward(unittest.TestCase):
             dropout=0.0,
             vocab_size=100,
             max_length=16,
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="swiglu",
         )
 
@@ -162,7 +162,7 @@ class TestModelForward(unittest.TestCase):
             dropout=0.1,
             vocab_size=1000,
             max_length=128,
-            flash_attention=False,
+            attn_backend="sdpa",
             ngpt=True,  # Enable nGPT mode
         )
 
@@ -259,7 +259,7 @@ class TestModelForward(unittest.TestCase):
             dropout=0.1,
             vocab_size=1000,
             max_length=128,
-            flash_attention=False,
+            attn_backend="sdpa",
             ngpt=False,
             num_labels=2,
             hidden_act="gelu",
@@ -413,10 +413,10 @@ class TestModelForward(unittest.TestCase):
         )
 
     def test_hf_flash_attention_silently_ignored(self):
-        """Ensure flash_attention=True is silently accepted for config compat."""
+        """Ensure flash_attention=True is silently accepted for HF config compat."""
         from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
 
-        # flash_attention=True should be accepted without warning
+        # flash_attention=True should be accepted without warning (HF config compat)
         config = NeoBERTConfig(
             hidden_size=32,
             num_hidden_layers=1,
@@ -448,7 +448,7 @@ class TestModelForward(unittest.TestCase):
             intermediate_size=64,
             vocab_size=10,
             max_length=8,
-            flash_attention=False,
+            attn_backend="sdpa",
             ngpt=False,
             hidden_act="gelu",
         )
@@ -481,7 +481,7 @@ class TestModelForward(unittest.TestCase):
             intermediate_size=64,
             vocab_size=16,
             max_length=8,
-            flash_attention=False,
+            attn_backend="sdpa",
             ngpt=False,
             hidden_act="gelu",
             tie_word_embeddings=True,
@@ -584,7 +584,7 @@ class TestModelForward(unittest.TestCase):
             num_hidden_layers=2,
             num_attention_heads=2,
             rope=True,
-            flash_attention=False,
+            attn_backend="sdpa",
             vocab_size=1000,
             hidden_act="gelu",
         )
@@ -596,7 +596,7 @@ class TestModelForward(unittest.TestCase):
             num_hidden_layers=2,
             num_attention_heads=2,
             rope=False,
-            flash_attention=False,
+            attn_backend="sdpa",
             vocab_size=1000,
             hidden_act="gelu",
         )
@@ -625,7 +625,7 @@ class TestModelForward(unittest.TestCase):
             max_length=8,
             pad_token_id=7,
             rope=False,
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="gelu",
         )
         model = NeoBERT(pos_config)
@@ -649,7 +649,7 @@ class TestModelForward(unittest.TestCase):
             num_hidden_layers=1,
             num_attention_heads=2,
             rope=True,
-            flash_attention=False,
+            attn_backend="sdpa",
             vocab_size=1000,
             hidden_act="gelu",
         )
@@ -692,7 +692,7 @@ class TestModelForward(unittest.TestCase):
             num_hidden_layers=1,
             num_attention_heads=2,
             hidden_act="swiglu",
-            flash_attention=False,
+            attn_backend="sdpa",
             vocab_size=1000,
         )
         swiglu_model = NeoBERT(swiglu_config)
@@ -703,7 +703,7 @@ class TestModelForward(unittest.TestCase):
             num_hidden_layers=1,
             num_attention_heads=2,
             hidden_act="GELU",
-            flash_attention=False,
+            attn_backend="sdpa",
             vocab_size=1000,
         )
         gelu_model = NeoBERT(gelu_config)
@@ -763,7 +763,7 @@ class TestModelForward(unittest.TestCase):
                 num_hidden_layers=1,
                 num_attention_heads=2,
                 hidden_act="relu",
-                flash_attention=False,
+                attn_backend="sdpa",
                 vocab_size=1000,
             )
 
@@ -864,7 +864,7 @@ class TestModelForward(unittest.TestCase):
             intermediate_size=64,
             vocab_size=100,
             max_length=8,
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="gelu",
             decoder_init_range=0.02,
         )
@@ -883,8 +883,8 @@ class TestModelForward(unittest.TestCase):
                 f"({config.decoder_init_range}); _init_weights may be overwriting backbone.",
             )
 
-    def test_seq_class_disables_flash_attention(self):
-        """Ensure NeoBERTForSequenceClassification forces flash_attention=False."""
+    def test_seq_class_forces_sdpa_backend(self):
+        """Ensure NeoBERTForSequenceClassification forces attn_backend='sdpa'."""
         config = NeoBERTConfig(
             hidden_size=32,
             num_hidden_layers=1,
@@ -892,14 +892,14 @@ class TestModelForward(unittest.TestCase):
             intermediate_size=64,
             vocab_size=100,
             max_length=8,
-            flash_attention=True,
+            attn_backend="flash_attn_varlen",
             hidden_act="gelu",
         )
         model = NeoBERTForSequenceClassification(config, num_labels=2)
-        self.assertFalse(model.model.config.flash_attention)
+        self.assertEqual(model.model.config.attn_backend, "sdpa")
 
-    def test_hf_seq_class_disables_flash_attention(self):
-        """Ensure NeoBERTHFForSequenceClassification forces flash_attention=False."""
+    def test_hf_seq_class_forces_sdpa_backend(self):
+        """Ensure NeoBERTHFForSequenceClassification forces attn_backend='sdpa'."""
         config = NeoBERTConfig(
             hidden_size=32,
             num_hidden_layers=1,
@@ -907,15 +907,15 @@ class TestModelForward(unittest.TestCase):
             intermediate_size=64,
             vocab_size=100,
             max_length=8,
-            flash_attention=True,
+            attn_backend="flash_attn_varlen",
             hidden_act="gelu",
             num_labels=3,
         )
         model = NeoBERTHFForSequenceClassification(config)
-        self.assertFalse(model.model.config.flash_attention)
+        self.assertEqual(model.model.config.attn_backend, "sdpa")
 
-    def test_mteb_encode_with_flash_off(self):
-        """Ensure MTEB encode works with flash_attention=False."""
+    def test_mteb_encode_with_sdpa_backend(self):
+        """Ensure MTEB encode works with attn_backend='sdpa'."""
         from neobert.model import NeoBERTConfig, NeoBERTForMTEB
 
         tokenizer = self._make_tokenizer()
@@ -926,7 +926,7 @@ class TestModelForward(unittest.TestCase):
             intermediate_size=64,
             vocab_size=10,
             max_length=8,
-            flash_attention=False,
+            attn_backend="sdpa",
             ngpt=False,
             hidden_act="gelu",
         )
@@ -943,15 +943,17 @@ class TestModelForward(unittest.TestCase):
         self.assertEqual(embeddings.shape[1], config.hidden_size)
 
     @unittest.skipUnless(
-        torch.cuda.is_available(), "CUDA required for flash_attention MTEB test"
+        torch.cuda.is_available(), "CUDA required for flash_attn_varlen MTEB test"
     )
-    def test_mteb_encode_flash_attention_no_crash(self):
-        """Ensure MTEB encode does not crash with flash_attention=True on CUDA."""
+    def test_mteb_encode_flash_attn_varlen_no_crash(self):
+        """Ensure MTEB encode does not crash with attn_backend='flash_attn_varlen' on CUDA."""
         from neobert.model import NeoBERTConfig, NeoBERTForMTEB
-        from neobert.model.model import XFORMERS_AVAILABLE
+        from neobert.kernels.attention import FLASH_ATTN_AVAILABLE
 
-        if not XFORMERS_AVAILABLE:
-            self.skipTest("xFormers not installed; flash_attention MTEB test skipped.")
+        if not FLASH_ATTN_AVAILABLE:
+            self.skipTest(
+                "flash-attn not installed; flash_attn_varlen MTEB test skipped."
+            )
 
         tokenizer = self._make_tokenizer()
         device = torch.device("cuda")
@@ -962,7 +964,7 @@ class TestModelForward(unittest.TestCase):
             intermediate_size=64,
             vocab_size=10,
             max_length=8,
-            flash_attention=True,
+            attn_backend="flash_attn_varlen",
             ngpt=False,
             hidden_act="gelu",
         )
@@ -973,7 +975,7 @@ class TestModelForward(unittest.TestCase):
             batch_size=2,
             pooling="avg",
         )
-        model.to(device)
+        model.to(device=device, dtype=torch.bfloat16)
         model.eval()
         embeddings = model.encode(["hello world", "hello"])
         self.assertEqual(embeddings.shape[0], 2)
