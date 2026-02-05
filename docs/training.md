@@ -163,7 +163,7 @@ otherwise to `tokenized_data/<dataset-name>/`.
 - **Gradient checkpointing**: `trainer.gradient_checkpointing: true`
 - **Gradient clipping**: `trainer.gradient_clipping: 1.0`
 - **Mixed precision**: set `trainer.mixed_precision: bf16`
-- **xFormers attention**: `model.xformers_attention: true` requires `xformers`
+- **xFormers attention**: `model.xformers_attention: true` requires `xformers` and right-padded (or packed) inputs
 
 ## Multi-GPU Launches
 
