@@ -219,6 +219,22 @@ def _count_masked_correct(
     return (preds[mask] == labels[mask]).sum()
 
 
+def _resolve_eval_max_batches(
+    max_batches: Optional[int], num_processes: int
+) -> Optional[int]:
+    """Resolve per-rank eval batch cap from a global target.
+
+    :param int | None max_batches: Global eval batch target (all ranks combined).
+    :param int num_processes: Number of distributed processes.
+    :return int | None: Per-rank eval batch cap.
+    """
+    if max_batches is None or max_batches <= 0:
+        return None
+    if num_processes <= 1:
+        return max_batches
+    return max(1, (max_batches + num_processes - 1) // num_processes)
+
+
 def _run_eval(
     model: torch.nn.Module,
     eval_dataloader: torch.utils.data.DataLoader,
@@ -244,11 +260,17 @@ def _run_eval(
     eval_num_pred = torch.zeros((), device=accelerator.device)
     eval_num_correct = torch.zeros((), device=accelerator.device)
     eval_batches = 0
+    max_batches_per_rank = _resolve_eval_max_batches(
+        max_batches, accelerator.num_processes
+    )
 
     try:
         with torch.no_grad():
             for batch in eval_dataloader:
-                if max_batches is not None and eval_batches >= max_batches:
+                if (
+                    max_batches_per_rank is not None
+                    and eval_batches >= max_batches_per_rank
+                ):
                     break
                 batch = _move_batch_to_device(batch, accelerator.device)
                 packed_seqlens = _packed_seqlens_to_list(batch.get("packed_seqlens"))
@@ -304,9 +326,10 @@ def _packed_seqlens_to_list(
         if packed_seqlens.numel() == 0:
             return [[] for _ in range(packed_seqlens.shape[0])]
         if packed_seqlens.is_cuda:
-            logger.warning(
-                "packed_seqlens is on CUDA; converting to CPU will synchronize. "
-                "Prefer emitting packed_seqlens as a CPU int32 tensor in the collator."
+            raise RuntimeError(
+                "packed_seqlens must be a CPU tensor. This indicates a collator or "
+                "dataloader device placement bug; keep packed_seqlens on CPU to "
+                "avoid GPU syncs."
             )
         cpu = packed_seqlens.detach().cpu()
         return [[int(x) for x in row[row > 0].tolist()] for row in cpu]
@@ -330,7 +353,8 @@ def _scale_gradients(model: torch.nn.Module, scale: torch.Tensor) -> None:
         scale_value = scale.to(device=device, dtype=dtype)
         try:
             torch._foreach_mul_(grads, scale_value)
-        except (AttributeError, RuntimeError):
+        except AttributeError:
+            # Older PyTorch fallback; dtype/device mismatches should surface as errors.
             for grad in grads:
                 grad.mul_(scale_value)
 

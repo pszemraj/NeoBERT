@@ -143,6 +143,7 @@ def _normalize_pad_mask(pad_mask: torch.Tensor) -> torch.Tensor:
     :param int num_heads: Number of attention heads for validation.
     :return torch.Tensor: Mask shaped (B, 1, 1, S) or (B, 1, S, S).
     """
+    # Training path expects additive float masks (0 for keep, -inf for mask).
     if pad_mask.dim() == 2:
         # Key padding mask; broadcast across query positions + heads.
         return pad_mask[:, None, None, :]
@@ -254,9 +255,10 @@ def _normalize_packed_seqlens(
             return [[] for _ in range(packed_seqlens.shape[0])]
         tensor = packed_seqlens.detach()
         if tensor.is_cuda:
-            logger.warning(
-                "packed_seqlens was a CUDA tensor; converting to Python list will sync. "
-                "Prefer emitting packed_seqlens as a CPU int32 tensor in the collator."
+            raise RuntimeError(
+                "packed_seqlens must be a CPU tensor. This indicates a collator or "
+                "dataloader device placement bug; keep packed_seqlens on CPU to "
+                "avoid GPU syncs."
             )
         tensor = tensor.cpu()
 
@@ -993,6 +995,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
                 )
             target_len = max(self.config.max_length, seq_len)
             # Reuse cached RoPE frequencies; only grow/reallocate on device/len changes.
+            # Inputs are expected to be on the same device as the model parameters.
             if (
                 self.freqs_cis.numel() == 0
                 or self.freqs_cis.device != src.device
@@ -1011,6 +1014,8 @@ class NeoBERT(NeoBERTPreTrainedModel):
             # Content-based positions: padding stays at index 0, and left-padding
             # does not shift token positions (padding-invariant positional IDs).
             # Keep this in sync with the HF create_position_ids_from_input_ids logic.
+            # This O(B*S) cumsum happens once per forward (not per layer) and is
+            # only used when RoPE is disabled (ablation/testing path).
             mask = src.ne(self.config.pad_token_id).int()
             incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask)) * mask
             x += self.positional_embedding(incremental_indices.long())
@@ -1385,6 +1390,8 @@ class NeoBERTHFForSequenceClassification(NeoBERTPreTrainedModel):
         :return SequenceClassifierOutput | tuple: Model outputs.
         """
         # Convert attention masks to additive mask (-inf for masked, 0 for keep).
+        # Accept bool/int/float masks here for HF/pipeline compatibility; training
+        # collators emit additive float masks by default.
         if attention_mask is not None:
             if attention_mask.dtype is torch.bool:
                 additive_mask = torch.where(attention_mask, float(0.0), float("-inf"))

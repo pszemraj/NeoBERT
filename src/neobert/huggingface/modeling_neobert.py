@@ -542,6 +542,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
                 config_max = getattr(self.config, "max_position_embeddings", None)
             max_pos = max(seq_len, int(config_max)) if config_max else seq_len
             # Reuse cached RoPE frequencies; only grow/reallocate if len/device changes.
+            # Inputs are expected to be on the same device as model parameters.
             if (
                 self.freqs_cis.numel() == 0
                 or self.freqs_cis.device != input_ids.device

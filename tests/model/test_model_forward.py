@@ -507,6 +507,16 @@ class TestModelForward(unittest.TestCase):
             hf_model.decoder.weight.data_ptr(), hf_model.model.encoder.weight.data_ptr()
         )
 
+    def test_packed_seqlens_cuda_raises(self):
+        """Ensure CUDA packed_seqlens fails fast to avoid syncs."""
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required to validate packed_seqlens guard.")
+        from neobert.model.model import _normalize_packed_seqlens
+
+        packed = torch.tensor([[1, 2]], device="cuda", dtype=torch.int32)
+        with self.assertRaises(RuntimeError):
+            _normalize_packed_seqlens(packed, seq_len=2)
+
     def test_hf_rope_disabled_uses_positional_embeddings(self):
         """Ensure HF model runs when RoPE is disabled."""
         from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig

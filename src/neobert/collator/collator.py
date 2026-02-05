@@ -132,7 +132,9 @@ class DataCollatorWithPacking(DefaultDataCollator):
                 raise ValueError(
                     "Packed segment length "
                     f"{len(segment_tokens)} exceeds max_length={self.max_length}. "
-                    "Truncate inputs or increase datacollator.max_length."
+                    "This includes special tokens (CLS/SEP). If you tokenized without "
+                    "accounting for packing, re-tokenize with a smaller max_length "
+                    "or increase datacollator.max_length."
                 )
 
             if current_sequence and (
@@ -395,6 +397,7 @@ def get_collator(
             )
             if return_packed_seqlens:
                 if _is_right_padded_mask(attention_mask):
+                    # Keep packed_seqlens on CPU to avoid GPU syncs downstream.
                     batch["packed_seqlens"] = attention_mask_to_packed_seqlens(
                         attention_mask
                     )

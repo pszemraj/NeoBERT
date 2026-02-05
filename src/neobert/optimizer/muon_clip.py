@@ -379,6 +379,9 @@ class NeoBERTAttentionHooks:
             # During gradient accumulation, we intentionally keep only the latest
             # microbatch activation to bound memory/compute overhead. This biases
             # QK clipping stats toward the most recent microbatch by design.
+            # We cache pre-projection inputs (not Q/K) to avoid duplicating large
+            # QKV tensors in CPU memory; projections are recomputed only on clip
+            # steps (interval-gated) to keep the steady-state overhead low.
             # Move to CPU to avoid retaining GPU activations when clipping is enabled.
             self.layer_inputs[layer_idx] = x.detach().to("cpu")
 

@@ -318,6 +318,16 @@ class TestPretrainComponents(unittest.TestCase):
 
         self.assertEqual(resolved, 8)
 
+    def test_resolve_eval_max_batches_per_rank(self):
+        """Ensure eval max_batches is split across ranks."""
+        from neobert.pretraining.trainer import _resolve_eval_max_batches
+
+        self.assertIsNone(_resolve_eval_max_batches(None, num_processes=2))
+        self.assertIsNone(_resolve_eval_max_batches(0, num_processes=2))
+        self.assertEqual(_resolve_eval_max_batches(10, num_processes=1), 10)
+        self.assertEqual(_resolve_eval_max_batches(10, num_processes=2), 5)
+        self.assertEqual(_resolve_eval_max_batches(11, num_processes=2), 6)
+
     def test_masked_correct_count(self):
         """Test masked accuracy counting ignores -100 labels."""
         from neobert.pretraining.trainer import _count_masked_correct

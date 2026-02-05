@@ -827,6 +827,8 @@ class ConfigLoader:
             return config
 
         # Resolve vocab_size for GPU efficiency (round up to a multiple of 128).
+        # This is opt-in via preprocess_config; disable resolve_vocab_size if you
+        # require exact tokenizer sizes for checkpoint interoperability.
         use_cpu = getattr(config.trainer, "use_cpu", False)
         if not use_cpu and hasattr(config.tokenizer, "name") and config.tokenizer.name:
             # Import tokenizer here to avoid circular imports
