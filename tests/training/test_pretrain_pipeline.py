@@ -273,6 +273,39 @@ class TestPretrainComponents(unittest.TestCase):
         lengths = keep.sum(dim=1, keepdim=True).to(torch.int32)
         self.assertTrue(torch.equal(packed, lengths))
 
+    def test_mlm_collator_skips_packed_seqlens_for_left_padding(self):
+        """Ensure left-padded batches do not emit packed_seqlens metadata."""
+        from neobert.collator import get_collator
+
+        tokenizer = self._make_tokenizer()
+        tokenizer.padding_side = "left"
+        collator = get_collator(
+            tokenizer=tokenizer, mlm_probability=0.15, return_packed_seqlens=True
+        )
+
+        texts = ["hello world", "test"]
+        tokenized = tokenizer(texts, padding=True, return_tensors="pt")
+        batch = [
+            {
+                "input_ids": tokenized["input_ids"][0],
+                "attention_mask": tokenized["attention_mask"][0],
+            },
+            {
+                "input_ids": tokenized["input_ids"][1],
+                "attention_mask": tokenized["attention_mask"][1],
+            },
+        ]
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            collated = collator(batch)
+        self.assertTrue(
+            any("Skipping packed_seqlens" in str(w.message) for w in caught)
+        )
+        self.assertIn("attention_mask", collated)
+        self.assertIn("packed_seqlens", collated)
+        self.assertIsNone(collated["packed_seqlens"])
+
     def test_masked_correct_count(self):
         """Test masked accuracy counting ignores -100 labels."""
         from neobert.pretraining.trainer import _count_masked_correct

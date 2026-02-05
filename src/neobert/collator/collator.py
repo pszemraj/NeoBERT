@@ -2,6 +2,8 @@
 
 from typing import Any, Callable, Optional, Tuple
 
+import warnings
+
 import torch
 from transformers import (
     DataCollatorForLanguageModeling,
@@ -265,10 +267,32 @@ def _ensure_attention_mask(
     return (input_ids != int(pad_token_id)).long()
 
 
+def _is_right_padded_mask(attention_mask: torch.Tensor) -> bool:
+    """Return True if a 0/1 attention mask uses right padding only.
+
+    :param torch.Tensor attention_mask: 0/1 mask (CPU).
+    :return bool: True if tokens are a prefix (right padding), else False.
+    """
+    if attention_mask.ndim != 2:
+        raise ValueError(
+            "Expected attention_mask rank-2 [B,S] for padding check, got "
+            f"shape={tuple(attention_mask.shape)}"
+        )
+    mask = attention_mask
+    if mask.is_cuda:
+        mask = mask.cpu()
+    mask = (mask != 0).to(torch.int)
+    # For right padding, the mask must be non-increasing along the sequence.
+    return bool(torch.all(mask.cummin(dim=-1).values == mask))
+
+
 def attention_mask_to_packed_seqlens(
     attention_mask: torch.Tensor,
 ) -> torch.Tensor:
     """Convert a 0/1 attention mask [B,S] into packed_seqlens tensor [B,1].
+
+    This assumes tokens are a prefix of the sequence (right padding). Left-padded
+    or non-prefix masks must keep the full attention mask instead of packed lengths.
 
     :param torch.Tensor attention_mask: 0/1 mask (CPU).
     :return torch.Tensor: Per-sample segment lengths tensor.
@@ -283,6 +307,8 @@ def attention_mask_to_packed_seqlens(
             "Packed seqlens should be derived before moving batches to CUDA."
         )
 
+    # packed_seqlens only encodes lengths, so this is valid only for right padding
+    # where non-pad tokens are contiguous from index 0.
     lengths = attention_mask.sum(dim=1, keepdim=True).to(torch.int32)
     return lengths
 
@@ -304,7 +330,8 @@ def get_collator(
     :param bool mask_all: If True, mask all sampled tokens.
     :param bool pack_sequences: If True, pack sequences into fixed-length chunks.
     :param int max_length: Maximum sequence length for packing.
-    :param bool return_packed_seqlens: If True, emit packed_seqlens metadata for non-packed batches.
+    :param bool return_packed_seqlens: If True, emit packed_seqlens metadata for non-packed batches
+        when attention masks are right-padded.
     :return Callable[[list[dict[str, Any]]], dict[str, Any]]: Collate function.
     """
     # No need to apply any padding if sequences are packed
@@ -366,9 +393,18 @@ def get_collator(
                 batch, getattr(tokenizer, "pad_token_id", None)
             )
             if return_packed_seqlens:
-                batch["packed_seqlens"] = attention_mask_to_packed_seqlens(
-                    attention_mask
-                )
+                if _is_right_padded_mask(attention_mask):
+                    batch["packed_seqlens"] = attention_mask_to_packed_seqlens(
+                        attention_mask
+                    )
+                else:
+                    warnings.warn(
+                        "Skipping packed_seqlens because attention_mask is not right-padded. "
+                        "Use tokenizer.padding_side='right' or disable return_packed_seqlens "
+                        "to avoid corrupting packed attention.",
+                        stacklevel=2,
+                    )
+                    batch["packed_seqlens"] = None
             # Always use float32 for attention masks regardless of mixed precision.
             # bf16 masks can cause numerical instability in softmax (NaN propagation).
             batch["attention_mask"] = torch.where(

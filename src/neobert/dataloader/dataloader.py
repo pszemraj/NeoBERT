@@ -40,7 +40,8 @@ def get_dataloader(
     :param bool persistent_workers: Keep workers alive across epochs.
     :param bool pack_sequences: Whether to pack sequences before collation.
     :param int max_length: Maximum sequence length for packing.
-    :param bool return_packed_seqlens: Whether to emit packed_seqlens for non-packed batches.
+    :param bool return_packed_seqlens: Whether to emit packed_seqlens for non-packed batches
+        when attention masks are right-padded.
     :return torch.utils.data.DataLoader: Configured dataloader instance.
     """
 
