@@ -306,7 +306,7 @@ def _packed_seqlens_to_list(
         if packed_seqlens.is_cuda:
             logger.warning(
                 "packed_seqlens is on CUDA; converting to CPU will synchronize. "
-                "Prefer emitting packed_seqlens as Python metadata in the collator."
+                "Prefer emitting packed_seqlens as a CPU int32 tensor in the collator."
             )
         cpu = packed_seqlens.detach().cpu()
         return [[int(x) for x in row[row > 0].tolist()] for row in cpu]

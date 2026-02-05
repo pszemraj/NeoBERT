@@ -256,7 +256,7 @@ def _normalize_packed_seqlens(
         if tensor.is_cuda:
             logger.warning(
                 "packed_seqlens was a CUDA tensor; converting to Python list will sync. "
-                "Prefer emitting packed_seqlens as list-of-lists in the collator."
+                "Prefer emitting packed_seqlens as a CPU int32 tensor in the collator."
             )
         tensor = tensor.cpu()
 
@@ -1526,7 +1526,10 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
 
         Args:
             sentences: The sentences to encode.
-            **kwargs: Additional arguments to pass to the encoder.
+            **kwargs: Optional overrides for the DataLoader.
+                - num_workers (int): DataLoader worker processes (default: 0).
+                - pin_memory (bool | None): Pin CPU memory for CUDA transfer. Defaults
+                  to ``True`` on CUDA devices, otherwise ``False``.
 
         Returns:
             The encoded sentences.
@@ -1537,6 +1540,10 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
         device = param.device
         # Keep additive masks in float32 for numerical stability (match training).
         mask_dtype = torch.float32
+        num_workers = int(kwargs.pop("num_workers", 0))
+        pin_memory = kwargs.pop("pin_memory", None)
+        if pin_memory is None:
+            pin_memory = device.type == "cuda"
 
         def _transform_func(
             tokenizer: PreTrainedTokenizerFast, x: Dict[str, List]
@@ -1565,9 +1572,9 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
             dataset,
             collate_fn=data_collator,
             batch_size=self.batch_size,
-            num_workers=2,
+            num_workers=num_workers,
             shuffle=False,
-            pin_memory=True,
+            pin_memory=pin_memory,
         )
 
         encodings = []

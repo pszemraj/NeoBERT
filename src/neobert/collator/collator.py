@@ -331,7 +331,8 @@ def get_collator(
     :param bool pack_sequences: If True, pack sequences into fixed-length chunks.
     :param int max_length: Maximum sequence length for packing.
     :param bool return_packed_seqlens: If True, emit packed_seqlens metadata for non-packed batches
-        when attention masks are right-padded.
+        when attention masks are right-padded. If lengths cannot be inferred, the key
+        is omitted.
     :return Callable[[list[dict[str, Any]]], dict[str, Any]]: Collate function.
     """
     # No need to apply any padding if sequences are packed
@@ -404,7 +405,6 @@ def get_collator(
                         "to avoid corrupting packed attention.",
                         stacklevel=2,
                     )
-                    batch["packed_seqlens"] = None
             # Always use float32 for attention masks regardless of mixed precision.
             # bf16 masks can cause numerical instability in softmax (NaN propagation).
             batch["attention_mask"] = torch.where(

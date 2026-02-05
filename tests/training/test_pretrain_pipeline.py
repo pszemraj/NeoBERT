@@ -303,8 +303,7 @@ class TestPretrainComponents(unittest.TestCase):
             any("Skipping packed_seqlens" in str(w.message) for w in caught)
         )
         self.assertIn("attention_mask", collated)
-        self.assertIn("packed_seqlens", collated)
-        self.assertIsNone(collated["packed_seqlens"])
+        self.assertNotIn("packed_seqlens", collated)
 
     def test_masked_correct_count(self):
         """Test masked accuracy counting ignores -100 labels."""

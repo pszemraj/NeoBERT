@@ -59,7 +59,9 @@ class MuonClipConfig:
     clipping_alpha: float = 0.5  # Q/K scaling balance (0.5 = equal)
     clipping_warmup_steps: int = 0  # Disable clipping for N steps
     clipping_interval: int = 10  # Apply clipping every N steps to cap overhead
-    clipping_qk_chunk_size: int = 1024  # Chunk size for QK max to avoid S^2 peaks
+    clipping_qk_chunk_size: int = (
+        1024  # Chunk size for QK max tiling to avoid S^2 peaks
+    )
     capture_last_microbatch_only: bool = (
         True  # Capture activations only on last microbatch
     )
@@ -1351,7 +1353,7 @@ class MuonClipOptimizer(Optimizer):
         scale: float,
         pad_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Compute per-sample/per-head max attention logits with chunking.
+        """Compute per-sample/per-head max attention logits with 2D tiling.
 
         :param torch.Tensor xq_heads: Query tensor of shape [B, H, S, D].
         :param torch.Tensor xk_heads: Key tensor of shape [B, H, S, D].
@@ -1384,7 +1386,6 @@ class MuonClipOptimizer(Optimizer):
             device=xq_heads.device,
             dtype=xq_heads.dtype,
         )
-        k_t = xk_heads.transpose(-2, -1)
         bias = None
         bias_is_full = False
         if pad_mask is not None:
@@ -1411,19 +1412,30 @@ class MuonClipOptimizer(Optimizer):
                     f"{tuple(bias.shape)}"
                 )
 
-        for start in range(0, seq_len, chunk_size):
-            end = min(seq_len, start + chunk_size)
-            q = xq_heads[:, :, start:end, :]
-            logits = torch.matmul(q, k_t) * scale
+        for q_start in range(0, seq_len, chunk_size):
+            q_end = min(seq_len, q_start + chunk_size)
+            q = xq_heads[:, :, q_start:q_end, :]
+            q_max = torch.full(
+                (batch, heads),
+                float("-inf"),
+                device=xq_heads.device,
+                dtype=xq_heads.dtype,
+            )
+            for k_start in range(0, seq_len, chunk_size):
+                k_end = min(seq_len, k_start + chunk_size)
+                k = xk_heads[:, :, k_start:k_end, :]
+                logits = torch.matmul(q, k.transpose(-2, -1)) * scale
 
-            if bias is not None:
-                if bias_is_full:
-                    logits = logits + bias[:, :, start:end, :]
-                else:
-                    logits = logits + bias
+                if bias is not None:
+                    if bias_is_full:
+                        logits = logits + bias[:, :, q_start:q_end, k_start:k_end]
+                    else:
+                        logits = logits + bias[..., k_start:k_end]
 
-            chunk_max = logits.amax(dim=(-2, -1))
-            per_step_max = torch.maximum(per_step_max, chunk_max)
+                chunk_max = logits.amax(dim=(-2, -1))
+                q_max = torch.maximum(q_max, chunk_max)
+
+            per_step_max = torch.maximum(per_step_max, q_max)
 
         return per_step_max
 
@@ -1493,14 +1505,25 @@ class MuonClipOptimizer(Optimizer):
 
                 q = xq_heads[batch_idx, :, start:end, :]
                 k = xk_heads[batch_idx, :, start:end, :]
-                k_t = k.transpose(-2, -1)
                 for q_start in range(0, seg_len_i, chunk_size):
                     q_end = min(seg_len_i, q_start + chunk_size)
                     q_chunk = q[:, q_start:q_end, :]
-                    logits = torch.matmul(q_chunk, k_t) * scale
-                    seg_max = logits.amax(dim=(-2, -1))
+                    q_max = torch.full(
+                        (heads,),
+                        float("-inf"),
+                        device=xq_heads.device,
+                        dtype=xq_heads.dtype,
+                    )
+                    for k_start in range(0, seg_len_i, chunk_size):
+                        k_end = min(seg_len_i, k_start + chunk_size)
+                        k_chunk = k[:, k_start:k_end, :]
+                        logits = (
+                            torch.matmul(q_chunk, k_chunk.transpose(-2, -1)) * scale
+                        )
+                        seg_max = logits.amax(dim=(-2, -1))
+                        q_max = torch.maximum(q_max, seg_max)
                     per_step_max[batch_idx] = torch.maximum(
-                        per_step_max[batch_idx], seg_max
+                        per_step_max[batch_idx], q_max
                     )
                 start = end
 

@@ -91,6 +91,7 @@ Notes:
 - If `use_deepspeed: true`, the script loads weights via DeepSpeed utilities.
 - Outputs land under `outputs/<pretrain_run>/mteb/<step>/<max_length>/`.
 - The MTEB runner currently reads `tokenizer.name`; if you trained with a local tokenizer, set `tokenizer.name` to that path in the config.
+- For direct `NeoBERTForMTEB.encode(...)` usage, you can override DataLoader settings with `num_workers` (default `0`) and `pin_memory` (defaults to `True` only on CUDA).
 
 ## Troubleshooting
 
