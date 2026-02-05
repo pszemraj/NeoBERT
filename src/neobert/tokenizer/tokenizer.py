@@ -120,6 +120,15 @@ def get_tokenizer(
             ],
         )
 
+    if tokenizer.pad_token is None:
+        logger.warning(
+            "Tokenizer is missing a pad token; adding '<pad>' for batching support."
+        )
+        tokenizer.add_special_tokens({"pad_token": "<pad>"})
+
+    if tokenizer.pad_token_id is None:
+        raise ValueError("Tokenizer must define pad_token_id for batching.")
+
     # Check if special tokens were modified and warn the user prominently
     final_special_tokens = tokenizer.special_tokens_map
     final_mask = tokenizer.mask_token if hasattr(tokenizer, "mask_token") else None

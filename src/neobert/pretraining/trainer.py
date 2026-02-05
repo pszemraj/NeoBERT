@@ -484,6 +484,11 @@ def _select_train_split(
     )
 
 
+def _has_stored_batch(stored_batch: BatchEncoding) -> bool:
+    """Return True if any buffered batch fragments are present."""
+    return any(value is not None for value in stored_batch.values())
+
+
 def to_target_batch_size(
     batch: BatchEncoding,
     stored_batch: BatchEncoding,
@@ -499,6 +504,35 @@ def to_target_batch_size(
     tmp = {}
     for key in batch.keys():
         stored_batch.setdefault(key, None)
+    buffer_device = None
+    for value in stored_batch.values():
+        if torch.is_tensor(value):
+            buffer_device = value.device
+            break
+    if buffer_device is None:
+        buffer_device = torch.device("cpu")
+    if _has_stored_batch(stored_batch):
+        merged: BatchEncoding = {}
+        for key, value in batch.items():
+            stored_value = stored_batch.get(key)
+            if stored_value is None:
+                merged[key] = value
+                continue
+            if value is None:
+                merged[key] = stored_value
+                continue
+            if torch.is_tensor(value):
+                if (
+                    torch.is_tensor(stored_value)
+                    and stored_value.device != value.device
+                ):
+                    stored_value = stored_value.to(value.device)
+                merged[key] = torch.cat([stored_value, value], dim=0)
+            else:
+                merged[key] = stored_value + value
+        for key in merged.keys():
+            stored_batch[key] = None
+        batch = merged
     batch_size = batch["input_ids"].shape[0]
 
     # If the batch is too large, we store samples
@@ -515,7 +549,10 @@ def to_target_batch_size(
                 )
                 batch[key] = tmp[key][0]
                 if stored_batch[key] is None:
-                    stored_batch[key] = tmp[key][1]
+                    leftover = tmp[key][1]
+                    if torch.is_tensor(leftover) and leftover.device != buffer_device:
+                        leftover = leftover.to(buffer_device)
+                    stored_batch[key] = leftover
                 else:
                     # Keep stored batches on a single device (often CPU) to avoid device mismatches.
                     if stored_batch[key].device != tmp[key][1].device:
@@ -579,9 +616,9 @@ def to_target_batch_size(
                     continue
                 if batch[key] is None:
                     continue
-                if torch.is_tensor(stored_batch[key]):
-                    if stored_batch[key].device != batch[key].device:
-                        stored_batch[key] = stored_batch[key].to(batch[key].device)
+                    if torch.is_tensor(stored_batch[key]):
+                        if stored_batch[key].device != batch[key].device:
+                            stored_batch[key] = stored_batch[key].to(batch[key].device)
                     batch[key] = torch.cat([batch[key], stored_batch[key]], dim=0)
                 else:
                     batch[key] = batch[key] + stored_batch[key]
@@ -1369,24 +1406,13 @@ def trainer(cfg: Config) -> None:
             # Pack or truncate the batch to target batch size (batch size might be variable due to sequence packing).
             # Skip batch buffering when using packed sequences, as packed_seqlens metadata would be lost.
             is_packed = batch.get("packed_seqlens") is not None
-            if batch["input_ids"].shape[0] != cfg.trainer.per_device_train_batch_size:
-                if is_packed:
-                    # Packed batches can't be split/merged; just process as-is (may be smaller at end of epoch)
-                    pass
-                else:
-                    batch, stored_batch = to_target_batch_size(
-                        batch, stored_batch, cfg.trainer.per_device_train_batch_size
-                    )
-
-            # If it is still smaller, stored batches were not enough and we skip to the next iteration to fill the batch
-            # For packed sequences, we allow smaller final batches rather than buffering
-            if (
-                not is_packed
-                and batch["input_ids"].shape[0]
-                < cfg.trainer.per_device_train_batch_size
+            if not is_packed and (
+                batch["input_ids"].shape[0] != cfg.trainer.per_device_train_batch_size
+                or _has_stored_batch(stored_batch)
             ):
-                stored_batch = batch
-                continue
+                batch, stored_batch = to_target_batch_size(
+                    batch, stored_batch, cfg.trainer.per_device_train_batch_size
+                )
 
             batch = _move_batch_to_device(batch, accelerator.device)
 

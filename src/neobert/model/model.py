@@ -7,16 +7,13 @@ import logging
 import math
 import warnings
 from functools import partial
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 import numpy as np
 import torch
-from datasets import Dataset
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from torch.utils.checkpoint import checkpoint
-from torch.utils.data import DataLoader
-from tqdm import tqdm
 from transformers import (
     DataCollatorWithPadding,
     PretrainedConfig,
@@ -24,6 +21,9 @@ from transformers import (
     PreTrainedTokenizerFast,
 )
 from transformers.modeling_outputs import SequenceClassifierOutput
+
+if TYPE_CHECKING:
+    pass
 
 from ..modeling_utils import (
     scaled_dot_product_attention_compat,
@@ -209,8 +209,10 @@ def _infer_single_segment_packed_seqlens_from_pad_mask(
 
     mask = pad_mask.detach()
     if mask.is_cuda:
-        # Sync once per batch to avoid per-layer GPU stalls.
-        mask = mask.cpu()
+        raise ValueError(
+            "pad_mask is on CUDA; packed_seqlens inference would sync to CPU. "
+            "Provide packed_seqlens from the collator instead."
+        )
 
     if mask.dim() == 2:
         key_mask = mask
@@ -397,6 +399,8 @@ class NeoBERTConfig(PretrainedConfig):
         if hidden_size % num_attention_heads != 0:
             raise ValueError("Hidden size must be divisible by the number of heads.")
         self.dim_head = hidden_size // num_attention_heads
+        if rope and self.dim_head % 2 != 0:
+            raise ValueError("RoPE requires an even head dimension.")
         self.intermediate_size = intermediate_size
 
         # Dropout: accept legacy 'dropout_prob' as alias
@@ -667,6 +671,7 @@ class NormEncoderBlock(nn.Module):
         self.mlp_c_proj = nn.Linear(
             config.intermediate_size, config.hidden_size, bias=False
         )
+        self.mlp_c_proj._ngpt_c_proj = True
 
         self.ffn_dropout = nn.Dropout(config.dropout)
 
@@ -877,9 +882,17 @@ class NeoBERTPreTrainedModel(PreTrainedModel):
         :param nn.Module module: Module to initialize.
         """
         if isinstance(module, nn.Linear):
-            module.weight.data.uniform_(
-                -self.config.decoder_init_range, self.config.decoder_init_range
-            )
+            if getattr(module, "_ngpt_c_proj", False):
+                torch.nn.init.normal_(
+                    module.weight,
+                    mean=0.0,
+                    std=self.config.base_scale
+                    / math.sqrt(2 * self.config.num_hidden_layers),
+                )
+            else:
+                module.weight.data.uniform_(
+                    -self.config.decoder_init_range, self.config.decoder_init_range
+                )
             if module.bias is not None:
                 module.bias.data.zero_()
         elif isinstance(module, nn.Embedding):
@@ -1089,14 +1102,6 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
         self.gradient_checkpointing = False
-
-        for pn, p in self.named_parameters():
-            if pn.endswith("c_proj.weight"):
-                torch.nn.init.normal_(
-                    p,
-                    mean=0.0,
-                    std=config.base_scale / math.sqrt(2 * config.num_hidden_layers),
-                )
 
     def forward(
         self,
@@ -1570,6 +1575,9 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
         Returns:
             The encoded sentences.
         """
+        from datasets import Dataset
+        from torch.utils.data import DataLoader
+        from tqdm import tqdm
 
         # Respect the model's current device to avoid CPU/GPU mismatches.
         param = next(self.parameters())

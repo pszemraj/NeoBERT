@@ -114,6 +114,8 @@ class NeoBERTConfig(PretrainedConfig):
                 f"of attention heads ({num_attention_heads})."
             )
         self.dim_head = hidden_size // num_attention_heads
+        if rope and self.dim_head % 2 != 0:
+            raise ValueError("RoPE requires an even head dimension.")
         self.intermediate_size = intermediate_size
         self.embedding_init_range = embedding_init_range
         self.decoder_init_range = decoder_init_range
