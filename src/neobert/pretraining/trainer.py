@@ -1141,6 +1141,10 @@ def trainer(cfg: Config) -> None:
     disable_dispatch = bool(
         cfg.datacollator.pack_sequences or cfg.model.xformers_attention
     )
+    if disable_dispatch:
+        logger.info(
+            "Disabling Accelerate dispatch_batches because packed_seqlens must stay on CPU."
+        )
     if hasattr(accelerator, "prepare_data_loader"):
 
         def _prepare_loader(
