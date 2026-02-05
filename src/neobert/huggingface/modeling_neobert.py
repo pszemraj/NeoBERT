@@ -1,23 +1,8 @@
 """NeoBERT model implementation for HuggingFace Transformers.
 
-This module provides the NeoBERT architecture compatible with the HuggingFace
-Transformers library. It includes the base model, language modeling head, and
-sequence classification variants.
-
-Architecture Features:
-- SwiGLU activation function for improved training dynamics
-- Rotary Position Embeddings (RoPE) for better position encoding
-- Pre-RMSNorm for improved training stability
-- Scaled dot-product attention for efficient long-context processing
-
-Based on: https://github.com/facebookresearch/llama/blob/main/llama/model.py
-
-NOTE: The training-time implementation lives in ``src/neobert/model/model.py`` and
-uses xFormers for flash attention. This HF variant targets export/inference APIs
-and may use different attention backends; keep the math consistent when editing.
-Packed/varlen sequences are intentionally unsupported in this HF export model.
-Module naming follows NeoBERT conventions; loading from unrelated BERT/RoBERTa
-checkpoints is not guaranteed to be compatible.
+This is the export/inference variant. The training-time model lives in
+``src/neobert/model/model.py`` and uses xFormers; keep math consistent across
+implementations. Packed/varlen sequences are intentionally unsupported here.
 """
 
 from typing import Any, Optional, Union

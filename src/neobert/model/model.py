@@ -1,12 +1,7 @@
 """NeoBERT model architecture and task heads."""
 
-# NOTE: Hugging Face export/inference uses ``neobert/huggingface/modeling_neobert.py`` with
-# different attention backends. Keep core math consistent when updating either path.
-# Typing coverage here is incremental; prefer correctness/clarity over exhaustive hints.
-
-# From https://stackoverflow.com/a/23689767
-# From https://github.com/pytorch/pytorch/issues/97899
-# From https://github.com/facebookresearch/llama/blob/main/llama/model.py
+# NOTE: HF export/inference uses ``neobert/huggingface/modeling_neobert.py`` with
+# different attention backends; keep core math consistent across both.
 
 import logging
 import math

@@ -1,21 +1,7 @@
-"""
-MuonClip Optimizer for NeoBERT Encoder Models
+"""MuonClip optimizer for NeoBERT encoders.
 
-Adapted for bidirectional encoders with:
-- Fused QKV projection support
-- Memory-efficient attention hook system
-- Full distributed training support (DDP, DeepSpeed)
-- Comprehensive error handling and validation
-
-Author: Peter Szemraj
-Date: 2025-01-10
-
-References:
-- Kimi K2 Technical Report: https://moonshotai.github.io/Kimi-K2/
-- Original Muon: https://github.com/KellerJordan/Muon
-- MuonClip: https://github.com/GAD-cell/muon-clip
-- DISCO optimizer: https://github.com/SDLAML/disco
-- Polar Express: https://arxiv.org/abs/2505.16932
+Adapted for fused QKV projections, attention hooks, and distributed training.
+References: Kimi K2 report, Muon, MuonClip, DISCO, Polar Express.
 """
 
 import logging
@@ -31,9 +17,7 @@ from torch.utils.hooks import RemovableHandle
 logger = logging.getLogger(__name__)
 
 
-# ============================================================================
 # Configuration
-# ============================================================================
 
 
 @dataclass
@@ -201,20 +185,14 @@ class MuonClipConfig:
         self.polar_express = None
 
 
-# ============================================================================
-# Attention Hook System for NeoBERT
-# ============================================================================
+# Attention hooks
 
 
 class NeoBERTAttentionHooks:
-    """
-    Lightweight hook system to capture attention inputs for QK clipping.
+    """Capture attention inputs needed for QK clipping.
 
-    We record:
-      - The normalized attention input fed into each layer's QKV (or Q/K) projection.
-      - The pad mask, rotary embeddings, and packed sequence metadata passed to the
-        encoder block.
-    The expensive QK statistics are computed lazily during the optimizer step.
+    Stores normalized QKV inputs plus pad mask/rotary/packed metadata. Expensive
+    stats are computed lazily during the optimizer step.
     """
 
     def __init__(
@@ -473,24 +451,13 @@ class NeoBERTAttentionHooks:
         self.hook_handles.clear()
 
 
-# ============================================================================
-# Optimizer Implementation
-# ============================================================================
+# Optimizer
 
 
 class MuonClipOptimizer(Optimizer):
-    """
-    MuonClip optimizer for NeoBERT encoder models.
+    """MuonClip optimizer for NeoBERT encoders.
 
-    Combines:
-    - Muon (orthogonalized gradients) for 2D parameters
-    - Adam for 1D parameters
-    - Optional QK-clipping for attention stability
-
-    Adapted for NeoBERT's architecture:
-    - Fused QKV projections
-    - Bidirectional attention
-    - transformer_encoder layer structure
+    Uses Muon for 2D params, Adam for 1D params, with optional QK clipping.
     """
 
     def __init__(
