@@ -6,8 +6,9 @@ Run: pytest tests/test_muonclip_unit.py -v
 
 import pytest
 import torch
-from neobert.model import NeoBERT, NeoBERTConfig
-from neobert.optimizer import MuonClipOptimizer, MuonClipConfig
+
+from neobert.model import NeoBERT, NeoBERTConfig, NeoBERTLMHead
+from neobert.optimizer import MuonClipConfig, MuonClipOptimizer
 
 
 class TestMuonClipConfig:
@@ -21,17 +22,29 @@ class TestMuonClipConfig:
 
     def test_invalid_lr(self):
         """Test invalid learning rate raises error."""
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             MuonClipConfig(lr=0)
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             MuonClipConfig(lr=-0.1)
 
     def test_invalid_threshold(self):
         """Test invalid clipping threshold raises error."""
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             MuonClipConfig(clipping_threshold=0)
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             MuonClipConfig(clipping_threshold=2000)
+
+    def test_invalid_clipping_interval(self):
+        """Test invalid clipping interval raises error."""
+        with pytest.raises(ValueError):
+            MuonClipConfig(clipping_interval=0)
+        with pytest.raises(ValueError):
+            MuonClipConfig(clipping_interval=-3)
+
+    def test_invalid_chunk_size(self):
+        """Test invalid chunk size raises error."""
+        with pytest.raises(ValueError):
+            MuonClipConfig(clipping_qk_chunk_size=0)
 
     def test_warnings_for_suboptimal(self):
         """Test warnings for suboptimal settings."""
@@ -65,7 +78,7 @@ class TestAttentionHooks:
             num_attention_heads=4,
             intermediate_size=512,
             vocab_size=1000,
-            max_position_embeddings=128,
+            max_length=128,
             flash_attention=False,
             hidden_act="gelu",
             rope=False,
@@ -95,11 +108,15 @@ class TestAttentionHooks:
 
         # Check data captured
         for layer_idx in range(2):
-            inputs, pad_mask, freqs = hook_system.get_layer_data(layer_idx)
+            inputs, pad_mask, freqs, packed_seqlens = hook_system.get_layer_data(
+                layer_idx
+            )
             assert inputs is not None
             assert inputs.shape[-1] == model.config.hidden_size
+            assert inputs.device.type == "cpu"
             assert pad_mask is None
             assert freqs is None
+            assert packed_seqlens is None
 
 
 class TestMuonClipOptimizer:
@@ -114,7 +131,7 @@ class TestMuonClipOptimizer:
             num_attention_heads=4,
             intermediate_size=512,
             vocab_size=1000,
-            max_position_embeddings=128,
+            max_length=128,
             flash_attention=False,
             hidden_act="gelu",
             rope=False,
@@ -154,6 +171,94 @@ class TestMuonClipOptimizer:
         for p in adam_group["params"]:
             assert p.ndim == 1
 
+    def test_interleaved_qkv_scaling(self):
+        """Ensure fused QKV scaling matches per-head interleaved layout."""
+        config = NeoBERTConfig(
+            hidden_size=4,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=16,
+            vocab_size=32,
+            max_length=8,
+            flash_attention=False,
+            hidden_act="gelu",
+            rope=False,
+        )
+        model = NeoBERT(config)
+        optimizer = MuonClipOptimizer(
+            model, config, MuonClipConfig(enable_clipping=False)
+        )
+
+        qkv_param = model.transformer_encoder[0].qkv.weight
+        original = torch.arange(qkv_param.numel(), dtype=qkv_param.dtype).view_as(
+            qkv_param
+        )
+        qkv_param.data.copy_(original)
+
+        eta = torch.tensor([0.5, 0.25], dtype=qkv_param.dtype)
+        with torch.no_grad():
+            optimizer._scale_qkv_weights(qkv_param, eta, alpha=1.0)
+
+        expected = original.clone()
+        view = expected.view(config.num_attention_heads, config.dim_head * 3, -1)
+        view[:, : config.dim_head].mul_(eta.view(-1, 1, 1))
+        assert torch.allclose(qkv_param, expected)
+
+    def test_packed_attention_logit_max_ignores_cross_segment(self):
+        """Cross-segment logits must not affect max in packed mode."""
+        config = NeoBERTConfig(
+            hidden_size=4,
+            num_hidden_layers=1,
+            num_attention_heads=1,
+            intermediate_size=16,
+            vocab_size=32,
+            max_length=8,
+            flash_attention=False,
+            hidden_act="gelu",
+            rope=False,
+        )
+        model = NeoBERT(config)
+        optimizer = MuonClipOptimizer(
+            model, config, MuonClipConfig(enable_clipping=False)
+        )
+
+        xq = torch.tensor([[[[1.0], [1.0], [0.0], [0.0]]]])
+        xk = torch.tensor([[[[1.0], [1.0], [100.0], [100.0]]]])
+        per_step_max = optimizer._packed_attention_logit_max(
+            xq_heads=xq,
+            xk_heads=xk,
+            packed_seqlens=[[2, 2]],
+            scale=1.0,
+        )
+
+        assert per_step_max.shape == (1, 1)
+        assert torch.allclose(per_step_max, torch.tensor([[1.0]]))
+
+    def test_ngpt_qk_clipping_runs(self):
+        """Ensure ngpt QK clipping path executes without errors."""
+        config = NeoBERTConfig(
+            hidden_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=32,
+            vocab_size=64,
+            max_length=16,
+            flash_attention=False,
+            hidden_act="gelu",
+            rope=False,
+            ngpt=True,
+        )
+        model = NeoBERTLMHead(config)
+        optimizer = MuonClipOptimizer(
+            model, config, MuonClipConfig(enable_clipping=True)
+        )
+
+        input_ids = torch.randint(0, 64, (2, 8))
+        output = model(input_ids)["logits"]
+        loss = output.sum()
+        loss.backward()
+        optimizer.step()
+
     def test_forward_backward_step(self, model):
         """Test full forward/backward/step cycle."""
         model_instance, config = model
@@ -187,15 +292,78 @@ class TestMuonClipOptimizer:
         if muon_config.enable_clipping:
             assert "train/max_attention_logit" in metrics
 
+    def test_hook_capture_gating_last_microbatch_only(self, model):
+        """Hooks should only capture on the last microbatch when enabled."""
+        model_instance, config = model
+        muon_config = MuonClipConfig(
+            enable_clipping=True,
+            clipping_interval=1,
+            capture_last_microbatch_only=True,
+        )
+        optimizer = MuonClipOptimizer(model_instance, config, muon_config)
+        hook_system = optimizer.hook_system
+        assert hook_system is not None
+
+        optimizer.prepare_for_forward(update_step=0, is_last_microbatch=False)
+        _ = model_instance(torch.randint(0, 1000, (2, 64)))
+        assert hook_system.layer_inputs == {}
+
+        optimizer.prepare_for_forward(update_step=0, is_last_microbatch=True)
+        _ = model_instance(torch.randint(0, 1000, (2, 64)))
+        assert len(hook_system.layer_inputs) > 0
+
+        optimizer.step()
+        assert hook_system.layer_inputs == {}
+
+    def test_chunked_logit_max_matches_full(self, model):
+        """Chunked logit max should match the full matmul result."""
+        model_instance, config = model
+        muon_config = MuonClipConfig(enable_clipping=False, clipping_qk_chunk_size=2)
+        optimizer = MuonClipOptimizer(model_instance, config, muon_config)
+
+        xq = torch.randn(1, config.num_attention_heads, 4, config.dim_head)
+        xk = torch.randn_like(xq)
+        scale = 1.0
+        full = torch.matmul(xq, xk.transpose(-2, -1)) * scale
+        full_max = full.amax(dim=(-2, -1))
+        chunked_max = optimizer._attention_logit_max(
+            xq_heads=xq, xk_heads=xk, scale=scale, pad_mask=None
+        )
+
+        assert torch.allclose(full_max, chunked_max)
+
+    def test_state_dict_persists_step(self, model):
+        """Ensure MuonClip step counter persists across state dicts."""
+        model_instance, config = model
+        muon_config = MuonClipConfig(enable_clipping=False)
+        optimizer = MuonClipOptimizer(model_instance, config, muon_config)
+
+        for _ in range(3):
+            input_ids = torch.randint(0, 1000, (2, 64))
+            output = model_instance(input_ids)
+            loss = output.sum()
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+
+        state = optimizer.state_dict()
+
+        model_clone = NeoBERT(config)
+        optimizer_clone = MuonClipOptimizer(model_clone, config, muon_config)
+        optimizer_clone.load_state_dict(state)
+
+        assert optimizer_clone._step == optimizer._step
+
     def test_clipping_applied(self, model):
         """Test QK-clipping actually modifies weights."""
         model_instance, config = model
 
-        muon_config = MuonClipConfig(
-            lr=1e-3,
-            enable_clipping=True,
-            clipping_threshold=10.0,  # Very low threshold
-        )
+        with pytest.warns(UserWarning, match="clipping_threshold"):
+            muon_config = MuonClipConfig(
+                lr=1e-3,
+                enable_clipping=True,
+                clipping_threshold=10.0,  # Very low threshold
+            )
 
         optimizer = MuonClipOptimizer(model_instance, config, muon_config)
 
@@ -213,6 +381,29 @@ class TestMuonClipOptimizer:
         # Check weight changed
         final_weight = qkv_param.data
         assert not torch.allclose(initial_weight, final_weight)
+
+    def test_clipping_interval_skips_steps(self, model):
+        """Ensure clipping only runs on the configured interval."""
+        model_instance, config = model
+        muon_config = MuonClipConfig(enable_clipping=True, clipping_interval=2)
+        optimizer = MuonClipOptimizer(model_instance, config, muon_config)
+
+        for step in range(3):
+            optimizer.prepare_for_forward(
+                update_step=optimizer._step, is_last_microbatch=True
+            )
+            input_ids = torch.randint(0, 1000, (2, 64))
+            output = model_instance(input_ids)
+            loss = output.sum()
+            loss.backward()
+            optimizer.step()
+            metrics = optimizer.get_metrics()
+            optimizer.zero_grad()
+
+            if step % 2 == 0:
+                assert "train/max_attention_logit" in metrics
+            else:
+                assert "train/max_attention_logit" not in metrics
 
     def test_muon_only(self, model):
         """Test Muon-only mode (no clipping)."""

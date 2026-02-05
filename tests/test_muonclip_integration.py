@@ -5,8 +5,9 @@ Run: python tests/test_muonclip_integration.py
 """
 
 import torch
+
 from neobert.model import NeoBERT, NeoBERTConfig
-from neobert.optimizer import MuonClipOptimizer, MuonClipConfig
+from neobert.optimizer import MuonClipConfig, MuonClipOptimizer
 
 
 def test_training_loop():
@@ -22,7 +23,7 @@ def test_training_loop():
         num_attention_heads=8,
         intermediate_size=1024,
         vocab_size=5000,
-        max_position_embeddings=256,
+        max_length=256,
         flash_attention=False,
         hidden_act="gelu",
         rope=False,
@@ -109,7 +110,7 @@ def test_comparison_with_adamw():
         num_attention_heads=4,
         intermediate_size=512,
         vocab_size=1000,
-        max_position_embeddings=128,
+        max_length=128,
         flash_attention=False,
         hidden_act="gelu",
         rope=False,
@@ -189,12 +190,11 @@ def test_distributed_compatibility():
         print("✓ Ready for distributed training (DDP/DeepSpeed)")
     except Exception as e:
         print(f"✗ Failed to create optimizer: {e}")
-        return False
+        raise AssertionError("Failed to create MuonClip optimizer") from e
 
     print("=" * 60)
     print("✅ Distributed compatibility test passed!")
     print("=" * 60)
-    return True
 
 
 if __name__ == "__main__":

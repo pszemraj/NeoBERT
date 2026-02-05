@@ -1,502 +1,184 @@
 # Training Guide
 
-This guide covers pretraining and fine-tuning NeoBERT models.
+This guide covers pretraining and fine-tuning NeoBERT models. It focuses on **how to launch runs**; configuration details live in [docs/configuration.md](configuration.md).
 
 > [!TIP]
-> Use [`scripts/README.md`](/scripts/README.md) as the directory map for CLI entry points. The sections below describe how to run the key scripts and how they relate to the configuration system.
+> Use [scripts/README.md](../scripts/README.md) as the directory map for CLI entry points.
 
 ## Script Entry Points
 
-| Script                                                             | Purpose                                                                                                                | Primary Reference                                            |
-| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| `scripts/pretraining/pretrain.py`                                  | Full NeoBERT pretraining loop with DeepSpeed, FlashAttention, optional streaming datasets, and dot-notation overrides. | This guide (Pretraining, Monitoring Training, Training Tips) |
-| `scripts/pretraining/preprocess.py`                                | Tokenize raw corpora into training-ready shards that match your config’s tokenizer choices.                            | Dataset Preparation                                          |
-| `scripts/pretraining/longer_seq.py`                                | Continue pretraining with longer context lengths without starting from scratch.                                        | Pretraining → Vocabulary & Sequence Extensions               |
-| `scripts/contrastive/download.py`                                  | Fetch contrastive datasets used in SimCSE-style workflows.                                                             | Contrastive Learning                                         |
-| `scripts/contrastive/preprocess.py`                                | Normalize and tokenize downloaded contrastive corpora.                                                                 | Contrastive Learning                                         |
-| `scripts/contrastive/finetune.py`                                  | Run contrastive fine-tuning on top of pretrained checkpoints.                                                          | Contrastive Learning                                         |
-| `scripts/evaluation/run_glue.py`, `scripts/evaluation/run_mteb.py` | Evaluation entry points once training is complete.                                                                     | [Evaluation Guide](/docs/evaluation.md)                     |
-| `scripts/export-hf/export.py`, `scripts/export-hf/validate.py`     | Export checkpoints to Hugging Face format and validate the outputs.                                                    | [Export Guide](/docs/export.md)                             |
+| Script                              | Purpose                               | Reference                                     |
+| ----------------------------------- | ------------------------------------- | --------------------------------------------- |
+| `scripts/pretraining/pretrain.py`   | Pretraining (MLM)                     | This guide (Pretraining, Checkpointing, Tips) |
+| `scripts/pretraining/preprocess.py` | Tokenize raw corpora into shards      | Dataset Preparation                           |
+| `scripts/pretraining/longer_seq.py` | Continue training with longer context | Pretraining Tips                              |
+| `scripts/contrastive/download.py`   | Fetch contrastive datasets            | Contrastive Learning                          |
+| `scripts/contrastive/preprocess.py` | Normalize/tokenize contrastive data   | Contrastive Learning                          |
+| `scripts/contrastive/finetune.py`   | Contrastive fine-tuning               | Contrastive Learning                          |
+| `scripts/evaluation/run_glue.py`    | GLUE evaluation                       | [Evaluation Guide](evaluation.md)             |
+| `scripts/evaluation/run_mteb.py`    | MTEB evaluation                       | [Evaluation Guide](evaluation.md)             |
+| `scripts/export-hf/export.py`       | Export to Hugging Face                | [Export Guide](export.md)                     |
 
 ## Pretraining
 
 ### Basic Pretraining
 
 ```bash
-# Run pretraining with default config
-python scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml
-
-# Override specific settings via CLI
+# Standard pretraining config
 python scripts/pretraining/pretrain.py \
-    --config configs/pretrain_neobert.yaml \
-    --trainer.per_device_train_batch_size 64 \
-    --optimizer.lr 2e-4 \
-    --trainer.max_steps 100000
-```
+  configs/pretraining/pretrain_neobert.yaml
 
-### Key Configuration Options
-
-```yaml
-# Model architecture
-model:
-  name_or_path: neobert-100m
-  hidden_size: 768
-  num_hidden_layers: 12
-  num_attention_heads: 12
-  intermediate_size: 3072
-  vocab_size: 30522          # Initial value - see note below
-  max_position_embeddings: 512
-  hidden_act: swiglu        # Modern activation
-  normalization_type: rmsnorm  # RMSNorm instead of LayerNorm
-  use_rope: true           # RoPE positional encoding
-  rope_theta: 10000
-  flash_attention: true    # Enable Flash Attention 2
-
-# Training settings
-trainer:
-  output_dir: ./outputs/neobert_100m
-  max_steps: 1000000
-  per_device_train_batch_size: 32
-  gradient_accumulation_steps: 1
-  eval_strategy: steps
-  eval_steps: 10000
-  save_strategy: steps
-  save_steps: 10000
-  logging_steps: 100
-  mixed_precision: bf16    # Always use bf16
-  tf32: true              # Enable TensorFloat32
-  dataloader_num_workers: 4
-
-# Optimizer
-optimizer:
-  name: adamw
-  lr: 1e-4
-  weight_decay: 0.01
-  betas: [0.9, 0.999]
-  eps: 1e-8
-
-# Scheduler
-scheduler:
-  name: cosine
-  warmup_steps: 10000
-  min_lr_ratio: 0.1
-```
-
-### Multi-GPU Training with DeepSpeed
-
-The pretraining pipeline uses DeepSpeed for efficient multi-GPU training:
-
-```bash
-# DeepSpeed is automatically configured based on your system
-python scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml
-
-# The script auto-detects GPUs and configures:
-# - ZeRO Stage 2 optimization
-# - FP16/BF16 mixed precision
-# - Gradient accumulation
-# - CPU offloading if needed
-```
-
-DeepSpeed configuration is handled automatically in `src/neobert/training/pretraining.py`:
-
-- Detects available GPUs
-- Configures optimal ZeRO stage
-- Enables mixed precision based on hardware
-- Sets up gradient accumulation
-
-### Vocabulary Size Optimization
-
-When training from scratch, NeoBERT automatically rounds the vocabulary size to the nearest multiple of 128 for GPU efficiency. This happens transparently:
-
-1. **Config File**: Specify your tokenizer's base vocab_size (e.g., 30522 for BERT)
-2. **Runtime**: The trainer calculates the actual tokenizer size including special tokens
-3. **Optimization**: Rounds up to nearest multiple of 128 (e.g., 30522 → 30592)
-4. **Propagation**: This optimized size is used for:
-   - Model embedding/decoder matrices
-   - Saved checkpoint configs
-   - WandB logging
-   - HuggingFace exports
-
-Example with ModernBERT tokenizer:
-
-- Base vocab_size: 50280
-- With special tokens: 50373
-- Optimized (rounded): 50432
-
-This ensures optimal GPU performance while maintaining compatibility across the pipeline.
-
-### Streaming Datasets
-
-For large datasets that don't fit in memory:
-
-```yaml
-dataset:
-  name: "common-pile/comma_v0.1_training_dataset"
-  streaming: true
-  max_seq_length: 512
-  mlm_probability: 0.15
-  shuffle_buffer_size: 10000
-  num_workers: 0  # Must be 0 for streaming
-```
-
-Benefits:
-
-- No need to download entire dataset upfront
-- Tokenization happens on-the-fly
-- Memory efficient for multi-TB datasets
-- Automatic shuffling with buffer
-
-Example streaming config:
-
-```bash
+# Override a few settings
 python scripts/pretraining/pretrain.py \
-    --config configs/streaming_pretrain.yaml
+  configs/pretraining/pretrain_neobert.yaml \
+  --trainer.per_device_train_batch_size 64 \
+  --optimizer.lr 2e-4 \
+  --trainer.max_steps 100000
 ```
 
-### Monitoring Training
-
-With Weights & Biases (automatic):
-
-```yaml
-wandb:
-  project: neobert-pretraining
-  name: neobert-100m-run1
-  mode: online  # or offline, disabled
-```
-
-Key metrics tracked:
-
-- `train/loss`: MLM loss
-- `train/perplexity`: exp(loss)
-- `train/learning_rate`: Current LR
-- `train/global_step`: Training step
-- `eval/loss`: Validation loss (if eval enabled)
-- GPU memory usage and throughput
-
-### Experiment Tooling
-
-**Accelerate (multi-GPU launch)**
-Use `accelerate launch` when you need distributed training without writing bespoke launcher scripts:
+### CLI-only Smoke Run (No Custom YAML)
 
 ```bash
-accelerate launch scripts/pretraining/pretrain.py \
-    --config configs/pretrain_neobert.yaml \
-    --trainer.per_device_train_batch_size 16 \
-    --trainer.gradient_accumulation_steps 4
-```
-
-Create your accelerate config with `accelerate config` before launching to capture cluster-specific defaults.
-
-**Environment variables for secrets and caches**
-Keep API tokens and paths out of configs:
-
-```bash
-export WANDB_PROJECT=neobert-pretraining
-export WANDB_API_KEY=...  # optional if already stored by wandb login
-export HF_TOKEN=...       # for private model download/push
-export HF_DATASETS_CACHE=/fast/cache/datasets
-
-python scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml
-```
-
-Most scripts also read `NEOBERT_DEBUG=1` to force verbose logging regardless of CLI flags.
-
-**Hugging Face Hub publishing**
-After training, you can push directly from the Trainer or custom code:
-
-```python
-model.push_to_hub("my-username/my-neobert-model")
-tokenizer.push_to_hub("my-username/my-neobert-model")
-```
-
-For full export with metadata and validation, use the dedicated workflow in `docs/export.md`.
-
-### Checkpointing
-
-Checkpoints are saved in DeepSpeed format:
-
-```
-outputs/neobert_100m/
-├── model_checkpoints/
-│   ├── 10000/
-│   │   ├── global_step10000/
-│   │   │   ├── mp_rank_00_model_states.pt
-│   │   │   └── zero_pp_rank_*_*.pt
-│   │   ├── config.yaml
-│   │   └── tokenizer/
-│   ├── 20000/
-│   └── latest -> 20000/
-├── logs/
-└── wandb/
-```
-
-Resume from checkpoint:
-
-```bash
+# Short smoke test without writing a new config file
 python scripts/pretraining/pretrain.py \
-    --config configs/pretrain_neobert.yaml \
-    --resume_from outputs/neobert_100m/model_checkpoints/50000
+  configs/pretraining/pretrain_smoke.yaml \
+  --dataset.streaming false \
+  --datacollator.pack_sequences false \
+  --trainer.max_steps 50 \
+  --wandb.mode offline
 ```
 
-## Fine-Tuning
+### Configuration Highlights
 
-### GLUE Fine-Tuning
+See [docs/configuration.md](configuration.md) for the full schema. Key knobs used during pretraining:
 
-GLUE fine-tuning loads pretrained DeepSpeed checkpoints:
+- `model.*`: architecture (e.g., `hidden_size`, `num_hidden_layers`, `rope`, `rms_norm`, `xformers_attention`)
+- `dataset.*`: dataset source, streaming, splits, and tokenization settings
+- `tokenizer.*`: tokenizer name/path and max length
+- `datacollator.*`: MLM masking, padding, and packing (`mlm_probability`, `mask_all`, `pad_to_multiple_of`, `pack_sequences`)
+- `trainer.*`: batch size, steps, logging, checkpointing
+- `optimizer.*` / `scheduler.*`: learning rate and scheduling
+- `wandb.*`: tracking controls
 
-```bash
-# Fine-tune on specific GLUE task
-python scripts/evaluation/run_glue.py \
-    --config configs/glue/cola.yaml
+Note: `datacollator.pack_sequences` uses xFormers block-diagonal attention in pretraining
+and is experimental. It requires `model.xformers_attention: true` (xFormers installed).
+See `docs/dev.md`.
 
-# The config specifies the pretrained checkpoint:
-glue:
-  pretrained_checkpoint_dir: ./outputs/neobert_100m_100k
-  pretrained_checkpoint: 100000  # or "latest"
-```
+> [!NOTE]
+> All training entrypoints read `trainer.mixed_precision`. Use that field for consistency.
 
-See [Evaluation Guide](/docs/evaluation.md) for detailed GLUE instructions.
-
-### Contrastive Learning (SimCSE)
-
-```bash
-python scripts/contrastive/finetune.py \
-    --config configs/contrastive_neobert.yaml \
-    --model.pretrained_checkpoint_dir outputs/neobert_100m \
-    --model.pretrained_checkpoint 100000
-```
-
-### Custom Fine-Tuning
-
-Load a pretrained checkpoint for custom tasks:
-
-```python
-from src.neobert.model.neobert import NeoBERTForSequenceClassification
-from src.neobert.training.utils import load_pretrained_weights
-
-# Initialize model architecture
-model = NeoBERTForSequenceClassification(config)
-
-# Load pretrained weights from DeepSpeed checkpoint
-checkpoint_dir = "outputs/neobert_100m"
-checkpoint_id = 100000  # or "latest"
-model = load_pretrained_weights(model, checkpoint_dir, checkpoint_id)
-
-# Now fine-tune on your task
-```
-
-## Training Tips
-
-### Memory Optimization
-
-1. **Gradient Accumulation**:
-
-```yaml
-trainer:
-  gradient_accumulation_steps: 4
-  per_device_train_batch_size: 16
-  # Effective batch size = 16 * 4 = 64
-```
-
-2. **Gradient Checkpointing**:
-
-```yaml
-model:
-  gradient_checkpointing: true
-```
-
-3. **Mixed Precision (Always use BF16)**:
+Example (minimal):
 
 ```yaml
 trainer:
   mixed_precision: bf16
-  tf32: true  # Additional optimization for Ampere+
+  per_device_train_batch_size: 32
+  gradient_accumulation_steps: 1
+  gradient_checkpointing: false
+  gradient_clipping: null
 ```
 
-4. **DeepSpeed ZeRO Stages**:
+### Streaming Datasets
 
-- Stage 1: Optimizer state sharding
-- Stage 2: Optimizer + gradient sharding (default)
-- Stage 3: Full model sharding (for very large models)
-
-### Performance Optimization
-
-1. **Flash Attention 2**:
+Enable streaming in the dataset block:
 
 ```yaml
-model:
-  flash_attention: true  # Automatic fallback if not available
+dataset:
+  name: "wikipedia"
+  streaming: true
+  max_seq_length: 512
+  shuffle_buffer_size: 10000
+  num_workers: 0
 ```
 
-2. **SwiGLU with xFormers**:
+> [!IMPORTANT]
+> Streaming datasets cannot resume from checkpoints because data position is not preserved.
+> For resumable runs, pre-tokenize the dataset and disable streaming (see "Pre-tokenize data" below).
 
-```yaml
-model:
-  hidden_act: swiglu  # Optimized via xformers if available
+### Checkpointing
+
+Pretraining **model checkpoints** are written under `trainer.output_dir/model_checkpoints/`:
+
+```
+outputs/neobert_pretrain/
+└── model_checkpoints/
+    ├── 10000/
+    │   ├── state_dict.pt
+    │   └── config.yaml
+    ├── 20000/
+    └── latest
 ```
 
-3. **Efficient Data Loading**:
+Accelerator **training state** (for resumable runs) is written under `trainer.output_dir/checkpoints/`:
 
-```yaml
-trainer:
-  dataloader_num_workers: 4
-  dataloader_pin_memory: true
+```
+outputs/neobert_pretrain/
+└── checkpoints/
+    ├── 10000/
+    ├── 20000/
+    └── 30000/
 ```
 
-### Learning Rate Scheduling
-
-Available schedulers:
-
-```yaml
-scheduler:
-  name: cosine  # or linear, constant, polynomial
-  warmup_steps: 10000
-  min_lr_ratio: 0.1  # For cosine
-```
-
-## Debugging
-
-### Enable Debug Logging
+Resume from the latest accelerator checkpoint:
 
 ```bash
-# Preferred: enable verbose mode per invocation
-python scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml --debug
-
-# Or set the environment variable to keep debug logging on for multiple runs
-export NEOBERT_DEBUG=1
-python scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml
+python scripts/pretraining/pretrain.py \
+  configs/pretraining/pretrain_neobert.yaml \
+  --trainer.resume_from_checkpoint true
 ```
 
-### Common Issues
+Notes:
+- `trainer.resume_from_checkpoint` may be `true`/`"latest"`/`"auto"` to resume the newest
+  checkpoint under `output_dir/checkpoints`, or a string path to load directly.
+- The trainer resumes from the **latest numeric directory** under `output_dir/checkpoints/`.
+- `trainer.output_dir` must point at the original run directory so checkpoints can be found.
+- To resume from a specific step, remove newer checkpoint directories first.
 
-1. **NaN Loss**:
-   - Reduce learning rate: `--optimizer.lr 5e-5`
-   - Enable gradient clipping: `--trainer.max_grad_norm 1.0`
-   - Check for data issues with debug mode
+## Contrastive Learning
 
-2. **Slow Training**:
-   - Ensure Flash Attention is enabled (check logs)
-   - Verify mixed precision is active
-   - Check dataloader workers: `--trainer.dataloader_num_workers 4`
-
-3. **Out of Memory**:
-   - Reduce batch size
-   - Increase gradient accumulation
-   - Enable gradient checkpointing
-   - Use DeepSpeed ZeRO-3 for model sharding
-
-### Profiling
-
-```python
-# Enable PyTorch profiler
-with torch.profiler.profile(
-    activities=[torch.profiler.ProfilerActivity.CPU,
-                torch.profiler.ProfilerActivity.CUDA],
-    record_shapes=True
-) as prof:
-    output = model(**batch)
-print(prof.key_averages().table(sort_by="cuda_time_total"))
+```bash
+python scripts/contrastive/finetune.py \
+  configs/contrastive/contrastive_neobert.yaml
 ```
+
+For dataset setup, see the configs under `configs/contrastive/` and the scripts in `scripts/contrastive/`. Contrastive training requires `dataset.path` to point to the preprocessed dataset produced by `scripts/contrastive/preprocess.py`.
 
 ## Dataset Preparation
 
-### Using HuggingFace Datasets
-
-```yaml
-dataset:
-  name: wikipedia
-  config: 20220301.en
-  split: train
-  streaming: false
-```
-
-### Using Custom Text Data
-
-1. Prepare text files:
+### Pre-tokenize data
 
 ```bash
-data/
-├── train.txt
-├── validation.txt
-└── test.txt
+python scripts/pretraining/preprocess.py \
+  configs/pretraining/pretrain_neobert.yaml
 ```
 
-2. Configure dataset:
+Tokenizer settings are taken from `tokenizer.*`; the output path comes from `dataset.path`.
 
-```yaml
-dataset:
-  name: text
-  data_files:
-    train: data/train.txt
-    validation: data/validation.txt
-```
+Alternatively, set `dataset.pre_tokenize: true` in your pretraining config to have the trainer invoke
+`scripts/pretraining/tokenize_dataset.py` automatically. It will save to `dataset.pre_tokenize_output` if set,
+otherwise to `tokenized_data/<dataset-name>/`.
 
-### Tokenization Settings
+## Training Tips
 
-```yaml
-tokenizer:
-  name: bert-base-uncased
-  max_length: 512
-  padding: max_length
-  truncation: true
-  return_special_tokens_mask: true
-```
+- **Gradient checkpointing**: `trainer.gradient_checkpointing: true`
+- **Gradient clipping**: `trainer.gradient_clipping: 1.0`
+- **Mixed precision**: set `trainer.mixed_precision: bf16`
+- **torch.compile**: set `trainer.torch_compile: true` (skips automatically with DeepSpeed or if `torch.compile` is unavailable)
+- **xFormers attention**: `model.xformers_attention: true` requires `xformers` and right-padded (or packed) inputs
 
-## Production Training
+## Multi-GPU Launches
 
-### Recommended Settings for 100M Model
-
-```yaml
-# 100M parameter model
-model:
-  hidden_size: 768
-  num_hidden_layers: 12
-  num_attention_heads: 12
-  intermediate_size: 3072
-
-trainer:
-  max_steps: 1000000
-  per_device_train_batch_size: 64
-  gradient_accumulation_steps: 2
-  # Effective batch size: 64 * 2 * num_gpus
-
-optimizer:
-  lr: 1e-4
-  weight_decay: 0.01
-
-scheduler:
-  warmup_steps: 10000
-```
-
-### Multi-Node Training
-
-For multi-node setups:
+The training scripts use `accelerate` under the hood. For multi-GPU runs, use `accelerate launch`:
 
 ```bash
-# On each node
-torchrun --nproc_per_node=8 \
-         --nnodes=2 \
-         --node_rank=$RANK \
-         --master_addr=$MASTER_ADDR \
-         --master_port=$MASTER_PORT \
-         scripts/pretraining/pretrain.py --config configs/pretrain_neobert.yaml
+accelerate launch scripts/pretraining/pretrain.py \
+  configs/pretraining/pretrain_neobert.yaml \
+  --trainer.per_device_train_batch_size 16 \
+  --trainer.gradient_accumulation_steps 4
 ```
-
-## Developing New Scripts
-
-> [!NOTE]
-> **Config logging safety**: whenever you touch the tracking setup (e.g., how configs are sent to Weights & Biases), stick with `cfg.__dict__` or explicitly merge any attributes that are attached post-instantiation such as `_raw_model_dict`. Missing this drops core model metadata from dashboards.
-
-When adding new automation in `scripts/`, follow these guidelines:
-
-- **Reuse the configuration loader**: accept `--config` plus `argparse` passthrough for dot-notation overrides (`parser.parse_known_args()`).
-- **Support `--debug`**: toggle verbose logging and surface extra assertions when enabled.
-- **Document usage**: include docstrings and example CLI invocations; if the script has multiple modes, add a short section to the relevant documentation page.
-- **Handle errors cleanly**: validate inputs, print actionable messages, and exit with non-zero codes on failure.
-- **Add regression coverage**: prefer adding or updating tests under `tests/` (or tiny configs in `tests/configs/`) to keep the workflow reproducible.
 
 ## Next Steps
 
-- Learn about [Evaluation](/docs/evaluation.md) for GLUE and MTEB
-- Read [Architecture Guide](/docs/architecture.md) for model details
-- See [Configuration Guide](/docs/configuration.md) for config system
+- Evaluation recipes: [docs/evaluation.md](evaluation.md)
+- Config reference: [docs/configuration.md](configuration.md)
+- Export to HF: [docs/export.md](export.md)

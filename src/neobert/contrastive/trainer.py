@@ -1,9 +1,11 @@
+"""Training loop for contrastive and SimCSE-style finetuning."""
+
 import logging
 import os
-import re
 import shutil
 import signal
 import sys
+from types import FrameType
 
 import numpy
 
@@ -17,8 +19,6 @@ from datasets import load_from_disk
 # Deepspeed
 from deepspeed.utils import safe_get_full_fp32_param
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -26,10 +26,18 @@ from tqdm import tqdm
 from transformers import DataCollatorWithPadding
 
 # Configuration
+from ..collator.collator import _is_right_padded_mask, attention_mask_to_packed_seqlens
 from ..config import Config
 from ..model import NeoBERT, NeoBERTConfig
+from ..optimizer import get_optimizer
+from ..scheduler import get_scheduler, resolve_scheduler_steps
 from ..tokenizer import get_tokenizer
-from ..utils import prepare_wandb_config
+from ..training_utils import (
+    _maybe_compile_model,
+    _maybe_prepare_for_forward,
+    _resolve_resume_checkpoint,
+)
+from ..utils import configure_tf32, prepare_wandb_config
 from .datasets import get_bsz
 from .loss import SupConLoss
 from .metrics import Metrics
@@ -37,7 +45,33 @@ from .metrics import Metrics
 logger = logging.getLogger(__name__)
 
 
+def _build_packed_seqlens(attention_mask: torch.Tensor, *, name: str) -> torch.Tensor:
+    """Build packed sequence lengths from a right-padded attention mask.
+
+    :param torch.Tensor attention_mask: 0/1 attention mask of shape [B, S].
+    :param str name: Context label used for error messages.
+    :return torch.Tensor: Packed sequence lengths tensor on CPU.
+    :raises ValueError: If the mask is not right-padded.
+    """
+    if attention_mask.ndim != 2:
+        raise ValueError(
+            f"{name} attention_mask must be rank-2 [B, S], got {tuple(attention_mask.shape)}"
+        )
+    mask_cpu = attention_mask.detach()
+    if mask_cpu.is_cuda:
+        mask_cpu = mask_cpu.cpu()
+    if not _is_right_padded_mask(mask_cpu):
+        raise ValueError(
+            f"xFormers attention requires right-padded attention_mask; '{name}' is not "
+            "right-padded. Set tokenizer.padding_side='right' or disable "
+            "model.xformers_attention."
+        )
+    return attention_mask_to_packed_seqlens(mask_cpu)
+
+
 class CustomDataCollatorWithPadding(DataCollatorWithPadding):
+    """Collator that pads query/corpus/negative fields separately."""
+
     def __call__(self, features):
         features_queries = [
             {
@@ -87,50 +121,52 @@ class CustomDataCollatorWithPadding(DataCollatorWithPadding):
         return batch
 
 
-def trainer(cfg: Config):
+def trainer(cfg: Config) -> None:
+    """Run contrastive training loop.
+
+    :param Config cfg: Training configuration.
+    """
     # Check if dropout is non zero
     if cfg.model.dropout_prob <= 0:
         raise ValueError(
             "Dropout needs to be positive in order to perform steps of SimCSE."
+        )
+    if not cfg.dataset.path:
+        raise ValueError(
+            "Contrastive training requires dataset.path to point to a preprocessed dataset. "
+            "Run scripts/contrastive/preprocess.py to build it first."
         )
 
     # Get the last checkpoint id
     checkpoint_dir = os.path.join(cfg.trainer.output_dir, "checkpoints")
     model_checkpoint_dir = os.path.join(cfg.trainer.output_dir, "model_checkpoints")
     os.makedirs(model_checkpoint_dir, exist_ok=True)
-    iteration = 0
-    if (
-        cfg.trainer.resume_from_checkpoint
-        and os.path.exists(checkpoint_dir)
-        and len(os.listdir(checkpoint_dir)) > 0
-    ):
-        # This regular expression was taken from accelerator.load_state()
-        folders = os.listdir(checkpoint_dir)
-        iteration = (
-            max(
-                int(re.findall(r"[\/]?([0-9]+)(?=[^\/]*$)", folder)[0])
-                for folder in folders
-            )
-            + 1
-        )
+    resume_checkpoint_path, iteration = _resolve_resume_checkpoint(
+        cfg.trainer.resume_from_checkpoint,
+        checkpoint_dir,
+        cfg.trainer.output_dir,
+    )
 
-    # Accelerator object
+    save_total_limit = max(
+        getattr(cfg.trainer, "save_total_limit", 0), getattr(cfg.trainer, "max_ckpt", 0)
+    )
     project_config = ProjectConfiguration(
         cfg.trainer.output_dir,
         automatic_checkpoint_naming=True,
-        total_limit=2,  # Keep only 2 checkpoints
+        total_limit=save_total_limit or None,
         iteration=iteration,
     )
+    wandb_enabled = cfg.wandb.enabled and cfg.wandb.mode != "disabled"
     accelerator = Accelerator(
         step_scheduler_with_optimizer=False,  # enable manual control of the scheduler
         mixed_precision=cfg.trainer.mixed_precision,
         gradient_accumulation_steps=cfg.trainer.gradient_accumulation_steps,
-        log_with="wandb" if cfg.wandb.mode != "disabled" else None,
+        log_with="wandb" if wandb_enabled else None,
         project_config=project_config,
     )
 
     # Initialise the wandb run and pass wandb parameters
-    if cfg.wandb.mode != "disabled":
+    if wandb_enabled:
         os.makedirs(cfg.wandb.dir, exist_ok=True)
         config_dict = prepare_wandb_config(cfg)
         accelerator.init_trackers(
@@ -169,106 +205,204 @@ def trainer(cfg: Config):
     # Set the seed
     set_seed(cfg.seed)
 
-    # Enable TF32 on matmul and on cuDNN (if available)
-    if torch.cuda.is_available():
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+    # Configure TF32 for supported GPUs
+    configure_tf32(enabled=cfg.trainer.tf32, print_fn=accelerator.print)
 
     # Local and global counters
     metrics = Metrics()
     accelerator.register_for_checkpointing(metrics)
+    log_interval = max(1, cfg.trainer.logging_steps)
 
     # Tokenizer
     tokenizer = get_tokenizer(
-        pretrained_model_name_or_path=cfg.tokenizer.name,
+        pretrained_model_name_or_path=cfg.tokenizer.path or cfg.tokenizer.name,
         max_length=cfg.tokenizer.max_length,
-        vocab_size=cfg.tokenizer.vocab_size or cfg.model.vocab_size,
     )
+    use_xformers = bool(cfg.model.xformers_attention)
+    if use_xformers and tokenizer.padding_side != "right":
+        logger.warning(
+            "tokenizer.padding_side=%s is incompatible with xFormers packed attention; "
+            "disabling model.xformers_attention.",
+            tokenizer.padding_side,
+        )
+        use_xformers = False
 
     # Dataset
-    dataset = load_from_disk(os.path.join(cfg.dataset.path, "all"))
+    dataset_path = str(cfg.dataset.path)
+    dataset = load_from_disk(os.path.join(dataset_path, "all"))
     pretraining_dataset = load_from_disk(
-        cfg.dataset.path
+        dataset_path
     )  # Base dataset for pretraining SimCSE
 
     data_collator = CustomDataCollatorWithPadding(
-        tokenizer=tokenizer, return_tensors="pt", **cfg.datacollator
+        tokenizer=tokenizer,
+        return_tensors="pt",
+        pad_to_multiple_of=cfg.datacollator.pad_to_multiple_of,
     )
+    target_bsz = (
+        cfg.trainer.per_device_train_batch_size or cfg.trainer.train_batch_size or 16
+    )
+    dataloader_kwargs = {
+        "collate_fn": data_collator,
+        "num_workers": cfg.trainer.dataloader_num_workers,
+        "pin_memory": torch.cuda.is_available(),
+        "shuffle": True,
+    }
     dataloaders = {
         key: DataLoader(
             dataset[key],
-            collate_fn=data_collator,
-            batch_size=get_bsz(key, cfg.dataloader.target_bsz),
-            **cfg.dataloader.train,
+            batch_size=max(1, get_bsz(key, target_bsz)),
+            **dataloader_kwargs,
         )
         for key in dataset.keys()
-    } | {
-        "pretraining": DataLoader(
-            pretraining_dataset,
-            collate_fn=data_collator,
-            batch_size=cfg.dataloader.target_bsz,
-            **cfg.dataloader.train,
-        )
     }
+    dataloaders["pretraining"] = DataLoader(
+        pretraining_dataset,
+        batch_size=target_bsz,
+        **dataloader_kwargs,
+    )
 
-    total = sum(x**cfg.datasets.alpha for x in dataset.num_rows.values())
+    alpha = getattr(cfg.dataset, "alpha", 1.0)
+    total = sum(x**alpha for x in dataset.num_rows.values())
     sample_probs = {
-        key: num_rows**cfg.datasets.alpha / total
-        for key, num_rows in dataset.num_rows.items()
+        key: num_rows**alpha / total for key, num_rows in dataset.num_rows.items()
     }
 
     # Model
-    model = NeoBERT(config=NeoBERTConfig(**cfg.model, **cfg.tokenizer))
+    max_length = cfg.tokenizer.max_length or cfg.model.max_position_embeddings
+    model_config = NeoBERTConfig(
+        hidden_size=cfg.model.hidden_size,
+        num_hidden_layers=cfg.model.num_hidden_layers,
+        num_attention_heads=cfg.model.num_attention_heads,
+        intermediate_size=cfg.model.intermediate_size,
+        max_length=max_length,
+        vocab_size=cfg.model.vocab_size,
+        rope=cfg.model.rope,
+        rms_norm=cfg.model.rms_norm,
+        hidden_act=cfg.model.hidden_act,
+        dropout=cfg.model.dropout_prob,
+        norm_eps=cfg.model.norm_eps,
+        embedding_init_range=cfg.model.embedding_init_range,
+        decoder_init_range=cfg.model.decoder_init_range,
+        flash_attention=use_xformers,
+        ngpt=cfg.model.ngpt,
+        base_scale=cfg.model.base_scale,
+        pad_token_id=tokenizer.pad_token_id,
+    )
+    model = NeoBERT(config=model_config)
 
-    # Get path of desired checkpoint
-    if "ckpt" in cfg.model.keys() and cfg.model.ckpt != "latest":
-        tag = cfg.model.ckpt
-    else:
-        latest_path = os.path.join(cfg.model.ckpt_dir, "latest")
-        if os.path.isfile(latest_path):
-            with open(latest_path, "r") as fd:
-                tag = fd.read().strip()
+    def _resolve_checkpoint_tag(
+        checkpoint_dir: str, checkpoint: str | int | None
+    ) -> str:
+        """Resolve a checkpoint tag to a concrete step directory name.
+
+        :param str checkpoint_dir: Base directory that holds checkpoint step folders.
+        :param str | int | None checkpoint: Tag or step to resolve, or ``None``/"latest".
+        :return str: Resolved checkpoint step tag.
+        """
+        if checkpoint is None or str(checkpoint).lower() == "latest":
+            latest_path = os.path.join(checkpoint_dir, "latest")
+            if os.path.isfile(latest_path):
+                with open(latest_path, "r") as fd:
+                    return fd.read().strip()
+            steps = [
+                int(entry)
+                for entry in os.listdir(checkpoint_dir)
+                if entry.isdigit()
+                and os.path.isdir(os.path.join(checkpoint_dir, entry))
+            ]
+            if not steps:
+                raise ValueError(
+                    f"No checkpoint steps found in {checkpoint_dir} to resolve 'latest'."
+                )
+            return str(max(steps))
+        return str(checkpoint)
+
+    # Load weights if provided
+    pretrained_checkpoint_dir = None
+    pretrained_checkpoint = None
+    allow_random_weights = False
+    use_deepspeed = getattr(cfg, "use_deepspeed", False)
+    if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
+        pretrained_checkpoint_dir = cfg._raw_model_dict.get("pretrained_checkpoint_dir")
+        pretrained_checkpoint = cfg._raw_model_dict.get("pretrained_checkpoint")
+        allow_random_weights = cfg._raw_model_dict.get("allow_random_weights", False)
+        if "deepspeed" in cfg._raw_model_dict:
+            use_deepspeed = cfg._raw_model_dict.get("deepspeed")
+
+    if pretrained_checkpoint_dir:
+        if not pretrained_checkpoint_dir.endswith("model_checkpoints"):
+            pretrained_checkpoint_dir = os.path.join(
+                pretrained_checkpoint_dir, "model_checkpoints"
+            )
+        tag = _resolve_checkpoint_tag(
+            pretrained_checkpoint_dir,
+            pretrained_checkpoint or cfg.pretrained_checkpoint,
+        )
+        if use_deepspeed:
+            model = load_state_dict_from_zero_checkpoint(
+                model, pretrained_checkpoint_dir, tag=str(tag)
+            )
         else:
-            raise ValueError(f"Unable to find 'latest' file at {latest_path}")
-
-    # Load weights
-    if cfg.model.deepspeed:
-        model = load_state_dict_from_zero_checkpoint(
-            model, cfg.model.ckpt_dir, tag=str(tag)
+            state_dict_path = os.path.join(
+                pretrained_checkpoint_dir, str(tag), "state_dict.pt"
+            )
+            if not os.path.exists(state_dict_path):
+                raise ValueError(
+                    f"Expected state_dict.pt at {state_dict_path}. "
+                    "Set pretrained_checkpoint_dir or enable DeepSpeed loading."
+                )
+            state_dict = torch.load(state_dict_path, map_location="cpu")
+            # NOTE: We allow partial loads for flexibility; checkpoint/config mismatches
+            # are not validated beyond this strict=False load.
+            model.load_state_dict(state_dict, strict=False)
+    elif allow_random_weights:
+        logger.warning(
+            "allow_random_weights=true: contrastive training will start from random initialization."
         )
     else:
-        raise NotImplementedError
+        logger.warning(
+            "No pretrained checkpoint provided. Contrastive training will start from random initialization."
+        )
 
     # Log the number of parameters
     # Log model parameters to console instead of wandb
     model_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     accelerator.print(f"Model parameters: {model_params:,}")
 
+    model = _maybe_compile_model(model, cfg, accelerator, logger)
+
     # Optimizer
-    optimizer = AdamW(model.parameters(), **cfg.optimizer.hparams)
+    optimizer = get_optimizer(
+        model,
+        accelerator.distributed_type,
+        model_config=model_config,
+        name=cfg.optimizer.name,
+        lr=cfg.optimizer.lr,
+        weight_decay=cfg.optimizer.weight_decay,
+        betas=tuple(cfg.optimizer.betas),
+        eps=cfg.optimizer.eps,
+        muon_config=cfg.optimizer.muon_config,
+    )
 
     # Scheduler
-    scheduler1 = LinearLR(
-        optimizer,
-        start_factor=1e-4,
-        end_factor=1.0,
-        total_iters=cfg.scheduler.warmup_steps,
+    _, warmup_steps, decay_steps, constant_steps = resolve_scheduler_steps(
+        trainer_max_steps=cfg.trainer.max_steps,
+        total_steps=cfg.scheduler.total_steps,
+        warmup_steps=cfg.scheduler.warmup_steps,
+        warmup_percent=cfg.scheduler.warmup_percent,
+        decay_steps=cfg.scheduler.decay_steps,
+        decay_percent=cfg.scheduler.decay_percent,
+        constant_steps=0,
     )
-    scheduler2 = CosineAnnealingLR(
-        optimizer,
-        T_max=cfg.scheduler.decay_steps,
-        eta_min=cfg.optimizer.hparams.lr * 0.1,
-    )
-
-    def _constant_min_lr(_):
-        """LambdaLR multiplies the optimizer's lr with lr_lambda(epoch)"""
-        return 0.1
-
-    scheduler3 = LambdaLR(optimizer, lr_lambda=_constant_min_lr)
-    scheduler = SequentialLR(
-        optimizer,
-        [scheduler1, scheduler2, scheduler3],
-        [cfg.scheduler.warmup_steps, cfg.scheduler.decay_steps],
+    scheduler = get_scheduler(
+        optimizer=optimizer,
+        lr=cfg.optimizer.lr,
+        decay=cfg.scheduler.name,
+        warmup_steps=warmup_steps,
+        decay_steps=decay_steps,
+        final_ratio=cfg.scheduler.final_lr_ratio,
+        constant_steps=constant_steps,
     )
 
     # Accelerate
@@ -286,7 +420,7 @@ def trainer(cfg: Config):
     for key in keys[1:]:
         dataloaders[key] = accelerator.prepare(dataloaders[key])
 
-    if cfg.wandb.mode != "disabled" and accelerator.is_main_process:
+    if wandb_enabled and accelerator.is_main_process:
         wandb_watch = os.environ.get("WANDB_WATCH")
         if wandb_watch is not None:
             watch_mode = wandb_watch.strip().lower()
@@ -308,16 +442,31 @@ def trainer(cfg: Config):
                 )
 
     # Loss function
-    train_loss_fn = SupConLoss()
+    train_loss_fn = SupConLoss(temperature=cfg.contrastive.temperature)
 
-    # # Resume from the latest checkpoint
-    # skipped_train_dataloader = None
-    # if cfg.trainer.resume and os.path.exists(checkpoint_dir) and len(os.listdir(checkpoint_dir)) > 0:
-    #     accelerator.load_state()
-    #     skipped_train_dataloader = accelerator.skip_first_batches(train_dataloader, metrics["train/batches"] % len(train_dataloader))
+    # Resume from the latest checkpoint if available
+    if cfg.trainer.resume_from_checkpoint:
+        if resume_checkpoint_path is not None:
+            if not os.path.exists(resume_checkpoint_path):
+                raise FileNotFoundError(
+                    f"resume_from_checkpoint path not found: {resume_checkpoint_path}"
+                )
+            accelerator.load_state(resume_checkpoint_path)
+        elif os.path.exists(checkpoint_dir) and os.listdir(checkpoint_dir):
+            accelerator.load_state()
+        else:
+            logger.warning(
+                "resume_from_checkpoint is set but no checkpoints were found in %s",
+                checkpoint_dir,
+            )
 
     # Signal handler that save the accelerate state
-    def handler(signum, frame):
+    def handler(signum: int, frame: FrameType | None) -> None:
+        """Handle termination signals by checkpointing state.
+
+        :param int signum: Signal number received.
+        :param FrameType | None frame: Current stack frame.
+        """
         print(
             f"Signal {signum} received on rank {accelerator.process_index}, checkpointing..."
         )
@@ -345,9 +494,21 @@ def trainer(cfg: Config):
 
     while cfg.trainer.max_steps > metrics["train/steps"]:
         coin_flip = numpy.random.random()
+        pad_mask_negatives = None
+        packed_negatives = None
 
         # Choose from one of the finetuning datasets
-        if coin_flip > cfg.datasets.pretraining_prob:
+        def _prepare_attention(
+            mask: torch.Tensor, *, name: str
+        ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+            if use_xformers:
+                return None, _build_packed_seqlens(mask, name=name)
+            pad_mask = torch.where(mask == 1, float(0.0), float("-inf")).type(
+                dtype_pad_mask
+            )
+            return pad_mask, None
+
+        if coin_flip > cfg.dataset.pretraining_prob:
             # Randomly select which task to draw a batch from
             task_name = numpy.random.choice(
                 list(sample_probs.keys()), p=list(sample_probs.values())
@@ -355,17 +516,18 @@ def trainer(cfg: Config):
             dataloader = dataloaders[task_name]
             batch = next(iter(dataloader))
 
-            # Convert Hugging Face multiplicative mask to xformers additive mask
-            pad_mask_queries = torch.where(
-                batch["attention_mask_queries"] == 1, float(0.0), float("-inf")
-            ).type(dtype_pad_mask)
-            pad_mask_corpus = torch.where(
-                batch["attention_mask_corpus"] == 1, float(0.0), float("-inf")
-            ).type(dtype_pad_mask)
+            pad_mask_queries, packed_queries = _prepare_attention(
+                batch["attention_mask_queries"], name="queries"
+            )
+            pad_mask_corpus, packed_corpus = _prepare_attention(
+                batch["attention_mask_corpus"], name="corpus"
+            )
+            pad_mask_negatives = None
+            packed_negatives = None
             if "input_ids_negative" in batch.keys():
-                pad_mask_negatives = torch.where(
-                    batch["attention_mask_negative"] == 1, float(0.0), float("-inf")
-                ).type(dtype_pad_mask)
+                pad_mask_negatives, packed_negatives = _prepare_attention(
+                    batch["attention_mask_negative"], name="negative"
+                )
 
             # Update specific number of batches
             metrics[f"train/{task_name}_batches"] += 1
@@ -378,11 +540,11 @@ def trainer(cfg: Config):
             batch["input_ids_queries"] = batch["input_ids"]
             batch["input_ids_corpus"] = batch["input_ids"]
 
-            # Convert Hugging Face multiplicative mask to xformers additive mask
-            pad_mask_queries = torch.where(
-                batch["attention_mask"] == 1, float(0.0), float("-inf")
-            ).type(dtype_pad_mask)
+            pad_mask_queries, packed_queries = _prepare_attention(
+                batch["attention_mask"], name="pretraining"
+            )
             pad_mask_corpus = pad_mask_queries
+            packed_corpus = packed_queries
 
             # Update specific number of batches
             metrics["train/pretraining_batches"] += 1
@@ -393,13 +555,34 @@ def trainer(cfg: Config):
         # Under the no_sync context manager, PyTorch will skip synchronizing the gradients when .backward() is
         # called, and the first call to .backward() outside this context manager will trigger the synchronization.
         # Accumulating manually gives more flexibility and is compatible with TPUs.
-        if metrics["train/batches"] % cfg.trainer.gradient_accumulation_steps != 0:
+        is_last_microbatch = (
+            metrics["train/batches"] % cfg.trainer.gradient_accumulation_steps == 0
+        )
+        _maybe_prepare_for_forward(
+            optimizer,
+            update_step=metrics["train/steps"],
+            is_last_microbatch=is_last_microbatch,
+        )
+
+        if not is_last_microbatch:
             with accelerator.no_sync(model):
                 # Forward pass
-                queries = model(batch["input_ids_queries"], pad_mask_queries)
-                corpus = model(batch["input_ids_corpus"], pad_mask_corpus)
+                queries = model(
+                    batch["input_ids_queries"],
+                    pad_mask_queries,
+                    packed_seqlens=packed_queries,
+                )
+                corpus = model(
+                    batch["input_ids_corpus"],
+                    pad_mask_corpus,
+                    packed_seqlens=packed_corpus,
+                )
                 if "input_ids_negative" in batch.keys():
-                    negatives = model(batch["input_ids_negative"], pad_mask_negatives)
+                    negatives = model(
+                        batch["input_ids_negative"],
+                        pad_mask_negatives,
+                        packed_seqlens=packed_negatives,
+                    )
 
                 # Pool representations
                 pooled_queries = (
@@ -429,14 +612,26 @@ def trainer(cfg: Config):
 
                 # Log metrics
                 metrics["train/local_samples"] += batch["input_ids_queries"].shape[0]
-                metrics["train/local_sum_loss"] += train_loss
+                metrics["train/local_sum_loss"] += train_loss.item()
 
         else:
             # Forward pass
-            queries = model(batch["input_ids_queries"], pad_mask_queries)
-            corpus = model(batch["input_ids_corpus"], pad_mask_corpus)
+            queries = model(
+                batch["input_ids_queries"],
+                pad_mask_queries,
+                packed_seqlens=packed_queries,
+            )
+            corpus = model(
+                batch["input_ids_corpus"],
+                pad_mask_corpus,
+                packed_seqlens=packed_corpus,
+            )
             if "input_ids_negative" in batch.keys():
-                negatives = model(batch["input_ids_negative"], pad_mask_negatives)
+                negatives = model(
+                    batch["input_ids_negative"],
+                    pad_mask_negatives,
+                    packed_seqlens=packed_negatives,
+                )
 
             # Pool representations
             pooled_queries = (
@@ -475,57 +670,59 @@ def trainer(cfg: Config):
             pbar.update(1)
             metrics["train/steps"] += 1
             metrics["train/local_samples"] += batch["input_ids_queries"].shape[0]
-            metrics["train/local_sum_loss"] += train_loss
+            metrics["train/local_sum_loss"] += train_loss.item()
 
-            if metrics["train/steps"] % cfg.wandb.log_interval == 0:
+            if metrics["train/steps"] % log_interval == 0:
                 # https://deepspeed.readthedocs.io/en/latest/zero3.html#deepspeed.utils.safe_get_full_grad
                 if accelerator.distributed_type is DistributedType.DEEPSPEED:
                     metrics["train/grad_norm"] = model.get_global_grad_norm()  # .item()
-                    metrics["train/weight_norm"] = (
-                        sum(
-                            [
-                                safe_get_full_fp32_param(p).norm(2) ** 2
-                                for p in model.parameters()
-                            ]
-                        )
-                        ** 0.5
-                    ).item()
+                    if cfg.trainer.log_weight_norms and accelerator.is_main_process:
+                        metrics["train/weight_norm"] = (
+                            sum(
+                                [
+                                    safe_get_full_fp32_param(p).norm(2) ** 2
+                                    for p in model.parameters()
+                                ]
+                            )
+                            ** 0.5
+                        ).item()
                 # DDP
                 else:
                     metrics["train/grad_norm"] = (
                         sum([p.grad.norm(2) ** 2 for p in model.parameters()]) ** 0.5
                     ).item()
-                    metrics["train/weight_norm"] = (
-                        sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5
-                    ).item()
+                    if cfg.trainer.log_weight_norms and accelerator.is_main_process:
+                        metrics["train/weight_norm"] = (
+                            sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5
+                        ).item()
 
                 metrics["train/learning_rate"] = optimizer.param_groups[0]["lr"]
                 metrics.log(accelerator)
 
-            # Save the accelerator state from the main process
-            if metrics["train/steps"] % cfg.trainer.accelerate.save_steps == 0:
+            # Save accelerator state
+            if metrics["train/steps"] % cfg.trainer.save_steps == 0:
                 accelerator.save_state()
 
             # Save the pytorch model
-            if metrics["train/steps"] % cfg.trainer.model.save_steps == 0:
-                if cfg.trainer.model.max_ckpt is not None:
+            if metrics["train/steps"] % cfg.trainer.save_steps == 0:
+                save_total_limit = getattr(cfg.trainer, "save_total_limit", 0)
+                max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
+                limit = max(save_total_limit, max_ckpt)
+                if limit > 0:
                     # Delete checkpoints if there are too many
                     files = os.listdir(model_checkpoint_dir)
                     iterations = [int(f) for f in files if f.isdigit()]
                     iterations.sort()
 
                     # Remove files with the smallest iterations until the limit is met
-                    while (
-                        iterations is not None
-                        and len(iterations) >= cfg.trainer.model.max_ckpt
-                    ):
+                    while iterations and len(iterations) >= limit:
                         file_to_remove = iterations.pop(0)
                         shutil.rmtree(
                             os.path.join(model_checkpoint_dir, str(file_to_remove))
                         )
                         print(
                             f"Deleted old model checkpoint {file_to_remove} due to limit "
-                            f"(max_ckpt = {cfg.trainer.model.max_ckpt})"
+                            f"(limit = {limit})"
                         )
                 # Save the checkpoint
                 if accelerator.distributed_type is DistributedType.DEEPSPEED:

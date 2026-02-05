@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 
 import torch
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
@@ -122,7 +123,11 @@ TASK_TYPE = {
 }
 
 
-def evaluate_mteb(cfg):
+def evaluate_mteb(cfg: Any) -> None:
+    """Evaluate a model on the MTEB benchmark.
+
+    :param Any cfg: Configuration object with MTEB settings.
+    """
     # Get MTEB-specific config (we'll add these to Config later)
     mteb_task_type = getattr(cfg, "mteb_task_type", "all")
     mteb_batch_size = getattr(cfg, "mteb_batch_size", 32)
@@ -164,7 +169,6 @@ def evaluate_mteb(cfg):
     tokenizer = get_tokenizer(
         pretrained_model_name_or_path=cfg.tokenizer.name,
         max_length=cfg.tokenizer.max_length,
-        vocab_size=cfg.tokenizer.vocab_size or cfg.model.vocab_size,
     )
 
     # Instantiate model
@@ -224,11 +228,12 @@ def evaluate_mteb(cfg):
             )
 
 
-def main():
+def main() -> None:
+    """Run the MTEB evaluation CLI."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Run MTEB evaluation")
-    parser.add_argument("--config", type=str, required=True, help="Path to config file")
+    parser.add_argument("config", type=str, help="Path to config file")
     parser.add_argument(
         "--model_name_or_path", type=str, required=True, help="Model path"
     )
@@ -243,7 +248,7 @@ def main():
 
     # Load configuration
     config = ConfigLoader.load(args.config, remaining)
-    config.model_name_or_path = args.model_name_or_path
+    config.trainer.output_dir = args.model_name_or_path
     config.task_types = args.task_types.split(",") if args.task_types != "all" else None
     config.output_folder = args.output_folder
 

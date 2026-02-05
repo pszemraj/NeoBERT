@@ -9,12 +9,12 @@ import time
 import torch
 import torch.nn.functional as F
 from datasets import load_dataset
+from torch.optim import AdamW
 from transformers import AutoTokenizer
 
 from neobert.collator import get_collator
 from neobert.model import NeoBERT, NeoBERTConfig
-from neobert.optimizer import MuonClipOptimizer, MuonClipConfig
-from torch.optim import AdamW
+from neobert.optimizer import MuonClipConfig, MuonClipOptimizer
 
 
 def build_fineweb_stream(tokenizer: AutoTokenizer, seq_len: int = 128):
@@ -58,14 +58,14 @@ def train_model(
 
     losses = []
     step_times = []
-    start_time = time.time()
+    start_time = time.perf_counter()
     step = 0
 
     print(f"\nTraining with {optimizer_name} for {duration_seconds} seconds...")
     print("-" * 60)
 
-    while time.time() - start_time < duration_seconds:
-        step_start = time.time()
+    while time.perf_counter() - start_time < duration_seconds:
+        step_start = time.perf_counter()
 
         batch = batch_provider()
         input_ids = batch["input_ids"].to(device)
@@ -75,6 +75,8 @@ def train_model(
             pad_mask = pad_mask.to(device)
 
         # Forward pass
+        if hasattr(optimizer, "prepare_for_forward"):
+            optimizer.prepare_for_forward(update_step=step, is_last_microbatch=True)
         hidden_states = model(input_ids, pad_mask)
 
         # Simple MLM head (just a linear projection for testing)
@@ -101,12 +103,12 @@ def train_model(
 
         # Track metrics
         losses.append(loss.item())
-        step_times.append(time.time() - step_start)
+        step_times.append(time.perf_counter() - step_start)
         step += 1
 
         # Log progress
         if step % 50 == 0:
-            elapsed = time.time() - start_time
+            elapsed = time.perf_counter() - start_time
             avg_loss = sum(losses[-50:]) / min(50, len(losses))
 
             # Get MuonClip metrics if available
@@ -122,7 +124,7 @@ def train_model(
                 f"  Step {step:4d} | Time: {elapsed:5.1f}s | Loss: {avg_loss:.4f}{extra_info}"
             )
 
-    training_time = time.time() - start_time
+    training_time = time.perf_counter() - start_time
 
     # Calculate final metrics
     final_avg_loss = sum(losses[-100:]) / min(100, len(losses))
@@ -166,7 +168,7 @@ def main():
         num_attention_heads=6,
         intermediate_size=1536,
         vocab_size=tokenizer.vocab_size,
-        max_position_embeddings=seq_len,
+        max_length=seq_len,
         flash_attention=False,  # Disable for compatibility
         hidden_act="gelu",
         rope=False,  # Disable for simplicity
@@ -184,7 +186,6 @@ def main():
     streaming_dataset = build_fineweb_stream(tokenizer, seq_len=seq_len)
     collator = get_collator(
         tokenizer=tokenizer,
-        dtype=torch.float32,
         mlm_probability=0.15,
         pad_to_multiple_of=8,
         max_length=seq_len,
@@ -199,7 +200,7 @@ def main():
             nonlocal stream_iterator
             samples = list(itertools.islice(stream_iterator, batch_size))
             while len(samples) < batch_size:
-                new_seed = int(time.time())
+                new_seed = time.perf_counter_ns()
                 stream_iterator = iter(
                     streaming_dataset.shuffle(buffer_size=8192, seed=new_seed)
                 )

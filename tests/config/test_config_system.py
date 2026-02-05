@@ -7,6 +7,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+from tokenizers import Tokenizer, models, pre_tokenizers
+from transformers import PreTrainedTokenizerFast
+
 from neobert.config import (
     Config,
     ConfigLoader,
@@ -17,6 +21,7 @@ from neobert.config import (
     TokenizerConfig,
     TrainerConfig,
     load_config_from_args,
+    round_up_to_multiple,
 )
 
 
@@ -43,6 +48,7 @@ class TestConfigSystem(unittest.TestCase):
         self.assertEqual(config.model.hidden_size, 768)
         self.assertEqual(config.model.num_hidden_layers, 12)
         self.assertEqual(config.trainer.per_device_train_batch_size, 16)
+        self.assertFalse(config.trainer.torch_compile)
 
     def test_config_from_yaml(self):
         """Test loading config from YAML file."""
@@ -65,7 +71,6 @@ class TestConfigSystem(unittest.TestCase):
         # Simulate command line args
         test_args = [
             "script.py",
-            "--config",
             str(config_path),
             "--model.hidden_size",
             "128",
@@ -73,6 +78,12 @@ class TestConfigSystem(unittest.TestCase):
             "5e-4",
             "--trainer.per_device_train_batch_size",
             "4",
+            "--dataset.streaming",
+            "false",
+            "--datacollator.pack_sequences",
+            "true",
+            "--trainer.torch_compile",
+            "true",
         ]
 
         # Mock sys.argv
@@ -88,6 +99,9 @@ class TestConfigSystem(unittest.TestCase):
             self.assertEqual(
                 config.trainer.per_device_train_batch_size, 4
             )  # Overridden from 2
+            self.assertFalse(config.dataset.streaming)
+            self.assertTrue(config.datacollator.pack_sequences)
+            self.assertTrue(config.trainer.torch_compile)
 
             # Check that non-overridden values remain the same
             self.assertEqual(config.model.num_hidden_layers, 2)
@@ -104,7 +118,7 @@ model:
   num_attention_heads: 2
 trainer:
   output_dir: "./test"
-  learning_rate: 1e-4
+  use_cpu: true
 optimizer:
   name: "adamw"
   lr: 1e-4
@@ -114,7 +128,6 @@ optimizer:
         try:
             test_args = [
                 "script.py",
-                "--config",
                 temp_config_path,
                 "--model.hidden_size",
                 "256",
@@ -184,6 +197,70 @@ optimizer:
 
         self.assertIsInstance(config_dict, dict)
         self.assertEqual(config_dict["model"]["hidden_size"], 128)
+
+    def test_config_save_includes_task_sections(self):
+        """Ensure saved configs include glue and contrastive sections."""
+        config = Config()
+        config.glue.task_name = "sst2"
+        config.contrastive.temperature = 0.1
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            path = f.name
+
+        try:
+            ConfigLoader.save(config, path)
+            with open(path, "r") as fh:
+                data = yaml.safe_load(fh)
+
+            self.assertIn("glue", data)
+            self.assertIn("contrastive", data)
+            self.assertEqual(data["glue"]["task_name"], "sst2")
+            self.assertEqual(data["contrastive"]["temperature"], 0.1)
+        finally:
+            os.unlink(path)
+
+    def test_unknown_keys_raise(self):
+        """Ensure unknown config keys raise a clear error."""
+        config_data = {
+            "model": {"hidden_size": 32, "unknown_key": 123},
+            "trainer": {"output_dir": "./tmp"},
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            path = f.name
+            yaml.safe_dump(config_data, f)
+
+        try:
+            with self.assertRaises(ValueError):
+                ConfigLoader.load(path)
+        finally:
+            os.unlink(path)
+
+    def test_preprocess_uses_tokenizer_path(self):
+        """Ensure tokenizer path is preferred when provided."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            vocab = {"[PAD]": 0, "[UNK]": 1, "[MASK]": 2, "hello": 3}
+            raw_tokenizer = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
+            raw_tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+            tokenizer = PreTrainedTokenizerFast(
+                tokenizer_object=raw_tokenizer,
+                pad_token="[PAD]",
+                unk_token="[UNK]",
+                mask_token="[MASK]",
+            )
+            tokenizer.save_pretrained(tmpdir)
+
+            config = Config()
+            config.trainer.use_cpu = False
+            config.tokenizer.name = "non-existent-tokenizer"
+            config.tokenizer.path = tmpdir
+            config.tokenizer.vocab_size = len(tokenizer)
+            config.model.vocab_size = len(tokenizer)
+
+            processed = ConfigLoader.preprocess_config(config, resolve_vocab_size=True)
+
+            expected_vocab_size = round_up_to_multiple(len(tokenizer), 128)
+            self.assertEqual(processed.model.vocab_size, expected_vocab_size)
 
     def test_missing_config_file(self):
         """Test handling of missing config file."""

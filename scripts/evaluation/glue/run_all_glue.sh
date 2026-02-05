@@ -52,7 +52,7 @@ for task in "${TASKS[@]}"; do
     fi
     cmd=(
         python "${SCRIPT_DIR}/../run_glue.py"
-        --config "${CONFIG_PATH}"
+        "${CONFIG_PATH}"
     )
 
     # Add model override if provided

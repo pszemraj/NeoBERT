@@ -2,26 +2,26 @@ task: "pretraining"
 
 model:
   hidden_size: 768
-  num_hidden_layers: 28  # Full NeoBERT size (250M params)
+  num_hidden_layers: 28 # Full NeoBERT size (250M params)
   num_attention_heads: 12
   intermediate_size: 3072
   dropout_prob: 0.0
-  vocab_size: 31999  # BEE-spoke-data tokenizer vocab size
+  vocab_size: 31999 # BEE-spoke-data tokenizer vocab size
   max_position_embeddings: 4096
-  flash_attention: true
+  xformers_attention: true
   ngpt: false
-  hidden_act: "swiglu"  # Requires xformers
+  hidden_act: "swiglu" # Requires xformers
   rope: true
   rms_norm: true
 
 dataset:
   name: "EleutherAI/SmolLM2-1.7B-stage-4-100B"
-  streaming: true  # Stream this large dataset
+  streaming: true # Stream this large dataset
   num_proc: 8
   num_workers: 4
   max_seq_length: 1024
   train_split: "train"
-  eval_split: "train[:1%]"  # Use small subset for eval
+  eval_split: "train[:1%]" # Use small subset for eval
 
 tokenizer:
   name: "BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp"
@@ -31,23 +31,20 @@ tokenizer:
 datacollator:
   mlm_probability: 0.2
   pad_to_multiple_of: 8
+  pack_sequences: true
 
 trainer:
   output_dir: "./outputs/smollm2_custom_tokenizer"
-  run_name: "neobert_250m_smollm2_32k"
-  max_steps: 100000  # 100k steps as requested
-  per_device_train_batch_size: 16  # Reduced for 250M model
-  per_device_eval_batch_size: 16
-  gradient_accumulation_steps: 4  # Increased to maintain effective batch size
-  learning_rate: 1e-4
-  warmup_steps: 5000
+  max_steps: 100000 # 100k steps as requested
+  per_device_train_batch_size: 8 # Fit 250M model on single 32GB GPU
+  per_device_eval_batch_size: 8
+  gradient_accumulation_steps: 8 # Keep effective batch size similar
   logging_steps: 25
   eval_steps: 5000
   save_steps: 10000
   dataloader_num_workers: 4
-  remove_unused_columns: false
   report_to: ["wandb"]
-  bf16: true
+  mixed_precision: "bf16"
   gradient_checkpointing: false
   resume_from_checkpoint: false
 
@@ -70,4 +67,3 @@ wandb:
 
 # Additional settings
 seed: 69
-mixed_precision: "bf16"

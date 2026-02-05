@@ -8,7 +8,7 @@ model:
   dropout_prob: 0.1  # Important for SimCSE-style training
   vocab_size: 30522
   max_position_embeddings: 512
-  flash_attention: true
+  xformers_attention: true
   ngpt: false
   hidden_act: "swiglu"
 
@@ -24,18 +24,14 @@ tokenizer:
 
 trainer:
   output_dir: "./outputs/contrastive"
-  run_name: "neobert_contrastive"
   num_train_epochs: 1
   per_device_train_batch_size: 128
   per_device_eval_batch_size: 256
   gradient_accumulation_steps: 1
-  learning_rate: 5e-5
-  warmup_steps: 100
   logging_steps: 100
   eval_steps: 1000
   save_steps: 1000
   dataloader_num_workers: 4
-  remove_unused_columns: false
   report_to: []
 
 contrastive:

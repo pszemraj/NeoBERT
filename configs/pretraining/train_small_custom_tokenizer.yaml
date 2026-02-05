@@ -8,7 +8,7 @@ model:
   dropout_prob: 0.0
   vocab_size: 32000  # Match the custom tokenizer
   max_position_embeddings: 512
-  flash_attention: true
+  xformers_attention: true
   ngpt: false
   hidden_act: "swiglu"  # Now compatible with flash attention (head_dim=64)
   rope: true
@@ -35,20 +35,16 @@ datacollator:
 
 trainer:
   output_dir: "./outputs/custom_bytebpe-tokenizer-32k_test"
-  run_name: "neobert_custom_bytebpe-tokenizer-32k_200steps"
   max_steps: 200
   per_device_train_batch_size: 8
   per_device_eval_batch_size: 32
   gradient_accumulation_steps: 2
-  learning_rate: 5e-4
-  warmup_steps: 20
   logging_steps: 10
   eval_steps: 100
   save_steps: 100
   dataloader_num_workers: 0
-  remove_unused_columns: false
   report_to: []
-  bf16: true  # Use bf16 on modern GPU
+  mixed_precision: "bf16"  # Use bf16 on modern GPU
   gradient_checkpointing: false
   resume_from_checkpoint: false
 
@@ -69,5 +65,4 @@ wandb:
 
 # Additional settings
 seed: 42
-mixed_precision: "bf16"
 debug: true

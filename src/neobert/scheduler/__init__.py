@@ -1,3 +1,5 @@
-__all__ = ["get_scheduler"]
+"""Learning-rate scheduler factory."""
 
-from .scheduler import get_scheduler
+__all__ = ["get_scheduler", "resolve_scheduler_steps"]
+
+from .scheduler import get_scheduler, resolve_scheduler_steps

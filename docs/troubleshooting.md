@@ -13,18 +13,18 @@ Common issues and their solutions when training and using NeoBERT.
 
 ### Configuration & CLI Issues
 
-- **Config validation errors**: verify YAML indentation, required fields, and value types. Run with `--debug` to print the resolved config and validation warnings.
+- **Config validation errors**: verify YAML indentation, required fields, and value types. Unknown keys are reported explicitly during config load; fix/remove those keys. `--debug` (pretraining only) prints vocab/tokenizer diagnostics, not a full config dump.
 - **Import errors**: ensure your virtual environment has `pip install -e .[dev]` applied and that you are inside the project root before invoking scripts.
-- **Slow data loading**: increase `trainer.dataloader_num_workers`, place datasets on faster storage, or enable streaming mode for giant corpora.
+- **Slow data loading**: increase `dataset.num_workers`, place datasets on faster storage, or enable streaming mode for giant corpora.
 
-### Flash Attention Issues During GLUE Evaluation
+### xFormers Attention Issues During GLUE Evaluation
 
-- **Symptom**: Launching GLUE evaluation with Flash Attention enabled produces runtime errors or crashes.
-- **Cause**: GLUE tasks use variable-length batches that are currently incompatible with Flash Attention's alignment requirements.
+- **Symptom**: Launching GLUE evaluation with xFormers memory-efficient attention enabled produces runtime errors or crashes.
+- **Cause**: GLUE tasks use variable-length batches that are currently incompatible with xFormers alignment requirements.
 - **Solution**:
-  1. When using the provided GLUE scripts/configs, no action is needed—Flash Attention is automatically disabled for you.
-  2. If you author custom launchers, set `model.flash_attention: false` (or pass `--model.flash_attention false`) before evaluation.
-  3. Restart the run after toggling the setting; mixed Flash Attention/eager runs in the same process can leave partially initialized CUDA kernels.
+  1. When using the provided GLUE scripts/configs, no action is needed; xFormers attention is automatically disabled for you.
+  2. If you author custom launchers, set `model.xformers_attention: false` (or pass `--model.xformers_attention false`) before evaluation.
+  3. Restart the run after toggling the setting; mixed xFormers/eager runs in the same process can leave partially initialized CUDA kernels.
 
 ### Model Checkpoint Corruption
 
@@ -42,7 +42,7 @@ torch.save(model.state_dict(), "checkpoint.pt")
 torch.save(accelerator.unwrap_model(model).state_dict(), "checkpoint.pt")
 ```
 
-This issue was fixed in `trainer.py` and `trainer_phase_2.py`.
+This issue was fixed in `trainer.py`.
 
 ### OOM During Training
 
@@ -50,23 +50,18 @@ This issue was fixed in `trainer.py` and `trainer_phase_2.py`.
 
 **Solutions**:
 
-1. Enable gradient checkpointing: `--model.gradient_checkpointing true`
+1. Enable gradient checkpointing: `--trainer.gradient_checkpointing true`
 2. Reduce batch size: `--trainer.per_device_train_batch_size 16`
 3. Use gradient accumulation: `--trainer.gradient_accumulation_steps 4`
-4. Enable mixed precision: `--trainer.fp16 true` or `--trainer.bf16 true`
+4. Enable mixed precision: `--trainer.mixed_precision bf16`
 
 ## Export Issues
 
 ### HuggingFace Model Fails to Load
 
-**Problem**: `AttributeError: 'NoneType' object has no attribute 'bool()'` when loading exported model.
+**Problem**: `AttributeError: 'NoneType' object has no attribute 'bool()'` or similar mask-handling errors when loading an exported model.
 
-**Solution**: The HF modeling file needs to handle None attention masks properly:
-
-```python
-# In modeling_neobert.py
-attn_mask=attention_mask.bool() if attention_mask is not None else None
-```
+**Solution**: Re-export with the latest `scripts/export-hf/export.py`, which bundles a modeling file that accepts `None`, bool, or additive attention masks. If you manually copied files, ensure `model.py`/`rotary.py` match the current repo versions.
 
 ### Missing Decoder Weights
 
@@ -74,8 +69,17 @@ attn_mask=attention_mask.bool() if attention_mask is not None else None
 
 **Solution**: Check that the export script correctly maps weights:
 
-- Training format: `decoder.weight`, `decoder.bias`
-- These should be preserved at the top level in HF format
+- Training format: `model.decoder.weight`, `model.decoder.bias`
+- These are mapped to top-level `decoder.*` weights in the HF export
+
+### Packed Sequences Not Supported
+
+**Problem**: Errors or OOMs when passing packed inputs (`cu_seqlens` /
+block-diagonal masks) to an exported model.
+
+**Solution**: Exported HF models are vanilla Transformers and expect standard
+attention masks on unpacked batches. Packing is a training-only feature; unpack
+inputs before export/inference.
 
 ## Inference Issues
 
@@ -120,7 +124,9 @@ attn_mask=attention_mask.bool() if attention_mask is not None else None
 1. Use batch processing for multiple inputs
 2. Enable CUDA if available: `model.cuda()`
 3. Use half precision: `model.half()` or `torch.autocast`
-4. Install Flash Attention: `pip install flash-attn`
+4. Install the appropriate attention backend:
+   - Training: `pip install xformers`
+   - Exported HF models: rely on PyTorch SDPA (flash/mem-efficient kernels are selected by PyTorch when available)
 
 ### High Memory Usage
 
@@ -133,27 +139,22 @@ attn_mask=attention_mask.bool() if attention_mask is not None else None
 
 ## Environment Issues
 
-### Flash Attention Not Available
+### Attention Backends
 
-**Problem**: Flash Attention fails to install or isn't detected.
+NeoBERT uses different backends depending on the code path:
 
-**Solution**:
+- **Training** uses `xformers.ops.memory_efficient_attention` when `model.xformers_attention: true`.
+- **Exported HF models** use PyTorch `scaled_dot_product_attention`; kernel selection
+  (flash/mem-efficient/math) is handled by PyTorch.
 
-```bash
-# Build from source for latest GPUs
-pip install flash-attn --no-build-isolation
-```
-
-### XFormers Compatibility
-
-**Problem**: XFormers not working with your PyTorch version.
-
-**Solution**:
+**If training backend is missing**:
 
 ```bash
-# Build from source
-pip install -v --no-build-isolation git+https://github.com/facebookresearch/xformers.git@main
+pip install xformers
 ```
+
+**If you want faster HF inference**: use a recent PyTorch build with SDPA/flash kernels.
+No extra dependency is required by default.
 
 ## Validation Tools
 
@@ -164,7 +165,7 @@ Use these scripts to diagnose issues:
 python scripts/export-hf/validate.py /path/to/exported/model
 
 # Test MLM predictions
-python scratch/mlm_predict.py /path/to/model --text "Test [MASK] sentence"
+python scripts/export-hf/mlm_predict.py /path/to/model --text "Test [MASK] sentence"
 
 # Run comprehensive tests
 python tests/run_tests.py
@@ -176,7 +177,7 @@ If you encounter issues not covered here:
 
 1. Check the [GitHub Issues](https://github.com/chandar-lab/NeoBERT/issues)
 2. Review the test outputs for clues
-3. Enable debug mode: `export NEOBERT_DEBUG=1`
+3. Enable debug mode: pass `--debug` or set `debug: true` in your config
 4. Open a new issue with:
    - Error message and stack trace
    - Config file used

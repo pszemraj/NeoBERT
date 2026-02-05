@@ -21,13 +21,83 @@ import logging
 import sys
 import warnings
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from transformers import AutoModel, AutoModelForMaskedLM, AutoTokenizer
 
 
+def _load_config(model_path: Path) -> Dict[str, Any]:
+    """Load config.json if present.
+
+    :param Path model_path: Model directory path.
+    :return dict[str, Any]: Parsed config mapping (empty if missing).
+    """
+    config_path = model_path / "config.json"
+    if not config_path.exists():
+        return {}
+    import json
+
+    with open(config_path, "r") as f:
+        return json.load(f)
+
+
+def _check_required_config_fields(config: Dict[str, Any]) -> Optional[str]:
+    """Verify config contains fields required by HF NeoBERT.
+
+    :param dict[str, Any] config: Loaded config mapping.
+    :return str | None: Issue summary if missing fields.
+    """
+    required = [
+        "hidden_size",
+        "num_hidden_layers",
+        "num_attention_heads",
+        "intermediate_size",
+        "vocab_size",
+        "max_position_embeddings",
+        "norm_eps",
+        "pad_token_id",
+        "rms_norm",
+        "rope",
+        "hidden_act",
+        "dropout",
+        "flash_attention",
+    ]
+    missing = [field for field in required if field not in config]
+    if missing:
+        return f"missing config fields: {missing}"
+    return None
+
+
+def _check_swiglu_layout(model: object, config: Dict[str, Any]) -> Optional[str]:
+    """Check that SwiGLU weights are unpacked (w1/w2/w3).
+
+    :param object model: Loaded model instance.
+    :param dict[str, Any] config: Loaded config mapping.
+    :return str | None: Issue description if layout is wrong, else None.
+    """
+    if not config:
+        return None
+    if str(config.get("hidden_act", "")).lower() != "swiglu":
+        return None
+    state = model.state_dict()
+    has_w12 = any(".ffn.w12." in key for key in state.keys())
+    has_w1 = any(".ffn.w1." in key for key in state.keys())
+    has_w2 = any(".ffn.w2." in key for key in state.keys())
+    has_w3 = any(".ffn.w3." in key for key in state.keys())
+    if has_w12:
+        return "packed SwiGLU weights (ffn.w12) found; expected unpacked w1/w2/w3"
+    if not (has_w1 and has_w2 and has_w3):
+        return "missing unpacked SwiGLU weights (w1/w2/w3)"
+    return None
+
+
 def validate_model_files(model_path: Path) -> List[str]:
+    """Check for required files in an exported model directory.
+
+    :param Path model_path: Model directory to inspect.
+    :return list[str]: Missing file names.
+    """
     # Project-specific expectations
     required_files = [
         "config.json",
@@ -39,12 +109,23 @@ def validate_model_files(model_path: Path) -> List[str]:
     missing = [f for f in required_files if not (model_path / f).exists()]
     if not any((model_path / f).exists() for f in weight_files):
         missing.append("model weights (model.safetensors or pytorch_model.bin)")
+    config = _load_config(model_path)
+    config_issues = _check_required_config_fields(config)
+    if config_issues:
+        missing.append(config_issues)
     return missing
 
 
 def _from_pretrained_with_info(
-    model_cls, model_path: Path, verbose: bool = False
+    model_cls: Any, model_path: Path, verbose: bool = False
 ) -> Tuple[object, Optional[dict]]:
+    """Load a model with output_loading_info when supported.
+
+    :param Any model_cls: AutoModel class to load.
+    :param Path model_path: Model directory path.
+    :param bool verbose: Whether to print model info.
+    :return tuple[object, dict | None]: Loaded model and loading info.
+    """
     # Prefer output_loading_info for deterministic checks; fall back if remote code doesn't support it.
     try:
         model, loading_info = model_cls.from_pretrained(
@@ -63,6 +144,11 @@ def _from_pretrained_with_info(
 
 
 def _format_loading_issues(loading_info: Optional[dict]) -> Optional[str]:
+    """Format loading issues from transformers output.
+
+    :param dict | None loading_info: Loading info from transformers.
+    :return str | None: Formatted issue summary.
+    """
     if not loading_info:
         return None
     missing = loading_info.get("missing_keys", [])
@@ -124,6 +210,14 @@ def test_model_loading(model_path: Path) -> Tuple[bool, str]:
         if issues:
             return False, "load issues: " + issues
 
+        config = _load_config(model_path)
+        config_issues = _check_required_config_fields(config)
+        if config_issues:
+            return False, "config issues: " + config_issues
+        swiglu_issues = _check_swiglu_layout(model, config)
+        if swiglu_issues:
+            return False, "swiglu layout mismatch: " + swiglu_issues
+
         tokenizer = AutoTokenizer.from_pretrained(
             str(model_path), trust_remote_code=True
         )
@@ -141,6 +235,11 @@ def test_model_loading(model_path: Path) -> Tuple[bool, str]:
 
 
 def test_tokenizer_loading(model_path: Path) -> Tuple[bool, str]:
+    """Test that the tokenizer loads and returns input_ids.
+
+    :param Path model_path: Model directory path.
+    :return tuple[bool, str]: Success flag and message.
+    """
     try:
         tok = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
         toks = tok("tokenizer check.", return_tensors="pt")
@@ -153,6 +252,12 @@ def test_tokenizer_loading(model_path: Path) -> Tuple[bool, str]:
 
 
 def test_masked_lm_loading(model_path: Path, verbose: bool = False) -> Tuple[bool, str]:
+    """Test AutoModelForMaskedLM loading and forward pass.
+
+    :param Path model_path: Model directory path.
+    :param bool verbose: Whether to print model info.
+    :return tuple[bool, str]: Success flag and message.
+    """
     try:
         mlm, loading_info = _from_pretrained_with_info(
             AutoModelForMaskedLM, model_path, verbose=verbose
@@ -176,6 +281,11 @@ def test_masked_lm_loading(model_path: Path, verbose: bool = False) -> Tuple[boo
 
 
 def test_end_to_end_pipeline(model_path: Path) -> Tuple[bool, str]:
+    """Test end-to-end tokenization and encoding.
+
+    :param Path model_path: Model directory path.
+    :return tuple[bool, str]: Success flag and message.
+    """
     try:
         tok = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
         model = AutoModel.from_pretrained(str(model_path), trust_remote_code=True)
@@ -200,6 +310,11 @@ def test_end_to_end_pipeline(model_path: Path) -> Tuple[bool, str]:
 
 
 def test_cosine_similarity_sanity(model_path: Path) -> Tuple[bool, str]:
+    """Sanity-check cosine similarities of CLS embeddings.
+
+    :param Path model_path: Model directory path.
+    :return tuple[bool, str]: Success flag and message.
+    """
     try:
         tok = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
         model = AutoModel.from_pretrained(str(model_path), trust_remote_code=True)
@@ -219,7 +334,13 @@ def test_cosine_similarity_sanity(model_path: Path) -> Tuple[bool, str]:
                 out = model(**inp)
                 embs.append(out.last_hidden_state[:, 0, :].squeeze())
 
-        def cos(a, b):
+        def cos(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+            """Compute cosine similarity between two vectors.
+
+            :param torch.Tensor a: First vector.
+            :param torch.Tensor b: Second vector.
+            :return torch.Tensor: Cosine similarity value.
+            """
             return (a @ b) / (a.norm() * b.norm())
 
         sim1 = cos(embs[0], embs[1]).item()
@@ -239,7 +360,8 @@ def test_cosine_similarity_sanity(model_path: Path) -> Tuple[bool, str]:
         return False, f"{type(e).__name__}: {e}"
 
 
-def main():
+def main() -> None:
+    """Run the export validation CLI."""
     p = argparse.ArgumentParser(
         description="Validate an exported HF model (concise output).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,

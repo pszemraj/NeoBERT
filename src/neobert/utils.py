@@ -1,6 +1,8 @@
+"""Utility helpers for logging, TF32 setup, and model summaries."""
+
 import logging
 from dataclasses import asdict, dataclass, is_dataclass
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
@@ -35,17 +37,33 @@ def prepare_wandb_config(cfg: Any) -> Dict[str, Any]:
     return config_dict
 
 
-def configure_tf32(print_fn=None) -> bool:
-    """Enable TF32 precision for GPUs with compute capability >= 8.0 (Ampere+).
+def configure_tf32(
+    enabled: bool, print_fn: Optional[Callable[[str], Any]] = None
+) -> bool:
+    """Enable/disable TF32 precision for GPUs with compute capability >= 8.0 (Ampere+).
 
-    :param print_fn: Optional function to use for printing messages (default: logging.info)
-    :return: True if TF32 was enabled, False otherwise
+    :param bool enabled: Whether TF32 should be enabled.
+    :param print_fn: Optional function to use for printing messages (default: logging.info).
+    :return bool: True if TF32 was enabled, False otherwise.
     """
-    # Use provided print function or fall back to logging
     log = print_fn if print_fn else logging.info
 
     if not torch.cuda.is_available():
         log("No GPU detected, running on CPU.")
+        return False
+
+    if not enabled:
+        try:
+            torch.set_float32_matmul_precision("highest")
+            torch.backends.cuda.matmul.allow_tf32 = False
+            torch.backends.cudnn.allow_tf32 = False
+            log("TF32 disabled by config.")
+        except Exception as e:
+            error_msg = f"Failed to disable TF32: {e}"
+            if print_fn:
+                print_fn(error_msg)
+            else:
+                logging.error(error_msg)
         return False
 
     try:
@@ -92,14 +110,20 @@ def model_summary(
     :param show_param_shapes: Whether to show parameter shapes
     """
 
-    # ---------- formatting helpers ----------
     def _format_number(num: int) -> str:
+        """Format integer counts for display.
+
+        :return str: Formatted number string.
+        """
         return f"{num:,}" if num > 0 else "--"
 
     def _format_shape(shape: Optional[torch.Size]) -> str:
+        """Format a tensor shape for display.
+
+        :return str: Shape string or ``N/A`` when missing.
+        """
         return "x".join(map(str, shape)) if shape else "N/A"
 
-    # ---------- build param info once ----------
     # Map: id(param) -> (numel, requires_grad)
     param_info: Dict[int, Tuple[int, bool]] = {}
     for p in model.parameters(recurse=True):
@@ -107,7 +131,6 @@ def model_summary(
         if pid not in param_info:
             param_info[pid] = (p.numel(), bool(p.requires_grad))
 
-    # Fast path: totals only
     if max_depth <= 0:
         total_params = sum(n for (n, _) in param_info.values())
         trainable_params = sum(n for (n, rg) in param_info.values() if rg)
@@ -164,14 +187,11 @@ def model_summary(
         )
         return all_ids
 
-    # Build the list (pre-order traversal)
     summarize_recursive(model, 1, "")
 
-    # Totals from the whole model (already deduped)
     total_params = sum(n for (n, _) in param_info.values())
     trainable_params = sum(n for (n, rg) in param_info.values() if rg)
 
-    # ---------- printing ----------
     name_col_width = max(len("Layer (type)"), max(len(s.name) for s in summary_list))
     shape_col_width = 0
     if show_param_shapes:

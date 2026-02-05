@@ -1,13 +1,16 @@
 """Finetuning a NeoBERT model for sequence classification on GLUE or Super GLUE."""
 
 import json
+import logging
 import math
 import os
 import random
+import re
 import shutil
-from pathlib import Path
 from contextlib import nullcontext
 from functools import partial
+from pathlib import Path
+from typing import Any, Optional
 
 import evaluate
 import numpy as np
@@ -34,6 +37,12 @@ from neobert.tokenizer import get_tokenizer
 from ..config import Config
 from ..optimizer import get_optimizer
 from ..scheduler import get_scheduler
+from ..training_utils import (
+    _maybe_compile_model,
+    _maybe_prepare_for_forward,
+    _unwrap_optimizer,
+)
+from ..utils import configure_tf32
 from ..validation import ValidationError, validate_glue_config
 from .process import process_function
 
@@ -75,8 +84,53 @@ TASK_TO_TRANSFER_FROM = {
     "rte": "mnli",
 }
 
+_STEP_RE = re.compile(r"(?:^|/)(?:step|checkpoint)_(\d+)(?:$|/)")
+_EPOCH_RE = re.compile(r"(?:^|/)(?:epoch)_(\d+)(?:$|/)")
 
-def _to_serializable(value):
+
+def _get_optimizer_update_step(optimizer: Any) -> Optional[int]:
+    """Return the optimizer update counter if available.
+
+    :param Any optimizer: Optimizer or wrapped optimizer.
+    :return int | None: Update step counter.
+    """
+    inner = _unwrap_optimizer(optimizer)
+    step = getattr(inner, "_step", None)
+    if step is None:
+        return None
+    try:
+        return int(step)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_checkpoint_progress(path: str) -> tuple[Optional[str], Optional[int]]:
+    """Parse step/epoch metadata from a checkpoint path.
+
+    :param str path: Checkpoint path or directory name.
+    :return tuple[str | None, int | None]: ("step" or "epoch", value) if detected.
+    """
+    name = os.path.basename(path.rstrip(os.sep))
+    if name.isdigit():
+        return "step", int(name)
+
+    match = _STEP_RE.search(name)
+    if match:
+        return "step", int(match.group(1))
+
+    match = _EPOCH_RE.search(name)
+    if match:
+        return "epoch", int(match.group(1))
+
+    return None, None
+
+
+def _to_serializable(value: Any) -> Any:
+    """Convert tensors/NumPy scalars to JSON-serializable values.
+
+    :param Any value: Value to convert.
+    :return Any: Serializable representation.
+    """
     if isinstance(value, (np.floating, np.integer)):
         return float(value)
     if torch.is_tensor(value):
@@ -84,7 +138,11 @@ def _to_serializable(value):
     return value
 
 
-def _configure_wandb_metrics(accelerator):
+def _configure_wandb_metrics(accelerator: Accelerator) -> None:
+    """Configure W&B metric definitions for GLUE runs.
+
+    :param Accelerator accelerator: Accelerator instance with trackers.
+    """
     for tracker in getattr(accelerator, "trackers", []):
         if tracker.__class__.__name__ != "WandBTracker":
             continue
@@ -104,6 +162,11 @@ def _configure_wandb_metrics(accelerator):
 
 
 def _normalize_metrics_for_scoring(raw_metrics: dict) -> dict[str, float]:
+    """Normalize metric keys for GLUE score calculation.
+
+    :param dict raw_metrics: Raw metric mapping from evaluation.
+    :return dict[str, float]: Normalized metric mapping.
+    """
     normalized: dict[str, float] = {}
     for key, value in (raw_metrics or {}).items():
         if not isinstance(key, str) or not isinstance(value, (int, float)):
@@ -114,7 +177,12 @@ def _normalize_metrics_for_scoring(raw_metrics: dict) -> dict[str, float]:
 
 
 def compute_glue_score(task: str, metrics: dict[str, float]) -> float | None:
-    """Return official GLUE score (averaged where required) for a task."""
+    """Return official GLUE score (averaged where required) for a task.
+
+    :param str task: GLUE task name.
+    :param dict[str, float] metrics: Evaluation metrics for the task.
+    :return float | None: Official GLUE score, if available.
+    """
 
     metric_keys = GLUE_SCORE_SPECS.get(task)
     if not metric_keys:
@@ -139,7 +207,12 @@ def compute_glue_score(task: str, metrics: dict[str, float]) -> float | None:
     return float(sum(values) / len(values))
 
 
-def _update_wandb_config(accelerator, cfg: Config):
+def _update_wandb_config(accelerator: Accelerator, cfg: Config) -> None:
+    """Update W&B run config with GLUE metadata.
+
+    :param Accelerator accelerator: Accelerator instance with trackers.
+    :param Config cfg: Training configuration.
+    """
     metadata = getattr(cfg, "pretraining_metadata", {}) or {}
     glue_task = getattr(cfg.glue, "task_name", getattr(cfg, "task", "glue"))
     glue_max_len = getattr(cfg.glue, "max_seq_length", None)
@@ -170,7 +243,13 @@ def _update_wandb_config(accelerator, cfg: Config):
         break
 
 
-def _save_metrics(output_dir: str, split: str, metrics: dict):
+def _save_metrics(output_dir: str, split: str, metrics: dict[str, Any]) -> None:
+    """Persist evaluation metrics to disk.
+
+    :param str output_dir: Output directory for metrics files.
+    :param str split: Dataset split name.
+    :param dict[str, Any] metrics: Metrics mapping to write.
+    """
     if not metrics:
         return
     path = Path(output_dir)
@@ -181,16 +260,29 @@ def _save_metrics(output_dir: str, split: str, metrics: dict):
 
 
 def get_evaluation(
-    model,
-    dataloader,
-    is_regression,
-    metric=None,
-    accelerator=None,
-    dtype_pad_mask=torch.float32,
-    return_predictions=False,
-    compute_metric=True,
-    flash_attention=False,
-):
+    model: torch.nn.Module,
+    dataloader: DataLoader,
+    is_regression: bool,
+    metric: Any | None = None,
+    accelerator: Accelerator | None = None,
+    dtype_pad_mask: torch.dtype = torch.float32,
+    return_predictions: bool = False,
+    compute_metric: bool = True,
+    flash_attention: bool = False,
+) -> dict[str, Any]:
+    """Run evaluation over a dataloader and return metrics/predictions.
+
+    :param torch.nn.Module model: Model to evaluate.
+    :param DataLoader dataloader: Evaluation dataloader.
+    :param bool is_regression: Whether task is regression.
+    :param Any | None metric: Optional evaluation metric object.
+    :param Accelerator | None accelerator: Accelerator for distributed eval.
+    :param torch.dtype dtype_pad_mask: Dtype for attention mask.
+    :param bool return_predictions: Whether to return predictions tensor.
+    :param bool compute_metric: Whether to compute metric values.
+    :param bool flash_attention: Whether to use flash attention masking.
+    :return dict[str, Any]: Evaluation outputs (metrics, predictions).
+    """
     samples_seen = 0
     # Fix: Use list for efficient accumulation instead of repeated torch.cat
     predictions_list = [] if return_predictions else None
@@ -201,16 +293,15 @@ def get_evaluation(
     sdp_context = (
         sdpa_kernel(SDPBackend.MATH) if torch.cuda.is_available() else nullcontext()
     )
+    if flash_attention:
+        logger.debug(
+            "GLUE attention_mask is already additive; flash_attention flag is ignored."
+        )
     with sdp_context:
         for step, batch in tqdm(enumerate(dataloader)):
             progress_bar.update(1)
             with torch.no_grad(), torch.inference_mode():
-                if flash_attention:
-                    pad_mask = torch.where(
-                        batch["attention_mask"] == 1, float(0.0), float("-inf")
-                    ).type(dtype_pad_mask)
-                else:
-                    pad_mask = batch["attention_mask"].type(dtype_pad_mask)
+                pad_mask = batch["attention_mask"].type(dtype_pad_mask)
                 logits = model(batch["input_ids"], pad_mask)["logits"]
 
             if not is_regression:
@@ -260,26 +351,40 @@ def get_evaluation(
 
 
 def run_evaluation_and_save(
-    model,
-    eval_dataloader,
-    metric,
-    cfg,
-    accelerator,
-    dtype_pad_mask,
-    is_regression,
-    flash_attention,
-    completed_steps,
-    epoch,
-    train_metric,
-    total_loss,
-    logger,
-    mm_eval_dataloader=None,
-    mm_metric=None,
-):
+    model: torch.nn.Module,
+    eval_dataloader: DataLoader,
+    metric: Any,
+    cfg: Config,
+    accelerator: Accelerator,
+    dtype_pad_mask: torch.dtype,
+    is_regression: bool,
+    flash_attention: bool,
+    completed_steps: int,
+    epoch: int,
+    train_metric: Optional[dict[str, float]],
+    total_loss: float,
+    logger: logging.Logger,
+    mm_eval_dataloader: DataLoader | None = None,
+    mm_metric: Any | None = None,
+) -> tuple[dict[str, float], float, bool]:
     """Run evaluation, log metrics, and save results.
 
-    Returns:
-        tuple: (eval_metric dict, current_accuracy float, should_stop bool)
+    :param torch.nn.Module model: Model to evaluate.
+    :param DataLoader eval_dataloader: Evaluation dataloader.
+    :param Any metric: Metric object for evaluation.
+    :param Config cfg: Training configuration.
+    :param Accelerator accelerator: Accelerator for logging/sync.
+    :param torch.dtype dtype_pad_mask: Dtype for attention mask.
+    :param bool is_regression: Whether task is regression.
+    :param bool flash_attention: Whether to use flash attention masking.
+    :param int completed_steps: Completed training steps.
+    :param int epoch: Current epoch.
+    :param dict[str, float] | None train_metric: Training metric values.
+    :param float total_loss: Running total loss.
+    :param logging.Logger logger: Logger for output.
+    :param DataLoader | None mm_eval_dataloader: MNLI mismatched dataloader.
+    :param Any | None mm_metric: Metric for mismatched evaluation.
+    :return tuple[dict[str, float], float, bool]: Metrics, score, early-stop flag.
     """
     model.eval()
     eval_result = get_evaluation(
@@ -388,7 +493,16 @@ def run_evaluation_and_save(
     return eval_metric, curr_accuracy, False  # Last value is early_stop flag
 
 
-def get_best_checkpoint_path(base_dir, task, num_checkpoints_to_merge=1):
+def get_best_checkpoint_path(
+    base_dir: str, task: str, num_checkpoints_to_merge: int = 1
+) -> tuple[str | None, list[int | None]]:
+    """Select the best checkpoint based on saved evaluation metrics.
+
+    :param str base_dir: Base directory containing GLUE runs.
+    :param str task: GLUE task name.
+    :param int num_checkpoints_to_merge: Number of recent checkpoints to merge.
+    :return tuple[str | None, list[int | None]]: Checkpoint dir and ids.
+    """
     best_accuracy = -float("inf")
     best_checkpoint_path = None
     best_checkpoint = None
@@ -446,17 +560,19 @@ def get_best_checkpoint_path(base_dir, task, num_checkpoints_to_merge=1):
     return best_checkpoint_path, checkpoint_list
 
 
-def load_pretrained_weights(model, checkpoint_dir, checkpoint_id, logger):
+def load_pretrained_weights(
+    model: torch.nn.Module,
+    checkpoint_dir: str,
+    checkpoint_id: int | str,
+    logger: logging.Logger,
+) -> torch.nn.Module:
     """Load pretrained weights from a checkpoint directory.
 
-    Args:
-        model: The model to load weights into
-        checkpoint_dir: Directory containing checkpoint folders
-        checkpoint_id: Specific checkpoint number/name to load
-        logger: Logger for output
-
-    Returns:
-        model with loaded weights
+    :param torch.nn.Module model: Model to load weights into.
+    :param str checkpoint_dir: Directory containing checkpoints.
+    :param int | str checkpoint_id: Checkpoint number or tag to load.
+    :param logging.Logger logger: Logger for output.
+    :return torch.nn.Module: Model with loaded weights.
     """
     checkpoint_path = os.path.join(checkpoint_dir, str(checkpoint_id))
 
@@ -510,14 +626,18 @@ def load_pretrained_weights(model, checkpoint_dir, checkpoint_id, logger):
     return model
 
 
-def save_training_checkpoint(cfg, model, accelerator, completed_steps):
+def save_training_checkpoint(
+    cfg: Config,
+    model: torch.nn.Module,
+    accelerator: Accelerator,
+    completed_steps: int,
+) -> None:
     """Save a training checkpoint during fine-tuning.
 
-    Args:
-        cfg: Configuration object
-        model: Model to save
-        accelerator: Accelerator object
-        completed_steps: Current training step
+    :param Config cfg: Configuration object.
+    :param torch.nn.Module model: Model to save.
+    :param Accelerator accelerator: Accelerator instance.
+    :param int completed_steps: Current training step.
     """
     model_checkpoint_dir = os.path.join(cfg.trainer.output_dir, "model_checkpoints")
 
@@ -556,7 +676,11 @@ def save_training_checkpoint(cfg, model, accelerator, completed_steps):
         )
 
 
-def trainer(cfg: Config):
+def trainer(cfg: Config) -> None:
+    """Run GLUE/SuperGLUE fine-tuning loop.
+
+    :param Config cfg: Training configuration.
+    """
     # Extract task and meta_task from config
     task = cfg.glue.task_name if hasattr(cfg, "glue") else cfg.task
     meta_task = "glue"  # Default for GLUE tasks
@@ -581,30 +705,33 @@ def trainer(cfg: Config):
     elif mixed_precision == "fp32":
         mixed_precision = "no"
 
+    wandb_enabled = cfg.wandb.enabled and cfg.wandb.mode != "disabled"
     accelerator = Accelerator(
-        log_with="wandb",
+        log_with="wandb" if wandb_enabled else None,
         mixed_precision=mixed_precision,
         project_config=project_config,
+        gradient_accumulation_steps=int(cfg.trainer.gradient_accumulation_steps),
     )
 
     # Initialise the wandb run and pass wandb parameters
-    accelerator.init_trackers(
-        project_name=cfg.wandb.project,
-        init_kwargs={
-            "wandb": {
-                "name": cfg.wandb.name,
-                "entity": cfg.wandb.entity,
-                "config": cfg.__dict__,
-                "tags": cfg.wandb.tags,
-                "dir": cfg.wandb.dir,
-                "mode": cfg.wandb.mode,
-                "resume": cfg.wandb.resume,
-            }
-        },
-    )
+    if wandb_enabled:
+        accelerator.init_trackers(
+            project_name=cfg.wandb.project,
+            init_kwargs={
+                "wandb": {
+                    "name": cfg.wandb.name,
+                    "entity": cfg.wandb.entity,
+                    "config": cfg.__dict__,
+                    "tags": cfg.wandb.tags,
+                    "dir": cfg.wandb.dir,
+                    "mode": cfg.wandb.mode,
+                    "resume": cfg.wandb.resume,
+                }
+            },
+        )
 
-    _configure_wandb_metrics(accelerator)
-    _update_wandb_config(accelerator, cfg)
+        _configure_wandb_metrics(accelerator)
+        _update_wandb_config(accelerator, cfg)
 
     set_seed(int(cfg.seed))
 
@@ -615,9 +742,8 @@ def trainer(cfg: Config):
         logger.error(f"Configuration validation failed: {e}")
         raise
 
-    # Enable TF32 on matmul and on cuDNN
-    torch.backends.cuda.matmul.allow_tf32 = cfg.trainer.tf32
-    torch.backends.cudnn.allow_tf32 = cfg.trainer.tf32
+    # Configure TF32 precision for GPUs with compute capability >= 8.0
+    configure_tf32(enabled=cfg.trainer.tf32, print_fn=accelerator.print)
 
     # Handle the repository creation
     if accelerator.is_main_process:
@@ -628,14 +754,14 @@ def trainer(cfg: Config):
         os.makedirs(cfg.trainer.output_dir, exist_ok=True)
     accelerator.wait_for_everyone()
 
-    # Override flash attention setting for GLUE - always use eager attention
-    # Flash attention has memory alignment issues with variable-length sequences in GLUE tasks
+    # Override xFormers attention setting for GLUE - always use eager attention
+    # xFormers attention has memory alignment issues with variable-length sequences in GLUE tasks
     # xformers requires sequences to be aligned to multiples of 8, which is incompatible
     # with GLUE's dynamic batching and variable sequence lengths
-    if hasattr(cfg.model, "flash_attention") and cfg.model.flash_attention:
+    if hasattr(cfg.model, "xformers_attention") and cfg.model.xformers_attention:
         logger.warning(
-            "Flash attention is not supported for GLUE evaluation due to memory alignment issues "
-            "with variable-length sequences. Using eager attention instead."
+            "xFormers memory-efficient attention is not supported for GLUE evaluation due to "
+            "memory alignment issues with variable-length sequences. Using eager attention instead."
         )
     flash_attention = False  # Always use eager attention for GLUE
 
@@ -659,15 +785,17 @@ def trainer(cfg: Config):
 
         # For GLUE, we MUST have pretrained model info
         # Check if we're allowing random weights for testing
-        allow_random_weights = (
-            hasattr(cfg, "_raw_model_dict")
-            and cfg._raw_model_dict
-            and cfg._raw_model_dict.get("allow_random_weights", False)
-        )
+        allow_random_weights = cfg.glue.allow_random_weights
+        if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
+            allow_random_weights = cfg._raw_model_dict.get(
+                "allow_random_weights", allow_random_weights
+            )
 
         if allow_random_weights:
             # Skip pretrained config loading for testing
             pretrained_config_path = None
+        elif cfg.glue.pretrained_model_path:
+            pretrained_config_path = cfg.glue.pretrained_model_path
         elif (
             hasattr(cfg, "_raw_model_dict")
             and cfg._raw_model_dict
@@ -677,14 +805,18 @@ def trainer(cfg: Config):
         else:
             raise ValueError(
                 "GLUE evaluation requires a pretrained model! "
-                "Please specify 'pretrained_config_path' in the model section of your config, "
+                "Please specify 'glue.pretrained_model_path' in your config, "
                 "or set 'allow_random_weights: true' for testing."
             )
         if pretrained_config_path:
             model_pretraining_config = ConfigLoader.load(pretrained_config_path)
-            model_pretraining_config.model.flash_attention = flash_attention
+            model_pretraining_config.model.xformers_attention = flash_attention
+            tokenizer_source = (
+                model_pretraining_config.tokenizer.path
+                or model_pretraining_config.tokenizer.name
+            )
             tokenizer = get_tokenizer(
-                pretrained_model_name_or_path=model_pretraining_config.tokenizer.name,
+                pretrained_model_name_or_path=tokenizer_source,
                 max_length=model_pretraining_config.tokenizer.max_length,
             )
         else:
@@ -727,7 +859,12 @@ def trainer(cfg: Config):
     elif cfg.task == "allnli":
         raw_datasets = load_dataset("sentence-transformers/all-nli", name="pair-class")
 
-        def collapse_classes(examples):
+        def collapse_classes(examples: dict[str, Any]) -> dict[str, Any]:
+            """Collapse neutral/contradiction into non-entailment.
+
+            :param dict[str, Any] examples: Batched examples.
+            :return dict[str, Any]: Updated examples with collapsed labels.
+            """
             examples["label"] = [
                 1 if label == 2 else label for label in examples["label"]
             ]
@@ -798,12 +935,15 @@ def trainer(cfg: Config):
     # DataLoaders creation:
     data_collator = DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)
 
-    # Get the dtype for the pad_mask
+    # Keep pad masks in float32 for numerical stability (match pretraining).
     dtype_pad_mask = torch.float32
-    if accelerator.mixed_precision == "bf16":
-        dtype_pad_mask = torch.bfloat16
 
-    def collate_fn(batch):
+    def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
+        """Apply padding collator and build additive attention mask.
+
+        :param list[dict[str, Any]] batch: Batch of examples.
+        :return dict[str, Any]: Collated batch with attention mask.
+        """
         batch = data_collator(batch)
         batch["attention_mask"] = torch.where(
             batch["attention_mask"] == 1, float(0.0), float("-inf")
@@ -889,15 +1029,17 @@ def trainer(cfg: Config):
                 "intermediate_size": getattr(cfg.model, "intermediate_size", 3072),
                 "vocab_size": getattr(cfg.model, "vocab_size", 30522),
                 "hidden_act": getattr(cfg.model, "hidden_act", "gelu"),
-                "max_position_embeddings": getattr(
-                    cfg.model, "max_position_embeddings", 512
-                ),
+                "max_length": getattr(cfg.model, "max_position_embeddings", 512),
                 "layer_norm_eps": getattr(cfg.model, "layer_norm_eps", 1e-12),
             }
 
         # Map dropout_prob to dropout and remove classifier_init_range from model config
         if "dropout_prob" in model_config_dict:
             model_config_dict["dropout"] = model_config_dict.pop("dropout_prob")
+        if "max_position_embeddings" in model_config_dict:
+            model_config_dict["max_length"] = model_config_dict.pop(
+                "max_position_embeddings"
+            )
         if "classifier_init_range" in model_config_dict:
             model_config_dict.pop("classifier_init_range")
         if "allow_random_weights" in model_config_dict:
@@ -914,16 +1056,15 @@ def trainer(cfg: Config):
         # Use model config directly - don't merge with tokenizer config
         # The tokenizer's vocab_size should match the model's anyway
         combined_config = model_config_dict
+        combined_config.pop("xformers_attention", None)
+        combined_config["flash_attention"] = flash_attention
 
         # If using random weights (for testing), round vocab_size for GPU efficiency
+        allow_random_weights = cfg.glue.allow_random_weights
         if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
             allow_random_weights = cfg._raw_model_dict.get(
-                "allow_random_weights", False
+                "allow_random_weights", allow_random_weights
             )
-        elif hasattr(cfg, "glue"):
-            allow_random_weights = cfg.glue.allow_random_weights
-        else:
-            allow_random_weights = False
 
         if allow_random_weights and "vocab_size" in combined_config:
             from neobert.config import round_up_to_multiple
@@ -934,56 +1075,49 @@ def trainer(cfg: Config):
         model = NeoBERTForSequenceClassification(
             NeoBERTConfig(**combined_config),
             num_labels=num_labels,
-            classifier_dropout=getattr(cfg.model, "classifier_dropout", 0.1),
-            classifier_init_range=getattr(cfg.model, "classifier_init_range", 0.02),
+            classifier_dropout=cfg.glue.classifier_dropout,
+            classifier_init_range=cfg.glue.classifier_init_range,
         )
 
-    if hasattr(cfg.model, "transfer_from_task") and cfg.model.transfer_from_task:
+    if cfg.glue.transfer_from_task:
         task_to_transfer_from = TASK_TO_TRANSFER_FROM.get(cfg.task, None)
         if not task_to_transfer_from:
             raise ValueError(f"Task to transfer from for {cfg.task} is not set.")
-        cfg.model.pretrained_checkpoint_dir, checkpoint_list = get_best_checkpoint_path(
+        cfg.glue.pretrained_checkpoint_dir, checkpoint_list = get_best_checkpoint_path(
             os.path.join(
-                cfg.model.pretrained_checkpoint_dir,
+                cfg.glue.pretrained_checkpoint_dir,
                 "glue",
-                str(cfg.model.pretrained_checkpoint),
+                str(cfg.glue.pretrained_checkpoint),
             ),
             task_to_transfer_from,
         )
-        cfg.model.pretrained_checkpoint = checkpoint_list[-1]
+        cfg.glue.pretrained_checkpoint = checkpoint_list[-1]
         logger.info(
-            f"Transfering from: {cfg.model.pretrained_checkpoint_dir}, {cfg.model.pretrained_checkpoint}"
+            f"Transfering from: {cfg.glue.pretrained_checkpoint_dir}, {cfg.glue.pretrained_checkpoint}"
         )
-        if (
-            not cfg.model.pretrained_checkpoint_dir
-            or not cfg.model.pretrained_checkpoint
-        ):
+        if not cfg.glue.pretrained_checkpoint_dir or not cfg.glue.pretrained_checkpoint:
             raise ValueError("Unable to retrieve checkpoint to transfer from.")
 
     else:
         # Get checkpoint info from raw model dict for GLUE
         logger.info("Looking for pretrained checkpoint info...")
 
-        # Check for checkpoint info in raw model dict
+        # Prefer GLUEConfig for checkpoint info
+        pretrained_checkpoint_dir = cfg.glue.pretrained_checkpoint_dir
+        pretrained_checkpoint = cfg.glue.pretrained_checkpoint
+        allow_random_weights = cfg.glue.allow_random_weights
+
+        # Fall back to raw model dict for legacy configs
         if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
             pretrained_checkpoint_dir = cfg._raw_model_dict.get(
-                "pretrained_checkpoint_dir", None
+                "pretrained_checkpoint_dir", pretrained_checkpoint_dir
             )
             pretrained_checkpoint = cfg._raw_model_dict.get(
-                "pretrained_checkpoint", None
+                "pretrained_checkpoint", pretrained_checkpoint
             )
             allow_random_weights = cfg._raw_model_dict.get(
-                "allow_random_weights", False
+                "allow_random_weights", allow_random_weights
             )
-        # Also check GLUEConfig if available
-        elif hasattr(cfg, "glue"):
-            pretrained_checkpoint_dir = cfg.glue.pretrained_checkpoint_dir
-            pretrained_checkpoint = cfg.glue.pretrained_checkpoint
-            allow_random_weights = cfg.glue.allow_random_weights
-        else:
-            pretrained_checkpoint_dir = None
-            pretrained_checkpoint = None
-            allow_random_weights = False
 
         # Validate checkpoint configuration
         if not pretrained_checkpoint_dir or not pretrained_checkpoint:
@@ -996,8 +1130,8 @@ def trainer(cfg: Config):
                 raise ValueError(
                     "GLUE evaluation requires pretrained weights!\n"
                     "Please specify either:\n"
-                    "  1. 'pretrained_checkpoint_dir' and 'pretrained_checkpoint' in model config\n"
-                    "  2. Set 'allow_random_weights: true' for testing with random weights"
+                    "  1. 'glue.pretrained_checkpoint_dir' and 'glue.pretrained_checkpoint' in config\n"
+                    "  2. Set 'glue.allow_random_weights: true' for testing with random weights"
                 )
         else:
             # Ensure we have the full path to model_checkpoints
@@ -1019,56 +1153,20 @@ def trainer(cfg: Config):
             model, pretrained_checkpoint_dir, pretrained_checkpoint, logger
         )
 
+    model = _maybe_compile_model(model, cfg, accelerator, logger)
+
     # Optimizer
-    optimizer_name = cfg.optimizer.name.lower()
-    optimizer_params = {"lr": cfg.optimizer.lr}
-    if optimizer_name in {"muonclip", "muon_clip", "muon-clip"}:
-        optimizer = get_optimizer(
-            model,
-            accelerator.distributed_type,
-            model_config=model.config,
-            name=cfg.optimizer.name,
-            lr=cfg.optimizer.lr,
-            weight_decay=cfg.optimizer.weight_decay,
-            betas=tuple(getattr(cfg.optimizer, "betas", [0.9, 0.999])),
-            eps=getattr(cfg.optimizer, "eps", 1e-8),
-            muon_config=getattr(cfg.optimizer, "muon_config", None),
-        )
-    else:
-        # Split weights in two groups, one with weight decay and the other not.
-        no_decay = ["bias", "LayerNorm.weight"]
-
-        if hasattr(cfg.optimizer, "hparams"):
-            weight_decay = cfg.optimizer.hparams.weight_decay
-            optimizer_params = cfg.optimizer.hparams
-        else:
-            weight_decay = cfg.optimizer.weight_decay
-            optimizer_params = {
-                "lr": cfg.optimizer.lr,
-                "weight_decay": cfg.optimizer.weight_decay,
-                "betas": tuple(getattr(cfg.optimizer, "betas", [0.9, 0.999])),
-                "eps": getattr(cfg.optimizer, "eps", 1e-8),
-            }
-
-        optimizer_grouped_parameters = [
-            {
-                "params": [
-                    p
-                    for n, p in model.named_parameters()
-                    if not any(nd in n for nd in no_decay)
-                ],
-                "weight_decay": weight_decay,
-            },
-            {
-                "params": [
-                    p
-                    for n, p in model.named_parameters()
-                    if any(nd in n for nd in no_decay)
-                ],
-                "weight_decay": 0.0,
-            },
-        ]
-        optimizer = torch.optim.AdamW(optimizer_grouped_parameters, **optimizer_params)
+    optimizer = get_optimizer(
+        model,
+        accelerator.distributed_type,
+        model_config=getattr(model, "config", None),
+        name=cfg.optimizer.name,
+        lr=cfg.optimizer.lr,
+        weight_decay=cfg.optimizer.weight_decay,
+        betas=tuple(getattr(cfg.optimizer, "betas", [0.9, 0.999])),
+        eps=getattr(cfg.optimizer, "eps", 1e-8),
+        muon_config=getattr(cfg.optimizer, "muon_config", None),
+    )
 
     # Calculate training steps consistently
     num_update_steps_per_epoch = math.ceil(
@@ -1103,10 +1201,7 @@ def trainer(cfg: Config):
         cfg.scheduler.decay_steps = cfg.trainer.max_steps
 
     # Get learning rate from optimizer config
-    if isinstance(optimizer_params, dict):
-        lr = optimizer_params.get("lr", cfg.optimizer.lr)
-    else:
-        lr = getattr(optimizer_params, "lr", cfg.optimizer.lr)
+    lr = cfg.optimizer.lr
 
     # Convert scheduler config to dict if needed
     scheduler_params = (
@@ -1156,10 +1251,10 @@ def trainer(cfg: Config):
         )
     elif eval_strategy == "steps":
         # Use the provided eval_steps or default to min of provided and epoch size
-        if hasattr(cfg.trainer, "eval_steps"):
+        if hasattr(cfg.trainer, "eval_steps") and cfg.trainer.eval_steps:
             cfg.trainer.eval_steps = min(
                 cfg.trainer.eval_steps,
-                len(train_dataset) // train_batch_size,
+                num_update_steps_per_epoch,
             )
         else:
             cfg.trainer.eval_steps = min(500, num_update_steps_per_epoch)
@@ -1213,38 +1308,42 @@ def trainer(cfg: Config):
     )
     completed_steps = 0
     starting_epoch = 0
+    resume_microbatch_in_epoch = 0
+
     # Potentially load in the weights and states from a previous save
     if cfg.trainer.resume_from_checkpoint:
         if (
             cfg.trainer.resume_from_checkpoint is not None
             or cfg.trainer.resume_from_checkpoint != ""
         ):
-            accelerator.print(f"Resumed from checkpoint: {cfg.trainer.checkpoint_dir}")
-            accelerator.load_state(cfg.trainer.checkpoint_dir)
-            path = os.path.basename(cfg.trainer.checkpoint_dir)
+            checkpoint_dir = cfg.trainer.checkpoint_dir
         else:
             # Get the most recent checkpoint
             dirs = [f.name for f in os.scandir(os.getcwd()) if f.is_dir()]
             dirs.sort(key=os.path.getctime)
-            path = dirs[
+            checkpoint_dir = dirs[
                 -1
             ]  # Sorts folders by date modified, most recent checkpoint is the last
-        # Extract `epoch_{i}` or `step_{i}`
-        training_difference = os.path.splitext(path)[0]
 
-        if "epoch" in training_difference:
-            starting_epoch = int(training_difference.replace("epoch_", "")) + 1
-            resume_step = None
-            completed_steps = starting_epoch * num_update_steps_per_epoch
+        accelerator.print(f"Resumed from checkpoint: {checkpoint_dir}")
+        accelerator.load_state(checkpoint_dir)
+        path = os.path.basename(checkpoint_dir)
+
+        step_from_optimizer = _get_optimizer_update_step(optimizer)
+        if step_from_optimizer is not None and step_from_optimizer > 0:
+            completed_steps = step_from_optimizer
         else:
-            # need to multiply `gradient_accumulation_steps` to reflect real steps
-            resume_step = (
-                int(training_difference.replace("step_", ""))
-                * cfg.trainer.gradient_accumulation_steps
-            )
-            starting_epoch = resume_step // len(train_dataloader)
-            resume_step -= starting_epoch * len(train_dataloader)
-            completed_steps = resume_step // cfg.gradient_accumulation_step
+            kind, value = _parse_checkpoint_progress(path)
+            if kind == "epoch" and value is not None:
+                completed_steps = (value + 1) * num_update_steps_per_epoch
+            elif kind == "step" and value is not None:
+                completed_steps = value
+
+        starting_epoch = completed_steps // num_update_steps_per_epoch
+        resume_update_in_epoch = completed_steps % num_update_steps_per_epoch
+        resume_microbatch_in_epoch = (
+            resume_update_in_epoch * cfg.trainer.gradient_accumulation_steps
+        )
 
     # update the progress_bar if load from checkpoint
     progress_bar.update(completed_steps)
@@ -1252,6 +1351,8 @@ def trainer(cfg: Config):
     # Initialize all training loop variables upfront
     results = {}
     total_loss = 0.0
+    micro_loss_sum = 0.0
+    micro_loss_count = 0
     early_stop = False
     prev_accuracy = 0.0
     early_stopping_counter = 1
@@ -1263,257 +1364,306 @@ def trainer(cfg: Config):
     evaluation_round = 0
 
     for epoch in range(starting_epoch, cfg.trainer.num_train_epochs):
-        for batch in train_dataloader:
-            logits = model(batch["input_ids"], batch["attention_mask"])["logits"]
+        sampler = getattr(train_dataloader, "sampler", None)
+        if sampler is not None and hasattr(sampler, "set_epoch"):
+            sampler.set_epoch(epoch)
 
-            # Debug logging for first few steps
-            if completed_steps < 3:
-                logger.info(
-                    f"Step {completed_steps}: logits shape: {logits.shape}, logits mean: {logits.mean().item():.6f}, std: {logits.std().item():.6f}"
+        for micro_step, batch in enumerate(train_dataloader):
+            if epoch == starting_epoch and micro_step < resume_microbatch_in_epoch:
+                continue
+
+            with accelerator.accumulate(model):
+                is_last_microbatch = bool(accelerator.sync_gradients)
+                _maybe_prepare_for_forward(
+                    optimizer,
+                    update_step=completed_steps,
+                    is_last_microbatch=is_last_microbatch,
                 )
-                logger.info(
-                    f"Step {completed_steps}: logits sample: {logits[0].detach().cpu()}"
-                )
-                logger.info(f"Step {completed_steps}: labels: {batch['labels'][:5]}")
 
-            if not is_regression:
-                loss = loss_fct(logits.view(-1, num_labels), batch["labels"].view(-1))
-            else:
-                if num_labels == 1:
-                    loss = loss_fct(logits.squeeze(), batch["labels"].squeeze())
-                else:
-                    loss = loss_fct(logits, batch["labels"])
+                logits = model(batch["input_ids"], batch["attention_mask"])["logits"]
 
-            # Compute train accuracy
-            predictions = (
-                logits.argmax(dim=-1)
-                if not is_regression
-                else (logits.squeeze() if logits.size() != torch.Size([1]) else logits)
-            )
-            predictions, references = accelerator.gather((predictions, batch["labels"]))
-
-            # print(logits, loss)
-
-            metric.add_batch(
-                predictions=predictions,
-                references=references,
-            )
-
-            accelerator.backward(loss)
-            optimizer.step()
-            scheduler.step()
-
-            progress_bar.update(1)
-            completed_steps += 1
-
-            # We keep track of the loss at each epoch
-            total_loss += loss.item()
-
-            # Run evaluation
-            if (
-                completed_steps
-                % min(
-                    cfg.trainer.eval_steps,
-                    len(train_dataloader) * train_batch_size // 10,
-                )
-                == 0
-            ):
-                train_metric = metric.compute()
-                if len(train_metric) > 1:
-                    train_metric["combined_score"] = np.mean(
-                        list(train_metric.values())
-                    ).item()
-
-                model.eval()
-                eval_metric = get_evaluation(
-                    model=model,
-                    dataloader=eval_dataloader,
-                    accelerator=accelerator,
-                    metric=metric,
-                    dtype_pad_mask=dtype_pad_mask,
-                    is_regression=is_regression,
-                    return_predictions=False,
-                    flash_attention=flash_attention,
-                )["eval_metric"]
-
-                # Log all metrics properly for STS-B (both Pearson and Spearman)
-                if cfg.task == "stsb" and "spearmanr" in eval_metric:
+                # Debug logging for first few steps
+                if completed_steps < 3 and is_last_microbatch:
                     logger.info(
-                        f"step {completed_steps} eval pearson: {eval_metric.get('pearson', 0):.4f}"
+                        f"Step {completed_steps}: logits shape: {logits.shape}, logits mean: {logits.mean().item():.6f}, std: {logits.std().item():.6f}"
                     )
                     logger.info(
-                        f"step {completed_steps} eval spearmanr: {eval_metric.get('spearmanr', 0):.4f}"
+                        f"Step {completed_steps}: logits sample: {logits[0].detach().cpu()}"
                     )
-                else:
-                    logger.info(f"step {completed_steps} eval metric: {eval_metric}")
-
-                logger.info(f"step {completed_steps} train metric: {train_metric}")
-                logger.info(
-                    f"step {completed_steps} train loss: {total_loss / completed_steps}"
-                )
-
-                if cfg.task == "mnli":
-                    # Evaluation on matched MNLI
-                    results["accuracy"] = eval_metric["accuracy"]
-
-                    # Evaluation on mismatched MNLI
-                    mm_eval_metric = get_evaluation(
-                        model=model,
-                        dataloader=mm_eval_dataloader,
-                        accelerator=accelerator,
-                        metric=mm_metric,
-                        dtype_pad_mask=dtype_pad_mask,
-                        is_regression=is_regression,
-                        return_predictions=False,
-                        flash_attention=flash_attention,
-                    )["eval_metric"]
-                    results["accuracy_mm"] = mm_eval_metric["accuracy"]
-
-                    res_mm = results["accuracy_mm"]
                     logger.info(
-                        f"step {completed_steps} eval metric mismatched: {res_mm}"
+                        f"Step {completed_steps}: labels: {batch['labels'][:5]}"
                     )
 
-                train_epoch_pos = completed_steps / max(1, num_update_steps_per_epoch)
-                train_avg_loss = (
-                    total_loss / completed_steps if completed_steps > 0 else loss.item()
-                )
-
-                log_payload = {
-                    "train/step": completed_steps,
-                    "train/epoch": train_epoch_pos,
-                    "train/loss": train_avg_loss,
-                    "train/lr": optimizer.param_groups[0]["lr"],
-                }
-
-                if train_metric:
-                    for key, value in train_metric.items():
-                        log_payload[f"train/{key}"] = value
-
-                val_metrics = eval_metric if cfg.task != "mnli" else results
-                val_epoch = train_epoch_pos
-                log_payload["val/epoch"] = val_epoch
-                for key, value in val_metrics.items():
-                    log_payload[f"val/{key}"] = value
-
-                score_for_early_stop = compute_glue_score(cfg.task, val_metrics)
-                if score_for_early_stop is not None:
-                    log_payload["val/score"] = score_for_early_stop
-
-                log_payload = {k: _to_serializable(v) for k, v in log_payload.items()}
-
-                evaluation_round += 1
-                accelerator.log(log_payload, step=completed_steps)
-
-                last_train_metrics = {
-                    "step": completed_steps,
-                    "epoch": train_epoch_pos,
-                    "loss": train_avg_loss,
-                    "lr": optimizer.param_groups[0]["lr"],
-                }
-                if train_metric:
-                    last_train_metrics.update(
-                        {k: _to_serializable(v) for k, v in train_metric.items()}
+                if not is_regression:
+                    loss = loss_fct(
+                        logits.view(-1, num_labels), batch["labels"].view(-1)
                     )
-
-                last_val_metrics = {
-                    "step": completed_steps,
-                    "epoch": val_epoch,
-                }
-                last_val_metrics.update(
-                    {k: _to_serializable(v) for k, v in val_metrics.items()}
-                )
-                if score_for_early_stop is not None:
-                    last_val_metrics["score"] = _to_serializable(score_for_early_stop)
-
-                _save_metrics(cfg.trainer.output_dir, "train", last_train_metrics)
-                _save_metrics(cfg.trainer.output_dir, "val", last_val_metrics)
-
-                all_results = {
-                    f"eval_{k}": _to_serializable(v) for k, v in eval_metric.items()
-                }
-                if cfg.task == "mnli":
-                    all_results = {
-                        f"eval_{k}": _to_serializable(v) for k, v in results.items()
-                    }
-
-                with open(
-                    os.path.join(
-                        cfg.trainer.output_dir,
-                        f"all_results_step_{completed_steps}.json",
-                    ),
-                    "w",
-                ) as f:
-                    print(
-                        "dumping in",
-                        os.path.join(
-                            cfg.trainer.output_dir,
-                            f"all_results_step_{completed_steps}.json",
-                        ),
-                    )
-                    json.dump(all_results, f)
-
-                fallback_metric = next(iter(val_metrics.values()), 0.0)
-                curr_accuracy = (
-                    score_for_early_stop
-                    if score_for_early_stop is not None
-                    else fallback_metric
-                )
-                metric_improved = curr_accuracy > prev_accuracy
-
-                # Update early stopping counter
-                if metric_improved:
-                    prev_accuracy = curr_accuracy
-                    early_stopping_counter = 0
-
                 else:
-                    early_stopping_counter += 1
+                    if num_labels == 1:
+                        loss = loss_fct(logits.squeeze(), batch["labels"].squeeze())
+                    else:
+                        loss = loss_fct(logits, batch["labels"])
 
-                if early_stopping > 0 and early_stopping_counter >= early_stopping:
-                    print(
-                        f"Evaluation accuracy has not improved in {early_stopping} cycles of {cfg.trainer.eval_steps} evaluation steps, stopping the training."
+                # Compute train accuracy
+                predictions = (
+                    logits.argmax(dim=-1)
+                    if not is_regression
+                    else (
+                        logits.squeeze() if logits.size() != torch.Size([1]) else logits
                     )
-                    early_stop = True
+                )
+                predictions, references = accelerator.gather(
+                    (predictions, batch["labels"])
+                )
 
-                # Save model checkpoint based on save_strategy
-                save_strategy = getattr(cfg.trainer, "save_strategy", "steps")
-                should_save = False
+                metric.add_batch(
+                    predictions=predictions,
+                    references=references,
+                )
 
-                if (
-                    save_strategy == "epoch"
-                    and completed_steps % num_update_steps_per_epoch == 0
-                ):
-                    should_save = True
-                elif save_strategy == "steps" and hasattr(cfg.trainer, "save_steps"):
-                    if completed_steps % cfg.trainer.save_steps == 0:
-                        should_save = True
-                elif save_strategy == "best":
-                    # Save only if this is the best model so far
-                    if metric_improved:
-                        should_save = True
-                elif save_strategy != "no":
-                    # Default to saving at eval steps if strategy is not 'no'
-                    should_save = True
+                accelerator.backward(loss)
+                micro_loss_sum += float(loss.item())
+                micro_loss_count += 1
 
-                # Only save checkpoint if explicitly enabled
-                save_model = getattr(cfg.trainer, "save_model", True)
-                save_total_limit = getattr(cfg.trainer, "save_total_limit", None)
+                if is_last_microbatch:
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad()
 
-                # Save if either save_total_limit>0 or max_ckpt>0 is configured
-                limit_enabled = (
-                    save_total_limit is not None and save_total_limit > 0
-                ) or (max_ckpt is not None and max_ckpt > 0)
+                    progress_bar.update(1)
+                    completed_steps += 1
 
-                if should_save and save_model and limit_enabled:
-                    save_training_checkpoint(cfg, model, accelerator, completed_steps)
+                    if micro_loss_count > 0:
+                        total_loss += micro_loss_sum / micro_loss_count
+                    micro_loss_sum = 0.0
+                    micro_loss_count = 0
 
-                model.train()
+                    # Run evaluation
+                    if (
+                        cfg.trainer.eval_steps
+                        and completed_steps % cfg.trainer.eval_steps == 0
+                    ):
+                        train_metric = metric.compute()
+                        if len(train_metric) > 1:
+                            train_metric["combined_score"] = np.mean(
+                                list(train_metric.values())
+                            ).item()
+
+                        model.eval()
+                        eval_metric = get_evaluation(
+                            model=model,
+                            dataloader=eval_dataloader,
+                            accelerator=accelerator,
+                            metric=metric,
+                            dtype_pad_mask=dtype_pad_mask,
+                            is_regression=is_regression,
+                            return_predictions=False,
+                            flash_attention=flash_attention,
+                        )["eval_metric"]
+
+                        # Log all metrics properly for STS-B (both Pearson and Spearman)
+                        if cfg.task == "stsb" and "spearmanr" in eval_metric:
+                            logger.info(
+                                f"step {completed_steps} eval pearson: {eval_metric.get('pearson', 0):.4f}"
+                            )
+                            logger.info(
+                                f"step {completed_steps} eval spearmanr: {eval_metric.get('spearmanr', 0):.4f}"
+                            )
+                        else:
+                            logger.info(
+                                f"step {completed_steps} eval metric: {eval_metric}"
+                            )
+
+                        logger.info(
+                            f"step {completed_steps} train metric: {train_metric}"
+                        )
+                        logger.info(
+                            f"step {completed_steps} train loss: {total_loss / completed_steps}"
+                        )
+
+                        if cfg.task == "mnli":
+                            # Evaluation on matched MNLI
+                            results["accuracy"] = eval_metric["accuracy"]
+
+                            # Evaluation on mismatched MNLI
+                            mm_eval_metric = get_evaluation(
+                                model=model,
+                                dataloader=mm_eval_dataloader,
+                                accelerator=accelerator,
+                                metric=mm_metric,
+                                dtype_pad_mask=dtype_pad_mask,
+                                is_regression=is_regression,
+                                return_predictions=False,
+                                flash_attention=flash_attention,
+                            )["eval_metric"]
+                            results["accuracy_mm"] = mm_eval_metric["accuracy"]
+
+                            res_mm = results["accuracy_mm"]
+                            logger.info(
+                                f"step {completed_steps} eval metric mismatched: {res_mm}"
+                            )
+
+                        train_epoch_pos = completed_steps / max(
+                            1, num_update_steps_per_epoch
+                        )
+                        train_avg_loss = (
+                            total_loss / completed_steps
+                            if completed_steps > 0
+                            else loss.item()
+                        )
+
+                        log_payload = {
+                            "train/step": completed_steps,
+                            "train/epoch": train_epoch_pos,
+                            "train/loss": train_avg_loss,
+                            "train/lr": optimizer.param_groups[0]["lr"],
+                        }
+
+                        if train_metric:
+                            for key, value in train_metric.items():
+                                log_payload[f"train/{key}"] = value
+
+                        val_metrics = eval_metric if cfg.task != "mnli" else results
+                        val_epoch = train_epoch_pos
+                        log_payload["val/epoch"] = val_epoch
+                        for key, value in val_metrics.items():
+                            log_payload[f"val/{key}"] = value
+
+                        score_for_early_stop = compute_glue_score(cfg.task, val_metrics)
+                        if score_for_early_stop is not None:
+                            log_payload["val/score"] = score_for_early_stop
+
+                        log_payload = {
+                            k: _to_serializable(v) for k, v in log_payload.items()
+                        }
+
+                        evaluation_round += 1
+                        accelerator.log(log_payload, step=completed_steps)
+
+                        last_train_metrics = {
+                            "step": completed_steps,
+                            "epoch": train_epoch_pos,
+                            "loss": train_avg_loss,
+                            "lr": optimizer.param_groups[0]["lr"],
+                        }
+                        if train_metric:
+                            last_train_metrics.update(
+                                {
+                                    k: _to_serializable(v)
+                                    for k, v in train_metric.items()
+                                }
+                            )
+
+                        last_val_metrics = {
+                            "step": completed_steps,
+                            "epoch": val_epoch,
+                        }
+                        last_val_metrics.update(
+                            {k: _to_serializable(v) for k, v in val_metrics.items()}
+                        )
+                        if score_for_early_stop is not None:
+                            last_val_metrics["score"] = _to_serializable(
+                                score_for_early_stop
+                            )
+
+                        _save_metrics(
+                            cfg.trainer.output_dir, "train", last_train_metrics
+                        )
+                        _save_metrics(cfg.trainer.output_dir, "val", last_val_metrics)
+
+                        all_results = {
+                            f"eval_{k}": _to_serializable(v)
+                            for k, v in eval_metric.items()
+                        }
+                        if cfg.task == "mnli":
+                            all_results = {
+                                f"eval_{k}": _to_serializable(v)
+                                for k, v in results.items()
+                            }
+
+                        with open(
+                            os.path.join(
+                                cfg.trainer.output_dir,
+                                f"all_results_step_{completed_steps}.json",
+                            ),
+                            "w",
+                        ) as f:
+                            print(
+                                "dumping in",
+                                os.path.join(
+                                    cfg.trainer.output_dir,
+                                    f"all_results_step_{completed_steps}.json",
+                                ),
+                            )
+                            json.dump(all_results, f)
+
+                        fallback_metric = next(iter(val_metrics.values()), 0.0)
+                        curr_accuracy = (
+                            score_for_early_stop
+                            if score_for_early_stop is not None
+                            else fallback_metric
+                        )
+                        metric_improved = curr_accuracy > prev_accuracy
+
+                        # Update early stopping counter
+                        if metric_improved:
+                            prev_accuracy = curr_accuracy
+                            early_stopping_counter = 0
+
+                        else:
+                            early_stopping_counter += 1
+
+                        if (
+                            early_stopping > 0
+                            and early_stopping_counter >= early_stopping
+                        ):
+                            print(
+                                f"Evaluation accuracy has not improved in {early_stopping} cycles of {cfg.trainer.eval_steps} evaluation steps, stopping the training."
+                            )
+                            early_stop = True
+
+                        # Save model checkpoint based on save_strategy
+                        save_strategy = getattr(cfg.trainer, "save_strategy", "steps")
+                        should_save = False
+
+                        if (
+                            save_strategy == "epoch"
+                            and completed_steps % num_update_steps_per_epoch == 0
+                        ):
+                            should_save = True
+                        elif save_strategy == "steps" and hasattr(
+                            cfg.trainer, "save_steps"
+                        ):
+                            if completed_steps % cfg.trainer.save_steps == 0:
+                                should_save = True
+                        elif save_strategy == "best":
+                            # Save only if this is the best model so far
+                            if metric_improved:
+                                should_save = True
+                        elif save_strategy != "no":
+                            # Default to saving at eval steps if strategy is not 'no'
+                            should_save = True
+
+                        # Only save checkpoint if explicitly enabled
+                        save_model = getattr(cfg.trainer, "save_model", True)
+                        save_total_limit = getattr(
+                            cfg.trainer, "save_total_limit", None
+                        )
+
+                        # Save if either save_total_limit>0 or max_ckpt>0 is configured
+                        limit_enabled = (
+                            save_total_limit is not None and save_total_limit > 0
+                        ) or (max_ckpt is not None and max_ckpt > 0)
+
+                        if should_save and save_model and limit_enabled:
+                            save_training_checkpoint(
+                                cfg, model, accelerator, completed_steps
+                            )
+
+                        model.train()
 
             if completed_steps >= cfg.trainer.max_steps or early_stop:
                 break
-
-            # Reset the gradient
-            optimizer.zero_grad()
 
         if completed_steps >= cfg.trainer.max_steps or early_stop:
             break

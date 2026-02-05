@@ -4,12 +4,17 @@
 from __future__ import annotations
 
 import argparse
+from typing import Any
 
 import torch
 from transformers import AutoModelForMaskedLM, AutoTokenizer
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser.
+
+    :return argparse.ArgumentParser: Configured parser.
+    """
     parser = argparse.ArgumentParser(
         description="Predict masked tokens with a Hugging Face Masked LM.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -46,13 +51,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _resolve_device(device: str) -> torch.device:
+    """Resolve the torch device for inference.
+
+    :param str device: Device selection string.
+    :return torch.device: Resolved torch device.
+    """
     if device == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(device)
 
 
-def _clean_metaspace_before_mask(inputs: dict, tokenizer) -> dict:
-    """Remove SentencePiece metaspace tokens that appear directly before a mask token."""
+def _clean_metaspace_before_mask(inputs: dict, tokenizer: Any) -> dict:
+    """Remove SentencePiece metaspace tokens that appear directly before a mask token.
+
+    :param dict inputs: Tokenized inputs.
+    :param Any tokenizer: Tokenizer instance.
+    :return dict: Cleaned inputs.
+    """
 
     metaspace = "▁"
     metaspace_id = tokenizer.convert_tokens_to_ids(metaspace)
@@ -84,6 +99,7 @@ def _clean_metaspace_before_mask(inputs: dict, tokenizer) -> dict:
 
 
 def main() -> None:
+    """Run the masked LM prediction CLI."""
     args = build_parser().parse_args()
     device = _resolve_device(args.device)
 

@@ -8,20 +8,20 @@ model:
   dropout_prob: 0.0
   vocab_size: 31999
   max_position_embeddings: 4096
-  flash_attention: true
+  xformers_attention: true
   ngpt: false
-  hidden_act: "swiglu"  # Requires xformers
+  hidden_act: "swiglu" # Requires xformers
   rope: true
   rms_norm: true
 
 dataset:
   name: "EleutherAI/SmolLM2-1.7B-stage-4-100B"
-  streaming: true  # Stream this large dataset
+  streaming: true # Stream this large dataset
   num_proc: 8
   num_workers: 4
   max_seq_length: 1024
   train_split: "train"
-  eval_split: "train[:1%]"  # Use small subset for eval
+  eval_split: "train[:1%]" # Use small subset for eval
 
 tokenizer:
   name: "BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp"
@@ -31,22 +31,20 @@ tokenizer:
 datacollator:
   mlm_probability: 0.2
   pad_to_multiple_of: 8
+  pack_sequences: true
 
 trainer:
   output_dir: "./outputs/neobert-100m-wordpc_msp_32k_tok-muonclip"
-  run_name: "neobert-100m-muonclip"
   max_steps: 100000
   per_device_train_batch_size: 16
   per_device_eval_batch_size: 16
   gradient_accumulation_steps: 4
-  warmup_steps: 5000
   logging_steps: 25
   eval_steps: 5000
   save_steps: 10000
-  save_total_limit: 3  # Keep only last 3 checkpoints
-  remove_unused_columns: false
+  save_total_limit: 3 # Keep only last 3 checkpoints
   report_to: ["wandb"]
-  bf16: true
+  mixed_precision: "bf16"
   gradient_checkpointing: false
   resume_from_checkpoint: false
 
@@ -64,20 +62,23 @@ optimizer:
   # NOTE: if muon_config is provided while name != "muonclip", we emit a warning and ignore it.
   muon_config:
     # Muon-specific parameters
-    orthogonalization: polar_express  # Options: polar_express (default), newton_schulz
-    muon_beta: 0.95  # Momentum coefficient for Muon
-    muon_decay: 0.01  # Weight decay for 2D params
-    ns_steps: 5  # Newton-Schulz iterations (3-9 recommended)
+    orthogonalization: polar_express # Options: polar_express (default), newton_schulz
+    muon_beta: 0.95 # Momentum coefficient for Muon
+    muon_decay: 0.01 # Weight decay for 2D params
+    ns_steps: 5 # Newton-Schulz iterations (3-9 recommended)
 
     # QK-Clipping parameters
-    enable_clipping: true  # Enable attention stability clipping
-    clipping_threshold: 50.0  # Conservative for encoders (decoder default: 100)
-    clipping_alpha: 0.5  # Q/K scaling balance (0.5 = equal)
-    clipping_warmup_steps: 0  # Steps before enabling clipping
+    enable_clipping: true # Enable attention stability clipping
+    clipping_threshold: 50.0 # Conservative for encoders (decoder default: 100)
+    clipping_alpha: 0.5 # Q/K scaling balance (0.5 = equal)
+    clipping_warmup_steps: 0 # Steps before enabling clipping
+    clipping_interval: 10 # Run clipping every N steps to cap dense QK overhead
+    clipping_qk_chunk_size: 1024 # Chunk QK max to avoid S^2 peak memory
+    capture_last_microbatch_only: true # Capture activations only on last microbatch
 
     # Debugging helpers
-    detect_anomalies: false  # Enable for debugging (slow)
-    clipping_layers_mapping: {}  # For non-fused attention blocks; keep empty for NeoBERT
+    detect_anomalies: false # Enable for debugging (slow)
+    clipping_layers_mapping: {} # For non-fused attention blocks; keep empty for NeoBERT
 
 scheduler:
   name: "cosine"
@@ -90,4 +91,3 @@ wandb:
 
 # Additional settings
 seed: 69
-mixed_precision: "bf16"

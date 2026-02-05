@@ -33,7 +33,6 @@ class TestEndToEndIntegration(unittest.TestCase):
         # Simulate command line args
         test_args = [
             "script.py",
-            "--config",
             str(config_path),
             "--trainer.output_dir",
             self.temp_dir,
@@ -56,7 +55,7 @@ class TestEndToEndIntegration(unittest.TestCase):
                 dropout=config.model.dropout_prob,
                 vocab_size=config.model.vocab_size,
                 max_length=config.model.max_position_embeddings,
-                flash_attention=config.model.flash_attention,
+                flash_attention=config.model.xformers_attention,
                 ngpt=config.model.ngpt,
                 hidden_act=config.model.hidden_act,
             )
@@ -137,7 +136,7 @@ class TestEndToEndIntegration(unittest.TestCase):
                     dropout=config.model.dropout_prob,
                     vocab_size=config.model.vocab_size,
                     max_length=config.model.max_position_embeddings,
-                    flash_attention=config.model.flash_attention,
+                    flash_attention=config.model.xformers_attention,
                     ngpt=config.model.ngpt,
                     hidden_act=config.model.hidden_act,
                 )
@@ -221,16 +220,24 @@ class TestEndToEndIntegration(unittest.TestCase):
                 self.assertIsNotNone(optimizer)
 
                 # Test scheduler creation
+                from neobert.scheduler import resolve_scheduler_steps
+
+                _, warmup_steps, decay_steps, constant_steps = resolve_scheduler_steps(
+                    trainer_max_steps=config.trainer.max_steps,
+                    total_steps=config.scheduler.total_steps,
+                    warmup_steps=config.scheduler.warmup_steps,
+                    warmup_percent=config.scheduler.warmup_percent,
+                    decay_steps=config.scheduler.decay_steps,
+                    decay_percent=config.scheduler.decay_percent,
+                    constant_steps=0,
+                )
                 scheduler = get_scheduler(
                     optimizer=optimizer,
                     lr=config.optimizer.lr,
                     decay=config.scheduler.name.replace("_decay", ""),
-                    warmup_steps=config.scheduler.warmup_steps,
-                    decay_steps=getattr(
-                        config.scheduler,
-                        "decay_steps",
-                        config.scheduler.total_steps or 1000,
-                    ),
+                    warmup_steps=warmup_steps,
+                    decay_steps=decay_steps,
+                    constant_steps=constant_steps,
                 )
                 self.assertIsNotNone(scheduler)
 
@@ -297,14 +304,14 @@ class TestEndToEndIntegration(unittest.TestCase):
             # Nested overrides
             ["--trainer.per_device_train_batch_size", "1"],
             # Boolean overrides
-            ["--model.flash_attention", "true"],
+            ["--model.xformers_attention", "true"],
             # Float overrides
             ["--optimizer.weight_decay", "0.02"],
         ]
 
         for overrides in test_cases:
             with self.subTest(overrides=overrides):
-                test_args = ["script.py", "--config", str(config_path)] + overrides
+                test_args = ["script.py", str(config_path)] + overrides
 
                 original_argv = sys.argv
                 sys.argv = test_args

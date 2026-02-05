@@ -1,3 +1,5 @@
-__all__ = ["tokenize", "get_tokenizer"]
+"""Tokenizer loading and dataset tokenization helpers."""
 
-from .tokenizer import get_tokenizer, tokenize
+__all__ = ["tokenize", "get_tokenizer", "resolve_text_column"]
+
+from .tokenizer import get_tokenizer, resolve_text_column, tokenize

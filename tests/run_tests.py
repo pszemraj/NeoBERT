@@ -7,8 +7,8 @@ import unittest
 from pathlib import Path
 
 
-def discover_and_run_tests(test_dir=None, pattern="test_*.py", verbosity=2):
-    """Discover and run tests."""
+def _run_unittest_discovery(test_dir: str | None, pattern: str, verbosity: int) -> bool:
+    """Run unittest discovery for legacy tests."""
     test_root = Path(__file__).parent
 
     if test_dir:
@@ -19,15 +19,65 @@ def discover_and_run_tests(test_dir=None, pattern="test_*.py", verbosity=2):
     else:
         test_path = test_root
 
-    # Discover tests
     loader = unittest.TestLoader()
     suite = loader.discover(str(test_path), pattern=pattern)
 
-    # Run tests
     runner = unittest.TextTestRunner(verbosity=verbosity)
     result = runner.run(suite)
 
     return result.wasSuccessful()
+
+
+def _pytest_args(
+    test_dir: str | None, pattern: str, quiet: bool, verbose: bool
+) -> tuple[list[str], bool]:
+    """Build pytest CLI arguments."""
+    args: list[str] = []
+    if quiet:
+        args.append("-q")
+    elif verbose:
+        args.append("-vv")
+
+    root = Path(__file__).parent
+    if test_dir:
+        root = root / test_dir
+
+    if pattern != "test_*.py":
+        matched = sorted(root.rglob(pattern))
+        if not matched:
+            print(f"No tests matched pattern: {pattern}")
+            return args, False
+        args.extend(str(path) for path in matched)
+    elif test_dir:
+        args.append(str(root))
+
+    return args, True
+
+
+def discover_and_run_tests(
+    test_dir=None,
+    pattern="test_*.py",
+    verbosity=2,
+    use_pytest=True,
+    quiet=False,
+    verbose=False,
+):
+    """Discover and run tests."""
+    if use_pytest:
+        try:
+            import pytest  # type: ignore
+
+            args, matched = _pytest_args(
+                test_dir, pattern, quiet=quiet, verbose=verbose
+            )
+            if not matched:
+                return False
+            return pytest.main(args) == 0
+        except Exception:
+            # Fall back to unittest discovery if pytest is unavailable.
+            pass
+
+    return _run_unittest_discovery(test_dir, pattern, verbosity)
 
 
 def main():
@@ -43,6 +93,11 @@ def main():
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
     parser.add_argument("--quiet", "-q", action="store_true", help="Quiet output")
+    parser.add_argument(
+        "--no-pytest",
+        action="store_true",
+        help="Force unittest discovery instead of pytest.",
+    )
 
     args = parser.parse_args()
 
@@ -65,7 +120,12 @@ def main():
     print("=" * 60)
 
     success = discover_and_run_tests(
-        test_dir=args.test_dir, pattern=args.pattern, verbosity=verbosity
+        test_dir=args.test_dir,
+        pattern=args.pattern,
+        verbosity=verbosity,
+        use_pytest=not args.no_pytest,
+        quiet=args.quiet,
+        verbose=args.verbose,
     )
 
     print("=" * 60)

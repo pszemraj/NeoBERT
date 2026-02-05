@@ -5,6 +5,7 @@ from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, Optional
 
 import torch
+import torch.nn as nn
 from accelerate.utils import DistributedType
 from torch.optim import Adam, AdamW
 
@@ -15,39 +16,60 @@ from .muon_clip import MuonClipConfig, MuonClipOptimizer
 logger = logging.getLogger(__name__)
 
 
+def _build_adamw_param_groups(
+    model: torch.nn.Module, weight_decay: float
+) -> list[dict[str, Any]]:
+    """Split parameters into decay / no-decay groups for AdamW.
+
+    :param torch.nn.Module model: Model whose parameters will be grouped.
+    :param float weight_decay: Weight decay value for decayed parameters.
+    :return list[dict[str, Any]]: Parameter groups for AdamW.
+    """
+    decay_params = []
+    no_decay_params = []
+    embedding_param_ids = {
+        id(param)
+        for module in model.modules()
+        if isinstance(module, nn.Embedding)
+        for param in module.parameters(recurse=False)
+    }
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        name_lower = name.lower()
+        if (
+            param.ndim < 2
+            or name_lower.endswith(".bias")
+            or "norm" in name_lower
+            or id(param) in embedding_param_ids
+        ):
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+
+    return [
+        {"params": decay_params, "weight_decay": weight_decay},
+        {"params": no_decay_params, "weight_decay": 0.0},
+    ]
+
+
 def get_optimizer(
     model: torch.nn.Module,
     distributed_type: DistributedType,
     model_config: Optional[Any] = None,
     muon_config: Optional[Any] = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> torch.optim.Optimizer:
     """Construct an optimizer configured for the current training run.
 
-    Parameters
-    ----------
-    model:
-        The model whose parameters will be optimized.
-    distributed_type:
-        Distributed execution mode reported by Accelerate.
-    model_config:
-        Optional model configuration. Required when instantiating MuonClip.
-    muon_config:
-        Dataclass or mapping containing MuonClip overrides.
-    **kwargs:
-        Additional optimizer-specific keyword arguments (e.g. ``lr``).
-
-    Returns
-    -------
-    torch.optim.Optimizer
-        An initialized optimizer instance.
-
-    Raises
-    ------
-    ValueError
-        If the MuonClip optimizer is requested without ``model_config``.
-    ValueError
-        If an unsupported optimizer name is provided.
+    :param torch.nn.Module model: Model whose parameters will be optimized.
+    :param DistributedType distributed_type: Distributed execution mode.
+    :param Any | None model_config: Optional model config (required for MuonClip).
+    :param Any | None muon_config: MuonClip overrides or dataclass.
+    :param Any kwargs: Additional optimizer-specific keyword arguments.
+    :return torch.optim.Optimizer: Initialized optimizer instance.
+    :raises ValueError: If MuonClip is requested without ``model_config``.
+    :raises ValueError: If an unsupported optimizer name is provided.
     """
     optimizer_name = kwargs.pop("name").lower()
 
@@ -59,7 +81,9 @@ def get_optimizer(
                 logger.warning(
                     "optimizer.muon_config provided but optimizer is adamw; ignoring"
                 )
-            optimizer = AdamW(model.parameters(), **kwargs)
+            weight_decay = kwargs.pop("weight_decay", 0.0)
+            param_groups = _build_adamw_param_groups(model, weight_decay)
+            optimizer = AdamW(param_groups, **kwargs)
             logger.info(f"AdamW initialized with lr={kwargs.get('lr', 'default')}")
             return optimizer
 
@@ -116,6 +140,9 @@ def get_optimizer(
                 f"  - Learning rate: {muon_clip_cfg.lr}\n"
                 f"  - Clipping enabled: {muon_clip_cfg.enable_clipping}\n"
                 f"  - Clipping threshold: {muon_clip_cfg.clipping_threshold}\n"
+                f"  - Clipping interval: {muon_clip_cfg.clipping_interval}\n"
+                f"  - QK chunk size: {muon_clip_cfg.clipping_qk_chunk_size}\n"
+                f"  - Capture last microbatch only: {muon_clip_cfg.capture_last_microbatch_only}\n"
                 f"  - Newton-Schulz steps: {muon_clip_cfg.ns_steps}\n"
                 f"  - Alpha (Q/K balance): {muon_clip_cfg.clipping_alpha}\n"
                 f"  - Orthogonalization: {muon_clip_cfg.orthogonalization}"

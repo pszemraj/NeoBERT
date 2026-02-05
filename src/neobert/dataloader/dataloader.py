@@ -1,3 +1,5 @@
+"""Dataloader helpers for masked language model pretraining."""
+
 import torch
 from datasets import Dataset
 from torch.utils.data import DataLoader
@@ -12,7 +14,6 @@ from ..collator import get_collator
 def get_dataloader(
     dataset: Dataset,
     tokenizer: PreTrainedTokenizer,
-    dtype: torch.dtype = torch.float32,
     mlm_probability: float = 0.15,
     mask_all: bool = False,
     pad_to_multiple_of: int = 8,
@@ -23,34 +24,35 @@ def get_dataloader(
     persistent_workers: bool = True,
     pack_sequences: bool = False,
     max_length: int = 512,
+    return_packed_seqlens: bool = False,
 ) -> torch.utils.data.DataLoader:
-    """Wrapper for constructing a ``torch`` dataloader, with a collator function applying masked language modeling and returning an additive pad mask.
+    """Build a ``torch`` dataloader with an MLM collator and pad mask.
 
-    Args:
-        dataset (Dataset).
-        tokenizer (PreTrainedTokenizer).
-        dtype (torch.dtype, optional): Dtype of the pad_mask. Defaults to torch.float32.
-        mlm_probability (float, optional): Ratio of tokens that are masked. Defaults to 0.15.
-        mask_all (bool, optional): Whether to mask every randomly selected tokens or to use the 80/10/10 masking scheme.
-        pad_to_multiple_of (int, optional): Pad to a multiple of. Defaults to 8.
-        num_workers (int): Number of workers for the dataloader. Defaults to 4.
-        batch_size (int): Batch size for each GPU. Defaults to 64.
-        shuffle (bool, optional): Whether to shuffle the dataset at the beginning of every epoch. Defaults to True.
-        pin_memory (bool, optional): If True, the dataloader will copy Tensors into device/CUDA pinned memory before returning them. Defaults to False.
-        persistent_workers (bool, optional): If True, the dataloader will not shut down the worker processes after a dataset has been consumed once. This allows to maintain the workers Dataset instances alive. Defaults to True.
-
-    Returns:
-        torch.utils.data.DataLoader
+    :param Dataset dataset: Dataset to iterate over.
+    :param PreTrainedTokenizer tokenizer: Tokenizer used by the collator.
+    :param float mlm_probability: Ratio of tokens to mask.
+    :param bool mask_all: Whether to mask all sampled tokens.
+    :param int pad_to_multiple_of: Pad length to a multiple of this value.
+    :param int num_workers: Number of dataloader workers.
+    :param int batch_size: Batch size per device.
+    :param bool shuffle: Whether to shuffle the dataset each epoch.
+    :param bool pin_memory: Whether to pin memory in the dataloader.
+    :param bool persistent_workers: Keep workers alive across epochs.
+    :param bool pack_sequences: Whether to pack sequences before collation.
+    :param int max_length: Maximum sequence length for packing.
+    :param bool return_packed_seqlens: Whether to emit packed_seqlens for non-packed batches
+        when attention masks are right-padded.
+    :return torch.utils.data.DataLoader: Configured dataloader instance.
     """
 
     collate_fn = get_collator(
-        dtype=dtype,
         tokenizer=tokenizer,
         mlm_probability=mlm_probability,
         pad_to_multiple_of=pad_to_multiple_of,
         mask_all=mask_all,
         max_length=max_length,
         pack_sequences=pack_sequences,
+        return_packed_seqlens=return_packed_seqlens,
     )
 
     # Check if this is a streaming dataset
@@ -64,6 +66,9 @@ def get_dataloader(
         "batch_size": batch_size,
         "pin_memory": pin_memory,
         "persistent_workers": persistent_workers if num_workers > 0 else False,
+        # Keep tail batches (important for unbiased eval); training logic tolerates
+        # smaller final batches when packing is enabled.
+        "drop_last": False,
     }
 
     # Only add shuffle for non-streaming datasets

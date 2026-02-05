@@ -1,3 +1,5 @@
+"""Download and cache contrastive datasets from the Hugging Face Hub."""
+
 from neobert.contrastive.datasets import (
     ALLNLI,
     AMAZONQA,

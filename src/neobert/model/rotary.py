@@ -1,60 +1,66 @@
-from typing import Tuple
+"""Rotary positional embedding helpers."""
+
+from typing import Optional, Tuple
 
 import torch
 
 
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
+def precompute_freqs_cis(
+    dim: int,
+    end: int,
+    theta: float = 10000.0,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    """Precompute complex rotary frequencies.
+
+    :param int dim: Dimension of the frequency tensor.
+    :param int end: End index for precomputing frequencies.
+    :param float theta: Scaling factor for frequency computation.
+    :param torch.device | None device: Optional device for precomputation.
+    :return torch.Tensor: Complex frequency tensor.
     """
-    Precompute the frequency tensor for complex exponentials (cis) with given dimensions.
-
-    This function calculates a frequency tensor with complex exponentials using the given dimension 'dim'
-    and the end index 'end'. The 'theta' parameter scales the frequencies.
-    The returned tensor contains complex values in complex64 data type.
-
-    Args:
-        dim (int): Dimension of the frequency tensor.
-        end (int): End index for precomputing frequencies.
-        theta (float, optional): Scaling factor for frequency computation. Defaults to 10000.0.
-
-    Returns:
-        torch.Tensor: Precomputed frequency tensor with complex exponentials.
-    """
-
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
+    # Compute frequencies in float32 for long-context numerical stability.
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, device=device).float() / dim))
     t = torch.arange(end, device=freqs.device)  # type: ignore
     freqs = torch.outer(t, freqs).float()  # type: ignore
     return torch.polar(torch.ones_like(freqs), freqs)  # complex64
 
 
-def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
-    """
-    Reshape frequency tensor for broadcasting it with another tensor.
+def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    """Reshape frequency tensor for broadcast with a target tensor.
 
-    This function reshapes the frequency tensor to have the same shape as the target tensor 'x'
-    for the purpose of broadcasting the frequency tensor during element-wise operations.
-
-    Args:
-        freqs_cis (torch.Tensor): Frequency tensor to be reshaped.
-        x (torch.Tensor): Target tensor for broadcasting compatibility.
-
-    Returns:
-        torch.Tensor: Reshaped frequency tensor.
-
-    Raises:
-        AssertionError: If the frequency tensor doesn't match the expected shape.
-        AssertionError: If the target tensor 'x' doesn't have the expected number of dimensions.
+    :param torch.Tensor freqs_cis: Frequency tensor to reshape.
+    :param torch.Tensor x: Target tensor for broadcasting compatibility.
+    :return torch.Tensor: Reshaped frequency tensor.
+    :raises ValueError: If tensor shapes are incompatible.
     """
 
     ndim = x.ndim
-    assert 0 <= 1 < ndim
-    try:
-        assert freqs_cis.shape == (x.shape[1], x.shape[-1])
-    except AssertionError:
-        print(freqs_cis.shape)
-        print((x.shape[1], x.shape[-1]))
-        raise AssertionError
-    shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
-    return freqs_cis.view(*shape)
+    if ndim < 2:
+        raise ValueError(f"Expected x with at least 2 dims, got shape {x.shape}")
+
+    if freqs_cis.dim() == 2:
+        if freqs_cis.shape != (x.shape[1], x.shape[-1]):
+            raise ValueError(
+                f"freqs_cis has shape {freqs_cis.shape}, expected "
+                f"({x.shape[1]}, {x.shape[-1]})"
+            )
+        shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
+        return freqs_cis.view(*shape)
+
+    if freqs_cis.dim() == 3:
+        if (
+            freqs_cis.shape[:2] != (x.shape[0], x.shape[1])
+            or freqs_cis.shape[-1] != x.shape[-1]
+        ):
+            raise ValueError(
+                f"freqs_cis has shape {freqs_cis.shape}, expected "
+                f"({x.shape[0]}, {x.shape[1]}, {x.shape[-1]})"
+            )
+        shape = [d if i in (0, 1, ndim - 1) else 1 for i, d in enumerate(x.shape)]
+        return freqs_cis.view(*shape)
+
+    raise ValueError(f"freqs_cis must have 2 or 3 dims, got {freqs_cis.dim()}")
 
 
 def apply_rotary_emb(
@@ -62,21 +68,12 @@ def apply_rotary_emb(
     xk: torch.Tensor,
     freqs_cis: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Apply rotary embeddings to input tensors using the given frequency tensor.
+    """Apply rotary embeddings to query and key tensors.
 
-    This function applies rotary embeddings to the given query 'xq' and key 'xk' tensors using the provided
-    frequency tensor 'freqs_cis'. The input tensors are reshaped as complex numbers, and the frequency tensor
-    is reshaped for broadcasting compatibility. The resulting tensors contain rotary embeddings and are
-    returned as real tensors.
-
-    Args:
-        xq (torch.Tensor): Query tensor to apply rotary embeddings.
-        xk (torch.Tensor): Key tensor to apply rotary embeddings.
-        freqs_cis (torch.Tensor): Precomputed frequency tensor for complex exponentials.
-
-    Returns:
-        Tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
+    :param torch.Tensor xq: Query tensor.
+    :param torch.Tensor xk: Key tensor.
+    :param torch.Tensor freqs_cis: Precomputed rotary frequencies.
+    :return tuple[torch.Tensor, torch.Tensor]: Rotary-embedded (xq, xk).
     """
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
     xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))

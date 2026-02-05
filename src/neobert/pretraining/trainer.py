@@ -1,112 +1,646 @@
+"""Pretraining loop for masked language modeling."""
+
+import inspect
 import json
 import logging
+import math
 import os
 import re
+from pathlib import Path
+from contextlib import nullcontext
+from typing import Any, Callable, Optional, Tuple
 
 # PyTorch
 import torch
 import wandb
 from accelerate import Accelerator
 from accelerate.utils import (
+    DataLoaderConfiguration,
     DistributedDataParallelKwargs,
     DistributedType,
     ProjectConfiguration,
+    send_to_device,
     set_seed,
 )
 
 # Hugging Face
-from datasets import load_dataset, load_from_disk
+from datasets import (
+    Dataset,
+    DatasetDict,
+    load_dataset,
+    load_dataset_builder,
+    load_from_disk,
+)
 
 # Deepspeed
 from deepspeed.utils import safe_get_full_fp32_param
 from torch.nn import CrossEntropyLoss
 from tqdm import tqdm
-from transformers import BatchEncoding
+from transformers import BatchEncoding, PreTrainedTokenizerBase
 
-from ..config import Config, ConfigLoader, MuonConfig
+from ..config import Config, ConfigLoader, MuonConfig, round_up_to_multiple
 from ..dataloader import get_dataloader
 from ..model import NeoBERTConfig, NeoBERTLMHead
+from ..model.model import XFORMERS_AVAILABLE, XFORMERS_ERROR
 from ..optimizer import get_optimizer
-from ..scheduler import get_scheduler
-from ..tokenizer import get_tokenizer
+from ..scheduler import get_scheduler, resolve_scheduler_steps
+from ..tokenizer import get_tokenizer, resolve_text_column
+from ..training_utils import (
+    _maybe_compile_model,
+    _maybe_prepare_for_forward,
+    _resolve_resume_checkpoint,
+)
 from ..utils import configure_tf32, model_summary, prepare_wandb_config
 
 # Our metric object and model
-from .metrics import Metrics
+from .metrics import Metrics, format_metrics
 
 # Set up logger
 logger = logging.getLogger(__name__)
+
+
+def _move_batch_to_device(batch: BatchEncoding, device: torch.device) -> BatchEncoding:
+    """Move batch tensors to device while keeping packed_seqlens on CPU.
+
+    :param BatchEncoding batch: Batch to move.
+    :param torch.device device: Target device.
+    :return BatchEncoding: Batch with tensors on device.
+    """
+    if hasattr(batch, "to") and not torch.is_tensor(batch):
+        batch = dict(batch)
+    return send_to_device(batch, device, skip_keys=["packed_seqlens"])
+
+
+def _parse_split_slice(split: str) -> Tuple[str, Optional[str], Optional[str]]:
+    """Parse a split string with optional slice notation.
+
+    Examples
+    --------
+    - "train[:1%]" -> ("train", "", "1%")
+    - "train[99%:]" -> ("train", "99%", "")
+    - "train[:1000]" -> ("train", "", "1000")
+
+    :param str split: Split string to parse.
+    :return tuple[str, str | None, str | None]: Base split and slice bounds.
+    """
+    match = re.match(r"^([^\[]+)\[([^\]]+)\]$", split)
+    if not match:
+        return split, None, None
+    base = match.group(1)
+    inner = match.group(2)
+    if ":" not in inner:
+        return split, None, None
+    start_str, end_str = inner.split(":", 1)
+    start = start_str.strip() or None
+    end = end_str.strip() or None
+    return base, start, end
+
+
+def _resolve_slice_index(value: Optional[str], total: Optional[int]) -> Optional[int]:
+    """Resolve a slice value (int or percent) to an integer index.
+
+    :param str | None value: Slice token (e.g., "1000" or "1%").
+    :param int | None total: Total number of examples (required for %).
+    :return int | None: Resolved index or None if not applicable.
+    """
+    if value is None:
+        return None
+    if value.endswith("%"):
+        if total is None:
+            return None
+        pct = float(value[:-1])
+        return int(total * pct / 100.0)
+    return int(value)
+
+
+def _load_streaming_split(
+    dataset_name: str,
+    split: str,
+    dataset_kwargs: dict[str, object],
+) -> Dataset:
+    """Load a streaming dataset split with optional slice notation.
+
+    Streaming datasets do not support slice notation in ``load_dataset`` directly,
+    so we emulate it using ``skip``/``take`` when possible.
+
+    :param str dataset_name: Dataset identifier.
+    :param str split: Split string (e.g., "train[:1%]").
+    :param dict[str, object] dataset_kwargs: Additional kwargs for HF datasets.
+    :return Dataset: Streaming dataset (IterableDataset).
+    """
+    base, start_token, end_token = _parse_split_slice(split)
+    dataset = load_dataset(
+        dataset_name,
+        split=base,
+        streaming=True,
+        **dataset_kwargs,
+    )
+
+    if start_token is None and end_token is None:
+        return dataset
+
+    needs_total = (start_token is not None and start_token.endswith("%")) or (
+        end_token is not None and end_token.endswith("%")
+    )
+    total_examples: Optional[int] = None
+    if needs_total:
+        try:
+            builder = load_dataset_builder(dataset_name, **dataset_kwargs)
+            if base in builder.info.splits:
+                total_examples = builder.info.splits[base].num_examples
+        except Exception as exc:
+            logger.warning(
+                "Unable to resolve streaming split size for %s (%s): %s",
+                dataset_name,
+                split,
+                exc,
+            )
+
+    if needs_total and total_examples is None:
+        raise ValueError(
+            f"Streaming split '{split}' uses percent slicing but total size is "
+            f"unknown. Use absolute indices (e.g., '{base}[:500]') instead of "
+            f"percentages for streaming datasets."
+        )
+
+    start_idx = _resolve_slice_index(start_token, total_examples)
+    end_idx = _resolve_slice_index(end_token, total_examples)
+
+    if start_idx and start_idx > 0:
+        dataset = dataset.skip(start_idx)
+
+    if end_idx is not None:
+        take_n = end_idx - (start_idx or 0)
+        if take_n <= 0:
+            logger.warning("Resolved split %s is empty after slicing.", split)
+            return dataset.take(0)
+        dataset = dataset.take(take_n)
+
+    return dataset
+
+
+def _count_masked_correct(
+    logits: torch.Tensor, labels: torch.Tensor, ignore_index: int = -100
+) -> torch.Tensor:
+    """Count correct predictions while ignoring masked labels.
+
+    :param torch.Tensor logits: Logits of shape ``[batch, seq_len, vocab]``.
+    :param torch.Tensor labels: Label IDs of shape ``[batch, seq_len]``.
+    :param int ignore_index: Label value to ignore (default: -100).
+    :return torch.Tensor: Scalar tensor of correct predictions on unmasked tokens.
+    """
+    mask = labels != ignore_index
+    if not mask.any():
+        return torch.zeros((), device=logits.device, dtype=torch.long)
+    preds = logits.argmax(dim=-1)
+    return (preds[mask] == labels[mask]).sum()
+
+
+def _resolve_eval_max_batches(
+    max_batches: Optional[int], num_processes: int
+) -> Optional[int]:
+    """Resolve per-rank eval batch cap from a global target.
+
+    :param int | None max_batches: Global eval batch target (all ranks combined).
+    :param int num_processes: Number of distributed processes.
+    :return int | None: Per-rank eval batch cap.
+    """
+    if max_batches is None or max_batches <= 0:
+        return None
+    if num_processes <= 1:
+        return max_batches
+    return max(1, (max_batches + num_processes - 1) // num_processes)
+
+
+def _run_eval(
+    model: torch.nn.Module,
+    eval_dataloader: torch.utils.data.DataLoader,
+    loss_fn: torch.nn.Module,
+    accelerator: Accelerator,
+    model_config: NeoBERTConfig,
+    max_batches: Optional[int] = None,
+) -> dict[str, float]:
+    """Run a lightweight evaluation loop for masked LM perplexity.
+
+    :param torch.nn.Module model: Model to evaluate.
+    :param torch.utils.data.DataLoader eval_dataloader: Evaluation dataloader.
+    :param torch.nn.Module loss_fn: Loss function (sum reduction).
+    :param Accelerator accelerator: Accelerator for distributed reductions.
+    :param NeoBERTConfig model_config: Model config with vocab size.
+    :param int | None max_batches: Optional cap on eval batches.
+    :return dict[str, float]: Evaluation metrics for logging.
+    """
+    was_training = model.training
+    model.eval()
+
+    eval_loss_sum = torch.zeros((), device=accelerator.device)
+    eval_num_pred = torch.zeros((), device=accelerator.device)
+    eval_num_correct = torch.zeros((), device=accelerator.device)
+    eval_batches = 0
+    max_batches_per_rank = _resolve_eval_max_batches(
+        max_batches, accelerator.num_processes
+    )
+
+    try:
+        with torch.no_grad():
+            for batch in eval_dataloader:
+                if (
+                    max_batches_per_rank is not None
+                    and eval_batches >= max_batches_per_rank
+                ):
+                    break
+                batch = _move_batch_to_device(batch, accelerator.device)
+                packed_seqlens = _packed_seqlens_to_list(batch.get("packed_seqlens"))
+                pad_mask = (
+                    None
+                    if packed_seqlens is not None
+                    else batch.get("attention_mask", None)
+                )
+                logits = model(
+                    batch["input_ids"],
+                    pad_mask,
+                    packed_seqlens=packed_seqlens,
+                )["logits"]
+                loss_sum = loss_fn(
+                    logits.view(-1, model_config.vocab_size), batch["labels"].view(-1)
+                )
+                num_pred = (batch["labels"] != -100).sum()
+                eval_loss_sum += loss_sum
+                eval_num_pred += num_pred
+                eval_num_correct += _count_masked_correct(logits, batch["labels"])
+                eval_batches += 1
+
+        total_loss = accelerator.reduce(eval_loss_sum, reduction="sum")
+        total_pred = accelerator.reduce(eval_num_pred, reduction="sum")
+        total_correct = accelerator.reduce(eval_num_correct, reduction="sum")
+        # Log per-rank batch count to avoid confusion about summed totals.
+        metrics: dict[str, float] = {
+            "eval/batches": float(eval_batches),
+        }
+        if total_pred.item() > 0:
+            eval_loss = (total_loss / total_pred).item()
+            metrics["eval/loss"] = eval_loss
+            metrics["eval/perplexity"] = math.exp(eval_loss)
+            metrics["eval/accuracy"] = (total_correct / total_pred).item()
+
+        return metrics
+    finally:
+        if was_training:
+            model.train()
+
+
+def _packed_seqlens_to_list(
+    packed_seqlens: Any,
+) -> Optional[list[list[int]]]:
+    """Normalize packed sequence lengths to Python lists.
+
+    :param Any packed_seqlens: Packed segment lengths tensor or list.
+    :return list[list[int]] | None: Packed segment lengths as Python lists.
+    """
+    if packed_seqlens is None:
+        return None
+    if torch.is_tensor(packed_seqlens):
+        if packed_seqlens.numel() == 0:
+            return [[] for _ in range(packed_seqlens.shape[0])]
+        if packed_seqlens.is_cuda:
+            raise RuntimeError(
+                "packed_seqlens must be a CPU tensor. This indicates a collator or "
+                "dataloader device placement bug; keep packed_seqlens on CPU to "
+                "avoid GPU syncs."
+            )
+        cpu = packed_seqlens.detach().cpu()
+        return [[int(x) for x in row[row > 0].tolist()] for row in cpu]
+    return packed_seqlens
+
+
+def _scale_gradients(model: torch.nn.Module, scale: torch.Tensor) -> None:
+    """Scale gradients in-place using a dtype-safe scalar.
+
+    :param torch.nn.Module model: Model whose gradients should be scaled.
+    :param torch.Tensor scale: Scale factor (scalar tensor).
+    """
+    grads_by_key: dict[tuple[torch.device, torch.dtype], list[torch.Tensor]] = {}
+    for param in model.parameters():
+        if param.grad is None:
+            continue
+        grad = param.grad
+        grads_by_key.setdefault((grad.device, grad.dtype), []).append(grad)
+
+    for (device, dtype), grads in grads_by_key.items():
+        scale_value = scale.to(device=device, dtype=dtype)
+        try:
+            torch._foreach_mul_(grads, scale_value)
+        except AttributeError:
+            # Older PyTorch fallback; dtype/device mismatches should surface as errors.
+            for grad in grads:
+                grad.mul_(scale_value)
+
+
+def _resolve_pack_token_limits(
+    tokenizer: PreTrainedTokenizerBase, max_length: int
+) -> Tuple[int, Optional[int], Optional[int]]:
+    """Compute tokenization limits for packed sequences.
+
+    :param PreTrainedTokenizerBase tokenizer: Tokenizer supplying special tokens.
+    :param int max_length: Target packed sequence length.
+    :return tuple[int, int | None, int | None]: Trimmed max_length and boundary IDs.
+    """
+    start_token_id = (
+        tokenizer.cls_token_id
+        if tokenizer.cls_token_id is not None
+        else tokenizer.bos_token_id
+    )
+    end_token_id = (
+        tokenizer.sep_token_id
+        if tokenizer.sep_token_id is not None
+        else tokenizer.eos_token_id
+    )
+    reserve = int(start_token_id is not None) + int(end_token_id is not None)
+    return max(1, max_length - reserve), start_token_id, end_token_id
+
+
+def _resolve_tokenize_num_proc(
+    requested: Optional[int],
+    num_processes: int,
+    is_main_process: bool,
+) -> int:
+    """Resolve per-rank num_proc for dataset tokenization.
+
+    :param int | None requested: Requested num_proc from config (or None).
+    :param int num_processes: Number of distributed processes.
+    :param bool is_main_process: Whether the caller is the main process.
+    :return int: Effective num_proc for this rank.
+    """
+    if requested is None or requested <= 0:
+        if hasattr(os, "sched_getaffinity"):
+            try:
+                requested = len(os.sched_getaffinity(0))
+            except Exception:
+                requested = os.cpu_count() or 1
+        else:
+            requested = os.cpu_count() or 1
+    if num_processes > 1:
+        requested = max(1, requested // num_processes)
+        if not is_main_process:
+            requested = 1
+    return max(1, requested)
+
+
+def _select_train_split(
+    dataset: Dataset | DatasetDict, train_split: Optional[str]
+) -> Dataset:
+    """Select a train split from a DatasetDict when needed.
+
+    :param Dataset | DatasetDict dataset: Loaded dataset object.
+    :param str | None train_split: Optional split name to select.
+    :return Dataset: Resolved training split dataset.
+    :raises ValueError: If no suitable split can be resolved.
+    """
+    if not isinstance(dataset, DatasetDict):
+        return dataset
+
+    if train_split:
+        if train_split in dataset:
+            return dataset[train_split]
+        raise ValueError(
+            f"train_split='{train_split}' not found in dataset splits: {list(dataset)}"
+        )
+
+    if "train" in dataset:
+        return dataset["train"]
+
+    raise ValueError(
+        "DatasetDict loaded from disk is missing a train split. "
+        f"Available splits: {list(dataset)}. Set dataset.train_split in the config."
+    )
+
+
+def _has_stored_batch(stored_batch: BatchEncoding) -> bool:
+    """Return True if any buffered batch fragments are present."""
+    return any(value is not None for value in stored_batch.values())
 
 
 def to_target_batch_size(
     batch: BatchEncoding,
     stored_batch: BatchEncoding,
     target_size: int = 8,
-):
+) -> tuple[BatchEncoding, BatchEncoding]:
+    """Adjust batch to a target size by splitting/concatenating.
+
+    :param BatchEncoding batch: Current batch to adjust.
+    :param BatchEncoding stored_batch: Buffered batch fragments.
+    :param int target_size: Target batch size.
+    :return tuple[BatchEncoding, BatchEncoding]: Adjusted batch and buffer.
+    """
     tmp = {}
+    for key in batch.keys():
+        stored_batch.setdefault(key, None)
+    buffer_device = None
+    for value in stored_batch.values():
+        if torch.is_tensor(value):
+            buffer_device = value.device
+            break
+    if buffer_device is None:
+        buffer_device = torch.device("cpu")
+    if _has_stored_batch(stored_batch):
+        merged: BatchEncoding = {}
+        for key, value in batch.items():
+            stored_value = stored_batch.get(key)
+            if stored_value is None:
+                merged[key] = value
+                continue
+            if value is None:
+                merged[key] = stored_value
+                continue
+            if torch.is_tensor(value):
+                if (
+                    torch.is_tensor(stored_value)
+                    and stored_value.device != value.device
+                ):
+                    stored_value = stored_value.to(value.device)
+                merged[key] = torch.cat([stored_value, value], dim=0)
+            else:
+                merged[key] = (
+                    stored_value + value
+                )  # list concatenation (non-tensor path)
+        for key in merged.keys():
+            stored_batch[key] = None
+        batch = merged
     batch_size = batch["input_ids"].shape[0]
 
-    # If the batch is to large, we store samples
+    # If the batch is too large, we store samples
     if batch_size > target_size:
         for key in batch.keys():
-            tmp[key] = torch.split(
-                batch[key], [target_size, batch_size - target_size], dim=0
-            )
-            batch[key] = tmp[key][0]
-            stored_batch[key] = (
-                tmp[key][1]
-                if stored_batch[key] is None
-                else torch.cat([stored_batch[key], tmp[key][1]], dim=0)
-            )
+            value = batch[key]
+            if value is None:
+                if key not in stored_batch:
+                    stored_batch[key] = None
+                continue
+            if torch.is_tensor(value):
+                tmp[key] = torch.split(
+                    value, [target_size, batch_size - target_size], dim=0
+                )
+                batch[key] = tmp[key][0]
+                if stored_batch[key] is None:
+                    leftover = tmp[key][1]
+                    if torch.is_tensor(leftover) and leftover.device != buffer_device:
+                        leftover = leftover.to(buffer_device)
+                    stored_batch[key] = leftover
+                else:
+                    # Keep stored batches on a single device (often CPU) to avoid device mismatches.
+                    if stored_batch[key].device != tmp[key][1].device:
+                        leftover = tmp[key][1].to(stored_batch[key].device)
+                    else:
+                        leftover = tmp[key][1]
+                    stored_batch[key] = torch.cat([stored_batch[key], leftover], dim=0)
+            else:
+                batch[key] = value[:target_size]
+                leftover = value[target_size:]
+                if stored_batch[key] is None:
+                    stored_batch[key] = leftover
+                else:
+                    stored_batch[key] = (
+                        stored_batch[key] + leftover
+                    )  # list concatenation (non-tensor path)
 
     # If the batch is too small, we had some stored_batch
     elif batch_size < target_size:
+        if stored_batch.get("input_ids") is None:
+            return batch, stored_batch
         # We have already enough samples stored
         if stored_batch["input_ids"].shape[0] >= target_size - batch_size:
             for key in batch.keys():
-                tmp[key] = torch.split(
-                    stored_batch[key],
-                    [
-                        target_size - batch_size,
-                        stored_batch[key].shape[0] - (target_size - batch_size),
-                    ],
-                    dim=0,
-                )
-                batch[key] = torch.cat([batch[key], tmp[key][0]], dim=0)
-                stored_batch[key] = tmp[key][1]
-                # Save on CPU to prevent full GPU memory
-                stored_batch[key].to("cpu", non_blocking=True)
+                if stored_batch[key] is None:
+                    continue
+                if batch[key] is None:
+                    continue
+                if (
+                    torch.is_tensor(stored_batch[key])
+                    and stored_batch[key].device != batch[key].device
+                ):
+                    stored_batch[key] = stored_batch[key].to(batch[key].device)
+            for key in batch.keys():
+                if stored_batch[key] is None:
+                    continue
+                if batch[key] is None:
+                    continue
+                if torch.is_tensor(stored_batch[key]):
+                    tmp[key] = torch.split(
+                        stored_batch[key],
+                        [
+                            target_size - batch_size,
+                            stored_batch[key].shape[0] - (target_size - batch_size),
+                        ],
+                        dim=0,
+                    )
+                    batch[key] = torch.cat([batch[key], tmp[key][0]], dim=0)
+                    stored_batch[key] = tmp[key][1]
+                    # Save on CPU to prevent full GPU memory; this trades extra H2D copies
+                    # for lower peak VRAM during uneven batch packing.
+                    # Use blocking transfer so buffered batches are ready when reused.
+                    stored_batch[key] = stored_batch[key].to("cpu")
+                else:
+                    take = target_size - batch_size
+                    batch[key] = (
+                        batch[key] + stored_batch[key][:take]
+                    )  # list concatenation (non-tensor path)
+                    stored_batch[key] = stored_batch[key][take:]
 
         # Concatenate otherwise
         else:
             for key in batch.keys():
-                batch[key] = torch.cat([batch[key], stored_batch[key]], dim=0)
+                if stored_batch[key] is None:
+                    continue
+                if batch[key] is None:
+                    continue
+                if torch.is_tensor(stored_batch[key]):
+                    if stored_batch[key].device != batch[key].device:
+                        stored_batch[key] = stored_batch[key].to(batch[key].device)
+                    batch[key] = torch.cat([batch[key], stored_batch[key]], dim=0)
+                else:
+                    batch[key] = (
+                        batch[key] + stored_batch[key]
+                    )  # list concatenation (non-tensor path)
                 stored_batch[key] = None
 
     return batch, stored_batch
 
 
-def trainer(cfg: Config):
+def _maybe_shuffle_streaming_dataset(
+    dataset: Dataset,
+    buffer_size: int,
+    seed: int,
+    print_fn: Callable[[str], None] | None = None,
+) -> Dataset:
+    """Shuffle a streaming dataset if a positive buffer size is configured.
+
+    :param Dataset dataset: Dataset to shuffle.
+    :param int buffer_size: Shuffle buffer size.
+    :param int seed: Random seed for deterministic shuffling.
+    :param callable | None print_fn: Optional logging callback.
+    :return Dataset: Shuffled dataset (or the original dataset if no shuffle is applied).
+    """
+    if buffer_size <= 0 or not hasattr(dataset, "shuffle"):
+        return dataset
+
+    shuffled = dataset.shuffle(buffer_size=buffer_size, seed=seed)
+    if print_fn is not None:
+        print_fn(f"Added shuffle buffer with size {buffer_size}")
+    return shuffled
+
+
+def _prepare_resume_dataloader(
+    train_dataloader: torch.utils.data.DataLoader,
+    metrics: Metrics,
+    accelerator: Accelerator,
+    is_streaming: bool,
+) -> torch.utils.data.DataLoader | None:
+    """Prepare a skipped dataloader for resume when possible.
+
+    :param torch.utils.data.DataLoader train_dataloader: Training dataloader.
+    :param Metrics metrics: Metrics tracker with resumed counters.
+    :param Accelerator accelerator: Accelerator instance.
+    :param bool is_streaming: Whether the dataset is streaming.
+    :return torch.utils.data.DataLoader | None: Skipped dataloader or ``None``.
+    """
+    if is_streaming:
+        raise ValueError(
+            "Cannot resume training with streaming datasets - data position is not "
+            "preserved. For resumable long runs, pre-tokenize your dataset:\n"
+            "  python scripts/pretraining/tokenize_dataset.py --dataset <name> --output <path>"
+        )
+
+    if not hasattr(train_dataloader, "__len__"):
+        logger.warning(
+            "Resume requested but dataloader has no length; "
+            "starting from the current epoch boundary."
+        )
+        return None
+
+    if hasattr(train_dataloader, "set_epoch"):
+        train_dataloader.set_epoch(metrics["train/epochs"])
+
+    resume_step = metrics["train/batches"] % len(train_dataloader)
+    if resume_step == 0:
+        return None
+
+    return accelerator.skip_first_batches(train_dataloader, resume_step)
+
+
+def trainer(cfg: Config) -> None:
+    """Run the pretraining loop.
+
+    :param Config cfg: Training configuration.
+    """
     # Get the last checkpoint id
     checkpoint_dir = os.path.join(cfg.trainer.output_dir, "checkpoints")
     model_checkpoint_dir = os.path.join(cfg.trainer.output_dir, "model_checkpoints")
     os.makedirs(model_checkpoint_dir, exist_ok=True)
-    iteration = 0
-
-    if (
-        cfg.trainer.resume_from_checkpoint
-        and os.path.exists(checkpoint_dir)
-        and len(os.listdir(checkpoint_dir)) > 0
-    ):
-        # This regular expression was taken from accelerator.load_state()
-        folders = os.listdir(checkpoint_dir)
-        iteration = (
-            max(
-                int(re.findall(r"[\/]?([0-9]+)(?=[^\/]*$)", folder)[0])
-                for folder in folders
-            )
-            + 1
-        )
+    resume_checkpoint_path, iteration = _resolve_resume_checkpoint(
+        cfg.trainer.resume_from_checkpoint,
+        checkpoint_dir,
+        cfg.trainer.output_dir,
+    )
 
     # Accelerator object - disable automatic checkpointing to avoid duplicate checkpoints/ directory
     project_config = ProjectConfiguration(
@@ -114,18 +648,51 @@ def trainer(cfg: Config):
         automatic_checkpoint_naming=False,  # We handle checkpointing manually in model_checkpoints/
         iteration=iteration,
     )
-    kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    # All parameters participate in the forward graph; keep DDP in fast-path mode.
+    kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
+    wandb_enabled = cfg.wandb.enabled and cfg.wandb.mode != "disabled"
+    # Keep dataloader batches on CPU so packed_seqlens stays as CPU metadata.
+    disable_dispatch = bool(
+        cfg.datacollator.pack_sequences or cfg.model.xformers_attention
+    )
+    dataloader_config = None
+    if disable_dispatch:
+        dataloader_config = DataLoaderConfiguration(dispatch_batches=False)
+        logger.info(
+            "Disabling Accelerate dispatch_batches because packed_seqlens must stay on CPU."
+        )
     accelerator = Accelerator(
         step_scheduler_with_optimizer=False,  # enable manual control of the scheduler
-        mixed_precision=cfg.mixed_precision,
+        mixed_precision=cfg.trainer.mixed_precision,
         gradient_accumulation_steps=cfg.trainer.gradient_accumulation_steps,
-        log_with="wandb" if cfg.wandb.mode != "disabled" else None,
+        log_with="wandb" if wandb_enabled else None,
         project_config=project_config,
         kwargs_handlers=[kwargs],
+        dataloader_config=dataloader_config,
     )
+    if accelerator.distributed_type is DistributedType.MEGATRON_LM:
+        raise RuntimeError(
+            "Megatron-LM backend is not supported by this training loop. "
+            "Use DDP or DeepSpeed instead."
+        )
+    if accelerator.distributed_type is DistributedType.DEEPSPEED:
+        is_muon = cfg.optimizer.name.lower() in {"muonclip", "muon-clip", "muon_clip"}
+        if is_muon:
+            deepspeed_plugin = getattr(accelerator.state, "deepspeed_plugin", None)
+            zero_stage = getattr(deepspeed_plugin, "zero_stage", None)
+            if zero_stage is None:
+                logger.warning(
+                    "MuonClip optimizer enabled with DeepSpeed, but zero stage is unknown. "
+                    "Ensure ZeRO stage < 2 to avoid incorrect sharded updates."
+                )
+            elif zero_stage >= 2:
+                raise RuntimeError(
+                    "MuonClip is not compatible with DeepSpeed ZeRO stage >= 2 "
+                    "(sharded grads/params). Use ZeRO stage 0/1 or disable MuonClip."
+                )
 
     # Initialise the wandb run and pass wandb parameters
-    if cfg.wandb.mode != "disabled":
+    if wandb_enabled:
         os.makedirs(cfg.wandb.dir, exist_ok=True)
         config_dict = prepare_wandb_config(cfg)
         accelerator.init_trackers(
@@ -165,51 +732,119 @@ def trainer(cfg: Config):
     set_seed(cfg.seed)
 
     # Configure TF32 precision for GPUs with compute capability >= 8.0
-    configure_tf32(print_fn=accelerator.print)
+    configure_tf32(enabled=cfg.trainer.tf32, print_fn=accelerator.print)
 
     # Local and global counters
     metrics = Metrics()
     accelerator.register_for_checkpointing(metrics)
+    log_interval = max(1, cfg.trainer.logging_steps)
 
-    # Get the dtype for the pad_mask
-    dtype_pad_mask = torch.float32
-    # Always use bf16 for mixed precision
-    if accelerator.mixed_precision == "bf16":
-        dtype_pad_mask = torch.bfloat16
+    is_streaming = cfg.dataset.streaming
+    if cfg.trainer.resume_from_checkpoint and is_streaming:
+        raise ValueError(
+            "Cannot resume training with streaming datasets - data position is not "
+            "preserved. For resumable long runs, pre-tokenize your dataset:\n"
+            "  python scripts/pretraining/tokenize_dataset.py --dataset <name> --output <path>"
+        )
+
+    if cfg.datacollator.pack_sequences:
+        logger.info(
+            "Using packed sequences with xFormers block-diagonal attention (experimental)."
+        )
+        if not cfg.model.xformers_attention:
+            raise ValueError(
+                "Packed sequences require model.xformers_attention=true (xFormers)."
+            )
+        if not XFORMERS_AVAILABLE:
+            raise ImportError(
+                "Packed sequences require xformers. Install with: pip install xformers. "
+                f"Import error: {XFORMERS_ERROR}"
+            )
 
     # Tokenizer
-    tokenizer = get_tokenizer(
-        pretrained_model_name_or_path=cfg.tokenizer.name,
-        max_length=cfg.tokenizer.max_length,
-        vocab_size=cfg.tokenizer.vocab_size or cfg.model.vocab_size,
-    )
+    with accelerator.main_process_first():
+        tokenizer = get_tokenizer(
+            pretrained_model_name_or_path=cfg.tokenizer.path or cfg.tokenizer.name,
+            max_length=cfg.tokenizer.max_length,
+        )
+
+    actual_vocab_size = len(tokenizer)
+    rounded_vocab_size = round_up_to_multiple(actual_vocab_size, 128)
+    if (
+        cfg.model.vocab_size != rounded_vocab_size
+        or cfg.tokenizer.vocab_size != rounded_vocab_size
+    ):
+        if accelerator.is_main_process:
+            logger.warning(
+                "Config vocab_size updated: tokenizer=%s rounded to %s (was model=%s).",
+                actual_vocab_size,
+                rounded_vocab_size,
+                cfg.model.vocab_size,
+            )
+    cfg.model.vocab_size = rounded_vocab_size
+    cfg.tokenizer.vocab_size = rounded_vocab_size
+
+    # Tokenization strategy for packed sequences: strip special tokens and reinsert
+    # boundaries in the collator to avoid duplicate BOS/EOS/SEP tokens.
+    pack_sequences = cfg.datacollator.pack_sequences
+    add_special_tokens = not pack_sequences
+    return_special_tokens_mask = True
+    tokenize_max_length = cfg.dataset.max_seq_length
+    if pack_sequences:
+        pack_target_length = cfg.datacollator.max_length or cfg.dataset.max_seq_length
+        tokenize_max_length, _, _ = _resolve_pack_token_limits(
+            tokenizer, pack_target_length
+        )
 
     # Dataset
+    dataset_kwargs: dict[str, object] = {}
+    if cfg.dataset.config:
+        dataset_kwargs["name"] = cfg.dataset.config
+    if cfg.dataset.cache_dir:
+        dataset_kwargs["cache_dir"] = cfg.dataset.cache_dir
+    if getattr(cfg.dataset, "trust_remote_code", False):
+        dataset_kwargs["trust_remote_code"] = True
+
+    train_dataset = None
     if cfg.dataset.path:
-        train_dataset = load_from_disk(cfg.dataset.path)
-    else:
-        # Parse split if it contains slice notation (e.g., "train[:1000]")
-        if cfg.dataset.train_split and "[" in cfg.dataset.train_split:
+        dataset_path = Path(cfg.dataset.path)
+        if dataset_path.exists():
+            train_dataset = load_from_disk(dataset_path)
+            train_dataset = _select_train_split(train_dataset, cfg.dataset.train_split)
+        else:
+            logger.warning(
+                "Dataset path %s not found; falling back to load_dataset().",
+                dataset_path,
+            )
+
+    if train_dataset is None:
+        if cfg.dataset.train_split:
+            if cfg.dataset.streaming:
+                train_dataset = _load_streaming_split(
+                    cfg.dataset.name,
+                    cfg.dataset.train_split,
+                    dataset_kwargs,
+                )
+            else:
+                train_dataset = load_dataset(
+                    cfg.dataset.name,
+                    split=cfg.dataset.train_split,
+                    streaming=False,
+                    **dataset_kwargs,
+                )
+        else:
             dataset = load_dataset(
                 cfg.dataset.name,
-                split=cfg.dataset.train_split,
                 streaming=cfg.dataset.streaming,
+                **dataset_kwargs,
             )
-            train_dataset = dataset
-        else:
-            dataset = load_dataset(cfg.dataset.name, streaming=cfg.dataset.streaming)
-            train_dataset = (
-                dataset[cfg.dataset.train_split]
-                if cfg.dataset.train_split
-                else dataset["train"]
-            )
+            train_dataset = dataset["train"]
 
     # Check if dataset needs tokenization
     # For streaming datasets, we need to check differently
-    is_streaming = cfg.dataset.streaming
     needs_tokenization = False
 
-    if train_dataset:
+    if train_dataset is not None:
         if is_streaming:
             # For streaming datasets, peek at the first example
             first_example = next(iter(train_dataset))
@@ -224,7 +859,6 @@ def trainer(cfg: Config):
         # For non-streaming datasets, check if pre-tokenization is requested
         if not is_streaming and cfg.dataset.pre_tokenize:
             import subprocess
-            from pathlib import Path
 
             # Create output directory
             if cfg.dataset.pre_tokenize_output:
@@ -233,109 +867,222 @@ def trainer(cfg: Config):
                 output_dir = f"tokenized_data/{cfg.dataset.name.replace('/', '_')}"
 
             Path(output_dir).mkdir(parents=True, exist_ok=True)
+            success_flag = Path(output_dir) / ".tokenize_complete"
+            failure_flag = Path(output_dir) / ".tokenize_failed"
 
             # Run tokenization script
             accelerator.print(f"Pre-tokenizing dataset to: {output_dir}")
 
             # Get absolute path to script
-            script_path = (
-                Path(__file__).parent.parent.parent
-                / "scripts"
-                / "pretraining"
-                / "tokenize_dataset.py"
-            )
+            repo_root = Path(__file__).resolve().parents[3]
+            script_path = repo_root / "scripts" / "pretraining" / "tokenize_dataset.py"
 
-            cmd = [
-                "python",
-                str(script_path),
-                "--dataset",
-                cfg.dataset.name,
-                "--tokenizer",
-                cfg.tokenizer.path or cfg.tokenizer.name,
-                "--output",
-                output_dir,
-                "--max-length",
-                str(cfg.dataset.max_seq_length),
-            ]
+            if accelerator.is_main_process and not success_flag.exists():
+                cmd = [
+                    "python",
+                    str(script_path),
+                    "--dataset",
+                    cfg.dataset.name,
+                    "--tokenizer",
+                    cfg.tokenizer.path or cfg.tokenizer.name,
+                    "--output",
+                    output_dir,
+                    "--max-length",
+                    str(tokenize_max_length),
+                ]
 
-            if cfg.dataset.train_split:
-                cmd.extend(["--split", cfg.dataset.train_split])
+                if cfg.dataset.config:
+                    cmd.extend(["--dataset-config", cfg.dataset.config])
 
-            if cfg.dataset.num_proc:
-                cmd.extend(["--num-proc", str(cfg.dataset.num_proc)])
+                if cfg.dataset.train_split:
+                    cmd.extend(["--split", cfg.dataset.train_split])
 
-            # Run the tokenization
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                raise RuntimeError(f"Tokenization failed: {result.stderr}")
+                if cfg.dataset.text_column:
+                    cmd.extend(["--text-column", cfg.dataset.text_column])
+
+                if cfg.dataset.num_proc:
+                    cmd.extend(["--num-proc", str(cfg.dataset.num_proc)])
+                if not add_special_tokens:
+                    cmd.append("--no-special-tokens")
+                if return_special_tokens_mask:
+                    cmd.append("--return-special-tokens-mask")
+
+                # Run the tokenization on the main process only.
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode != 0:
+                    failure_flag.write_text(result.stderr)
+                else:
+                    success_flag.write_text("ok")
+
+            accelerator.wait_for_everyone()
+            if not success_flag.exists():
+                err_msg = (
+                    failure_flag.read_text()
+                    if failure_flag.exists()
+                    else "Pre-tokenization failed; see main process logs."
+                )
+                raise RuntimeError(f"Tokenization failed: {err_msg}")
 
             accelerator.print(f"Pre-tokenization complete. Loading from: {output_dir}")
             # Load the pre-tokenized dataset
             train_dataset = load_from_disk(output_dir)
+            train_dataset = _select_train_split(train_dataset, cfg.dataset.train_split)
         else:
             # Determine text column
-            text_column = None
-            if is_streaming:
-                # For streaming, check the first example
-                first_example = next(iter(train_dataset))
-                for col in ["text", "sentence", "content"]:
-                    if col in first_example:
-                        text_column = col
-                        break
-                if text_column is None:
-                    raise ValueError(
-                        f"Could not find text column in dataset. "
-                        f"Available columns: {list(first_example.keys())}"
-                    )
-            else:
-                for col in ["text", "sentence", "content"]:
-                    if col in train_dataset.column_names:
-                        text_column = col
-                        break
-                if text_column is None:
-                    raise ValueError(
-                        f"Could not find text column in dataset. "
-                        f"Available columns: {train_dataset.column_names}"
-                    )
+            text_column = resolve_text_column(
+                train_dataset,
+                is_streaming,
+                preferred=cfg.dataset.text_column,
+            )
+            tokenize_num_proc = (
+                None
+                if is_streaming
+                else _resolve_tokenize_num_proc(
+                    cfg.dataset.num_proc,
+                    accelerator.num_processes,
+                    accelerator.is_main_process,
+                )
+            )
 
             # Tokenize dataset
-            train_dataset = tokenize(
-                train_dataset,
-                tokenizer,
-                column_name=text_column,
-                max_length=cfg.dataset.max_seq_length,
-                remove_columns=True,
-                truncation=True,
-                num_proc=cfg.dataset.num_proc if not cfg.dataset.streaming else None,
-            )
+            with accelerator.main_process_first():
+                train_dataset = tokenize(
+                    train_dataset,
+                    tokenizer,
+                    column_name=text_column,
+                    max_length=tokenize_max_length,
+                    remove_columns=True,
+                    truncation=True,
+                    num_proc=tokenize_num_proc,
+                    add_special_tokens=add_special_tokens,
+                    return_special_tokens_mask=return_special_tokens_mask,
+                )
         if cfg.dataset.streaming:
             accelerator.print("Tokenization setup complete for streaming dataset.")
-            # Add shuffle buffer for streaming datasets
-            if (
-                hasattr(cfg.dataset, "shuffle_buffer_size")
-                and cfg.dataset.shuffle_buffer_size > 0
-            ):
-                train_dataset = train_dataset.shuffle(
-                    buffer_size=cfg.dataset.shuffle_buffer_size, seed=cfg.trainer.seed
-                )
-                accelerator.print(
-                    f"Added shuffle buffer with size {cfg.dataset.shuffle_buffer_size}"
-                )
         else:
             accelerator.print(
                 f"Tokenization complete. Dataset size: {len(train_dataset)}"
             )
 
+    eval_dataset = None
+    if cfg.dataset.eval_split:
+        if cfg.dataset.path and Path(cfg.dataset.path).exists():
+            eval_source = load_from_disk(cfg.dataset.path)
+            if isinstance(eval_source, DatasetDict):
+                eval_dataset = eval_source[cfg.dataset.eval_split]
+            else:
+                logger.warning(
+                    "eval_split=%s requested but dataset path is not a DatasetDict; "
+                    "skipping evaluation.",
+                    cfg.dataset.eval_split,
+                )
+        else:
+            if cfg.dataset.streaming:
+                eval_dataset = _load_streaming_split(
+                    cfg.dataset.name,
+                    cfg.dataset.eval_split,
+                    dataset_kwargs,
+                )
+            else:
+                eval_dataset = load_dataset(
+                    cfg.dataset.name,
+                    split=cfg.dataset.eval_split,
+                    streaming=False,
+                    **dataset_kwargs,
+                )
+    elif cfg.dataset.validation_split:
+        if is_streaming:
+            logger.warning(
+                "validation_split is not supported for streaming datasets; "
+                "provide dataset.eval_split to enable validation."
+            )
+        else:
+            split = train_dataset.train_test_split(
+                test_size=cfg.dataset.validation_split, seed=cfg.seed
+            )
+            train_dataset = split["train"]
+            eval_dataset = split["test"]
+
+    if eval_dataset is not None:
+        eval_is_streaming = cfg.dataset.streaming
+        eval_needs_tokenization = False
+        if eval_is_streaming:
+            first_example = next(iter(eval_dataset))
+            eval_needs_tokenization = "input_ids" not in first_example
+        else:
+            eval_needs_tokenization = "input_ids" not in eval_dataset.column_names
+
+        if eval_needs_tokenization:
+            from neobert.tokenizer import tokenize
+
+            text_column = resolve_text_column(
+                eval_dataset,
+                eval_is_streaming,
+                preferred=cfg.dataset.text_column,
+            )
+            eval_num_proc = (
+                None
+                if eval_is_streaming
+                else _resolve_tokenize_num_proc(
+                    cfg.dataset.num_proc,
+                    accelerator.num_processes,
+                    accelerator.is_main_process,
+                )
+            )
+            with accelerator.main_process_first():
+                eval_dataset = tokenize(
+                    eval_dataset,
+                    tokenizer,
+                    column_name=text_column,
+                    max_length=tokenize_max_length,
+                    remove_columns=True,
+                    truncation=True,
+                    num_proc=eval_num_proc,
+                    add_special_tokens=add_special_tokens,
+                    return_special_tokens_mask=return_special_tokens_mask,
+                )
+
+        if not eval_is_streaming:
+            accelerator.print(f"Eval dataset size: {len(eval_dataset)}")
+
+    if cfg.dataset.streaming and hasattr(cfg.dataset, "shuffle_buffer_size"):
+        train_dataset = _maybe_shuffle_streaming_dataset(
+            train_dataset,
+            cfg.dataset.shuffle_buffer_size,
+            cfg.seed,
+            print_fn=accelerator.print,
+        )
+
     # Dataloader
+    collator_max_length = cfg.datacollator.max_length or cfg.dataset.max_seq_length
     train_dataloader = get_dataloader(
         train_dataset,
         tokenizer,
-        dtype=dtype_pad_mask,
         batch_size=cfg.trainer.per_device_train_batch_size,
         num_workers=cfg.dataset.num_workers,
         mlm_probability=cfg.datacollator.mlm_probability,
         pad_to_multiple_of=cfg.datacollator.pad_to_multiple_of,
+        mask_all=cfg.datacollator.mask_all,
+        pack_sequences=cfg.datacollator.pack_sequences,
+        max_length=collator_max_length,
+        return_packed_seqlens=cfg.model.xformers_attention,
     )
+
+    eval_dataloader = None
+    if eval_dataset is not None:
+        eval_dataloader = get_dataloader(
+            eval_dataset,
+            tokenizer,
+            batch_size=cfg.trainer.per_device_eval_batch_size,
+            num_workers=cfg.dataset.num_workers,
+            mlm_probability=cfg.datacollator.mlm_probability,
+            pad_to_multiple_of=cfg.datacollator.pad_to_multiple_of,
+            mask_all=cfg.datacollator.mask_all,
+            pack_sequences=cfg.datacollator.pack_sequences,
+            max_length=collator_max_length,
+            shuffle=False,
+            return_packed_seqlens=cfg.model.xformers_attention,
+        )
 
     # Model
     # vocab_size is now resolved during config preprocessing
@@ -346,34 +1093,40 @@ def trainer(cfg: Config):
         print(f"Tokenizer len(): {len(tokenizer)}")
         print(f"Tokenizer pad_token_id: {tokenizer.pad_token_id}")
 
+    # Keep this mapping in sync with ModelConfig fields to avoid config drift.
     model_config = NeoBERTConfig(
         hidden_size=cfg.model.hidden_size,
         num_hidden_layers=cfg.model.num_hidden_layers,
         num_attention_heads=cfg.model.num_attention_heads,
         intermediate_size=cfg.model.intermediate_size,
-        max_position_embeddings=cfg.model.max_position_embeddings,
+        max_length=cfg.model.max_position_embeddings,
         vocab_size=cfg.model.vocab_size,  # Use preprocessed vocab_size
         rope=cfg.model.rope,
         rms_norm=cfg.model.rms_norm,
         hidden_act=cfg.model.hidden_act,
-        dropout_prob=cfg.model.dropout_prob,
+        dropout=cfg.model.dropout_prob,
         norm_eps=cfg.model.norm_eps,
         embedding_init_range=cfg.model.embedding_init_range,
         decoder_init_range=cfg.model.decoder_init_range,
         classifier_init_range=cfg.model.classifier_init_range,
         pad_token_id=tokenizer.pad_token_id,
-        flash_attention=cfg.model.flash_attention,
+        flash_attention=cfg.model.xformers_attention,
+        ngpt=cfg.model.ngpt,
+        base_scale=cfg.model.base_scale,
     )
     model = NeoBERTLMHead(model_config)
 
     if cfg.trainer.gradient_checkpointing:
         model.gradient_checkpointing_enable()
-        # Track flag on config for downstream logging/debug, mirroring HF behaviour.
+        # Track flag on config for downstream logging/debug; the forward pass reads
+        # the model attribute, so this is purely metadata (HF-compatible).
         setattr(model.config, "gradient_checkpointing", True)
 
     # Print model summary with hierarchical parameter counts
     if accelerator.is_main_process:
         model_summary(model, max_depth=3, show_param_shapes=True)
+
+    model = _maybe_compile_model(model, cfg, accelerator, logger)
 
     # Optimizer and Scheduler
     # Log if using MuonClip optimizer
@@ -388,6 +1141,11 @@ def trainer(cfg: Config):
         logger.info(f"Newton-Schulz iterations: {muon_cfg.ns_steps}")
         logger.info(f"Orthogonalization: {muon_cfg.orthogonalization}")
         logger.info(f"Clipping warmup steps: {muon_cfg.clipping_warmup_steps}")
+        logger.info(f"Clipping interval: {muon_cfg.clipping_interval}")
+        logger.info(f"QK chunk size: {muon_cfg.clipping_qk_chunk_size}")
+        logger.info(
+            f"Capture last microbatch only: {muon_cfg.capture_last_microbatch_only}"
+        )
         logger.info("=" * 60)
 
     optimizer = get_optimizer(
@@ -401,26 +1159,110 @@ def trainer(cfg: Config):
         eps=cfg.optimizer.eps,
         muon_config=cfg.optimizer.muon_config,
     )
+    _, warmup_steps, decay_steps, constant_steps = resolve_scheduler_steps(
+        trainer_max_steps=cfg.trainer.max_steps,
+        total_steps=cfg.scheduler.total_steps,
+        warmup_steps=cfg.scheduler.warmup_steps,
+        warmup_percent=cfg.scheduler.warmup_percent,
+        decay_steps=cfg.scheduler.decay_steps,
+        decay_percent=cfg.scheduler.decay_percent,
+        constant_steps=0,
+    )
     scheduler = get_scheduler(
         optimizer=optimizer,
         lr=cfg.optimizer.lr,
         decay=cfg.scheduler.name,
-        warmup_steps=min(cfg.scheduler.warmup_steps, cfg.trainer.max_steps),
-        decay_steps=max(
-            cfg.trainer.max_steps, cfg.scheduler.warmup_steps + 1
-        ),  # Ensure decay_steps > warmup_steps
-        constant_steps=0,  # No constant phase for simplicity
+        warmup_steps=warmup_steps,
+        decay_steps=decay_steps,
+        final_ratio=cfg.scheduler.final_lr_ratio,
+        constant_steps=constant_steps,
     )
 
-    # Prepare with accelerate
-    train_dataloader, model, optimizer, scheduler = accelerator.prepare(
-        train_dataloader,
-        model,
-        optimizer,
-        scheduler,
-    )
+    if hasattr(accelerator, "prepare_data_loader"):
 
-    if cfg.wandb.mode != "disabled" and accelerator.is_main_process:
+        def _prepare_loader(
+            dataloader: torch.utils.data.DataLoader,
+        ) -> torch.utils.data.DataLoader:
+            kwargs = {"device_placement": False}
+            try:
+                supports_dispatch = (
+                    "dispatch_batches"
+                    in inspect.signature(accelerator.prepare_data_loader).parameters
+                )
+                if supports_dispatch:
+                    kwargs["dispatch_batches"] = not disable_dispatch
+                return accelerator.prepare_data_loader(dataloader, **kwargs)
+            except TypeError:
+                return accelerator.prepare_data_loader(
+                    dataloader, device_placement=False
+                )
+
+        train_dataloader = _prepare_loader(train_dataloader)
+        if eval_dataloader is not None:
+            eval_dataloader = _prepare_loader(eval_dataloader)
+        model, optimizer, scheduler = accelerator.prepare(
+            model,
+            optimizer,
+            scheduler,
+        )
+    else:
+        if disable_dispatch:
+            raise RuntimeError(
+                "Accelerate version too old to configure dispatch_batches. "
+                "Upgrade accelerate when using packed_seqlens."
+            )
+        if accelerator.distributed_type is DistributedType.DEEPSPEED:
+            logger.warning(
+                "Accelerate backend does not support per-object device placement; "
+                "falling back to default dataloader placement."
+            )
+            if eval_dataloader is not None:
+                (
+                    train_dataloader,
+                    eval_dataloader,
+                    model,
+                    optimizer,
+                    scheduler,
+                ) = accelerator.prepare(
+                    train_dataloader,
+                    eval_dataloader,
+                    model,
+                    optimizer,
+                    scheduler,
+                )
+            else:
+                train_dataloader, model, optimizer, scheduler = accelerator.prepare(
+                    train_dataloader,
+                    model,
+                    optimizer,
+                    scheduler,
+                )
+        else:
+            if eval_dataloader is not None:
+                (
+                    train_dataloader,
+                    eval_dataloader,
+                    model,
+                    optimizer,
+                    scheduler,
+                ) = accelerator.prepare(
+                    train_dataloader,
+                    eval_dataloader,
+                    model,
+                    optimizer,
+                    scheduler,
+                    device_placement=[False, False, True, True, True],
+                )
+            else:
+                train_dataloader, model, optimizer, scheduler = accelerator.prepare(
+                    train_dataloader,
+                    model,
+                    optimizer,
+                    scheduler,
+                    device_placement=[False, True, True, True],
+                )
+
+    if wandb_enabled and accelerator.is_main_process:
         wandb_watch = os.environ.get("WANDB_WATCH")
         if wandb_watch is not None:
             watch_mode = wandb_watch.strip().lower()
@@ -443,19 +1285,34 @@ def trainer(cfg: Config):
                 )
 
     # Loss function
-    train_loss_fn = CrossEntropyLoss()
+    # Note: logits are fully materialized; consider fused/chunked CE for very long contexts.
+    train_loss_fn = CrossEntropyLoss(reduction="sum")
+    eval_max_batches = getattr(cfg.trainer, "eval_max_batches", None)
+    if isinstance(eval_max_batches, int) and eval_max_batches <= 0:
+        eval_max_batches = None
+    if eval_max_batches is None and eval_dataset is not None and cfg.dataset.streaming:
+        eval_max_batches = 100
+        logger.info(
+            "Streaming eval detected; defaulting eval_max_batches to %s. "
+            "Set trainer.eval_max_batches to override.",
+            eval_max_batches,
+        )
 
     # Resume from the latest checkpoint
     skipped_train_dataloader = None
-    if (
-        cfg.trainer.resume_from_checkpoint
-        and os.path.exists(checkpoint_dir)
-        and len(os.listdir(checkpoint_dir)) > 0
-    ):
-        accelerator.load_state()
-        train_dataloader.set_epoch(metrics["train/epochs"])
-        skipped_train_dataloader = accelerator.skip_first_batches(
-            train_dataloader, metrics["train/batches"] % len(train_dataloader)
+    if cfg.trainer.resume_from_checkpoint and resume_checkpoint_path:
+        if not os.path.exists(resume_checkpoint_path):
+            raise FileNotFoundError(
+                f"resume_from_checkpoint path not found: {resume_checkpoint_path}"
+            )
+        accelerator.load_state(resume_checkpoint_path)
+        skipped_train_dataloader = _prepare_resume_dataloader(
+            train_dataloader, metrics, accelerator, is_streaming
+        )
+    elif cfg.trainer.resume_from_checkpoint:
+        logger.warning(
+            "resume_from_checkpoint is set but no valid checkpoints were found in %s",
+            checkpoint_dir,
         )
 
     # Progress bar
@@ -467,6 +1324,18 @@ def trainer(cfg: Config):
         disable=(not accelerator.is_main_process),
     )
 
+    accum_tokens = torch.zeros((), device=accelerator.device, dtype=torch.long)
+    local_samples = torch.zeros((), device=accelerator.device, dtype=torch.long)
+    local_tokens = torch.zeros((), device=accelerator.device, dtype=torch.long)
+    local_num_pred = torch.zeros((), device=accelerator.device, dtype=torch.long)
+    local_sum_loss = torch.zeros((), device=accelerator.device, dtype=torch.float32)
+    local_num_correct = torch.zeros((), device=accelerator.device, dtype=torch.long)
+    stored_batch = {
+        "input_ids": None,
+        "attention_mask": None,
+        "labels": None,
+        "packed_seqlens": None,
+    }
     while cfg.trainer.max_steps > metrics["train/steps"]:
         # Use skipped_train_dataloader the first epoch after resuming
         dataloader = (
@@ -474,159 +1343,152 @@ def trainer(cfg: Config):
             if skipped_train_dataloader is None
             else skipped_train_dataloader
         )
-
-        stored_batch = {
-            "input_ids": None,
-            "attention_mask": None,
-            "labels": None,
-        }
-        i = 0
         for batch in dataloader:
-            # Update number of batches
-            metrics["train/batches"] += 1
-            i += 1
-
             # Pack or truncate the batch to target batch size (batch size might be variable due to sequence packing).
-            if batch["input_ids"].shape[0] != cfg.trainer.per_device_train_batch_size:
+            # Skip batch buffering when using packed sequences, as packed_seqlens metadata would be lost.
+            is_packed = batch.get("packed_seqlens") is not None
+            if not is_packed and (
+                batch["input_ids"].shape[0] != cfg.trainer.per_device_train_batch_size
+                or _has_stored_batch(stored_batch)
+            ):
                 batch, stored_batch = to_target_batch_size(
                     batch, stored_batch, cfg.trainer.per_device_train_batch_size
                 )
 
-            # If it is still smaller, stored batches were not enough and we skip to the next iteration to fill the batch
-            if batch["input_ids"].shape[0] < cfg.trainer.per_device_train_batch_size:
-                stored_batch = batch
-                continue
+            batch = _move_batch_to_device(batch, accelerator.device)
 
-            # Under the no_sync context manager, PyTorch will skip synchronizing the gradients when .backward() is
-            # called, and the first call to .backward() outside this context manager will trigger the synchronization.
-            # Accumulating manually gives more flexibility and is compatible with TPUs.
-            if metrics["train/batches"] % cfg.trainer.gradient_accumulation_steps != 0:
-                with accelerator.no_sync(model):
-                    # Forward pass
-                    logits = model(
-                        batch["input_ids"], batch.get("attention_mask", None)
-                    )["logits"]
-                    train_loss = train_loss_fn(
-                        logits.view(-1, model_config.vocab_size),
-                        batch["labels"].view(-1),
-                    )
+            # Update number of batches only when we will execute a backward pass.
+            metrics["train/batches"] += 1
 
-                    # Compute gradient
-                    accelerator.backward(train_loss)
+            num_pred = (batch["labels"] != -100).sum()
+            num_tokens = (batch["input_ids"] != model_config.pad_token_id).sum()
+            packed_seqlens = _packed_seqlens_to_list(batch.get("packed_seqlens"))
+            pad_mask = (
+                None
+                if packed_seqlens is not None
+                else batch.get("attention_mask", None)
+            )
 
-                    # Log metrics
-                    metrics["train/local_samples"] += batch["input_ids"].shape[0]
-                    if "attention_mask" in batch.keys():
-                        metrics["train/local_tokens"] += (
-                            (batch["attention_mask"] == 0).sum().item()
-                        )
-                    else:
-                        metrics["train/local_tokens"] += batch["input_ids"].shape[1]
-                    metrics["train/local_num_pred"] += (
-                        (batch["labels"] != -100).sum().item()
-                    )
-                    metrics["train/local_sum_loss"] += (
-                        train_loss.item() * (batch["labels"] != -100).sum().item()
-                    )
-                    metrics["train/local_num_correct"] += (
-                        (logits.argmax(dim=-1) == batch["labels"]).sum().item()
-                    )
-
-            else:
+            sync_gradients = (
+                metrics["train/batches"] % cfg.trainer.gradient_accumulation_steps == 0
+            )
+            _maybe_prepare_for_forward(
+                optimizer,
+                update_step=metrics["train/steps"],
+                is_last_microbatch=sync_gradients,
+            )
+            context = nullcontext() if sync_gradients else accelerator.no_sync(model)
+            with context:
                 # Forward pass
-                logits = model(batch["input_ids"], batch.get("attention_mask", None))[
-                    "logits"
-                ]
-                train_loss = train_loss_fn(
+                logits = model(
+                    batch["input_ids"],
+                    pad_mask,
+                    packed_seqlens=packed_seqlens,
+                )["logits"]
+                loss_sum = train_loss_fn(
                     logits.view(-1, model_config.vocab_size), batch["labels"].view(-1)
                 )
 
                 # Compute gradient
-                accelerator.backward(train_loss)
+                accelerator.backward(loss_sum)
+                accum_tokens += num_pred.to(accum_tokens.dtype)
 
-                # Measure gradient norm prior to optional clipping so we always log it
-                grad_norm_value = None
-                if accelerator.distributed_type is DistributedType.DEEPSPEED:
-                    get_global_grad = getattr(model, "get_global_grad_norm", None)
-                    if callable(get_global_grad):
-                        grad_norm = get_global_grad()
-                        if isinstance(grad_norm, torch.Tensor):
-                            grad_norm_value = float(grad_norm.item())
-                        elif grad_norm is not None:
-                            grad_norm_value = float(grad_norm)
+                # Accumulate metrics on device to avoid per-batch syncs.
+                local_samples += batch["input_ids"].shape[0]
+                local_tokens += num_tokens
+                local_num_pred += num_pred
+                local_sum_loss += loss_sum.detach().float()
+                local_num_correct += _count_masked_correct(logits, batch["labels"])
+
+            if sync_gradients:
+                # Reduce to global token count to handle uneven sharding across ranks.
+                tokens_global = accelerator.reduce(accum_tokens, reduction="sum")
+                if tokens_global.item() > 0:
+                    # Match full-batch normalization across variable-length microbatches.
+                    # accelerator.backward() already divides by grad_accumulation_steps, and DDP averages
+                    # across processes on the sync step, so we rescale by
+                    # (num_processes * grad_accum_steps) / tokens_global
+                    # to recover per-token mean gradients for the global batch size.
+                    # This post-accumulation rescale is equivalent to scaling each microbatch loss
+                    # because gradients are linear in the loss scalar.
+                    # Ref: Unsloth blog (archived) https://archive.ph/RmO0U
+                    scale = (
+                        accelerator.num_processes
+                        * accelerator.gradient_accumulation_steps
+                    ) / tokens_global.float()
+                    _scale_gradients(model, scale)
                 else:
-                    grad_norm_sq = None
                     for param in model.parameters():
-                        if param.grad is None:
-                            continue
-                        param_norm = param.grad.norm(2)
-                        grad_norm_sq = (
-                            param_norm**2
-                            if grad_norm_sq is None
-                            else grad_norm_sq + param_norm**2
-                        )
-                    if grad_norm_sq is not None:
-                        grad_norm_value = float(torch.sqrt(grad_norm_sq).item())
+                        if param.grad is not None:
+                            param.grad.zero_()
 
-                max_grad_norm = (
-                    cfg.trainer.gradient_clipping
-                    if cfg.trainer.gradient_clipping is not None
-                    else (1.0 if cfg.trainer.gradient_checkpointing else None)
-                )
+                should_log = (metrics["train/steps"] + 1) % log_interval == 0
+                grad_norm_value = None
+
+                # Optional gradient clipping for stability on deep/long-context runs.
+                max_grad_norm = cfg.trainer.gradient_clipping
 
                 if max_grad_norm is not None and max_grad_norm > 0:
                     grad_norm_pre_clip = accelerator.clip_grad_norm_(
                         model.parameters(), max_grad_norm
                     )
-                    if grad_norm_value is None and grad_norm_pre_clip is not None:
+                    if should_log and grad_norm_pre_clip is not None:
                         grad_norm_value = float(
                             grad_norm_pre_clip.item()
                             if isinstance(grad_norm_pre_clip, torch.Tensor)
                             else grad_norm_pre_clip
                         )
+                elif should_log:
+                    if accelerator.distributed_type is DistributedType.DEEPSPEED:
+                        get_global_grad = getattr(model, "get_global_grad_norm", None)
+                        if callable(get_global_grad):
+                            grad_norm = get_global_grad()
+                            if isinstance(grad_norm, torch.Tensor):
+                                grad_norm_value = float(grad_norm.item())
+                            elif grad_norm is not None:
+                                grad_norm_value = float(grad_norm)
+                    else:
+                        grad_norm_sq = None
+                        for param in model.parameters():
+                            if param.grad is None:
+                                continue
+                            param_norm = param.grad.norm(2)
+                            grad_norm_sq = (
+                                param_norm**2
+                                if grad_norm_sq is None
+                                else grad_norm_sq + param_norm**2
+                            )
+                        if grad_norm_sq is not None:
+                            grad_norm_value = float(torch.sqrt(grad_norm_sq).item())
 
                 # Log metrics
                 pbar.update(1)
                 metrics["train/steps"] += 1
-                metrics["train/local_samples"] += batch["input_ids"].shape[0]
-                if "attention_mask" in batch.keys():
-                    metrics["train/local_tokens"] += (
-                        (batch["attention_mask"] == 0).sum().item()
-                    )
-                else:
-                    metrics["train/local_tokens"] += batch["input_ids"].shape[1]
-                metrics["train/local_num_pred"] += (
-                    (batch["labels"] != -100).sum().item()
-                )
-                metrics["train/local_sum_loss"] += (
-                    train_loss.item() * (batch["labels"] != -100).sum().item()
-                )
-                metrics["train/local_num_correct"] += (
-                    (logits.argmax(dim=-1) == batch["labels"]).sum().item()
-                )
 
                 # Update the parameters and the scheduler
                 optimizer.step()
                 scheduler.step()
+                accum_tokens.zero_()
 
-                if metrics["train/steps"] % cfg.wandb.log_interval == 0:
+                if metrics["train/steps"] % log_interval == 0:
                     if grad_norm_value is not None:
                         metrics["train/grad_norm"] = grad_norm_value
 
-                    if accelerator.distributed_type is DistributedType.DEEPSPEED:
-                        metrics["train/weight_norm"] = (
-                            sum(
-                                [
-                                    safe_get_full_fp32_param(p).norm(2) ** 2
-                                    for p in model.parameters()
-                                ]
-                            )
-                            ** 0.5
-                        ).item()
-                    else:
-                        metrics["train/weight_norm"] = (
-                            sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5
-                        ).item()
+                    if cfg.trainer.log_weight_norms and accelerator.is_main_process:
+                        if accelerator.distributed_type is DistributedType.DEEPSPEED:
+                            metrics["train/weight_norm"] = (
+                                sum(
+                                    [
+                                        safe_get_full_fp32_param(p).norm(2) ** 2
+                                        for p in model.parameters()
+                                    ]
+                                )
+                                ** 0.5
+                            ).item()
+                        else:
+                            metrics["train/weight_norm"] = (
+                                sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5
+                            ).item()
 
                     # Add MuonClip metrics if available
                     if hasattr(optimizer, "get_metrics"):
@@ -635,62 +1497,87 @@ def trainer(cfg: Config):
                             metrics[key] = value
 
                     metrics["train/learning_rate"] = optimizer.param_groups[0]["lr"]
+                    metrics["train/local_samples"] = int(local_samples.item())
+                    metrics["train/local_tokens"] = int(local_tokens.item())
+                    metrics["train/local_num_pred"] = int(local_num_pred.item())
+                    metrics["train/local_sum_loss"] = float(local_sum_loss.item())
+                    metrics["train/local_num_correct"] = int(local_num_correct.item())
                     metrics.log(accelerator)
+                    local_samples.zero_()
+                    local_tokens.zero_()
+                    local_num_pred.zero_()
+                    local_sum_loss.zero_()
+                    local_num_correct.zero_()
 
-                # Skip saving accelerator state - we only need model checkpoints
-                # This avoids the duplicate checkpoints/ directory
-
-                # Save the pytorch model
+                # Save accelerator state for resumable training
                 if metrics["train/steps"] % cfg.trainer.save_steps == 0:
-                    # Clean up old checkpoints if limit is set
+                    state_checkpoint_path = os.path.join(
+                        checkpoint_dir, str(metrics["train/steps"])
+                    )
+                    accelerator.save_state(output_dir=state_checkpoint_path)
+                    accelerator.wait_for_everyone()
+
+                    # Accelerator checkpoints are the source of truth for resuming.
                     save_total_limit = getattr(cfg.trainer, "save_total_limit", 0)
                     max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
-                    limit = max(save_total_limit, max_ckpt)  # Use whichever is set
-
-                    if limit > 0 and os.path.exists(model_checkpoint_dir):
-                        # Get all checkpoint directories
-                        checkpoints = []
-                        for item in os.listdir(model_checkpoint_dir):
-                            item_path = os.path.join(model_checkpoint_dir, item)
+                    limit = max(save_total_limit, max_ckpt)
+                    if (
+                        limit > 0
+                        and os.path.exists(checkpoint_dir)
+                        and accelerator.is_main_process
+                    ):
+                        # Prune accelerator checkpoints to the same retention policy
+                        # as model_checkpoints to avoid unbounded disk growth.
+                        accel_checkpoints = []
+                        for item in os.listdir(checkpoint_dir):
+                            item_path = os.path.join(checkpoint_dir, item)
                             if os.path.isdir(item_path) and item.isdigit():
-                                checkpoints.append(int(item))
-
-                        # Sort and remove oldest checkpoints if over limit
-                        if len(checkpoints) >= limit:
-                            checkpoints.sort()
-                            # Remove oldest checkpoints
-                            for old_ckpt in checkpoints[: len(checkpoints) - limit + 1]:
-                                old_path = os.path.join(
-                                    model_checkpoint_dir, str(old_ckpt)
-                                )
+                                accel_checkpoints.append(int(item))
+                        if len(accel_checkpoints) > limit:
+                            accel_checkpoints.sort()
+                            for old_ckpt in accel_checkpoints[
+                                : len(accel_checkpoints) - limit
+                            ]:
+                                old_path = os.path.join(checkpoint_dir, str(old_ckpt))
                                 if os.path.exists(old_path):
                                     import shutil
 
                                     shutil.rmtree(old_path)
-                                    # Use logger instead of accelerator.print to avoid progress bar interference
-                                    if accelerator.is_main_process:
-                                        logger.info(
-                                            f"Removed old checkpoint: {old_path} (limit={limit})"
-                                        )
+                                    logger.info(
+                                        "Removed old accelerator checkpoint: %s (limit=%s)",
+                                        old_path,
+                                        limit,
+                                    )
 
+                # Save the pytorch model
+                if metrics["train/steps"] % cfg.trainer.save_steps == 0:
+                    # Model checkpoints are used for inference/export and can be pruned independently.
                     # Save the checkpoint
+                    step_tag = str(metrics["train/steps"])
+                    tmp_tag = f"{step_tag}.tmp"
+                    tmp_path = os.path.join(model_checkpoint_dir, tmp_tag)
+
+                    # Clean up any stale tmp directory from a previous failed save.
+                    # Use exist_ok pattern to avoid TOCTOU race conditions in distributed setting.
+                    if accelerator.is_main_process:
+                        import shutil
+
+                        if os.path.exists(tmp_path):
+                            shutil.rmtree(tmp_path)
+                        os.makedirs(tmp_path, exist_ok=True)
+                    accelerator.wait_for_everyone()
+
+                    checkpoint_path = tmp_path
                     if accelerator.distributed_type is DistributedType.DEEPSPEED:
-                        model.save_checkpoint(
-                            model_checkpoint_dir, tag=metrics["train/steps"]
-                        )
-                        checkpoint_path = os.path.join(
-                            model_checkpoint_dir, str(metrics["train/steps"])
-                        )
+                        # DeepSpeed checkpoints are not directly portable; use zero_to_fp32 to export.
+                        # DeepSpeed writes into model_checkpoint_dir/tmp_tag, which we later rename
+                        # atomically alongside config/tokenizer for a single cohesive checkpoint.
+                        model.save_checkpoint(model_checkpoint_dir, tag=tmp_tag)
                     else:
-                        path = os.path.join(
-                            model_checkpoint_dir, str(metrics["train/steps"])
-                        )
-                        os.makedirs(path, exist_ok=True)
                         torch.save(
                             accelerator.unwrap_model(model).state_dict(),
-                            os.path.join(path, "state_dict.pt"),
+                            os.path.join(checkpoint_path, "state_dict.pt"),
                         )
-                        checkpoint_path = path
 
                     # Save config and tokenizer info (only from main process)
                     if accelerator.is_main_process:
@@ -701,7 +1588,7 @@ def trainer(cfg: Config):
                         # Save tokenizer info as JSON
                         tokenizer_info = {
                             "tokenizer_name": cfg.tokenizer.path or cfg.tokenizer.name,
-                            "vocab_size": tokenizer.vocab_size,
+                            "vocab_size": cfg.model.vocab_size,
                             "pad_token_id": tokenizer.pad_token_id,
                         }
                         tokenizer_info_path = os.path.join(
@@ -718,10 +1605,75 @@ def trainer(cfg: Config):
                         tokenizer.model_max_length = cfg.model.max_position_embeddings
                         tokenizer.save_pretrained(tokenizer_dir)
 
+                    accelerator.wait_for_everyone()
+
+                    if accelerator.is_main_process:
+                        final_path = os.path.join(model_checkpoint_dir, step_tag)
+                        if os.path.exists(final_path):
+                            import shutil
+
+                            shutil.rmtree(final_path)
+                        os.replace(checkpoint_path, final_path)
+                        checkpoint_path = final_path
                         # Use logger instead of accelerator.print to avoid progress bar interference
                         logger.info(
-                            f"Saved checkpoint with config, tokenizer info, and full tokenizer to {checkpoint_path}"
+                            "Saved checkpoint with config, tokenizer info, and full tokenizer to %s",
+                            checkpoint_path,
                         )
+
+                    accelerator.wait_for_everyone()
+
+                    # Clean up old checkpoints if limit is set (after saving).
+                    save_total_limit = getattr(cfg.trainer, "save_total_limit", 0)
+                    max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
+                    limit = max(save_total_limit, max_ckpt)  # Use whichever is set
+
+                    if (
+                        limit > 0
+                        and os.path.exists(model_checkpoint_dir)
+                        and accelerator.is_main_process
+                    ):
+                        # Get all checkpoint directories
+                        checkpoints = []
+                        for item in os.listdir(model_checkpoint_dir):
+                            item_path = os.path.join(model_checkpoint_dir, item)
+                            if os.path.isdir(item_path) and item.isdigit():
+                                checkpoints.append(int(item))
+
+                        # Sort and remove oldest checkpoints if over limit
+                        if len(checkpoints) > limit:
+                            checkpoints.sort()
+                            # Remove oldest checkpoints
+                            for old_ckpt in checkpoints[: len(checkpoints) - limit]:
+                                old_path = os.path.join(
+                                    model_checkpoint_dir, str(old_ckpt)
+                                )
+                                if os.path.exists(old_path):
+                                    import shutil
+
+                                    shutil.rmtree(old_path)
+                                    # Use logger instead of accelerator.print to avoid progress bar interference
+                                    logger.info(
+                                        f"Removed old checkpoint: {old_path} (limit={limit})"
+                                    )
+
+                if (
+                    eval_dataloader is not None
+                    and getattr(cfg.trainer, "eval_strategy", "steps") == "steps"
+                    and cfg.trainer.eval_steps > 0
+                    and metrics["train/steps"] % cfg.trainer.eval_steps == 0
+                ):
+                    eval_metrics = _run_eval(
+                        model,
+                        eval_dataloader,
+                        train_loss_fn,
+                        accelerator,
+                        model_config,
+                        max_batches=eval_max_batches,
+                    )
+                    accelerator.log(
+                        format_metrics(eval_metrics), step=metrics["train/steps"]
+                    )
 
                 # Zero out the optimizer
                 optimizer.zero_grad()
@@ -731,12 +1683,27 @@ def trainer(cfg: Config):
                     pbar.close()
                     return
 
+        if (
+            eval_dataloader is not None
+            and getattr(cfg.trainer, "eval_strategy", "steps") == "epoch"
+        ):
+            eval_metrics = _run_eval(
+                model,
+                eval_dataloader,
+                train_loss_fn,
+                accelerator,
+                model_config,
+                max_batches=eval_max_batches,
+            )
+            accelerator.log(format_metrics(eval_metrics), step=metrics["train/steps"])
+
         # Update the number of epochs
         metrics["train/epochs"] += 1
         skipped_train_dataloader = None
 
         # For streaming datasets, update the epoch to ensure different shuffling
         if cfg.dataset.streaming and hasattr(train_dataset, "set_epoch"):
+            # Called after epoch increment so the next epoch uses the new seed.
             train_dataset.set_epoch(metrics["train/epochs"])
             accelerator.print(
                 f"Set streaming dataset epoch to {metrics['train/epochs']}"

@@ -1,3 +1,5 @@
+task: pretraining
+
 dataset:
   name: "common-pile/comma_v0.1_training_dataset"
   train_split: "train"
@@ -6,10 +8,8 @@ dataset:
   num_workers: 0  # Required for streaming datasets to avoid pickling errors
 
 model:
-  path: "google-bert/bert-base-uncased"
   dropout_prob: 0.0
-  use_flash_attention: false
-  flash_attention: false
+  xformers_attention: false
 
 tokenizer:
   path: "google-bert/bert-base-uncased"
@@ -18,38 +18,30 @@ tokenizer:
   truncation: true
 
 trainer:
+  output_dir: "./outputs/streaming_test"
   max_steps: 100
-  report_to: []  # Disable wandb
-  bf16: true
-  mixed_precision: "bf16"
   per_device_train_batch_size: 8
   per_device_eval_batch_size: 8
   gradient_accumulation_steps: 1
   save_steps: 50
   eval_steps: 50
   logging_steps: 10
-  warmup_steps: 10
-  learning_rate: 5.0e-5
-  weight_decay: 0.01
-  adam_epsilon: 1.0e-8
-  adam_beta1: 0.9
-  adam_beta2: 0.999
-  max_grad_norm: 1.0
   gradient_checkpointing: false
-  eval_accumulation_steps: 10
-  debug: true
-  remove_unused_columns: true
-  dataloader_pin_memory: false
+  mixed_precision: "bf16"
+  report_to: []  # Disable wandb
   dataloader_num_workers: 0
+  gradient_clipping: 1.0
 
-dataloader:
-  batch_size: 8
-  shuffle: false  # Streaming datasets handle shuffling differently
-  num_workers: 0
-  pin_memory: false
-  drop_last: true
+optimizer:
+  name: "adamw"
+  lr: 5.0e-5
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
 
-mlm:
+scheduler:
+  name: "linear"
+  warmup_steps: 10
+
+datacollator:
   mlm_probability: 0.15
-
-output_dir: "./outputs/streaming_test"

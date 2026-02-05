@@ -1,25 +1,49 @@
+"""Tokenizer utilities and dataset tokenization helpers."""
+
+import logging
 import os
 from functools import partial
-from typing import Tuple
+from typing import Any, Optional, Tuple
 
 from datasets import Dataset, Features, Sequence, Value
 from tokenizers.processors import TemplateProcessing
-from transformers import AutoTokenizer, PreTrainedTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+
+logger = logging.getLogger("neobert.tokenizer")
 
 
 def get_tokenizer(
     pretrained_model_name_or_path: str = "meta-llama/Llama-2-7b-hf",
-    vocab_size: int = 32064,
     max_length: int = 4096,
-    token: str = None,
-    **kwargs,
-):
+    token: Optional[str] = None,
+    vocab_size: Optional[int] = None,
+    use_fast: bool = True,
+    **kwargs: Any,
+) -> PreTrainedTokenizer:
+    """Load and configure a tokenizer for NeoBERT usage.
+
+    :param str pretrained_model_name_or_path: Tokenizer model name or path.
+    :param int max_length: Maximum sequence length.
+    :param str | None token: Optional auth token for gated models.
+    :param int | None vocab_size: Deprecated; tokenizer vocab size is derived from the model.
+    :param bool use_fast: Whether to require a fast tokenizer backend.
+    :param Any kwargs: Additional kwargs forwarded to ``from_pretrained``.
+    :return PreTrainedTokenizer: Configured tokenizer instance.
+    """
+    if vocab_size is not None:
+        logger.warning(
+            "get_tokenizer(): 'vocab_size' is deprecated and ignored; "
+            "resize model embeddings instead."
+        )
+    kwargs.pop("vocab_size", None)
+    kwargs.setdefault("use_fast", use_fast)
+
     # Load Tokenizer and replace/add special tokens
     tokenizer = AutoTokenizer.from_pretrained(
         pretrained_model_name_or_path,
-        vocab_size=vocab_size,
         token=token,
         trust_remote_code=True,
+        **kwargs,
     )
 
     # Set model_max_length (not max_length which is deprecated)
@@ -31,10 +55,6 @@ def get_tokenizer(
 
     # Check if tokenizer already has mask token defined
     # If it does, keep the existing special tokens
-    import logging
-
-    logger = logging.getLogger(__name__)
-
     if hasattr(tokenizer, "mask_token") and tokenizer.mask_token is not None:
         # Tokenizer already has special tokens configured, keep them
         logger.info(
@@ -50,6 +70,17 @@ def get_tokenizer(
         should_keep_special_tokens = False
 
     if not should_keep_special_tokens:
+        if not isinstance(tokenizer, PreTrainedTokenizerFast) or not tokenizer.is_fast:
+            raise ValueError(
+                "Tokenizer does not provide a fast backend; cannot override post-processing "
+                "for MLM-style special tokens. Use a fast tokenizer or a model that already "
+                "defines a mask token."
+            )
+        if not hasattr(tokenizer, "_tokenizer") or tokenizer._tokenizer is None:
+            raise ValueError(
+                "Fast tokenizer backend is missing; cannot set post_processor for special tokens."
+            )
+
         # Define special tokens to be consistent with RoBERTa
         special_tokens = {
             "bos_token": "<s>",
@@ -64,6 +95,11 @@ def get_tokenizer(
         tokenizer.add_special_tokens(special_tokens)
 
         # Update the processor to add <eos> and <bos> tokens
+        if tokenizer._tokenizer.post_processor is not None:
+            logger.warning(
+                "Overriding existing tokenizer post_processor to enforce MLM-style "
+                "special tokens; custom post-processing will be replaced."
+            )
         tokenizer._tokenizer.post_processor = TemplateProcessing(
             single=tokenizer.bos_token + " $A " + tokenizer.eos_token,
             pair=tokenizer.bos_token
@@ -79,6 +115,15 @@ def get_tokenizer(
                 (tokenizer.sep_token, tokenizer.sep_token_id),
             ],
         )
+
+    if tokenizer.pad_token is None:
+        logger.warning(
+            "Tokenizer is missing a pad token; adding '<pad>' for batching support."
+        )
+        tokenizer.add_special_tokens({"pad_token": "<pad>"})
+
+    if tokenizer.pad_token_id is None:
+        raise ValueError("Tokenizer must define pad_token_id for batching.")
 
     # Check if special tokens were modified and warn the user prominently
     final_special_tokens = tokenizer.special_tokens_map
@@ -120,16 +165,89 @@ def get_tokenizer(
     return tokenizer
 
 
-def single_column_mapping(x, tokenizer, column_name, max_length, truncation):
+def resolve_text_column(
+    dataset: Dataset, is_streaming: bool, preferred: Optional[str] = None
+) -> str:
+    """Resolve the text column for tokenization.
+
+    :param Dataset dataset: Dataset to inspect.
+    :param bool is_streaming: Whether the dataset is streaming.
+    :param str | None preferred: Optional preferred column name to validate.
+    :return str: Name of the text column.
+    """
+    if is_streaming:
+        first_example = next(iter(dataset))
+        columns = list(first_example.keys())
+    else:
+        columns = dataset.column_names
+
+    if preferred is not None:
+        if preferred in columns:
+            return preferred
+        raise ValueError(
+            f"Requested text column '{preferred}' not found. Available columns: "
+            + ", ".join(columns)
+        )
+
+    for col in ["text", "sentence", "content"]:
+        if col in columns:
+            return col
+    raise ValueError(
+        "Could not find text column in dataset. Available columns: "
+        + ", ".join(columns)
+    )
+
+
+def single_column_mapping(
+    x: dict[str, Any],
+    tokenizer: PreTrainedTokenizer,
+    column_name: str,
+    max_length: int,
+    truncation: bool,
+    add_special_tokens: bool,
+    return_special_tokens_mask: bool,
+) -> dict[str, Any]:
+    """Tokenize a single text column in a batched mapping call.
+
+    :param dict[str, Any] x: Batch of examples from the dataset.
+    :param PreTrainedTokenizer tokenizer: Tokenizer to apply.
+    :param str column_name: Column containing text inputs.
+    :param int max_length: Maximum sequence length.
+    :param bool truncation: Whether to truncate sequences.
+    :param bool add_special_tokens: Whether to add tokenizer special tokens.
+    :param bool return_special_tokens_mask: Whether to return special token masks.
+    :return dict[str, Any]: Tokenized outputs for the batch.
+    """
     return tokenizer(
         x[column_name],
         truncation=truncation,
         max_length=max_length,
         padding=False,  # no padding saves time and memory
+        add_special_tokens=add_special_tokens,
+        return_special_tokens_mask=return_special_tokens_mask,
     )
 
 
-def multi_column_mapping(x, tokenizer, column_name, max_length, truncation):
+def multi_column_mapping(
+    x: dict[str, Any],
+    tokenizer: PreTrainedTokenizer,
+    column_name: tuple[str, ...],
+    max_length: int,
+    truncation: bool,
+    add_special_tokens: bool,
+    return_special_tokens_mask: bool,
+) -> dict[str, Any]:
+    """Tokenize multiple text columns in a batched mapping call.
+
+    :param dict[str, Any] x: Batch of examples from the dataset.
+    :param PreTrainedTokenizer tokenizer: Tokenizer to apply.
+    :param tuple[str, ...] column_name: Columns containing text inputs.
+    :param int max_length: Maximum sequence length.
+    :param bool truncation: Whether to truncate sequences.
+    :param bool add_special_tokens: Whether to add tokenizer special tokens.
+    :param bool return_special_tokens_mask: Whether to return special token masks.
+    :return dict[str, Any]: Tokenized outputs for the batch.
+    """
     output = {}
     for col in column_name:
         if isinstance(x[col][0], list):
@@ -141,6 +259,8 @@ def multi_column_mapping(x, tokenizer, column_name, max_length, truncation):
                     padding=False,
                     return_token_type_ids=False,
                     is_split_into_words=False,
+                    add_special_tokens=add_special_tokens,
+                    return_special_tokens_mask=return_special_tokens_mask,
                 )
                 for item in x[col]
             ]
@@ -150,6 +270,10 @@ def multi_column_mapping(x, tokenizer, column_name, max_length, truncation):
             output[f"attention_mask_{col}"] = [
                 tokenized["attention_mask"] for tokenized in tokenized_list
             ]
+            if return_special_tokens_mask:
+                output[f"special_tokens_mask_{col}"] = [
+                    tokenized["special_tokens_mask"] for tokenized in tokenized_list
+                ]
         else:
             tokenized = tokenizer(
                 x[col],
@@ -158,21 +282,40 @@ def multi_column_mapping(x, tokenizer, column_name, max_length, truncation):
                 padding=False,
                 return_token_type_ids=False,
                 is_split_into_words=False,
+                add_special_tokens=add_special_tokens,
+                return_special_tokens_mask=return_special_tokens_mask,
             )
             output[f"input_ids_{col}"] = tokenized["input_ids"]
             output[f"attention_mask_{col}"] = tokenized["attention_mask"]
+            if return_special_tokens_mask:
+                output[f"special_tokens_mask_{col}"] = tokenized["special_tokens_mask"]
     return output
 
 
 def tokenize(
     dataset: Dataset,
     tokenizer: PreTrainedTokenizer,
-    column_name: str | Tuple[str],
+    column_name: str | Tuple[str, ...],
     max_length: int = 4096,
     remove_columns: bool = True,
     truncation: bool = True,
-    **kwargs,
-):
+    add_special_tokens: bool = True,
+    return_special_tokens_mask: bool = False,
+    **kwargs: Any,
+) -> Dataset:
+    """Tokenize a dataset with a single- or multi-column schema.
+
+    :param Dataset dataset: Dataset to tokenize.
+    :param PreTrainedTokenizer tokenizer: Tokenizer to apply.
+    :param str | tuple[str, ...] column_name: Column(s) to tokenize.
+    :param int max_length: Maximum sequence length.
+    :param bool remove_columns: Whether to remove non-token columns.
+    :param bool truncation: Whether to truncate sequences.
+    :param bool add_special_tokens: Whether to add tokenizer special tokens.
+    :param bool return_special_tokens_mask: Whether to return special token masks.
+    :param Any kwargs: Extra arguments passed to ``Dataset.map``.
+    :return Dataset: Tokenized dataset.
+    """
     # Check if this is a streaming dataset (IterableDataset)
     is_streaming = hasattr(dataset, "_iter") or "IterableDataset" in str(type(dataset))
 
@@ -213,12 +356,16 @@ def tokenize(
         test_output = tokenizer("test", truncation=True, max_length=10)
         has_token_type_ids = "token_type_ids" in test_output
 
+        # We deliberately avoid emitting labels here; MLM labels are created
+        # in the data collator to prevent duplicating input_ids on disk.
         feature_dict = {
             "input_ids": Sequence(Value("int32")),
             "attention_mask": Sequence(Value("bool")),
         }
         if has_token_type_ids:
             feature_dict["token_type_ids"] = Sequence(Value("int32"))
+        if return_special_tokens_mask:
+            feature_dict["special_tokens_mask"] = Sequence(Value("bool"))
 
         features = Features(feature_dict)
         mapping = partial(
@@ -227,19 +374,30 @@ def tokenize(
             column_name=column_name,
             max_length=max_length,
             truncation=truncation,
+            add_special_tokens=add_special_tokens,
+            return_special_tokens_mask=return_special_tokens_mask,
         )
 
     # Multi column tokenization
     else:
-        feat = {}
-        for col in column_name:
-            if isinstance(dataset[col][0], list):
-                feat[f"input_ids_{col}"] = Sequence(Sequence(Value("int32")))
-                feat[f"attention_mask_{col}"] = Sequence(Sequence(Value("bool")))
-            else:
-                feat[f"input_ids_{col}"] = Sequence(Value("int32"))
-                feat[f"attention_mask_{col}"] = Sequence(Value("bool"))
-        features = Features(feat)
+        features = None
+        if not is_streaming:
+            feat = {}
+            for col in column_name:
+                sample = dataset[col][0] if len(dataset) > 0 else ""
+                if isinstance(sample, list):
+                    feat[f"input_ids_{col}"] = Sequence(Sequence(Value("int32")))
+                    feat[f"attention_mask_{col}"] = Sequence(Sequence(Value("bool")))
+                    if return_special_tokens_mask:
+                        feat[f"special_tokens_mask_{col}"] = Sequence(
+                            Sequence(Value("bool"))
+                        )
+                else:
+                    feat[f"input_ids_{col}"] = Sequence(Value("int32"))
+                    feat[f"attention_mask_{col}"] = Sequence(Value("bool"))
+                    if return_special_tokens_mask:
+                        feat[f"special_tokens_mask_{col}"] = Sequence(Value("bool"))
+            features = Features(feat)
 
         mapping = partial(
             multi_column_mapping,
@@ -247,6 +405,8 @@ def tokenize(
             column_name=column_name,
             max_length=max_length,
             truncation=truncation,
+            add_special_tokens=add_special_tokens,
+            return_special_tokens_mask=return_special_tokens_mask,
         )
 
     # Tokenize the dataset

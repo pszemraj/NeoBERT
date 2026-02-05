@@ -1,3 +1,5 @@
+"""Contrastive loss implementations."""
+
 from typing import List, Optional, Union
 
 import torch
@@ -5,11 +7,18 @@ import torch.nn as nn
 
 
 class SupConLoss(nn.Module):
+    """Supervised contrastive loss wrapper."""
+
     def __init__(
         self,
         temperature: float = 0.07,
-        similarity_fn=nn.CrossEntropyLoss(reduction="sum"),
-    ):
+        similarity_fn: nn.Module = nn.CrossEntropyLoss(reduction="sum"),
+    ) -> None:
+        """Initialize the loss module.
+
+        :param float temperature: Temperature scaling for cosine similarity.
+        :param nn.Module similarity_fn: Loss function applied to logits.
+        """
         super().__init__()
 
         self.temperature = temperature
@@ -21,14 +30,13 @@ class SupConLoss(nn.Module):
         queries: torch.Tensor,
         corpus: torch.Tensor,
         negatives: Optional[Union[torch.Tensor, List[torch.Tensor]]] = None,
-    ):
-        """Compute loss for model.
-        Args:
-            queries: vector of shape [batch_size, hidden_size].
-            corpus: vector of shape [batch_size, hidden_size].
-            negatives: vector of shape [..., hidden_size]. Optional additional hard negatives for the queries.
-        Returns:
-            A loss scalar.
+    ) -> torch.Tensor:
+        """Compute supervised contrastive loss.
+
+        :param torch.Tensor queries: Query embeddings of shape ``[batch, hidden]``.
+        :param torch.Tensor corpus: Positive embeddings of shape ``[batch, hidden]``.
+        :param torch.Tensor | list[torch.Tensor] | None negatives: Optional hard negatives.
+        :return torch.Tensor: Scalar loss value.
         """
 
         labels = torch.arange(queries.size(0)).long().to(queries.device)

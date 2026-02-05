@@ -1,6 +1,8 @@
+"""Dataset wrappers for contrastive training tasks."""
+
 import os
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Any, Optional
 
 import pandas as pd
 from datasets import Dataset, concatenate_datasets, load_dataset, load_from_disk
@@ -26,7 +28,13 @@ DATASET_TO_BSZ = {
 }
 
 
-def get_bsz(dataset_name, target_batch_size):
+def get_bsz(dataset_name: str, target_batch_size: int) -> int:
+    """Compute per-dataset batch size multiplier.
+
+    :param str dataset_name: Dataset name key.
+    :param int target_batch_size: Global target batch size.
+    :return int: Per-dataset batch size.
+    """
     if dataset_name not in DATASET_TO_BSZ.keys():
         raise ValueError(
             f"{dataset_name} is not a known finetuning dataset. Available splits are: {DATASET_TO_BSZ.keys()}"
@@ -36,7 +44,13 @@ def get_bsz(dataset_name, target_batch_size):
 
 
 class AbsDataset(ABC):
+    """Abstract dataset wrapper providing Hub/disk loading hooks."""
+
     def __init__(self, dataset: Optional[Dataset] = None):
+        """Initialize dataset wrapper.
+
+        :param Dataset | None dataset: Optional pre-loaded dataset instance.
+        """
         super().__init__()
 
         if dataset is None:
@@ -47,30 +61,49 @@ class AbsDataset(ABC):
         self.size = self._dataset.num_rows
 
     @property
-    def dataset(self):
+    def dataset(self) -> Dataset:
+        """Return the underlying dataset.
+
+        :return Dataset: Wrapped dataset.
+        """
         return self._dataset
 
     @dataset.setter
-    def dataset(self, dataset: Dataset):
+    def dataset(self, dataset: Dataset) -> None:
+        """Update the underlying dataset.
+
+        :param Dataset dataset: Dataset to wrap.
+        """
         self._dataset = dataset
 
     @classmethod
-    def from_disk(cls, dataset_path) -> "AbsDataset":
+    def from_disk(cls, dataset_path: str) -> "AbsDataset":
+        """Load dataset from disk.
+
+        :param str dataset_path: Path to the dataset on disk.
+        :return AbsDataset: Dataset wrapper instance.
+        """
         dataset = load_from_disk(dataset_path)
         return cls(dataset)
 
     @abstractmethod
     def from_hub(self) -> Dataset:
+        """Load dataset from the Hugging Face Hub.
+
+        :return Dataset: Loaded dataset.
+        """
         pass
 
 
 class ALLNLI(AbsDataset):
+    """ALLNLI dataset wrapper."""
+
     name = "ALLNLI"
 
     def __init__(self, dataset: Optional[Dataset] = None):
         super().__init__(dataset=dataset)
 
-    def from_hub(self):
+    def from_hub(self) -> Dataset:
         num_proc = len(os.sched_getaffinity(0))
         dataset = load_dataset(
             "sentence-transformers/all-nli",
@@ -86,18 +119,21 @@ class ALLNLI(AbsDataset):
 
 
 class AMAZONQA(AbsDataset):
+    """Amazon QA dataset wrapper."""
+
     name = "AMAZONQA"
 
     def __init__(self, dataset: Optional[Dataset] = None):
         super().__init__(dataset=dataset)
 
-    def from_hub(self):
+    def from_hub(self) -> Dataset:
         num_proc = len(os.sched_getaffinity(0))
         dataset = load_dataset(
             "embedding-data/Amazon-QA", split="train", num_proc=num_proc
         )
 
-        def unwrap_corpus_column(example):
+        def unwrap_corpus_column(example: dict[str, Any]) -> dict[str, Any]:
+            """Flatten positive corpus entries."""
             example["corpus"] = [pos[0] for pos in example["pos"]]
             return example
 
@@ -116,12 +152,14 @@ class AMAZONQA(AbsDataset):
 
 
 class CONCURRENTQA(AbsDataset):
+    """ConcurrentQA dataset wrapper."""
+
     name = "CONCURRENTQA"
 
     def __init__(self, dataset: Optional[Dataset] = None):
         super().__init__(dataset=dataset)
 
-    def from_hub(self):
+    def from_hub(self) -> Dataset:
         num_proc = len(os.sched_getaffinity(0))
         dataset = load_dataset(
             "stanfordnlp/concurrentqa-retrieval", split="train", num_proc=num_proc
@@ -129,7 +167,8 @@ class CONCURRENTQA(AbsDataset):
 
         dataset = dataset.rename_column("question", "query")
 
-        def process(example):
+        def process(example: dict[str, Any]) -> dict[str, Any]:
+            """Normalize columns into query/corpus/negative fields."""
             example["corpus"] = [x[0]["text"] for x in example["pos_paras"]]
             example["negative"] = [[y["text"] for y in x] for x in example["neg_paras"]]
             return example
@@ -149,12 +188,14 @@ class CONCURRENTQA(AbsDataset):
 
 
 class FEVER(AbsDataset):
+    """FEVER dataset wrapper."""
+
     name = "FEVER"
 
     def __init__(self, dataset: Optional[Dataset] = None):
         super().__init__(dataset=dataset)
 
-    def from_hub(self):
+    def from_hub(self) -> Dataset:
         dataset = load_dataset("mteb/fever", "default", split="train")
         dataset = dataset.to_pandas()
 
@@ -172,6 +213,7 @@ class FEVER(AbsDataset):
         return dataset
 
     def load_and_prepare_corpus(self) -> pd.DataFrame:
+        """Load and normalize the FEVER corpus split."""
         corpus = load_dataset("mteb/fever", "corpus", split="corpus")
         corpus = corpus.remove_columns("title")
         corpus = corpus.rename_column("_id", "corpus-id")
@@ -179,6 +221,7 @@ class FEVER(AbsDataset):
         return corpus.to_pandas()
 
     def load_and_prepare_queries(self) -> pd.DataFrame:
+        """Load and normalize the FEVER queries split."""
         queries = load_dataset("mteb/fever", "queries", split="queries")
         queries = queries.rename_column("_id", "query-id")
         queries = queries.rename_column("text", "query")
@@ -186,12 +229,14 @@ class FEVER(AbsDataset):
 
 
 class GITHUBISSUE(AbsDataset):
+    """GitHub Issue similarity dataset wrapper."""
+
     name = "GITHUBISSUE"
 
     def __init__(self, dataset: Optional[Dataset] = None):
         super().__init__(dataset=dataset)
 
-    def from_hub(self):
+    def from_hub(self) -> Dataset:
         num_proc = len(os.sched_getaffinity(0))
         dataset = load_dataset(
             "WhereIsAI/github-issue-similarity",
@@ -207,12 +252,14 @@ class GITHUBISSUE(AbsDataset):
 
 
 class GOOAQ(AbsDataset):
+    """GOOAQ hard-negative dataset wrapper."""
+
     name = "GOOAQ"
 
     def __init__(self, dataset: Optional[Dataset] = None):
         super().__init__(dataset=dataset)
 
-    def from_hub(self):
+    def from_hub(self) -> Dataset:
         num_proc = len(os.sched_getaffinity(0))
         dataset = load_dataset(
             "tomaarsen/gooaq-hard-negatives",
@@ -224,7 +271,8 @@ class GOOAQ(AbsDataset):
         dataset = dataset.rename_column("question", "query")
         dataset = dataset.rename_column("answer", "corpus")
 
-        def aggregate_negatives(example):
+        def aggregate_negatives(example: dict[str, Any]) -> dict[str, Any]:
+            """Aggregate negatives into nested lists per query."""
             example["negative"] = [
                 [example[f"negative_{i + 1}"][j] for i in range(5)]
                 for j in range(len(example["query"]))
@@ -246,12 +294,14 @@ class GOOAQ(AbsDataset):
 
 
 class MSMARCO(AbsDataset):
+    """MS MARCO dataset wrapper."""
+
     name = "MSMARCO"
 
     def __init__(self, dataset: Optional[Dataset] = None):
         super().__init__(dataset=dataset)
 
-    def from_hub(self):
+    def from_hub(self) -> Dataset:
         dataset = load_dataset("mteb/msmarco", "default", split="train")
 
         corpus = self.load_and_prepare_corpus()
@@ -268,6 +318,7 @@ class MSMARCO(AbsDataset):
         return dataset
 
     def load_and_prepare_corpus(self) -> pd.DataFrame:
+        """Load and normalize the MS MARCO corpus split."""
         corpus = load_dataset("mteb/msmarco", "corpus", split="corpus")
         corpus = corpus.remove_columns("title")
         corpus = corpus.rename_column("_id", "corpus-id")
@@ -275,6 +326,7 @@ class MSMARCO(AbsDataset):
         return corpus.to_pandas()
 
     def load_and_prepare_queries(self) -> pd.DataFrame:
+        """Load and normalize the MS MARCO queries split."""
         queries = load_dataset("mteb/msmarco", "queries", split="queries")
         queries = queries.rename_column("_id", "query-id")
         queries = queries.rename_column("text", "query")
@@ -282,18 +334,21 @@ class MSMARCO(AbsDataset):
 
 
 class PAQ(AbsDataset):
+    """PAQ dataset wrapper."""
+
     name = "PAQ"
 
     def __init__(self, dataset: Optional[Dataset] = None):
         super().__init__(dataset=dataset)
 
-    def from_hub(self):
+    def from_hub(self) -> Dataset:
         num_proc = len(os.sched_getaffinity(0))
         dataset = load_dataset(
             "embedding-data/PAQ_pairs", split="train", num_proc=num_proc
         )
 
-        def split_set_column(example):
+        def split_set_column(example: dict[str, Any]) -> dict[str, Any]:
+            """Split pair tuples into query/corpus columns."""
             example["query"] = [x[0] for x in example["set"]]
             example["corpus"] = [x[1] for x in example["set"]]
             return example
@@ -313,12 +368,14 @@ class PAQ(AbsDataset):
 
 
 class PUBMEDQA(AbsDataset):
+    """PubMedQA dataset wrapper."""
+
     name = "PUBMEDQA"
 
     def __init__(self, dataset: Optional[Dataset] = None):
         super().__init__(dataset=dataset)
 
-    def from_hub(self):
+    def from_hub(self) -> Dataset:
         num_proc = len(os.sched_getaffinity(0))
         dataset = load_dataset(
             "sentence-transformers/pubmedqa",
@@ -330,7 +387,8 @@ class PUBMEDQA(AbsDataset):
         dataset = dataset.rename_column("anchor", "query")
         dataset = dataset.rename_column("positive", "corpus")
 
-        def aggregate_negatives(example):
+        def aggregate_negatives(example: dict[str, Any]) -> dict[str, Any]:
+            """Aggregate negatives into nested lists per query."""
             example["negative"] = [
                 [example[f"negative_{i + 1}"][j] for i in range(20)]
                 for j in range(len(example["query"]))
@@ -352,18 +410,21 @@ class PUBMEDQA(AbsDataset):
 
 
 class QQP(AbsDataset):
+    """QQP triplet dataset wrapper."""
+
     name = "QQP"
 
     def __init__(self, dataset: Optional[Dataset] = None):
         super().__init__(dataset=dataset)
 
-    def from_hub(self):
+    def from_hub(self) -> Dataset:
         num_proc = len(os.sched_getaffinity(0))
         dataset = load_dataset(
             "embedding-data/QQP_triplets", split="train", num_proc=num_proc
         )
 
-        def split_set_column(example):
+        def split_set_column(example: dict[str, Any]) -> dict[str, Any]:
+            """Split set examples into query/corpus/negative columns."""
             example["query"] = [x["query"] for x in example["set"]]
             example["corpus"] = [x["pos"][0] for x in example["set"]]
             example["negative"] = [x["neg"] for x in example["set"]]
@@ -384,18 +445,21 @@ class QQP(AbsDataset):
 
 
 class SENTENCECOMP(AbsDataset):
+    """Sentence compression dataset wrapper."""
+
     name = "SENTENCECOMP"
 
     def __init__(self, dataset: Optional[Dataset] = None):
         super().__init__(dataset=dataset)
 
-    def from_hub(self):
+    def from_hub(self) -> Dataset:
         num_proc = len(os.sched_getaffinity(0))
         dataset = load_dataset(
             "embedding-data/sentence-compression", split="train", num_proc=num_proc
         )
 
-        def split_set_column(example):
+        def split_set_column(example: dict[str, Any]) -> dict[str, Any]:
+            """Split set examples into query/corpus columns."""
             example["query"] = [x[1] for x in example["set"]]
             example["corpus"] = [x[0] for x in example["set"]]
             return example
@@ -415,12 +479,14 @@ class SENTENCECOMP(AbsDataset):
 
 
 class STACKEXCHANGE(AbsDataset):
+    """StackExchange duplicate question dataset wrapper."""
+
     name = "STACKEXCHANGE"
 
     def __init__(self, dataset: Optional[Dataset] = None):
         super().__init__(dataset=dataset)
 
-    def from_hub(self):
+    def from_hub(self) -> Dataset:
         num_proc = len(os.sched_getaffinity(0))
 
         dataset_body = load_dataset(
@@ -448,18 +514,21 @@ class STACKEXCHANGE(AbsDataset):
 
 
 class STACKOVERFLOW(AbsDataset):
+    """StackOverflow duplicate question dataset wrapper."""
+
     name = "STACKOVERFLOW"
 
     def __init__(self, dataset: Optional[Dataset] = None):
         super().__init__(dataset=dataset)
 
-    def from_hub(self):
+    def from_hub(self) -> Dataset:
         num_proc = len(os.sched_getaffinity(0))
         dataset = load_dataset(
             "mteb/stackoverflowdupquestions-reranking", split="train", num_proc=num_proc
         )
 
-        def split_set_column(example):
+        def split_set_column(example: dict[str, Any]) -> dict[str, Any]:
+            """Normalize positive examples into corpus column."""
             example["corpus"] = [x[0] for x in example["positive"]]
             return example
 
@@ -478,12 +547,14 @@ class STACKOVERFLOW(AbsDataset):
 
 
 class STS12(AbsDataset):
+    """STS12 dataset wrapper filtered to high-similarity pairs."""
+
     name = "STS12"
 
     def __init__(self, dataset: Optional[Dataset] = None):
         super().__init__(dataset=dataset)
 
-    def from_hub(self):
+    def from_hub(self) -> Dataset:
         num_proc = len(os.sched_getaffinity(0))
         dataset = load_dataset("mteb/sts12-sts", split="train", num_proc=num_proc)
 
@@ -504,12 +575,14 @@ class STS12(AbsDataset):
 
 
 class STSBENCHMARK(AbsDataset):
+    """STS Benchmark dataset wrapper filtered to high-similarity pairs."""
+
     name = "STSBENCHMARK"
 
     def __init__(self, dataset: Optional[Dataset] = None):
         super().__init__(dataset=dataset)
 
-    def from_hub(self):
+    def from_hub(self) -> Dataset:
         num_proc = len(os.sched_getaffinity(0))
         dataset = load_dataset(
             "mteb/stsbenchmark-sts", split="train", num_proc=num_proc
@@ -532,12 +605,14 @@ class STSBENCHMARK(AbsDataset):
 
 
 class TRIVIAQA(AbsDataset):
+    """TriviaQA triplet dataset wrapper."""
+
     name = "TRIVIAQA"
 
     def __init__(self, dataset: Optional[Dataset] = None):
         super().__init__(dataset=dataset)
 
-    def from_hub(self):
+    def from_hub(self) -> Dataset:
         num_proc = len(os.sched_getaffinity(0))
         dataset = load_dataset(
             "sentence-transformers/trivia-qa-triplet",
@@ -553,12 +628,14 @@ class TRIVIAQA(AbsDataset):
 
 
 class WIKIHOW(AbsDataset):
+    """WikiHow dataset wrapper for query/summary pairs."""
+
     name = "WIKIHOW"
 
     def __init__(self, dataset: Optional[Dataset] = None):
         super().__init__(dataset=dataset)
 
-    def from_hub(self):
+    def from_hub(self) -> Dataset:
         num_proc = len(os.sched_getaffinity(0))
         dataset = load_dataset(
             "sentence-transformers/wikihow", split="train", num_proc=num_proc

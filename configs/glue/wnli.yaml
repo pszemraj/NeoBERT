@@ -1,9 +1,5 @@
 task: glue
 model:
-  name_or_path: neobert-100m
-  pretrained_checkpoint_dir: ./outputs/neobert_100m_100k
-  pretrained_checkpoint: 100000
-  pretrained_config_path: ./outputs/neobert_100m_100k/model_checkpoints/100000/config.yaml
   hidden_size: 768
   num_hidden_layers: 12
   num_attention_heads: 12
@@ -12,12 +8,16 @@ model:
   vocab_size: 30522
   max_position_embeddings: 512
   hidden_act: swiglu
-  classifier_dropout: 0.1
-  classifier_init_range: 0.02
+  name: neobert-100m
 glue:
   task_name: wnli
   num_labels: 2
   max_seq_length: 512
+  pretrained_model_path: ./outputs/neobert_100m_100k/model_checkpoints/100000/config.yaml
+  pretrained_checkpoint_dir: ./outputs/neobert_100m_100k
+  pretrained_checkpoint: 100000
+  classifier_dropout: 0.1
+  classifier_init_range: 0.02
 tokenizer:
   name: bert-base-uncased
   max_length: 512
@@ -30,10 +30,10 @@ trainer:
   gradient_accumulation_steps: 1
   eval_strategy: epoch
   eval_steps: 20
-  save_model: false  # Disable model checkpoint saving for GLUE evaluation
-  save_strategy: "no"
-  save_steps: -1  # Disabled
-  save_total_limit: 0  # No checkpoints
+  save_model: false
+  save_strategy: 'no'
+  save_steps: -1
+  save_total_limit: 0
   logging_steps: 100
   early_stopping: 5
   metric_for_best_model: eval_accuracy
@@ -41,7 +41,6 @@ trainer:
   load_best_model_at_end: true
   mixed_precision: bf16
   tf32: true
-  seed: 42
   report_to:
   - wandb
 optimizer:
@@ -61,3 +60,4 @@ wandb:
   project: neobert-glue
   name: neobert-100m-wnli-100k
   mode: online
+seed: 42
