@@ -42,7 +42,8 @@ class ModelConfig:
     embedding_init_range: float = 0.02
     decoder_init_range: float = 0.02
     classifier_init_range: float = 0.02
-    xformers_attention: bool = True
+    attn_backend: str = "sdpa"  # "sdpa" or "flash_attn_varlen"
+    kernel_backend: str = "auto"  # "auto", "liger", or "torch"
     ngpt: bool = False
     base_scale: float = 1.0 / (960.0**0.5)
     pad_token_id: int = 0
@@ -572,7 +573,7 @@ class ConfigLoader:
                 "use 'trainer.logging_steps'."
             )
 
-        # model.flash_attention/use_flash_attention -> model.xformers_attention
+        # Legacy attention flags -> model.attn_backend
         model = normalized.get("model", {})
         if isinstance(model, dict):
             if "name_or_path" in model:
@@ -585,30 +586,39 @@ class ConfigLoader:
                 ConfigLoader._warn_legacy(
                     "Config key 'model.name_or_path' is deprecated; use 'model.name'."
                 )
-            legacy_keys = [
-                k for k in ("flash_attention", "use_flash_attention") if k in model
+
+            # Coalesce all legacy boolean attention flags into a single value.
+            legacy_attn_keys = [
+                k
+                for k in (
+                    "flash_attention",
+                    "use_flash_attention",
+                    "xformers_attention",
+                )
+                if k in model
             ]
-            if legacy_keys:
-                legacy_value = model.pop(legacy_keys[0])
-                for key in legacy_keys[1:]:
+            if legacy_attn_keys:
+                legacy_value = model.pop(legacy_attn_keys[0])
+                for key in legacy_attn_keys[1:]:
                     value = model.pop(key)
                     if value != legacy_value:
                         raise ValueError(
                             "Conflicting values for legacy attention flags: "
-                            f"{legacy_keys[0]}={legacy_value} vs {key}={value}."
+                            f"{legacy_attn_keys[0]}={legacy_value} vs {key}={value}."
                         )
+                resolved_backend = "flash_attn_varlen" if legacy_value else "sdpa"
                 if (
-                    "xformers_attention" in model
-                    and model["xformers_attention"] != legacy_value
+                    "attn_backend" in model
+                    and model["attn_backend"] != resolved_backend
                 ):
                     raise ValueError(
-                        "Both legacy flash_attention flags and 'model.xformers_attention' "
+                        "Both legacy attention flags and 'model.attn_backend' "
                         "are set with different values."
                     )
-                model.setdefault("xformers_attention", legacy_value)
+                model.setdefault("attn_backend", resolved_backend)
                 ConfigLoader._warn_legacy(
-                    "Config key 'model.flash_attention' is deprecated; use "
-                    "'model.xformers_attention' to indicate xFormers memory-efficient attention."
+                    f"Config keys {legacy_attn_keys} are deprecated; use "
+                    "'model.attn_backend' ('sdpa' or 'flash_attn_varlen')."
                 )
 
             glue = normalized.get("glue", {})
@@ -980,9 +990,14 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     )
     parser.add_argument("--model.dropout_prob", type=float, help="Dropout probability")
     parser.add_argument(
-        "--model.xformers_attention",
-        type=lambda x: x.lower() == "true",
-        help="Use xFormers memory-efficient attention",
+        "--model.attn_backend",
+        type=str,
+        help="Attention backend: 'sdpa' or 'flash_attn_varlen'",
+    )
+    parser.add_argument(
+        "--model.kernel_backend",
+        type=str,
+        help="Kernel backend: 'auto', 'liger', or 'torch'",
     )
 
     # Dataset arguments

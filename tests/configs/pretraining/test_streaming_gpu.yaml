@@ -15,7 +15,8 @@ model:
   max_position_embeddings: 512
   rope: true
   rms_norm: true
-  xformers_attention: true  # Enable xFormers attention for GPU
+  attn_backend: flash_attn_varlen
+  kernel_backend: auto
 
 # Tokenizer configuration
 tokenizer:

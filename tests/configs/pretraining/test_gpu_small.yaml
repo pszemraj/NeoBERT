@@ -13,7 +13,8 @@ model:
   num_hidden_layers: 4
   num_attention_heads: 4
   intermediate_size: 1024
-  xformers_attention: true
+  attn_backend: flash_attn_varlen
+  kernel_backend: auto
 
 # Small dataset and training params
 trainer:
