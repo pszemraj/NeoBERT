@@ -28,6 +28,7 @@ from tqdm import tqdm
 from transformers import DataCollatorWithPadding
 
 # Configuration
+from ..collator.collator import _is_right_padded_mask, attention_mask_to_packed_seqlens
 from ..config import Config
 from ..model import NeoBERT, NeoBERTConfig
 from ..optimizer import get_optimizer
@@ -116,6 +117,30 @@ def _resolve_resume_checkpoint(
         + 1
     )
     return None, iteration
+
+
+def _build_packed_seqlens(attention_mask: torch.Tensor, *, name: str) -> torch.Tensor:
+    """Build packed sequence lengths from a right-padded attention mask.
+
+    :param torch.Tensor attention_mask: 0/1 attention mask of shape [B, S].
+    :param str name: Context label used for error messages.
+    :return torch.Tensor: Packed sequence lengths tensor on CPU.
+    :raises ValueError: If the mask is not right-padded.
+    """
+    if attention_mask.ndim != 2:
+        raise ValueError(
+            f"{name} attention_mask must be rank-2 [B, S], got {tuple(attention_mask.shape)}"
+        )
+    mask_cpu = attention_mask.detach()
+    if mask_cpu.is_cuda:
+        mask_cpu = mask_cpu.cpu()
+    if not _is_right_padded_mask(mask_cpu):
+        raise ValueError(
+            f"xFormers attention requires right-padded attention_mask; '{name}' is not "
+            "right-padded. Set tokenizer.padding_side='right' or disable "
+            "model.xformers_attention."
+        )
+    return attention_mask_to_packed_seqlens(mask_cpu)
 
 
 class CustomDataCollatorWithPadding(DataCollatorWithPadding):
@@ -267,6 +292,14 @@ def trainer(cfg: Config) -> None:
         pretrained_model_name_or_path=cfg.tokenizer.path or cfg.tokenizer.name,
         max_length=cfg.tokenizer.max_length,
     )
+    use_xformers = bool(cfg.model.xformers_attention)
+    if use_xformers and tokenizer.padding_side != "right":
+        logger.warning(
+            "tokenizer.padding_side=%s is incompatible with xFormers packed attention; "
+            "disabling model.xformers_attention.",
+            tokenizer.padding_side,
+        )
+        use_xformers = False
 
     # Dataset
     dataset_path = str(cfg.dataset.path)
@@ -325,7 +358,7 @@ def trainer(cfg: Config) -> None:
         norm_eps=cfg.model.norm_eps,
         embedding_init_range=cfg.model.embedding_init_range,
         decoder_init_range=cfg.model.decoder_init_range,
-        flash_attention=cfg.model.xformers_attention,
+        flash_attention=use_xformers,
         ngpt=cfg.model.ngpt,
         base_scale=cfg.model.base_scale,
         pad_token_id=tokenizer.pad_token_id,
@@ -546,8 +579,20 @@ def trainer(cfg: Config) -> None:
 
     while cfg.trainer.max_steps > metrics["train/steps"]:
         coin_flip = numpy.random.random()
+        pad_mask_negatives = None
+        packed_negatives = None
 
         # Choose from one of the finetuning datasets
+        def _prepare_attention(
+            mask: torch.Tensor, *, name: str
+        ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+            if use_xformers:
+                return None, _build_packed_seqlens(mask, name=name)
+            pad_mask = torch.where(mask == 1, float(0.0), float("-inf")).type(
+                dtype_pad_mask
+            )
+            return pad_mask, None
+
         if coin_flip > cfg.dataset.pretraining_prob:
             # Randomly select which task to draw a batch from
             task_name = numpy.random.choice(
@@ -556,17 +601,18 @@ def trainer(cfg: Config) -> None:
             dataloader = dataloaders[task_name]
             batch = next(iter(dataloader))
 
-            # Convert Hugging Face multiplicative mask to xformers additive mask
-            pad_mask_queries = torch.where(
-                batch["attention_mask_queries"] == 1, float(0.0), float("-inf")
-            ).type(dtype_pad_mask)
-            pad_mask_corpus = torch.where(
-                batch["attention_mask_corpus"] == 1, float(0.0), float("-inf")
-            ).type(dtype_pad_mask)
+            pad_mask_queries, packed_queries = _prepare_attention(
+                batch["attention_mask_queries"], name="queries"
+            )
+            pad_mask_corpus, packed_corpus = _prepare_attention(
+                batch["attention_mask_corpus"], name="corpus"
+            )
+            pad_mask_negatives = None
+            packed_negatives = None
             if "input_ids_negative" in batch.keys():
-                pad_mask_negatives = torch.where(
-                    batch["attention_mask_negative"] == 1, float(0.0), float("-inf")
-                ).type(dtype_pad_mask)
+                pad_mask_negatives, packed_negatives = _prepare_attention(
+                    batch["attention_mask_negative"], name="negative"
+                )
 
             # Update specific number of batches
             metrics[f"train/{task_name}_batches"] += 1
@@ -579,11 +625,11 @@ def trainer(cfg: Config) -> None:
             batch["input_ids_queries"] = batch["input_ids"]
             batch["input_ids_corpus"] = batch["input_ids"]
 
-            # Convert Hugging Face multiplicative mask to xformers additive mask
-            pad_mask_queries = torch.where(
-                batch["attention_mask"] == 1, float(0.0), float("-inf")
-            ).type(dtype_pad_mask)
+            pad_mask_queries, packed_queries = _prepare_attention(
+                batch["attention_mask"], name="pretraining"
+            )
             pad_mask_corpus = pad_mask_queries
+            packed_corpus = packed_queries
 
             # Update specific number of batches
             metrics["train/pretraining_batches"] += 1
@@ -606,10 +652,22 @@ def trainer(cfg: Config) -> None:
         if not is_last_microbatch:
             with accelerator.no_sync(model):
                 # Forward pass
-                queries = model(batch["input_ids_queries"], pad_mask_queries)
-                corpus = model(batch["input_ids_corpus"], pad_mask_corpus)
+                queries = model(
+                    batch["input_ids_queries"],
+                    pad_mask_queries,
+                    packed_seqlens=packed_queries,
+                )
+                corpus = model(
+                    batch["input_ids_corpus"],
+                    pad_mask_corpus,
+                    packed_seqlens=packed_corpus,
+                )
                 if "input_ids_negative" in batch.keys():
-                    negatives = model(batch["input_ids_negative"], pad_mask_negatives)
+                    negatives = model(
+                        batch["input_ids_negative"],
+                        pad_mask_negatives,
+                        packed_seqlens=packed_negatives,
+                    )
 
                 # Pool representations
                 pooled_queries = (
@@ -643,10 +701,22 @@ def trainer(cfg: Config) -> None:
 
         else:
             # Forward pass
-            queries = model(batch["input_ids_queries"], pad_mask_queries)
-            corpus = model(batch["input_ids_corpus"], pad_mask_corpus)
+            queries = model(
+                batch["input_ids_queries"],
+                pad_mask_queries,
+                packed_seqlens=packed_queries,
+            )
+            corpus = model(
+                batch["input_ids_corpus"],
+                pad_mask_corpus,
+                packed_seqlens=packed_corpus,
+            )
             if "input_ids_negative" in batch.keys():
-                negatives = model(batch["input_ids_negative"], pad_mask_negatives)
+                negatives = model(
+                    batch["input_ids_negative"],
+                    pad_mask_negatives,
+                    packed_seqlens=packed_negatives,
+                )
 
             # Pool representations
             pooled_queries = (
