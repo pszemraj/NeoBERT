@@ -19,6 +19,7 @@ def precompute_freqs_cis(
     :param torch.device | None device: Optional device for precomputation.
     :return torch.Tensor: Complex frequency tensor.
     """
+    # Compute frequencies in float32 for long-context numerical stability.
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, device=device).float() / dim))
     t = torch.arange(end, device=freqs.device)  # type: ignore
     freqs = torch.outer(t, freqs).float()  # type: ignore

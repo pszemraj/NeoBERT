@@ -1372,6 +1372,7 @@ def trainer(cfg: Config) -> None:
                     if grad_norm_sq is not None:
                         grad_norm_value = float(torch.sqrt(grad_norm_sq).item())
 
+                # Optional gradient clipping for stability on deep/long-context runs.
                 max_grad_norm = cfg.trainer.gradient_clipping
 
                 if max_grad_norm is not None and max_grad_norm > 0:

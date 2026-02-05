@@ -466,6 +466,47 @@ class TestModelForward(unittest.TestCase):
 
         self.assertEqual(embeddings.shape[0], 1)
 
+    def test_lm_head_ties_word_embeddings(self):
+        """Ensure LM heads tie input/output embeddings by default."""
+        from neobert.huggingface.modeling_neobert import (
+            NeoBERTConfig as HFNeoBERTConfig,
+            NeoBERTLMHead as HFNeoBERTLMHead,
+        )
+        from neobert.model import NeoBERTConfig, NeoBERTLMHead
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            intermediate_size=64,
+            vocab_size=16,
+            max_length=8,
+            flash_attention=False,
+            ngpt=False,
+            hidden_act="gelu",
+            tie_word_embeddings=True,
+        )
+        model = NeoBERTLMHead(config)
+        self.assertEqual(
+            model.decoder.weight.data_ptr(), model.model.encoder.weight.data_ptr()
+        )
+
+        hf_config = HFNeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            intermediate_size=64,
+            vocab_size=16,
+            max_length=8,
+            flash_attention=False,
+            hidden_act="gelu",
+            tie_word_embeddings=True,
+        )
+        hf_model = HFNeoBERTLMHead(hf_config)
+        self.assertEqual(
+            hf_model.decoder.weight.data_ptr(), hf_model.model.encoder.weight.data_ptr()
+        )
+
     def test_hf_rope_disabled_uses_positional_embeddings(self):
         """Ensure HF model runs when RoPE is disabled."""
         from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig

@@ -20,6 +20,9 @@ def round_up_to_multiple(x: int, N: int = 128) -> int:
     return ((x + N - 1) // N) * N
 
 
+# Note: mutable defaults in dataclasses below use default_factory to avoid shared state.
+
+
 @dataclass
 class ModelConfig:
     """Model architecture and initialization settings."""
@@ -823,7 +826,7 @@ class ConfigLoader:
         if not resolve_vocab_size:
             return config
 
-        # Resolve vocab_size for GPU efficiency (skip CPU-only runs/tests).
+        # Resolve vocab_size for GPU efficiency (round up to a multiple of 128).
         use_cpu = getattr(config.trainer, "use_cpu", False)
         if not use_cpu and hasattr(config.tokenizer, "name") and config.tokenizer.name:
             # Import tokenizer here to avoid circular imports

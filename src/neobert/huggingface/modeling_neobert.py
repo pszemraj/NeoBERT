@@ -16,6 +16,8 @@ NOTE: The training-time implementation lives in ``src/neobert/model/model.py`` a
 uses xFormers for flash attention. This HF variant targets export/inference APIs
 and may use different attention backends; keep the math consistent when editing.
 Packed/varlen sequences are intentionally unsupported in this HF export model.
+Module naming follows NeoBERT conventions; loading from unrelated BERT/RoBERTa
+checkpoints is not guaranteed to be compatible.
 """
 
 from typing import Any, Optional, Union
@@ -89,6 +91,7 @@ class NeoBERTConfig(PretrainedConfig):
         hidden_act: str = "swiglu",
         dropout: float = 0.0,
         flash_attention: bool = False,
+        tie_word_embeddings: bool = True,
         ngpt: bool = False,
         base_scale: float = 1.0 / (960.0**0.5),
         **kwargs: Any,
@@ -110,11 +113,12 @@ class NeoBERTConfig(PretrainedConfig):
         :param str hidden_act: Activation name ("swiglu" or "gelu").
         :param float dropout: Dropout probability for residual/MLP blocks.
         :param bool flash_attention: Whether to prefer flash attention backends.
+        :param bool tie_word_embeddings: Whether to tie input/output embeddings.
         :param bool ngpt: Whether to enable nGPT-style normalization (unsupported here).
         :param float base_scale: Base scaling factor for nGPT compatibility.
         :param Any kwargs: Additional configuration parameters.
         """
-        super().__init__(**kwargs)
+        super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
 
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
@@ -143,6 +147,7 @@ class NeoBERTConfig(PretrainedConfig):
         self.flash_attention = flash_attention
         self.ngpt = ngpt
         self.base_scale = base_scale
+        self.tie_word_embeddings = tie_word_embeddings
         self.vocab_size = vocab_size
         self.pad_token_id = pad_token_id
         self.max_length = max_length
@@ -536,6 +541,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
             if config_max is None:
                 config_max = getattr(self.config, "max_position_embeddings", None)
             max_pos = max(seq_len, int(config_max)) if config_max else seq_len
+            # Reuse cached RoPE frequencies; only grow/reallocate if len/device changes.
             if (
                 self.freqs_cis.numel() == 0
                 or self.freqs_cis.device != input_ids.device
@@ -612,6 +618,24 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
         self.decoder = nn.Linear(config.hidden_size, config.vocab_size)
 
         self.post_init()
+        if getattr(self.config, "tie_word_embeddings", False):
+            self.tie_weights()
+
+    def get_input_embeddings(self) -> nn.Embedding:
+        """Return input token embeddings for weight tying."""
+        return self.model.encoder
+
+    def set_input_embeddings(self, new_embeddings: nn.Embedding) -> None:
+        """Set input token embeddings (used by HF APIs)."""
+        self.model.encoder = new_embeddings
+
+    def get_output_embeddings(self) -> nn.Linear:
+        """Return output embeddings for weight tying."""
+        return self.decoder
+
+    def set_output_embeddings(self, new_embeddings: nn.Linear) -> None:
+        """Set output embeddings (used by HF APIs)."""
+        self.decoder = new_embeddings
 
     def forward(
         self,

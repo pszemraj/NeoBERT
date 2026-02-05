@@ -23,4 +23,7 @@ class RMSNorm(nn.Module):
         :param torch.Tensor x: Input tensor.
         :return torch.Tensor: Normalized tensor.
         """
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight
+        # Accumulate in float32 for numerical stability, then cast back.
+        x_float = x.float()
+        rms = torch.rsqrt(x_float.pow(2).mean(-1, keepdim=True) + self.eps)
+        return (x_float * rms).to(x.dtype) * self.weight

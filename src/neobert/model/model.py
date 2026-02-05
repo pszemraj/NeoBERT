@@ -364,6 +364,7 @@ class NeoBERTConfig(PretrainedConfig):
         pad_token_id: int = 0,
         max_length: int = 1024,
         flash_attention: bool = True,
+        tie_word_embeddings: bool = True,
         base_scale: float = 1.0 / (960.0**0.5),
         ngpt: bool = False,
         **kwargs: Any,
@@ -385,11 +386,12 @@ class NeoBERTConfig(PretrainedConfig):
         :param int pad_token_id: Padding token ID.
         :param int max_length: Maximum sequence length.
         :param bool flash_attention: Whether to use xFormers memory-efficient attention.
+        :param bool tie_word_embeddings: Whether to tie input/output embeddings.
         :param float base_scale: Base scaling factor for NGPT.
         :param bool ngpt: Whether to enable NGPT mode.
         :param Any kwargs: Additional configuration parameters.
         """
-        super().__init__(**kwargs)
+        super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
 
         # Core dims
         self.hidden_size = hidden_size
@@ -423,6 +425,7 @@ class NeoBERTConfig(PretrainedConfig):
         self.hidden_act = normalized_act
         self.vocab_size = vocab_size
         self.pad_token_id = pad_token_id
+        self.tie_word_embeddings = tie_word_embeddings
 
         # Positional length: accept HF-style 'max_position_embeddings'
         if (
@@ -605,6 +608,8 @@ class EncoderBlock(nn.Module):
                     "Packed sequences require flash_attention with xFormers."
                 )
             # Use explicit scale for consistency with NormEncoderBlock.
+            # Keep additive padding masks here for correctness; for fastest kernels,
+            # prefer flash_attention/xFormers when available.
             softmax_scale = 1.0 / math.sqrt(self.config.dim_head)
             # Input and output are of dimension (B, H, M, K)
             attn = scaled_dot_product_attention_compat(
@@ -987,6 +992,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
                     stacklevel=2,
                 )
             target_len = max(self.config.max_length, seq_len)
+            # Reuse cached RoPE frequencies; only grow/reallocate on device/len changes.
             if (
                 self.freqs_cis.numel() == 0
                 or self.freqs_cis.device != src.device
@@ -1212,6 +1218,24 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
         self.decoder = nn.Linear(config.hidden_size, config.vocab_size)
 
         self.post_init()
+        if getattr(self.config, "tie_word_embeddings", False):
+            self.tie_weights()
+
+    def get_input_embeddings(self) -> nn.Embedding:
+        """Return input token embeddings for weight tying."""
+        return self.model.encoder
+
+    def set_input_embeddings(self, new_embeddings: nn.Embedding) -> None:
+        """Set input token embeddings (used by HF APIs)."""
+        self.model.encoder = new_embeddings
+
+    def get_output_embeddings(self) -> nn.Linear:
+        """Return output embeddings for weight tying."""
+        return self.decoder
+
+    def set_output_embeddings(self, new_embeddings: nn.Linear) -> None:
+        """Set output embeddings (used by HF APIs)."""
+        self.decoder = new_embeddings
 
     def forward(
         self,
