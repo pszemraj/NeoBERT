@@ -17,19 +17,20 @@ class ValidationError(Exception):
 
 
 def validate_glue_config(cfg: Any) -> None:
-    """Validate GLUE-specific configuration with improved error messages"""
-    # Task validation
+    """Validate GLUE-specific configuration with improved error messages.
+
+    :param Any cfg: Configuration object.
+    :raises ValidationError: If configuration is invalid.
+    """
     valid_tasks = ["cola", "sst2", "mrpc", "stsb", "qqp", "mnli", "qnli", "rte", "wnli"]
     if cfg.glue.task_name not in valid_tasks:
         raise ValidationError(
             f"Invalid GLUE task: {cfg.glue.task_name}. Must be one of {valid_tasks}"
         )
 
-    # Check that required fields are present
     if cfg.trainer.output_dir is None:
         raise ValidationError("trainer.output_dir is required for GLUE evaluation")
 
-    # Validate num_labels matches task
     expected_labels = {
         "cola": 2,
         "sst2": 2,
@@ -39,7 +40,7 @@ def validate_glue_config(cfg: Any) -> None:
         "qnli": 2,
         "rte": 2,
         "wnli": 2,
-        "stsb": 1,  # Regression task
+        "stsb": 1,
     }
 
     if cfg.glue.task_name in expected_labels:
@@ -51,24 +52,20 @@ def validate_glue_config(cfg: Any) -> None:
             )
             cfg.glue.num_labels = expected
 
-    # Validate pretrained model configuration
     has_pretrained_info = False
 
-    # Check GLUEConfig
     if (
         hasattr(cfg.glue, "pretrained_checkpoint_dir")
         and cfg.glue.pretrained_checkpoint_dir
     ):
         has_pretrained_info = True
 
-    # Check raw model dict
     if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
         if cfg._raw_model_dict.get("pretrained_checkpoint_dir"):
             has_pretrained_info = True
         if cfg._raw_model_dict.get("allow_random_weights", False):
-            has_pretrained_info = True  # Random weights allowed for testing
+            has_pretrained_info = True
 
-    # Check model config
     if (
         hasattr(cfg.model, "pretrained_checkpoint_dir")
         and cfg.model.pretrained_checkpoint_dir
@@ -85,14 +82,12 @@ def validate_glue_config(cfg: Any) -> None:
                 "  3. Use a pretrained model from HuggingFace Hub with 'from_hub: true'"
             )
 
-    # Validate training parameters
     if cfg.trainer.num_train_epochs <= 0:
         raise ValidationError("trainer.num_train_epochs must be > 0")
 
     if cfg.trainer.per_device_train_batch_size <= 0:
         raise ValidationError("trainer.per_device_train_batch_size must be > 0")
 
-    # Warn about common configuration issues
     if cfg.trainer.eval_steps > 10000:
         logger.warning(
             f"eval_steps is very high ({cfg.trainer.eval_steps}). "
