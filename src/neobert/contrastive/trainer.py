@@ -2,12 +2,10 @@
 
 import logging
 import os
-import re
 import shutil
 import signal
 import sys
 from types import FrameType
-from typing import Optional, Tuple
 
 import numpy
 
@@ -34,89 +32,17 @@ from ..model import NeoBERT, NeoBERTConfig
 from ..optimizer import get_optimizer
 from ..scheduler import get_scheduler, resolve_scheduler_steps
 from ..tokenizer import get_tokenizer
+from ..training_utils import (
+    _maybe_compile_model,
+    _maybe_prepare_for_forward,
+    _resolve_resume_checkpoint,
+)
 from ..utils import configure_tf32, prepare_wandb_config
 from .datasets import get_bsz
 from .loss import SupConLoss
 from .metrics import Metrics
 
 logger = logging.getLogger(__name__)
-
-
-def _unwrap_optimizer(opt: object) -> object:
-    """Return the underlying optimizer if wrapped by Accelerate.
-
-    :param object opt: Optimizer instance to unwrap.
-    :return object: Unwrapped optimizer.
-    """
-    return getattr(opt, "optimizer", opt)
-
-
-def _maybe_prepare_for_forward(
-    optimizer: object,
-    *,
-    update_step: int,
-    is_last_microbatch: bool,
-) -> None:
-    """Invoke MuonClip hook gating if supported by the optimizer.
-
-    :param object optimizer: Optimizer instance (possibly wrapped).
-    :param int update_step: Current optimizer update step.
-    :param bool is_last_microbatch: Whether this microbatch will sync gradients.
-    """
-    inner = _unwrap_optimizer(optimizer)
-    fn = getattr(inner, "prepare_for_forward", None)
-    if fn is None:
-        return
-    fn(update_step=int(update_step), is_last_microbatch=bool(is_last_microbatch))
-
-
-def _resolve_resume_checkpoint(
-    resume_from_checkpoint: Optional[str],
-    checkpoint_dir: str,
-    output_dir: str,
-) -> Tuple[Optional[str], int]:
-    """Resolve an explicit or latest checkpoint path for resuming.
-
-    :param str | None resume_from_checkpoint: Configured resume value.
-    :param str checkpoint_dir: Default checkpoint directory to scan for latest.
-    :param str output_dir: Output directory for relative path resolution.
-    :return tuple[str | None, int]: Resolved checkpoint path and iteration.
-    """
-    if not resume_from_checkpoint:
-        return None, 0
-
-    if isinstance(resume_from_checkpoint, str):
-        resume_value = resume_from_checkpoint.strip()
-        if resume_value.lower() not in {"true", "latest", "auto"}:
-            resume_path = resume_value
-            if not os.path.isabs(resume_path):
-                candidate = os.path.join(output_dir, resume_path)
-                if os.path.exists(candidate):
-                    resume_path = candidate
-            base = os.path.basename(os.path.normpath(resume_path))
-            iteration = int(base) + 1 if base.isdigit() else 0
-            return resume_path, iteration
-
-    if not (os.path.exists(checkpoint_dir) and os.listdir(checkpoint_dir)):
-        return None, 0
-
-    folders = [
-        folder
-        for folder in os.listdir(checkpoint_dir)
-        if os.path.isdir(os.path.join(checkpoint_dir, folder))
-        and re.findall(r"[\/]?([0-9]+)(?=[^\/]*$)", folder)
-    ]
-    if not folders:
-        return None, 0
-
-    iteration = (
-        max(
-            int(re.findall(r"[\/]?([0-9]+)(?=[^\/]*$)", folder)[0])
-            for folder in folders
-        )
-        + 1
-    )
-    return None, iteration
 
 
 def _build_packed_seqlens(attention_mask: torch.Tensor, *, name: str) -> torch.Tensor:
@@ -444,18 +370,7 @@ def trainer(cfg: Config) -> None:
     model_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     accelerator.print(f"Model parameters: {model_params:,}")
 
-    if getattr(cfg.trainer, "torch_compile", False):
-        if not hasattr(torch, "compile"):
-            logger.warning(
-                "trainer.torch_compile is enabled but torch.compile is unavailable; skipping."
-            )
-        elif accelerator.distributed_type is DistributedType.DEEPSPEED:
-            logger.warning(
-                "trainer.torch_compile is enabled but DeepSpeed is active; skipping torch.compile."
-            )
-        else:
-            logger.info("Compiling model with torch.compile.")
-            model = torch.compile(model)
+    model = _maybe_compile_model(model, cfg, accelerator, logger)
 
     # Optimizer
     optimizer = get_optimizer(

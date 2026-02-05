@@ -37,6 +37,12 @@ from neobert.tokenizer import get_tokenizer
 from ..config import Config
 from ..optimizer import get_optimizer
 from ..scheduler import get_scheduler
+from ..training_utils import (
+    _maybe_compile_model,
+    _maybe_prepare_for_forward,
+    _unwrap_optimizer,
+)
+from ..utils import configure_tf32
 from ..validation import ValidationError, validate_glue_config
 from .process import process_function
 
@@ -80,31 +86,6 @@ TASK_TO_TRANSFER_FROM = {
 
 _STEP_RE = re.compile(r"(?:^|/)(?:step|checkpoint)_(\d+)(?:$|/)")
 _EPOCH_RE = re.compile(r"(?:^|/)(?:epoch)_(\d+)(?:$|/)")
-
-
-def _unwrap_optimizer(optimizer: Any) -> Any:
-    """Return the underlying optimizer (handles Accelerate wrappers).
-
-    :param Any optimizer: Possibly wrapped optimizer.
-    :return Any: Unwrapped optimizer.
-    """
-    return getattr(optimizer, "optimizer", optimizer)
-
-
-def _maybe_prepare_for_forward(
-    optimizer: Any, *, update_step: int, is_last_microbatch: bool
-) -> None:
-    """Invoke MuonClip hook gating if supported by the optimizer.
-
-    :param Any optimizer: Optimizer or wrapped optimizer.
-    :param int update_step: Optimizer update index (0-based).
-    :param bool is_last_microbatch: Whether this microbatch completes an update.
-    """
-    inner = _unwrap_optimizer(optimizer)
-    fn = getattr(inner, "prepare_for_forward", None)
-    if fn is None:
-        return
-    fn(update_step=int(update_step), is_last_microbatch=bool(is_last_microbatch))
 
 
 def _get_optimizer_update_step(optimizer: Any) -> Optional[int]:
@@ -761,9 +742,8 @@ def trainer(cfg: Config) -> None:
         logger.error(f"Configuration validation failed: {e}")
         raise
 
-    # Enable TF32 on matmul and on cuDNN
-    torch.backends.cuda.matmul.allow_tf32 = cfg.trainer.tf32
-    torch.backends.cudnn.allow_tf32 = cfg.trainer.tf32
+    # Configure TF32 precision for GPUs with compute capability >= 8.0
+    configure_tf32(enabled=cfg.trainer.tf32, print_fn=accelerator.print)
 
     # Handle the repository creation
     if accelerator.is_main_process:
@@ -1173,69 +1153,20 @@ def trainer(cfg: Config) -> None:
             model, pretrained_checkpoint_dir, pretrained_checkpoint, logger
         )
 
-    if getattr(cfg.trainer, "torch_compile", False):
-        if not hasattr(torch, "compile"):
-            logger.warning(
-                "trainer.torch_compile is enabled but torch.compile is unavailable; skipping."
-            )
-        elif accelerator.distributed_type is DistributedType.DEEPSPEED:
-            logger.warning(
-                "trainer.torch_compile is enabled but DeepSpeed is active; skipping torch.compile."
-            )
-        else:
-            logger.info("Compiling model with torch.compile.")
-            model = torch.compile(model)
+    model = _maybe_compile_model(model, cfg, accelerator, logger)
 
     # Optimizer
-    optimizer_name = cfg.optimizer.name.lower()
-    optimizer_params = {"lr": cfg.optimizer.lr}
-    if optimizer_name in {"muonclip", "muon_clip", "muon-clip"}:
-        optimizer = get_optimizer(
-            model,
-            accelerator.distributed_type,
-            model_config=model.config,
-            name=cfg.optimizer.name,
-            lr=cfg.optimizer.lr,
-            weight_decay=cfg.optimizer.weight_decay,
-            betas=tuple(getattr(cfg.optimizer, "betas", [0.9, 0.999])),
-            eps=getattr(cfg.optimizer, "eps", 1e-8),
-            muon_config=getattr(cfg.optimizer, "muon_config", None),
-        )
-    else:
-        # Split weights in two groups, one with weight decay and the other not.
-        no_decay = ["bias", "LayerNorm.weight"]
-
-        if hasattr(cfg.optimizer, "hparams"):
-            weight_decay = cfg.optimizer.hparams.weight_decay
-            optimizer_params = cfg.optimizer.hparams
-        else:
-            weight_decay = cfg.optimizer.weight_decay
-            optimizer_params = {
-                "lr": cfg.optimizer.lr,
-                "weight_decay": cfg.optimizer.weight_decay,
-                "betas": tuple(getattr(cfg.optimizer, "betas", [0.9, 0.999])),
-                "eps": getattr(cfg.optimizer, "eps", 1e-8),
-            }
-
-        optimizer_grouped_parameters = [
-            {
-                "params": [
-                    p
-                    for n, p in model.named_parameters()
-                    if not any(nd in n for nd in no_decay)
-                ],
-                "weight_decay": weight_decay,
-            },
-            {
-                "params": [
-                    p
-                    for n, p in model.named_parameters()
-                    if any(nd in n for nd in no_decay)
-                ],
-                "weight_decay": 0.0,
-            },
-        ]
-        optimizer = torch.optim.AdamW(optimizer_grouped_parameters, **optimizer_params)
+    optimizer = get_optimizer(
+        model,
+        accelerator.distributed_type,
+        model_config=getattr(model, "config", None),
+        name=cfg.optimizer.name,
+        lr=cfg.optimizer.lr,
+        weight_decay=cfg.optimizer.weight_decay,
+        betas=tuple(getattr(cfg.optimizer, "betas", [0.9, 0.999])),
+        eps=getattr(cfg.optimizer, "eps", 1e-8),
+        muon_config=getattr(cfg.optimizer, "muon_config", None),
+    )
 
     # Calculate training steps consistently
     num_update_steps_per_epoch = math.ceil(
@@ -1270,10 +1201,7 @@ def trainer(cfg: Config) -> None:
         cfg.scheduler.decay_steps = cfg.trainer.max_steps
 
     # Get learning rate from optimizer config
-    if isinstance(optimizer_params, dict):
-        lr = optimizer_params.get("lr", cfg.optimizer.lr)
-    else:
-        lr = getattr(optimizer_params, "lr", cfg.optimizer.lr)
+    lr = cfg.optimizer.lr
 
     # Convert scheduler config to dict if needed
     scheduler_params = (

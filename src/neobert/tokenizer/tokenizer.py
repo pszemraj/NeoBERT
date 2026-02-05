@@ -1,5 +1,6 @@
 """Tokenizer utilities and dataset tokenization helpers."""
 
+import logging
 import os
 from functools import partial
 from typing import Any, Optional, Tuple
@@ -7,6 +8,8 @@ from typing import Any, Optional, Tuple
 from datasets import Dataset, Features, Sequence, Value
 from tokenizers.processors import TemplateProcessing
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+
+logger = logging.getLogger("neobert.tokenizer")
 
 
 def get_tokenizer(
@@ -28,9 +31,6 @@ def get_tokenizer(
     :return PreTrainedTokenizer: Configured tokenizer instance.
     """
     if vocab_size is not None:
-        import logging
-
-        logger = logging.getLogger(__name__)
         logger.warning(
             "get_tokenizer(): 'vocab_size' is deprecated and ignored; "
             "resize model embeddings instead."
@@ -55,10 +55,6 @@ def get_tokenizer(
 
     # Check if tokenizer already has mask token defined
     # If it does, keep the existing special tokens
-    import logging
-
-    logger = logging.getLogger(__name__)
-
     if hasattr(tokenizer, "mask_token") and tokenizer.mask_token is not None:
         # Tokenizer already has special tokens configured, keep them
         logger.info(
