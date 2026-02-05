@@ -34,14 +34,13 @@ from datasets import (
 
 # Deepspeed
 from deepspeed.utils import safe_get_full_fp32_param
-from torch.nn import CrossEntropyLoss
 from tqdm import tqdm
 from transformers import BatchEncoding, PreTrainedTokenizerBase
 
 from ..config import Config, ConfigLoader, MuonConfig, round_up_to_multiple
 from ..dataloader import get_dataloader
 from ..model import NeoBERTConfig, NeoBERTLMHead
-from ..model.model import XFORMERS_AVAILABLE, XFORMERS_ERROR
+from ..kernels.backend import get_cross_entropy_loss, resolve_kernel_backend
 from ..optimizer import get_optimizer
 from ..scheduler import get_scheduler, resolve_scheduler_steps
 from ..tokenizer import get_tokenizer, resolve_text_column
@@ -654,7 +653,7 @@ def trainer(cfg: Config) -> None:
     wandb_enabled = cfg.wandb.enabled and cfg.wandb.mode != "disabled"
     # Keep dataloader batches on CPU so packed_seqlens stays as CPU metadata.
     disable_dispatch = bool(
-        cfg.datacollator.pack_sequences or cfg.model.xformers_attention
+        cfg.datacollator.pack_sequences or cfg.model.attn_backend != "sdpa"
     )
     dataloader_config = None
     if disable_dispatch:
@@ -750,16 +749,14 @@ def trainer(cfg: Config) -> None:
 
     if cfg.datacollator.pack_sequences:
         logger.info(
-            "Using packed sequences with xFormers block-diagonal attention (experimental)."
+            "Using packed sequences (experimental). "
+            "Recommended: attn_backend=flash_attn_varlen with flash-attn installed."
         )
-        if not cfg.model.xformers_attention:
-            raise ValueError(
-                "Packed sequences require model.xformers_attention=true (xFormers)."
-            )
-        if not XFORMERS_AVAILABLE:
-            raise ImportError(
-                "Packed sequences require xformers. Install with: pip install xformers. "
-                f"Import error: {XFORMERS_ERROR}"
+        if cfg.model.attn_backend == "sdpa":
+            logger.warning(
+                "pack_sequences is enabled with attn_backend=sdpa; "
+                "per-segment SDPA fallback will be used (slow on GPU). "
+                "Set attn_backend=flash_attn_varlen and install flash-attn for production."
             )
 
     # Tokenizer
@@ -1066,7 +1063,7 @@ def trainer(cfg: Config) -> None:
         mask_all=cfg.datacollator.mask_all,
         pack_sequences=cfg.datacollator.pack_sequences,
         max_length=collator_max_length,
-        return_packed_seqlens=cfg.model.xformers_attention,
+        return_packed_seqlens=cfg.model.attn_backend != "sdpa",
     )
 
     eval_dataloader = None
@@ -1082,7 +1079,7 @@ def trainer(cfg: Config) -> None:
             pack_sequences=cfg.datacollator.pack_sequences,
             max_length=collator_max_length,
             shuffle=False,
-            return_packed_seqlens=cfg.model.xformers_attention,
+            return_packed_seqlens=cfg.model.attn_backend != "sdpa",
         )
 
     # Model
@@ -1111,7 +1108,8 @@ def trainer(cfg: Config) -> None:
         decoder_init_range=cfg.model.decoder_init_range,
         classifier_init_range=cfg.model.classifier_init_range,
         pad_token_id=tokenizer.pad_token_id,
-        flash_attention=cfg.model.xformers_attention,
+        attn_backend=cfg.model.attn_backend,
+        kernel_backend=cfg.model.kernel_backend,
         ngpt=cfg.model.ngpt,
         base_scale=cfg.model.base_scale,
     )
@@ -1285,9 +1283,9 @@ def trainer(cfg: Config) -> None:
                     log_freq=getattr(cfg.wandb, "log_interval", 100),
                 )
 
-    # Loss function
-    # Note: logits are fully materialized; consider fused/chunked CE for very long contexts.
-    train_loss_fn = CrossEntropyLoss(reduction="sum")
+    # Loss function — use Liger CE when available, else standard PyTorch
+    resolved_kb = resolve_kernel_backend(cfg.model.kernel_backend)
+    train_loss_fn = get_cross_entropy_loss(reduction="sum", backend=resolved_kb)
     eval_max_batches = getattr(cfg.trainer, "eval_max_batches", None)
     if isinstance(eval_max_batches, int) and eval_max_batches <= 0:
         eval_max_batches = None

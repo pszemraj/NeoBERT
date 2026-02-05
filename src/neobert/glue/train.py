@@ -751,16 +751,13 @@ def trainer(cfg: Config) -> None:
         output_dir.mkdir(parents=True, exist_ok=True)
     accelerator.wait_for_everyone()
 
-    # Override xFormers attention setting for GLUE - always use eager attention
-    # xFormers attention has memory alignment issues with variable-length sequences in GLUE tasks
-    # xformers requires sequences to be aligned to multiples of 8, which is incompatible
-    # with GLUE's dynamic batching and variable sequence lengths
-    if hasattr(cfg.model, "xformers_attention") and cfg.model.xformers_attention:
+    # Force SDPA for GLUE — variable-length batches are incompatible with packed attention
+    if hasattr(cfg.model, "attn_backend") and cfg.model.attn_backend != "sdpa":
         logger.warning(
-            "xFormers memory-efficient attention is not supported for GLUE evaluation due to "
-            "memory alignment issues with variable-length sequences. Using eager attention instead."
+            "Packed attention is not supported for GLUE evaluation due to "
+            "variable-length sequences. Forcing attn_backend='sdpa'."
         )
-    flash_attention = False  # Always use eager attention for GLUE
+    flash_attention = False  # Always use SDPA (eager) attention for GLUE
 
     # Check from_hub in raw model dict for GLUE tasks
     from_hub = False
@@ -807,7 +804,7 @@ def trainer(cfg: Config) -> None:
             )
         if pretrained_config_path:
             model_pretraining_config = ConfigLoader.load(pretrained_config_path)
-            model_pretraining_config.model.xformers_attention = flash_attention
+            model_pretraining_config.model.attn_backend = "sdpa"
             tokenizer_source = (
                 model_pretraining_config.tokenizer.path
                 or model_pretraining_config.tokenizer.name
@@ -1052,7 +1049,8 @@ def trainer(cfg: Config) -> None:
         # The tokenizer's vocab_size should match the model's anyway
         combined_config = model_config_dict
         combined_config.pop("xformers_attention", None)
-        combined_config["flash_attention"] = flash_attention
+        combined_config.pop("flash_attention", None)
+        combined_config["attn_backend"] = "sdpa"
 
         # If using random weights (for testing), round vocab_size for GPU efficiency
         allow_random_weights = cfg.glue.allow_random_weights

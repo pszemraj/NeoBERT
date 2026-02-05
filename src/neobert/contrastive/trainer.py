@@ -63,9 +63,9 @@ def _build_packed_seqlens(attention_mask: torch.Tensor, *, name: str) -> torch.T
         mask_cpu = mask_cpu.cpu()
     if not _is_right_padded_mask(mask_cpu):
         raise ValueError(
-            f"xFormers attention requires right-padded attention_mask; '{name}' is not "
-            "right-padded. Set tokenizer.padding_side='right' or disable "
-            "model.xformers_attention."
+            f"Packed attention requires right-padded attention_mask; '{name}' is not "
+            "right-padded. Set tokenizer.padding_side='right' or use "
+            "model.attn_backend='sdpa'."
         )
     return attention_mask_to_packed_seqlens(mask_cpu)
 
@@ -220,14 +220,14 @@ def trainer(cfg: Config) -> None:
         pretrained_model_name_or_path=cfg.tokenizer.path or cfg.tokenizer.name,
         max_length=cfg.tokenizer.max_length,
     )
-    use_xformers = bool(cfg.model.xformers_attention)
-    if use_xformers and tokenizer.padding_side != "right":
+    use_packed = cfg.model.attn_backend != "sdpa"
+    if use_packed and tokenizer.padding_side != "right":
         logger.warning(
-            "tokenizer.padding_side=%s is incompatible with xFormers packed attention; "
-            "disabling model.xformers_attention.",
+            "tokenizer.padding_side=%s is incompatible with packed attention; "
+            "falling back to attn_backend='sdpa'.",
             tokenizer.padding_side,
         )
-        use_xformers = False
+        use_packed = False
 
     # Dataset
     dataset_path = Path(cfg.dataset.path)
@@ -286,7 +286,8 @@ def trainer(cfg: Config) -> None:
         norm_eps=cfg.model.norm_eps,
         embedding_init_range=cfg.model.embedding_init_range,
         decoder_init_range=cfg.model.decoder_init_range,
-        flash_attention=use_xformers,
+        attn_backend=cfg.model.attn_backend if use_packed else "sdpa",
+        kernel_backend=cfg.model.kernel_backend,
         ngpt=cfg.model.ngpt,
         base_scale=cfg.model.base_scale,
         pad_token_id=tokenizer.pad_token_id,
@@ -499,7 +500,7 @@ def trainer(cfg: Config) -> None:
         def _prepare_attention(
             mask: torch.Tensor, *, name: str
         ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-            if use_xformers:
+            if use_packed:
                 return None, _build_packed_seqlens(mask, name=name)
             pad_mask = torch.where(mask == 1, float(0.0), float("-inf")).type(
                 dtype_pad_mask
