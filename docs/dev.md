@@ -14,17 +14,12 @@ This page tracks known limitations and TODOs that need follow-up work as well as
 
 ## Pretraining: `datacollator.pack_sequences`
 
-Status: **experimental**. Pretraining uses xFormers block-diagonal attention
-without materializing a dense mask.
+Status: **experimental**. Pretraining uses `flash_attn_varlen_func` for packed
+sequences without materializing a dense mask.
 
-Why: Packed sequences must prevent cross-sequence attention. Today we use an
-xFormers block-diagonal bias on the flash-attention path. For efficiency, we may
-want to switch to FlashAttention varlen kernels in the future.
-
-Options:
-
-- xFormers block-diagonal attention (current implementation)
-- FlashAttention varlen kernels (cu_seqlens + max_seqlen) with a packed layout
+Why: Packed sequences must prevent cross-sequence attention. We use flash-attn
+varlen kernels (`cu_seqlens` + `max_seqlen`) with a flattened packed layout.
+A segmented-SDPA fallback exists for CPU/testing but is slow on GPU.
 
 TODO scope:
 
@@ -42,12 +37,12 @@ for packed sequences during pretraining.
 Current state:
 
 - `src/neobert/collator/collator.py` emits `packed_seqlens` as a padded int
-  tensor for packed batches (and optional non-packed xFormers batches) and
-  keeps a 2D padding `attention_mask`; it does **not** build dense block masks.
+  tensor for packed batches and keeps a 2D padding `attention_mask`; it does
+  **not** build dense block masks.
 - `src/neobert/pretraining/trainer.py` passes `packed_seqlens` into `NeoBERTLMHead`
   and skips additive masks for packed batches.
-- `src/neobert/model/model.py` supports xFormers block-diagonal attention for
-  packed batches when `model.xformers_attention: true`.
+- `src/neobert/model/model.py` uses `flash_attn_varlen_func` for packed batches
+  when `model.attn_backend: flash_attn_varlen`; falls back to segmented SDPA otherwise.
 - `src/neobert/huggingface/modeling_neobert.py` intentionally **does not**
   support packed/varlen inputs; the exported HF model stays within vanilla
   Transformers expectations.

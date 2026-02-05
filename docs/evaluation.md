@@ -58,7 +58,7 @@ glue:
 
 ### Attention backend behavior
 
-GLUE runs always force eager attention (xFormers is disabled) to avoid variable-length alignment issues.
+GLUE runs always force `attn_backend: sdpa` to avoid variable-length alignment issues with packed attention.
 
 ### Summarize results
 
@@ -95,7 +95,7 @@ Notes:
 
 ## Troubleshooting
 
-- xFormers attention errors on GLUE: expected (xFormers forced off).
+- Attention backend errors on GLUE: GLUE forces SDPA; packed attention is disabled.
 - OOM: lower `trainer.per_device_train_batch_size` and/or enable `trainer.gradient_checkpointing`.
 - Random or flat metrics: verify `glue.pretrained_model_path` and checkpoint paths.
 

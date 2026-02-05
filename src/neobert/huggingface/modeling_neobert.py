@@ -1,7 +1,7 @@
 """NeoBERT model implementation for HuggingFace Transformers.
 
 This is the export/inference variant. The training-time model lives in
-``src/neobert/model/model.py`` and uses xFormers; keep math consistent across
+``src/neobert/model/model.py`` and uses SDPA/flash-attn + Liger kernels; keep math consistent across
 implementations. Packed/varlen sequences are intentionally unsupported here.
 """
 

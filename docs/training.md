@@ -52,7 +52,7 @@ python scripts/pretraining/pretrain.py \
 
 See [docs/configuration.md](configuration.md) for the full schema. Key knobs used during pretraining:
 
-- `model.*`: architecture (e.g., `hidden_size`, `num_hidden_layers`, `rope`, `rms_norm`, `xformers_attention`)
+- `model.*`: architecture (e.g., `hidden_size`, `num_hidden_layers`, `rope`, `rms_norm`, `attn_backend`, `kernel_backend`)
 - `dataset.*`: dataset source, streaming, splits, and tokenization settings
 - `tokenizer.*`: tokenizer name/path and max length
 - `datacollator.*`: MLM masking, padding, and packing (`mlm_probability`, `mask_all`, `pad_to_multiple_of`, `pack_sequences`)
@@ -60,9 +60,8 @@ See [docs/configuration.md](configuration.md) for the full schema. Key knobs use
 - `optimizer.*` / `scheduler.*`: learning rate and scheduling
 - `wandb.*`: tracking controls
 
-Note: `datacollator.pack_sequences` uses xFormers block-diagonal attention in pretraining
-and is experimental. It requires `model.xformers_attention: true` (xFormers installed).
-See `docs/dev.md`.
+Note: `datacollator.pack_sequences` requires `model.attn_backend: flash_attn_varlen` and
+`flash-attn` installed. It is experimental. See `docs/dev.md`.
 
 > [!NOTE]
 > All training entrypoints read `trainer.mixed_precision`. Use that field for consistency.
@@ -164,7 +163,7 @@ otherwise to `tokenized_data/<dataset-name>/`.
 - **Gradient clipping**: `trainer.gradient_clipping: 1.0`
 - **Mixed precision**: set `trainer.mixed_precision: bf16`
 - **torch.compile**: set `trainer.torch_compile: true` (skips automatically with DeepSpeed or if `torch.compile` is unavailable)
-- **xFormers attention**: `model.xformers_attention: true` requires `xformers` and right-padded (or packed) inputs
+- **Packed attention**: `model.attn_backend: flash_attn_varlen` requires `flash-attn` and right-padded (or packed) inputs
 
 ## Multi-GPU Launches
 

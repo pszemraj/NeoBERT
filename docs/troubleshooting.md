@@ -17,14 +17,13 @@ Common issues and their solutions when training and using NeoBERT.
 - **Import errors**: ensure your virtual environment has `pip install -e .[dev]` applied and that you are inside the project root before invoking scripts.
 - **Slow data loading**: increase `dataset.num_workers`, place datasets on faster storage, or enable streaming mode for giant corpora.
 
-### xFormers Attention Issues During GLUE Evaluation
+### Attention Backend Issues During GLUE Evaluation
 
-- **Symptom**: Launching GLUE evaluation with xFormers memory-efficient attention enabled produces runtime errors or crashes.
-- **Cause**: GLUE tasks use variable-length batches that are currently incompatible with xFormers alignment requirements.
+- **Symptom**: Launching GLUE evaluation with `attn_backend: flash_attn_varlen` produces runtime errors or crashes.
+- **Cause**: GLUE tasks use variable-length batches that are incompatible with packed-sequence attention.
 - **Solution**:
-  1. When using the provided GLUE scripts/configs, no action is needed; xFormers attention is automatically disabled for you.
-  2. If you author custom launchers, set `model.xformers_attention: false` (or pass `--model.xformers_attention false`) before evaluation.
-  3. Restart the run after toggling the setting; mixed xFormers/eager runs in the same process can leave partially initialized CUDA kernels.
+  1. When using the provided GLUE scripts/configs, no action is needed; SDPA is forced automatically.
+  2. If you author custom launchers, set `model.attn_backend: sdpa` (or pass `--model.attn_backend sdpa`) before evaluation.
 
 ### Model Checkpoint Corruption
 
@@ -125,7 +124,8 @@ inputs before export/inference.
 2. Enable CUDA if available: `model.cuda()`
 3. Use half precision: `model.half()` or `torch.autocast`
 4. Install the appropriate attention backend:
-   - Training: `pip install xformers`
+   - Packed-sequence training: `pip install flash-attn` (for `attn_backend: flash_attn_varlen`)
+   - Liger kernel primitives: `pip install liger-kernel` (auto-used on CUDA when `kernel_backend: auto`)
    - Exported HF models: rely on PyTorch SDPA (flash/mem-efficient kernels are selected by PyTorch when available)
 
 ### High Memory Usage
@@ -143,14 +143,18 @@ inputs before export/inference.
 
 NeoBERT uses different backends depending on the code path:
 
-- **Training** uses `xformers.ops.memory_efficient_attention` when `model.xformers_attention: true`.
+- **Training** uses SDPA by default (`model.attn_backend: sdpa`). For packed sequences,
+  set `model.attn_backend: flash_attn_varlen` (requires `flash-attn`).
+- **Kernel primitives** (`model.kernel_backend: auto`): Liger kernel is used on CUDA for
+  RMSNorm, SwiGLU, and CrossEntropy when available; falls back to torch on CPU or when
+  `liger-kernel` is not installed.
 - **Exported HF models** use PyTorch `scaled_dot_product_attention`; kernel selection
   (flash/mem-efficient/math) is handled by PyTorch.
 
-**If training backend is missing**:
+**If packed-sequence training backend is missing**:
 
 ```bash
-pip install xformers
+pip install flash-attn --no-build-isolation
 ```
 
 **If you want faster HF inference**: use a recent PyTorch build with SDPA/flash kernels.

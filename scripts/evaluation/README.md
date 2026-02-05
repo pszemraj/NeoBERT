@@ -23,9 +23,9 @@ For quick-start commands, see [docs/evaluation.md](../../docs/evaluation.md).
 
 ## Implementation Notes
 
-### xFormers Compatibility
+### Attention Backend
 
-GLUE evaluation always runs with eager attention (xFormers disabled). See [xFormers attention issues during GLUE evaluation](../../docs/troubleshooting.md#xformers-attention-issues-during-glue-evaluation) for background and mitigation steps.
+GLUE evaluation always forces `attn_backend: sdpa` (packed attention is disabled). See [attention backend issues during GLUE evaluation](../../docs/troubleshooting.md#attention-backend-issues-during-glue-evaluation) for background.
 
 ### Model Checkpoint Saving
 

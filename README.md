@@ -46,7 +46,7 @@ pip install -e .[dev]  # drop [dev] if you only need runtime deps
 See [docs/troubleshooting.md](docs/troubleshooting.md) for help with common installation issues.
 
 <!-- > [!TIP]
-> For faster training on supported GPUs, add `flash-attn` (and optionally `xformers`) with `pip install flash-attn --no-build-isolation`. -->
+> For packed-sequence training on supported GPUs, add `flash-attn` with `pip install flash-attn --no-build-isolation`. -->
 
 ### Verify your setup
 
@@ -161,7 +161,7 @@ For detailed guides and documentation, see the **[Documentation](docs/README.md)
 | `Optimizer`             | AdamW          |
 | `Scheduler`             | CosineDecay    |
 | `Training Tokens`       | 2.1 T          |
-| `Efficiency`            | xFormers memory-efficient attention |
+| `Efficiency`            | SDPA / flash-attn + Liger kernels   |
 
 ## License
 

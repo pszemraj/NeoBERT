@@ -74,7 +74,8 @@ model.norm_eps: float = 1e-5
 model.embedding_init_range: float = 0.02
 model.decoder_init_range: float = 0.02
 model.classifier_init_range: float = 0.02
-model.xformers_attention: bool = True  # uses xformers during training
+model.attn_backend: str = "sdpa"       # "sdpa" or "flash_attn_varlen"
+model.kernel_backend: str = "auto"     # "auto" (Liger on CUDA, torch on CPU), "liger", or "torch"
 model.ngpt: bool = False
 model.base_scale: float = 1 / (960 ** 0.5)
 model.pad_token_id: int = 0
@@ -137,8 +138,8 @@ datacollator.pack_sequences: bool = False
 datacollator.max_length: int | None = None
 ```
 
-Note: `pack_sequences` uses xFormers block-diagonal attention in pretraining and is
-considered experimental. It requires `model.xformers_attention: true`. See `docs/dev.md`.
+Note: `pack_sequences` requires `model.attn_backend: flash_attn_varlen` and `flash-attn`
+installed. It is considered experimental. See `docs/dev.md`.
 When packing is enabled, tokenization runs with `add_special_tokens=false` and the
 collator injects BOS/CLS and EOS/SEP tokens per segment to avoid duplicated boundaries.
 If `datacollator.max_length` is unset, pretraining uses `dataset.max_seq_length`.

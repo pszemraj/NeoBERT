@@ -10,7 +10,8 @@ NeoBERT is a transformer encoder with modernized components:
 - **RoPE positional embeddings** (optional)
 - **RMSNorm or LayerNorm** (configurable)
 - **SwiGLU or GELU** feed-forward (configurable)
-- **xFormers memory-efficient attention** when enabled (training path)
+- **SDPA or flash-attn varlen** attention backends (configurable)
+- **Liger kernel** primitives for RMSNorm, SwiGLU, and CrossEntropy (optional, CUDA)
 - **Optional nGPT-style normalization** (NormNeoBERT)
 
 ## Source of Truth
@@ -32,9 +33,9 @@ NeoBERT is a transformer encoder with modernized components:
 
 - Single `qkv` projection (`hidden_size -> 3 * hidden_size`) split into Q/K/V.
 - RoPE applied to Q/K when `model.rope: true`.
-- Attention backend:
-  - `model.xformers_attention: true` uses `xformers.ops.memory_efficient_attention`.
-  - Otherwise uses PyTorch `scaled_dot_product_attention`.
+- Attention backend (`model.attn_backend`):
+  - `"sdpa"` (default): PyTorch `scaled_dot_product_attention`.
+  - `"flash_attn_varlen"`: `flash_attn.flash_attn_varlen_func` for packed sequences.
 - Attention masks are additive (0 = keep, -inf = mask).
 
 ### Feed-Forward Network
@@ -64,15 +65,16 @@ model:
   rope: true
   rms_norm: true
   hidden_act: swiglu
-  xformers_attention: true
+  attn_backend: sdpa         # or "flash_attn_varlen" for packed sequences
+  kernel_backend: auto        # "auto" uses Liger on CUDA, torch on CPU
   ngpt: false
 ```
 
 Notes:
 
 - RoPE frequency scaling (`theta`) is currently fixed at 10,000 in `src/neobert/model/rotary.py`.
-- xFormers attention for training requires `xformers`. Exported HF models use
-  standard SDPA and ignore `model.xformers_attention`.
+- Packed-sequence training requires `flash-attn` (`pip install flash-attn`). Exported HF
+  models always use standard SDPA and ignore `model.attn_backend`.
 
 ## Differences from BERT (High Level)
 
@@ -81,7 +83,7 @@ Notes:
 | Position encoding | Learned   | RoPE (optional)      |
 | Normalization     | LayerNorm | RMSNorm or LayerNorm |
 | Activation        | GELU      | SwiGLU or GELU       |
-| Attention backend | Standard  | xformers (optional)  |
+| Attention backend | Standard  | SDPA / flash-attn    |
 | Token types       | Yes       | No                   |
 
 ## Next Steps
