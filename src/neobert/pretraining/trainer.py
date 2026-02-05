@@ -616,9 +616,9 @@ def to_target_batch_size(
                     continue
                 if batch[key] is None:
                     continue
-                    if torch.is_tensor(stored_batch[key]):
-                        if stored_batch[key].device != batch[key].device:
-                            stored_batch[key] = stored_batch[key].to(batch[key].device)
+                if torch.is_tensor(stored_batch[key]):
+                    if stored_batch[key].device != batch[key].device:
+                        stored_batch[key] = stored_batch[key].to(batch[key].device)
                     batch[key] = torch.cat([batch[key], stored_batch[key]], dim=0)
                 else:
                     batch[key] = batch[key] + stored_batch[key]
