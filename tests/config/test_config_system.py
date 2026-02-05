@@ -48,6 +48,7 @@ class TestConfigSystem(unittest.TestCase):
         self.assertEqual(config.model.hidden_size, 768)
         self.assertEqual(config.model.num_hidden_layers, 12)
         self.assertEqual(config.trainer.per_device_train_batch_size, 16)
+        self.assertFalse(config.trainer.torch_compile)
 
     def test_config_from_yaml(self):
         """Test loading config from YAML file."""
@@ -81,6 +82,8 @@ class TestConfigSystem(unittest.TestCase):
             "false",
             "--datacollator.pack_sequences",
             "true",
+            "--trainer.torch_compile",
+            "true",
         ]
 
         # Mock sys.argv
@@ -98,6 +101,7 @@ class TestConfigSystem(unittest.TestCase):
             )  # Overridden from 2
             self.assertFalse(config.dataset.streaming)
             self.assertTrue(config.datacollator.pack_sequences)
+            self.assertTrue(config.trainer.torch_compile)
 
             # Check that non-overridden values remain the same
             self.assertEqual(config.model.num_hidden_layers, 2)
