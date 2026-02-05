@@ -959,6 +959,11 @@ class NeoBERT(NeoBERTPreTrainedModel):
                 )
                 if packed_seqlens is not None:
                     pad_mask = None
+                else:
+                    raise ValueError(
+                        "flash_attention requires right-padded masks or packed_seqlens. "
+                        "Disable flash_attention or right-pad inputs to avoid dense O(S^2) masks."
+                    )
             if packed_seqlens is not None:
                 if not XFORMERS_AVAILABLE:
                     raise ImportError(
@@ -1119,6 +1124,11 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
                 )
                 if packed_seqlens is not None:
                     pad_mask = None
+                else:
+                    raise ValueError(
+                        "flash_attention requires right-padded masks or packed_seqlens. "
+                        "Disable flash_attention or right-pad inputs to avoid dense O(S^2) masks."
+                    )
             if packed_seqlens is not None:
                 if not XFORMERS_AVAILABLE:
                     raise ImportError(

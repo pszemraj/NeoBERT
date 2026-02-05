@@ -8,7 +8,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 import torch
-from datasets import Dataset
+from datasets import Dataset, DatasetDict
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 
@@ -327,6 +327,17 @@ class TestPretrainComponents(unittest.TestCase):
         self.assertEqual(_resolve_eval_max_batches(10, num_processes=1), 10)
         self.assertEqual(_resolve_eval_max_batches(10, num_processes=2), 5)
         self.assertEqual(_resolve_eval_max_batches(11, num_processes=2), 6)
+
+    def test_select_train_split_from_datasetdict(self):
+        """Ensure DatasetDict splits resolve to a Dataset."""
+        from neobert.pretraining.trainer import _select_train_split
+
+        dataset = Dataset.from_dict({"text": ["a", "b"]})
+        dataset_dict = DatasetDict(train=dataset, validation=dataset)
+
+        resolved = _select_train_split(dataset_dict, None)
+
+        self.assertIsInstance(resolved, Dataset)
 
     def test_masked_correct_count(self):
         """Test masked accuracy counting ignores -100 labels."""

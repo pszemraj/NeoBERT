@@ -78,3 +78,26 @@ class TestToTargetBatchSizeDevice(unittest.TestCase):
         self.assertIsNotNone(stored["input_ids"])
         self.assertEqual(stored["input_ids"].device.type, "cpu")
         self.assertEqual(stored["input_ids"].shape[0], 3)
+
+
+class TestToTargetBatchSizeKeys(unittest.TestCase):
+    """Validate buffering with extra batch keys."""
+
+    def test_handles_extra_keys_without_errors(self):
+        """Ensure unexpected keys do not raise KeyError when buffering."""
+        batch = {
+            "input_ids": torch.zeros((2, 4), dtype=torch.long),
+            "attention_mask": torch.ones((2, 4), dtype=torch.long),
+            "labels": torch.zeros((2, 4), dtype=torch.long),
+            "token_type_ids": torch.zeros((2, 4), dtype=torch.long),
+        }
+        stored_batch = {
+            "input_ids": None,
+            "attention_mask": None,
+            "labels": None,
+        }
+
+        out, stored = to_target_batch_size(batch, stored_batch, target_size=1)
+
+        self.assertEqual(out["input_ids"].shape[0], 1)
+        self.assertIn("token_type_ids", stored)

@@ -7,7 +7,6 @@ from typing import Any, Dict
 
 import torch
 from accelerate import Accelerator
-from torch import Tensor
 
 
 def format_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
@@ -94,12 +93,16 @@ class Metrics(defaultdict):
         :param Accelerator accelerator: Accelerator used for reduction/logging.
         """
         # Aggregate only the local counters using a fixed key order.
-        count_tensor = Tensor([self.get(k, 0) for k in self.LOCAL_COUNT_KEYS]).to(
-            accelerator.device, dtype=torch.long, non_blocking=True
+        count_tensor = torch.tensor(
+            [self.get(k, 0) for k in self.LOCAL_COUNT_KEYS],
+            device=accelerator.device,
+            dtype=torch.long,
         )
         count_tensor = accelerator.reduce(count_tensor, reduction="sum")
-        float_tensor = Tensor([self.get(k, 0.0) for k in self.LOCAL_FLOAT_KEYS]).to(
-            accelerator.device, dtype=torch.float64, non_blocking=True
+        float_tensor = torch.tensor(
+            [self.get(k, 0.0) for k in self.LOCAL_FLOAT_KEYS],
+            device=accelerator.device,
+            dtype=torch.float64,
         )
         float_tensor = accelerator.reduce(float_tensor, reduction="sum")
 

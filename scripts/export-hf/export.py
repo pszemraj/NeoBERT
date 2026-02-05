@@ -2,8 +2,8 @@
 """Export NeoBERT pretraining checkpoint to HuggingFace format.
 
 This script converts a NeoBERT checkpoint from the training format
-(state_dict.pt + config.yaml) to HuggingFace format with all necessary
-files for loading with transformers library.
+(state_dict.pt + config.yaml or a DeepSpeed ZeRO checkpoint) to HuggingFace
+format with all necessary files for loading with transformers library.
 
 Usage:
     python scripts/export-hf/export.py outputs/neobert_100m_100k/model_checkpoints/100000
@@ -77,6 +77,46 @@ def load_tokenizer_info(tokenizer_info_path: Path) -> Optional[Dict[str, Any]]:
         return None
     with open(tokenizer_info_path, "r") as f:
         return json.load(f)
+
+
+def load_state_dict_from_checkpoint(checkpoint_path: Path) -> Dict[str, torch.Tensor]:
+    """Load a training state dict from a checkpoint directory.
+
+    Supports native ``state_dict.pt`` checkpoints and DeepSpeed ZeRO checkpoints.
+
+    :param Path checkpoint_path: Checkpoint directory.
+    :return dict[str, torch.Tensor]: Loaded state dict.
+    :raises FileNotFoundError: If no supported checkpoint is found.
+    :raises ValueError: If the loaded state dict is empty.
+    """
+    state_dict_path = checkpoint_path / "state_dict.pt"
+    if state_dict_path.exists():
+        state_dict = torch.load(state_dict_path, map_location="cpu")
+        if not state_dict:
+            raise ValueError(f"Loaded state dict is empty from {state_dict_path}")
+        return state_dict
+
+    try:
+        from deepspeed.utils.zero_to_fp32 import (
+            get_fp32_state_dict_from_zero_checkpoint,
+        )
+    except Exception as exc:
+        raise FileNotFoundError(
+            f"state_dict.pt not found in {checkpoint_path} and DeepSpeed is unavailable."
+        ) from exc
+
+    try:
+        state_dict = get_fp32_state_dict_from_zero_checkpoint(str(checkpoint_path))
+    except Exception as exc:
+        raise FileNotFoundError(
+            f"state_dict.pt not found in {checkpoint_path} and DeepSpeed conversion failed."
+        ) from exc
+
+    if not state_dict:
+        raise ValueError(
+            "DeepSpeed checkpoint conversion produced an empty state dict."
+        )
+    return state_dict
 
 
 def maybe_alias_decoder_weights(
@@ -427,11 +467,8 @@ def export_checkpoint(checkpoint_path: Path, output_dir: Path | None = None) -> 
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_path}")
 
-    state_dict_path = checkpoint_path / "state_dict.pt"
     config_path = checkpoint_path / "config.yaml"
 
-    if not state_dict_path.exists():
-        raise FileNotFoundError(f"state_dict.pt not found in {checkpoint_path}")
     if not config_path.exists():
         raise FileNotFoundError(f"config.yaml not found in {checkpoint_path}")
 
@@ -447,9 +484,7 @@ def export_checkpoint(checkpoint_path: Path, output_dir: Path | None = None) -> 
 
     # 1. Load state dict first to get dtype info
     print("Loading model weights...")
-    state_dict = torch.load(state_dict_path, map_location="cpu")
-    if not state_dict:
-        raise ValueError(f"Loaded state dict is empty from {state_dict_path}")
+    state_dict = load_state_dict_from_checkpoint(checkpoint_path)
     print(
         f"  Loaded {len(state_dict)} weight tensors with dtype: {next(iter(state_dict.values())).dtype}"
     )
@@ -761,7 +796,10 @@ def main() -> None:
     parser.add_argument(
         "checkpoint_path",
         type=str,
-        help="Path to checkpoint directory containing state_dict.pt and config.yaml",
+        help=(
+            "Path to checkpoint directory containing config.yaml plus "
+            "state_dict.pt or a DeepSpeed ZeRO checkpoint"
+        ),
     )
     parser.add_argument(
         "--output",

@@ -455,6 +455,35 @@ def _resolve_tokenize_num_proc(
     return max(1, requested)
 
 
+def _select_train_split(
+    dataset: Dataset | DatasetDict, train_split: Optional[str]
+) -> Dataset:
+    """Select a train split from a DatasetDict when needed.
+
+    :param Dataset | DatasetDict dataset: Loaded dataset object.
+    :param str | None train_split: Optional split name to select.
+    :return Dataset: Resolved training split dataset.
+    :raises ValueError: If no suitable split can be resolved.
+    """
+    if not isinstance(dataset, DatasetDict):
+        return dataset
+
+    if train_split:
+        if train_split in dataset:
+            return dataset[train_split]
+        raise ValueError(
+            f"train_split='{train_split}' not found in dataset splits: {list(dataset)}"
+        )
+
+    if "train" in dataset:
+        return dataset["train"]
+
+    raise ValueError(
+        "DatasetDict loaded from disk is missing a train split. "
+        f"Available splits: {list(dataset)}. Set dataset.train_split in the config."
+    )
+
+
 def to_target_batch_size(
     batch: BatchEncoding,
     stored_batch: BatchEncoding,
@@ -468,6 +497,8 @@ def to_target_batch_size(
     :return tuple[BatchEncoding, BatchEncoding]: Adjusted batch and buffer.
     """
     tmp = {}
+    for key in batch.keys():
+        stored_batch.setdefault(key, None)
     batch_size = batch["input_ids"].shape[0]
 
     # If the batch is too large, we store samples
@@ -502,7 +533,7 @@ def to_target_batch_size(
 
     # If the batch is too small, we had some stored_batch
     elif batch_size < target_size:
-        if stored_batch["input_ids"] is None:
+        if stored_batch.get("input_ids") is None:
             return batch, stored_batch
         # We have already enough samples stored
         if stored_batch["input_ids"].shape[0] >= target_size - batch_size:
@@ -668,6 +699,21 @@ def trainer(cfg: Config) -> None:
             "Megatron-LM backend is not supported by this training loop. "
             "Use DDP or DeepSpeed instead."
         )
+    if accelerator.distributed_type is DistributedType.DEEPSPEED:
+        is_muon = cfg.optimizer.name.lower() in {"muonclip", "muon-clip", "muon_clip"}
+        if is_muon:
+            deepspeed_plugin = getattr(accelerator.state, "deepspeed_plugin", None)
+            zero_stage = getattr(deepspeed_plugin, "zero_stage", None)
+            if zero_stage is None:
+                logger.warning(
+                    "MuonClip optimizer enabled with DeepSpeed, but zero stage is unknown. "
+                    "Ensure ZeRO stage < 2 to avoid incorrect sharded updates."
+                )
+            elif zero_stage >= 2:
+                raise RuntimeError(
+                    "MuonClip is not compatible with DeepSpeed ZeRO stage >= 2 "
+                    "(sharded grads/params). Use ZeRO stage 0/1 or disable MuonClip."
+                )
 
     # Initialise the wandb run and pass wandb parameters
     if wandb_enabled:
@@ -788,6 +834,7 @@ def trainer(cfg: Config) -> None:
         dataset_path = Path(cfg.dataset.path)
         if dataset_path.exists():
             train_dataset = load_from_disk(dataset_path)
+            train_dataset = _select_train_split(train_dataset, cfg.dataset.train_split)
         else:
             logger.warning(
                 "Dataset path %s not found; falling back to load_dataset().",
@@ -903,6 +950,7 @@ def trainer(cfg: Config) -> None:
             accelerator.print(f"Pre-tokenization complete. Loading from: {output_dir}")
             # Load the pre-tokenized dataset
             train_dataset = load_from_disk(output_dir)
+            train_dataset = _select_train_split(train_dataset, cfg.dataset.train_split)
         else:
             # Determine text column
             text_column = resolve_text_column(
@@ -1069,6 +1117,7 @@ def trainer(cfg: Config) -> None:
         print(f"Tokenizer len(): {len(tokenizer)}")
         print(f"Tokenizer pad_token_id: {tokenizer.pad_token_id}")
 
+    # Keep this mapping in sync with ModelConfig fields to avoid config drift.
     model_config = NeoBERTConfig(
         hidden_size=cfg.model.hidden_size,
         num_hidden_layers=cfg.model.num_hidden_layers,
@@ -1086,6 +1135,8 @@ def trainer(cfg: Config) -> None:
         classifier_init_range=cfg.model.classifier_init_range,
         pad_token_id=tokenizer.pad_token_id,
         flash_attention=cfg.model.xformers_attention,
+        ngpt=cfg.model.ngpt,
+        base_scale=cfg.model.base_scale,
     )
     model = NeoBERTLMHead(model_config)
 
@@ -1404,29 +1455,8 @@ def trainer(cfg: Config) -> None:
                         if param.grad is not None:
                             param.grad.zero_()
 
-                # Measure gradient norm prior to optional clipping so we always log it
+                should_log = (metrics["train/steps"] + 1) % log_interval == 0
                 grad_norm_value = None
-                if accelerator.distributed_type is DistributedType.DEEPSPEED:
-                    get_global_grad = getattr(model, "get_global_grad_norm", None)
-                    if callable(get_global_grad):
-                        grad_norm = get_global_grad()
-                        if isinstance(grad_norm, torch.Tensor):
-                            grad_norm_value = float(grad_norm.item())
-                        elif grad_norm is not None:
-                            grad_norm_value = float(grad_norm)
-                else:
-                    grad_norm_sq = None
-                    for param in model.parameters():
-                        if param.grad is None:
-                            continue
-                        param_norm = param.grad.norm(2)
-                        grad_norm_sq = (
-                            param_norm**2
-                            if grad_norm_sq is None
-                            else grad_norm_sq + param_norm**2
-                        )
-                    if grad_norm_sq is not None:
-                        grad_norm_value = float(torch.sqrt(grad_norm_sq).item())
 
                 # Optional gradient clipping for stability on deep/long-context runs.
                 max_grad_norm = cfg.trainer.gradient_clipping
@@ -1435,12 +1465,34 @@ def trainer(cfg: Config) -> None:
                     grad_norm_pre_clip = accelerator.clip_grad_norm_(
                         model.parameters(), max_grad_norm
                     )
-                    if grad_norm_value is None and grad_norm_pre_clip is not None:
+                    if should_log and grad_norm_pre_clip is not None:
                         grad_norm_value = float(
                             grad_norm_pre_clip.item()
                             if isinstance(grad_norm_pre_clip, torch.Tensor)
                             else grad_norm_pre_clip
                         )
+                elif should_log:
+                    if accelerator.distributed_type is DistributedType.DEEPSPEED:
+                        get_global_grad = getattr(model, "get_global_grad_norm", None)
+                        if callable(get_global_grad):
+                            grad_norm = get_global_grad()
+                            if isinstance(grad_norm, torch.Tensor):
+                                grad_norm_value = float(grad_norm.item())
+                            elif grad_norm is not None:
+                                grad_norm_value = float(grad_norm)
+                    else:
+                        grad_norm_sq = None
+                        for param in model.parameters():
+                            if param.grad is None:
+                                continue
+                            param_norm = param.grad.norm(2)
+                            grad_norm_sq = (
+                                param_norm**2
+                                if grad_norm_sq is None
+                                else grad_norm_sq + param_norm**2
+                            )
+                        if grad_norm_sq is not None:
+                            grad_norm_value = float(torch.sqrt(grad_norm_sq).item())
 
                 # Log metrics
                 pbar.update(1)
