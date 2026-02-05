@@ -415,7 +415,13 @@ def _resolve_tokenize_num_proc(
     :return int: Effective num_proc for this rank.
     """
     if requested is None or requested <= 0:
-        requested = len(os.sched_getaffinity(0))
+        if hasattr(os, "sched_getaffinity"):
+            try:
+                requested = len(os.sched_getaffinity(0))
+            except Exception:
+                requested = os.cpu_count() or 1
+        else:
+            requested = os.cpu_count() or 1
     if num_processes > 1:
         requested = max(1, requested // num_processes)
         if not is_main_process:

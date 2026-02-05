@@ -4,6 +4,7 @@
 import tempfile
 import unittest
 import warnings
+from unittest.mock import patch
 from pathlib import Path
 
 import torch
@@ -304,6 +305,18 @@ class TestPretrainComponents(unittest.TestCase):
         )
         self.assertIn("attention_mask", collated)
         self.assertNotIn("packed_seqlens", collated)
+
+    def test_resolve_tokenize_num_proc_falls_back_to_cpu_count(self):
+        """Ensure tokenization num_proc falls back when affinity is unavailable."""
+        from neobert.pretraining.trainer import _resolve_tokenize_num_proc
+
+        with patch("os.sched_getaffinity", side_effect=AttributeError, create=True):
+            with patch("os.cpu_count", return_value=8):
+                resolved = _resolve_tokenize_num_proc(
+                    requested=None, num_processes=1, is_main_process=True
+                )
+
+        self.assertEqual(resolved, 8)
 
     def test_masked_correct_count(self):
         """Test masked accuracy counting ignores -100 labels."""
