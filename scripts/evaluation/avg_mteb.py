@@ -202,7 +202,7 @@ def compute_table() -> None:
                 avg_results[model][task_type] = 0
 
     with result_file.open("w", encoding="utf-8") as f:
-        json.dump(avg_results, f)
+        json.dump(avg_results, f, indent=2)
 
 
 if __name__ == "__main__":

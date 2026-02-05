@@ -97,7 +97,7 @@ def pipeline(cfg: Any) -> DatasetDict:
         )
 
         with (all_dir / "dataset_dict.json").open("w", encoding="utf-8") as f:
-            json.dump({"splits": list(dataset.keys())}, f)
+            json.dump({"splits": list(dataset.keys())}, f, indent=2)
 
     return dataset
 

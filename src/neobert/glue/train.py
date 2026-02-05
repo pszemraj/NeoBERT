@@ -479,7 +479,7 @@ def run_evaluation_and_save(
         Path(cfg.trainer.output_dir) / f"all_results_step_{completed_steps}.json"
     )
     with output_file.open("w", encoding="utf-8") as f:
-        json.dump(all_results, f)
+        json.dump(all_results, f, indent=2)
     logger.info(f"Saved evaluation results to {output_file}")
 
     # Return current accuracy for early stopping (use official GLUE score when available)
@@ -1582,7 +1582,7 @@ def trainer(cfg: Config) -> None:
                         )
                         with result_path.open("w", encoding="utf-8") as f:
                             print("dumping in", result_path)
-                            json.dump(all_results, f)
+                            json.dump(all_results, f, indent=2)
 
                         fallback_metric = next(iter(val_metrics.values()), 0.0)
                         curr_accuracy = (
@@ -1735,13 +1735,13 @@ def trainer(cfg: Config) -> None:
     }
 
     with (output_dir / "all_results.json").open("w", encoding="utf-8") as f:
-        json.dump(final_eval_dump, f)
+        json.dump(final_eval_dump, f, indent=2)
 
     # Also save to timestamped file for clarity
     with (output_dir / f"all_results_step_{completed_steps}.json").open(
         "w", encoding="utf-8"
     ) as f:
-        json.dump(final_eval_dump, f)
+        json.dump(final_eval_dump, f, indent=2)
         logger.info(
             f"Final results saved to {cfg.trainer.output_dir}/all_results_step_{completed_steps}.json"
         )
