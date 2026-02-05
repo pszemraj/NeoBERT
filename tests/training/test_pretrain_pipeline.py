@@ -372,6 +372,28 @@ class TestPretrainComponents(unittest.TestCase):
         out, stored = to_target_batch_size(batch, stored_batch, target_size=4)
         self.assertEqual(out["input_ids"].shape[0], 4)
 
+    def test_to_target_batch_size_handles_none_packed_seqlens(self):
+        """Ensure None packed_seqlens are ignored when resizing batches."""
+        from neobert.pretraining.trainer import to_target_batch_size
+
+        batch = {
+            "input_ids": torch.zeros((3, 4), dtype=torch.long),
+            "attention_mask": torch.ones((3, 4), dtype=torch.long),
+            "labels": torch.zeros((3, 4), dtype=torch.long),
+            "packed_seqlens": None,
+        }
+        stored_batch = {
+            "input_ids": None,
+            "attention_mask": None,
+            "labels": None,
+            "packed_seqlens": None,
+        }
+
+        out, stored = to_target_batch_size(batch, stored_batch, target_size=2)
+        self.assertEqual(out["input_ids"].shape[0], 2)
+        self.assertIsNone(out["packed_seqlens"])
+        self.assertIsNone(stored["packed_seqlens"])
+
     def test_optimizer_creation(self):
         """Test optimizer creation from config."""
         config = ConfigLoader.load(

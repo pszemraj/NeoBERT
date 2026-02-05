@@ -442,6 +442,10 @@ def to_target_batch_size(
     if batch_size > target_size:
         for key in batch.keys():
             value = batch[key]
+            if value is None:
+                if key not in stored_batch:
+                    stored_batch[key] = None
+                continue
             if torch.is_tensor(value):
                 tmp[key] = torch.split(
                     value, [target_size, batch_size - target_size], dim=0
@@ -473,12 +477,18 @@ def to_target_batch_size(
             for key in batch.keys():
                 if stored_batch[key] is None:
                     continue
+                if batch[key] is None:
+                    continue
                 if (
                     torch.is_tensor(stored_batch[key])
                     and stored_batch[key].device != batch[key].device
                 ):
                     stored_batch[key] = stored_batch[key].to(batch[key].device)
             for key in batch.keys():
+                if stored_batch[key] is None:
+                    continue
+                if batch[key] is None:
+                    continue
                 if torch.is_tensor(stored_batch[key]):
                     tmp[key] = torch.split(
                         stored_batch[key],
@@ -503,6 +513,8 @@ def to_target_batch_size(
         else:
             for key in batch.keys():
                 if stored_batch[key] is None:
+                    continue
+                if batch[key] is None:
                     continue
                 if torch.is_tensor(stored_batch[key]):
                     if stored_batch[key].device != batch[key].device:
