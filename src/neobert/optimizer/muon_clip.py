@@ -210,7 +210,7 @@ class NeoBERTAttentionHooks:
         self.head_dim = model_config.hidden_size // model_config.num_attention_heads
         self.layer_mapping = layer_mapping or {}
 
-        self.layer_inputs: Dict[int, torch.Tensor] = {}
+        self.layer_inputs: Dict[int, Optional[torch.Tensor]] = {}
         self.layer_pad_masks: Dict[int, Optional[torch.Tensor]] = {}
         self.layer_freqs: Dict[int, Optional[torch.Tensor]] = {}
         self.layer_packed_seqlens: Dict[int, Optional[list[list[int]]]] = {}
@@ -268,6 +268,10 @@ class NeoBERTAttentionHooks:
         try:
             for idx, layer in enumerate(layers):
                 self.layers[idx] = layer
+                self.layer_inputs[idx] = None
+                self.layer_pad_masks[idx] = None
+                self.layer_freqs[idx] = None
+                self.layer_packed_seqlens[idx] = None
                 setattr(layer, self._LAYER_IDX_ATTR, int(idx))
 
                 if hasattr(layer, "qkv"):
@@ -436,10 +440,21 @@ class NeoBERTAttentionHooks:
 
     def clear(self) -> None:
         """Clear cached tensors from all layers."""
-        self.layer_inputs.clear()
-        self.layer_pad_masks.clear()
-        self.layer_freqs.clear()
-        self.layer_packed_seqlens.clear()
+        for layer_idx in self.layer_inputs:
+            self.layer_inputs[layer_idx] = None
+        for layer_idx in self.layer_pad_masks:
+            self.layer_pad_masks[layer_idx] = None
+        for layer_idx in self.layer_freqs:
+            self.layer_freqs[layer_idx] = None
+        for layer_idx in self.layer_packed_seqlens:
+            self.layer_packed_seqlens[layer_idx] = None
+
+    def has_captured_inputs(self) -> bool:
+        """Return whether any layer currently has captured activations.
+
+        :return bool: True when at least one layer input tensor is cached.
+        """
+        return any(inputs is not None for inputs in self.layer_inputs.values())
 
     def remove_hooks(self) -> None:
         """Remove all registered forward hooks."""
@@ -743,7 +758,7 @@ class MuonClipOptimizer(Optimizer):
         if self.config.enable_clipping and self.hook_system:
             should_clip = self.should_clip_update(self._step)
             if should_clip:
-                if not self.hook_system.layer_inputs:
+                if not self.hook_system.has_captured_inputs():
                     logger.warning(
                         "MuonClip scheduled at update_step=%d but no activations were captured. "
                         "Clipping will be skipped. This usually means prepare_for_forward() "

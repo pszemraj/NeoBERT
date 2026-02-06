@@ -204,6 +204,38 @@ class TestFlashVarlenAttentionInternals:
         assert captured["tokens"] == 6
         assert captured["cu"] == [0, 3, 5, 6]
 
+    def test_flash_varlen_compile_path_avoids_scalar_item(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Compile mode should avoid tensor.item() for max_seqlen extraction."""
+        B, S, H, D = 1, 6, 2, 8
+        xq = torch.randn(B, S, H, D)
+        xk = torch.randn(B, S, H, D)
+        xv = torch.randn(B, S, H, D)
+        packed = torch.tensor([[3, 0, 2]], dtype=torch.int32)
+
+        captured: dict[str, object] = {}
+
+        def _fake_flash(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, **kwargs):
+            captured["max_seqlen_q"] = kwargs["max_seqlen_q"]
+            return torch.zeros_like(q)
+
+        monkeypatch.setattr(
+            "neobert.kernels.attention._flash_attn_varlen_func",
+            _fake_flash,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "neobert.kernels.attention._is_torch_compiling",
+            lambda: True,
+            raising=False,
+        )
+
+        out = _flash_varlen_attention(xq, xk, xv, packed, dropout_p=0.0, scale=None)
+
+        assert out.shape == (B, S, H, D)
+        assert captured["max_seqlen_q"] == S
+
 
 @pytest.mark.skipif(
     not (FLASH_ATTN_AVAILABLE and torch.cuda.is_available()),

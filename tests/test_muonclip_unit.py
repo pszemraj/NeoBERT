@@ -134,6 +134,26 @@ class TestAttentionHooks:
             assert freqs is None
             assert packed_seqlens is None
 
+    def test_hook_clear_preserves_layer_slots(self, model):
+        """Ensure clearing hook caches keeps stable dictionary cardinality."""
+        from neobert.optimizer.muon_clip import NeoBERTAttentionHooks
+
+        hook_system = NeoBERTAttentionHooks(model.config)
+        hook_system.register_hooks(model)
+
+        num_layers = len(model.transformer_encoder)
+        assert len(hook_system.layer_inputs) == num_layers
+        assert not hook_system.has_captured_inputs()
+
+        input_ids = torch.randint(0, 1000, (2, 64))
+        model(input_ids)
+        assert hook_system.has_captured_inputs()
+        assert len(hook_system.layer_inputs) == num_layers
+
+        hook_system.clear()
+        assert len(hook_system.layer_inputs) == num_layers
+        assert not hook_system.has_captured_inputs()
+
 
 class TestMuonClipOptimizer:
     """Test optimizer functionality."""
@@ -345,14 +365,15 @@ class TestMuonClipOptimizer:
 
         optimizer.prepare_for_forward(update_step=0, is_last_microbatch=False)
         _ = model_instance(torch.randint(0, 1000, (2, 64)))
-        assert hook_system.layer_inputs == {}
+        assert not hook_system.has_captured_inputs()
+        assert len(hook_system.layer_inputs) == len(model_instance.transformer_encoder)
 
         optimizer.prepare_for_forward(update_step=0, is_last_microbatch=True)
         _ = model_instance(torch.randint(0, 1000, (2, 64)))
-        assert len(hook_system.layer_inputs) > 0
+        assert hook_system.has_captured_inputs()
 
         optimizer.step()
-        assert hook_system.layer_inputs == {}
+        assert not hook_system.has_captured_inputs()
 
     def test_chunked_logit_max_matches_full(self, model):
         """Chunked logit max should match the full matmul result."""
@@ -527,8 +548,9 @@ class TestMemoryLeaks:
             optimizer.step()
             optimizer.zero_grad()
 
-        # Hook stats should be cleared
-        assert len(optimizer.hook_system.layer_inputs) == 0
+        # Hook stats should be cleared while preserving stable layer slots.
+        assert not optimizer.hook_system.has_captured_inputs()
+        assert len(optimizer.hook_system.layer_inputs) == len(model.transformer_encoder)
 
 
 if __name__ == "__main__":
