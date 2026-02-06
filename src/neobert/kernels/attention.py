@@ -29,6 +29,21 @@ except (ImportError, RuntimeError) as exc:
 _WARNED_SDPA_PACKED_GPU = False
 
 
+def _is_torch_compiling() -> bool:
+    """Return whether execution is inside a torch.compile trace."""
+    compiler = getattr(torch, "compiler", None)
+    if compiler is not None:
+        is_compiling = getattr(compiler, "is_compiling", None)
+        if callable(is_compiling):
+            return bool(is_compiling())
+    dynamo = getattr(torch, "_dynamo", None)
+    if dynamo is not None:
+        is_compiling = getattr(dynamo, "is_compiling", None)
+        if callable(is_compiling):
+            return bool(is_compiling())
+    return False
+
+
 def canonicalize_attn_backend(
     requested: str,
 ) -> Literal["sdpa", "flash_attn_varlen"]:
@@ -238,12 +253,23 @@ def _flash_varlen_attention(
     seg_lens_flat = seg_lens_cuda[seg_lens_cuda > 0]
     if seg_lens_flat.numel() == 0:
         return torch.zeros_like(xq)
-    if int(seg_lens_flat.sum().item()) != int(batch_ids.shape[0]):
-        raise ValueError(
-            "packed_seqlens metadata is inconsistent: sum of positive segment lengths "
-            f"({int(seg_lens_flat.sum().item())}) does not match flattened token count "
-            f"({int(batch_ids.shape[0])})."
+    seg_tokens_total = seg_lens_flat.sum(dtype=torch.int64)
+    flattened_tokens = batch_ids.shape[0]
+    if _is_torch_compiling():
+        # Keep compile path graph-friendly: avoid scalar .item() extraction.
+        torch._assert(
+            seg_tokens_total.eq(flattened_tokens),
+            "packed_seqlens metadata is inconsistent with flattened token count.",
         )
+    else:
+        seg_tokens_total_int = int(seg_tokens_total.item())
+        flattened_tokens_int = int(flattened_tokens)
+        if seg_tokens_total_int != flattened_tokens_int:
+            raise ValueError(
+                "packed_seqlens metadata is inconsistent: sum of positive segment lengths "
+                f"({seg_tokens_total_int}) does not match flattened token count "
+                f"({flattened_tokens_int})."
+            )
 
     cu_seqlens = torch.empty(
         seg_lens_flat.shape[0] + 1, dtype=torch.int32, device=xq.device

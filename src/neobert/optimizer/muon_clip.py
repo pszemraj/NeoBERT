@@ -195,6 +195,8 @@ class NeoBERTAttentionHooks:
     stats are computed lazily during the optimizer step.
     """
 
+    _LAYER_IDX_ATTR = "_muonclip_layer_idx"
+
     def __init__(
         self, model_config: Any, layer_mapping: Optional[Dict[str, str]] = None
     ) -> None:
@@ -266,11 +268,11 @@ class NeoBERTAttentionHooks:
         try:
             for idx, layer in enumerate(layers):
                 self.layers[idx] = layer
+                setattr(layer, self._LAYER_IDX_ATTR, int(idx))
 
                 if hasattr(layer, "qkv"):
-                    handle = layer.qkv.register_forward_hook(
-                        self._create_qkv_input_hook(idx)
-                    )
+                    setattr(layer.qkv, self._LAYER_IDX_ATTR, int(idx))
+                    handle = layer.qkv.register_forward_hook(self._qkv_input_hook)
                     registered_handles.append(handle)
                     num_hooks += 1
                 else:
@@ -285,15 +287,12 @@ class NeoBERTAttentionHooks:
                         raise RuntimeError(
                             f"Encoder block missing projection '{q_proj_name}'"
                         )
-                    handle = q_proj.register_forward_hook(
-                        self._create_qkv_input_hook(idx)
-                    )
+                    setattr(q_proj, self._LAYER_IDX_ATTR, int(idx))
+                    handle = q_proj.register_forward_hook(self._qkv_input_hook)
                     registered_handles.append(handle)
                     num_hooks += 1
 
-                block_handle = layer.register_forward_hook(
-                    self._create_block_context_hook(idx)
-                )
+                block_handle = layer.register_forward_hook(self._block_context_hook)
                 registered_handles.append(block_handle)
                 num_hooks += 1
 
@@ -331,89 +330,87 @@ class NeoBERTAttentionHooks:
 
         return None
 
-    def _create_qkv_input_hook(
-        self, layer_idx: int
-    ) -> Callable[[torch.nn.Module, tuple[Any, ...], Any], None]:
-        """Create a hook capturing QKV input activations.
+    def _module_layer_idx(self, module: torch.nn.Module) -> Optional[int]:
+        """Resolve the cached layer index for a hook module.
 
-        :param int layer_idx: Encoder layer index.
-        :return Callable: Hook function for forward pass.
+        :param torch.nn.Module module: Hooked module.
+        :return int | None: Layer index when present.
         """
+        layer_idx = getattr(module, self._LAYER_IDX_ATTR, None)
+        if layer_idx is None:
+            return None
+        try:
+            return int(layer_idx)
+        except (TypeError, ValueError):
+            return None
 
-        def hook_fn(
-            module: torch.nn.Module, inputs: tuple[Any, ...], output: Any
-        ) -> None:
-            """Store the QKV input tensor for a layer.
+    def _qkv_input_hook(
+        self, module: torch.nn.Module, inputs: tuple[Any, ...], output: Any
+    ) -> None:
+        """Store QKV input activations for the layer owning ``module``.
 
-            :param torch.nn.Module module: Hooked module.
-            :param tuple[Any, ...] inputs: Forward inputs.
-            :param Any output: Forward output (unused).
-            """
-            if not self.enabled or not inputs:
-                return
-            x = inputs[0]
-            if not torch.is_tensor(x):
-                return
-            # During gradient accumulation, we intentionally keep only the latest
-            # microbatch activation to bound memory/compute overhead. This biases
-            # QK clipping stats toward the most recent microbatch by design.
-            # We cache pre-projection inputs (not Q/K) to avoid duplicating large
-            # QKV tensors in CPU memory; projections are recomputed only on clip
-            # steps (interval-gated) to keep the steady-state overhead low.
-            # Move to CPU to avoid retaining GPU activations when clipping is enabled.
-            self.layer_inputs[layer_idx] = x.detach().to("cpu")
-
-        return hook_fn
-
-    def _create_block_context_hook(
-        self, layer_idx: int
-    ) -> Callable[[torch.nn.Module, tuple[Any, ...], Any], None]:
-        """Create a hook capturing pad mask and rotary embeddings.
-
-        :param int layer_idx: Encoder layer index.
-        :return Callable: Hook function for forward pass.
+        :param torch.nn.Module module: Hooked qkv (or q_proj) module.
+        :param tuple[Any, ...] inputs: Forward inputs.
+        :param Any output: Forward output (unused).
         """
+        del output
+        if not self.enabled or not inputs:
+            return
+        layer_idx = self._module_layer_idx(module)
+        if layer_idx is None:
+            return
+        x = inputs[0]
+        if not torch.is_tensor(x):
+            return
+        # During gradient accumulation, we intentionally keep only the latest
+        # microbatch activation to bound memory/compute overhead. This biases
+        # QK clipping stats toward the most recent microbatch by design.
+        # We cache pre-projection inputs (not Q/K) to avoid duplicating large
+        # QKV tensors in CPU memory; projections are recomputed only on clip
+        # steps (interval-gated) to keep the steady-state overhead low.
+        # Move to CPU to avoid retaining GPU activations when clipping is enabled.
+        self.layer_inputs[layer_idx] = x.detach().to("cpu")
 
-        def hook_fn(
-            module: torch.nn.Module, inputs: tuple[Any, ...], output: Any
-        ) -> None:
-            """Store pad mask and rotary embeddings for a layer.
+    def _block_context_hook(
+        self, module: torch.nn.Module, inputs: tuple[Any, ...], output: Any
+    ) -> None:
+        """Store layer-level context tensors for clipping diagnostics.
 
-            :param torch.nn.Module module: Hooked module.
-            :param tuple[Any, ...] inputs: Forward inputs.
-            :param Any output: Forward output (unused).
-            """
-            if not self.enabled or not inputs:
-                return
+        :param torch.nn.Module module: Hooked encoder block module.
+        :param tuple[Any, ...] inputs: Forward inputs.
+        :param Any output: Forward output (unused).
+        """
+        del output
+        if not self.enabled or not inputs:
+            return
+        layer_idx = self._module_layer_idx(module)
+        if layer_idx is None:
+            return
 
-            pad_mask = inputs[1] if len(inputs) > 1 else None
-            freqs_cis = inputs[2] if len(inputs) > 2 else None
-            packed_seqlens = inputs[3] if len(inputs) > 3 else None
+        pad_mask = inputs[1] if len(inputs) > 1 else None
+        freqs_cis = inputs[2] if len(inputs) > 2 else None
+        packed_seqlens = inputs[3] if len(inputs) > 3 else None
 
-            self.layer_pad_masks[layer_idx] = (
-                pad_mask.detach().to("cpu") if torch.is_tensor(pad_mask) else pad_mask
-            )
-            self.layer_freqs[layer_idx] = (
-                freqs_cis.detach().to("cpu")
-                if torch.is_tensor(freqs_cis)
-                else freqs_cis
-            )
-            if packed_seqlens is not None:
-                if torch.is_tensor(packed_seqlens):
-                    if packed_seqlens.numel() == 0:
-                        packed_seqlens = [[] for _ in range(packed_seqlens.shape[0])]
-                    else:
-                        cpu = packed_seqlens.detach().cpu()
-                        packed_seqlens = [
-                            [int(x) for x in row[row > 0].tolist()] for row in cpu
-                        ]
+        self.layer_pad_masks[layer_idx] = (
+            pad_mask.detach().to("cpu") if torch.is_tensor(pad_mask) else pad_mask
+        )
+        self.layer_freqs[layer_idx] = (
+            freqs_cis.detach().to("cpu") if torch.is_tensor(freqs_cis) else freqs_cis
+        )
+        if packed_seqlens is not None:
+            if torch.is_tensor(packed_seqlens):
+                if packed_seqlens.numel() == 0:
+                    packed_seqlens = [[] for _ in range(packed_seqlens.shape[0])]
                 else:
+                    cpu = packed_seqlens.detach().cpu()
                     packed_seqlens = [
-                        list(map(int, seg_lens)) for seg_lens in packed_seqlens
+                        [int(x) for x in row[row > 0].tolist()] for row in cpu
                     ]
-            self.layer_packed_seqlens[layer_idx] = packed_seqlens
-
-        return hook_fn
+            else:
+                packed_seqlens = [
+                    list(map(int, seg_lens)) for seg_lens in packed_seqlens
+                ]
+        self.layer_packed_seqlens[layer_idx] = packed_seqlens
 
     def get_layer_data(
         self, layer_idx: int
