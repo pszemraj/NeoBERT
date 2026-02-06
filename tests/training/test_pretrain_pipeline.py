@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Test pretraining pipeline functionality."""
 
+import os
 import tempfile
 import unittest
 import warnings
@@ -377,6 +378,26 @@ class TestPretrainComponents(unittest.TestCase):
         logits = torch.tensor([[[0.1, 0.2, 0.7], [0.9, 0.1, 0.0]]])
         labels = torch.tensor([[2, -100]])
         self.assertEqual(_count_masked_correct(logits, labels).item(), 1)
+
+    def test_masked_correct_count_all_ignored(self):
+        """Test masked accuracy count returns zero when all labels are ignored."""
+        from neobert.pretraining.trainer import _count_masked_correct
+
+        logits = torch.tensor([[[0.1, 0.2, 0.7], [0.9, 0.1, 0.0]]])
+        labels = torch.full((1, 2), -100, dtype=torch.long)
+        self.assertEqual(_count_masked_correct(logits, labels).item(), 0)
+
+    def test_set_default_worker_env_respects_user_overrides(self):
+        """Ensure worker env defaults only apply when vars are unset."""
+        from neobert.pretraining.trainer import _set_default_worker_env
+
+        with patch.dict(os.environ, {"OMP_NUM_THREADS": "8"}, clear=False):
+            os.environ.pop("TOKENIZERS_PARALLELISM", None)
+            os.environ.pop("MKL_NUM_THREADS", None)
+            _set_default_worker_env(num_workers=4)
+            self.assertEqual(os.environ["OMP_NUM_THREADS"], "8")
+            self.assertEqual(os.environ["TOKENIZERS_PARALLELISM"], "false")
+            self.assertEqual(os.environ["MKL_NUM_THREADS"], "1")
 
     def test_pack_sequences_collator(self):
         """Ensure packed collator builds a block attention mask."""

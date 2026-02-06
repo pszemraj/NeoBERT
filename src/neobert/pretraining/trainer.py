@@ -219,11 +219,36 @@ def _count_masked_correct(
     :param int ignore_index: Label value to ignore (default: -100).
     :return torch.Tensor: Scalar tensor of correct predictions on unmasked tokens.
     """
-    mask = labels != ignore_index
-    if not mask.any():
-        return torch.zeros((), device=logits.device, dtype=torch.long)
     preds = logits.argmax(dim=-1)
-    return (preds[mask] == labels[mask]).sum()
+    mask = labels != ignore_index
+    # Avoid Python branching on CUDA scalar tensors (implicit sync via .item()).
+    return (preds.eq(labels) & mask).sum(dtype=torch.long)
+
+
+def _set_default_worker_env(num_workers: int) -> None:
+    """Set conservative host-thread env defaults for data workers.
+
+    Existing user-provided values take precedence.
+
+    :param int num_workers: DataLoader worker count.
+    """
+    if num_workers <= 0:
+        return
+    defaults = {
+        "TOKENIZERS_PARALLELISM": "false",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+    }
+    applied: dict[str, str] = {}
+    for key, value in defaults.items():
+        if os.environ.get(key) is None:
+            os.environ[key] = value
+            applied[key] = value
+    if applied:
+        logger.info(
+            "Set default worker env: %s",
+            ", ".join(f"{k}={v}" for k, v in sorted(applied.items())),
+        )
 
 
 def _resolve_eval_max_batches(
@@ -909,6 +934,7 @@ def trainer(cfg: Config) -> None:
 
     # Set the seed
     set_seed(cfg.seed)
+    _set_default_worker_env(int(cfg.dataset.num_workers))
 
     # Configure TF32 precision for GPUs with compute capability >= 8.0
     configure_tf32(enabled=cfg.trainer.tf32, print_fn=accelerator.print)
