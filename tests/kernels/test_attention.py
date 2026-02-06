@@ -104,6 +104,15 @@ class TestAttentionForwardSDPAPacked:
         out = attention_forward(xq, xk, xv, None, packed, 0.0, None, "sdpa")
         assert out.shape == (B, S, H, D)
 
+    def test_packed_sdpa_tensor_metadata(self):
+        B, S, H, D = 2, 16, 2, 8
+        xq = torch.randn(B, S, H, D)
+        xk = torch.randn(B, S, H, D)
+        xv = torch.randn(B, S, H, D)
+        packed = torch.tensor([[8, 8, 0], [16, 0, 0]], dtype=torch.int32)
+        out = attention_forward(xq, xk, xv, None, packed, 0.0, None, "sdpa")
+        assert out.shape == (B, S, H, D)
+
     def test_packed_sdpa_zeros_in_padding(self):
         """Padding positions should be zero in output."""
         B, S, H, D = 1, 8, 2, 4

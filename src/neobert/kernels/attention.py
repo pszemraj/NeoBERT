@@ -2,13 +2,14 @@
 
 import logging
 import math
-from typing import Literal, Optional
+from typing import Any, Callable, Literal, Optional, TypeVar
 
 import torch
 
 from ..modeling_utils import scaled_dot_product_attention_compat
 
 logger = logging.getLogger(__name__)
+PackedSeqLens = torch.Tensor | list[list[int]]
 
 # ---------------------------------------------------------------------------
 # Import-time flash-attn availability check
@@ -26,6 +27,28 @@ except (ImportError, RuntimeError) as exc:
     FLASH_ATTN_ERROR = str(exc)
 
 _WARNED_SDPA_PACKED_GPU = False
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def _identity_decorator(fn: _F) -> _F:
+    """Return *fn* unchanged.
+
+    :param callable fn: Function to decorate.
+    :return callable: Original function.
+    """
+    return fn
+
+
+try:
+    _compile_disable = torch.compiler.disable  # type: ignore[attr-defined]
+except AttributeError:
+    try:
+        import torch._dynamo as _dynamo
+
+        _compile_disable = _dynamo.disable
+    except ImportError:
+        _compile_disable = _identity_decorator
 
 
 def canonicalize_attn_backend(
@@ -90,6 +113,28 @@ def packed_seqlens_to_cu_seqlens(
         cu.append(cu[-1] + length)
     max_seqlen = max(all_lens)
     return torch.tensor(cu, dtype=torch.int32, device=device), max_seqlen
+
+
+@_compile_disable
+def _packed_seqlens_to_list(packed_seqlens: PackedSeqLens) -> list[list[int]]:
+    """Convert packed seqlens input to normalized Python nested lists.
+
+    :param torch.Tensor | list[list[int]] packed_seqlens: Packed sequence lengths.
+    :return list[list[int]]: Normalized packed segment lengths.
+    """
+    if torch.is_tensor(packed_seqlens):
+        if packed_seqlens.is_cuda:
+            raise RuntimeError("packed_seqlens metadata must stay on CPU.")
+        tensor = packed_seqlens.detach().cpu().to(torch.int32)
+        if tensor.ndim == 1:
+            tensor = tensor.unsqueeze(1)
+        if tensor.ndim != 2:
+            raise ValueError(
+                "packed_seqlens tensor must be rank 1 or 2, got "
+                f"shape={tuple(tensor.shape)}"
+            )
+        return [[int(x) for x in row if int(x) > 0] for row in tensor.tolist()]
+    return [[int(x) for x in row if int(x) > 0] for row in packed_seqlens]
 
 
 def _flash_varlen_attention(
@@ -235,7 +280,7 @@ def attention_forward(
     xk: torch.Tensor,
     xv: torch.Tensor,
     pad_mask: torch.Tensor | None,
-    packed_seqlens: list[list[int]] | None,
+    packed_seqlens: PackedSeqLens | None,
     dropout_p: float,
     scale: float | None,
     attn_backend: str,
@@ -246,7 +291,7 @@ def attention_forward(
     :param torch.Tensor xk: Key ``(B, S, H, D)``.
     :param torch.Tensor xv: Value ``(B, S, H, D)``.
     :param torch.Tensor | None pad_mask: Additive mask for SDPA (broadcast-friendly).
-    :param list[list[int]] | None packed_seqlens: Packed segment lengths.
+    :param torch.Tensor | list[list[int]] | None packed_seqlens: Packed segment lengths.
     :param float dropout_p: Dropout probability.
     :param float | None scale: Softmax scale factor.
     :param str attn_backend: ``"sdpa"`` or ``"flash_attn_varlen"``.
@@ -254,6 +299,7 @@ def attention_forward(
     """
     attn_backend = canonicalize_attn_backend(attn_backend)
     if packed_seqlens is not None:
+        packed_list = _packed_seqlens_to_list(packed_seqlens)
         # Packed sequences
         if attn_backend == "flash_attn_varlen":
             if not xq.is_cuda:
@@ -266,9 +312,9 @@ def attention_forward(
                     "attn_backend='flash_attn_varlen' requested but flash-attn is not "
                     f"available: {FLASH_ATTN_ERROR}"
                 )
-            return _flash_varlen_attention(xq, xk, xv, packed_seqlens, dropout_p, scale)
+            return _flash_varlen_attention(xq, xk, xv, packed_list, dropout_p, scale)
         # SDPA per-segment fallback (works on CPU + GPU)
-        return _sdpa_packed_fallback(xq, xk, xv, packed_seqlens, dropout_p, scale)
+        return _sdpa_packed_fallback(xq, xk, xv, packed_list, dropout_p, scale)
 
     # Unpacked: always use SDPA
     # SDPA expects (B, H, S, D), our input is (B, S, H, D)

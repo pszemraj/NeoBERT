@@ -66,8 +66,14 @@ def _maybe_compile_model(
             "trainer.torch_compile is enabled but DeepSpeed is active; skipping torch.compile."
         )
         return model
-    log.info("Compiling model with torch.compile.")
-    return torch.compile(model)
+    use_dynamic = bool(
+        getattr(getattr(cfg, "datacollator", None), "pack_sequences", False)
+    )
+    model_backend = getattr(getattr(cfg, "model", None), "attn_backend", None)
+    if isinstance(model_backend, str) and model_backend != "sdpa":
+        use_dynamic = True
+    log.info("Compiling model with torch.compile (dynamic=%s).", use_dynamic)
+    return torch.compile(model, dynamic=use_dynamic)
 
 
 def _resolve_resume_checkpoint(

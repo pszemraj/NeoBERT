@@ -38,6 +38,7 @@ from ..modeling_utils import swiglu_intermediate_size
 from .rotary import apply_rotary_emb, precompute_freqs_cis
 
 logger = logging.getLogger(__name__)
+PackedSeqLens = torch.Tensor | list[list[int]]
 
 
 def _normalize_pad_mask(pad_mask: torch.Tensor) -> torch.Tensor:
@@ -61,7 +62,7 @@ def _normalize_pad_mask(pad_mask: torch.Tensor) -> torch.Tensor:
 
 def _infer_single_segment_packed_seqlens_from_pad_mask(
     pad_mask: torch.Tensor, seq_len: int
-) -> Optional[list[list[int]]]:
+) -> Optional[PackedSeqLens]:
     """Infer packed lengths from an additive pad mask.
 
     This only works for prefix padding masks where tokens are unmasked first and
@@ -69,7 +70,7 @@ def _infer_single_segment_packed_seqlens_from_pad_mask(
 
     :param torch.Tensor pad_mask: Additive pad mask (0/-inf).
     :param int seq_len: Sequence length for validation.
-    :return list[list[int]] | None: Packed lengths per batch item.
+    :return torch.Tensor | list[list[int]] | None: Packed lengths per batch item.
     """
     if not torch.is_tensor(pad_mask):
         raise TypeError("pad_mask must be a torch.Tensor")
@@ -104,19 +105,20 @@ def _normalize_packed_seqlens(
     packed_seqlens: Any,
     *,
     seq_len: Optional[int] = None,
-) -> Optional[list[list[int]]]:
+) -> Optional[PackedSeqLens]:
     """Normalize packed sequence lengths to Python lists.
 
     :param Any packed_seqlens: Packed segment lengths tensor or list.
     :param int | None seq_len: Optional sequence length for validation.
-    :return list[list[int]] | None: Packed segment lengths as Python lists.
+    :return torch.Tensor | list[list[int]] | None: Packed segment lengths.
     """
     if packed_seqlens is None:
         return None
 
     if torch.is_tensor(packed_seqlens):
         if packed_seqlens.numel() == 0:
-            return [[] for _ in range(packed_seqlens.shape[0])]
+            rows = int(packed_seqlens.shape[0]) if packed_seqlens.ndim > 0 else 0
+            return torch.zeros((rows, 0), dtype=torch.int32)
         tensor = packed_seqlens.detach()
         if tensor.is_cuda:
             raise RuntimeError(
@@ -124,30 +126,23 @@ def _normalize_packed_seqlens(
                 "dataloader device placement bug; keep packed_seqlens on CPU to "
                 "avoid GPU syncs."
             )
-        tensor = tensor.cpu()
+        tensor = tensor.cpu().to(torch.int32)
 
         if tensor.ndim == 1:
-            out: list[list[int]] = []
-            for value in tensor.tolist():
-                length = int(value)
-                segs = [length] if length > 0 else []
-                if seq_len is not None and sum(segs) > seq_len:
-                    raise ValueError(
-                        f"packed_seqlens sums to {sum(segs)} > seq_len={seq_len}: {segs}"
-                    )
-                out.append(segs)
-            return out
+            tensor = tensor.unsqueeze(1)
 
         if tensor.ndim == 2:
-            out = []
-            for row in tensor.tolist():
-                segs = [int(x) for x in row if int(x) > 0]
-                if seq_len is not None and sum(segs) > seq_len:
+            if seq_len is not None:
+                sums = tensor.clamp_min(0).sum(dim=-1)
+                bad = sums > seq_len
+                if bad.any():
+                    bad_idx = int(torch.where(bad)[0][0].item())
                     raise ValueError(
-                        f"packed_seqlens sums to {sum(segs)} > seq_len={seq_len}: {segs}"
+                        "packed_seqlens sum exceeds seq_len "
+                        f"(row={bad_idx}, sum={int(sums[bad_idx].item())}, "
+                        f"seq_len={seq_len})."
                     )
-                out.append(segs)
-            return out
+            return tensor
 
         raise ValueError(
             "packed_seqlens tensor must be rank 1 or 2, got "
@@ -401,7 +396,7 @@ class EncoderBlock(nn.Module):
         x: torch.Tensor,
         pad_mask: torch.Tensor,
         freqs_cis: torch.Tensor,
-        packed_seqlens: Optional[list[list[int]]] = None,
+        packed_seqlens: Optional[PackedSeqLens] = None,
     ) -> torch.Tensor:
         """Run the encoder block forward pass.
 
@@ -422,7 +417,7 @@ class EncoderBlock(nn.Module):
         x: torch.Tensor,
         pad_mask: torch.Tensor,
         freqs_cis: torch.Tensor,
-        packed_seqlens: Optional[list[list[int]]] = None,
+        packed_seqlens: Optional[PackedSeqLens] = None,
     ) -> torch.Tensor:
         """Apply the attention sub-layer.
 
@@ -551,14 +546,14 @@ class NormEncoderBlock(nn.Module):
         x: torch.Tensor,
         pad_mask: torch.Tensor,
         freqs_cis: torch.Tensor,
-        packed_seqlens: Optional[list[list[int]]] = None,
+        packed_seqlens: Optional[PackedSeqLens] = None,
     ) -> torch.Tensor:
         """Run the normalized encoder block forward pass.
 
         :param torch.Tensor x: Input tensor.
         :param torch.Tensor pad_mask: Additive attention mask.
         :param torch.Tensor freqs_cis: Rotary embedding frequencies.
-        :param list[list[int]] | None packed_seqlens: Packed segment lengths.
+        :param torch.Tensor | list[list[int]] | None packed_seqlens: Packed segment lengths.
         :return torch.Tensor: Updated hidden states.
         """
         x_attn = self._att_block(x, pad_mask, freqs_cis, packed_seqlens)
@@ -588,14 +583,14 @@ class NormEncoderBlock(nn.Module):
         x: torch.Tensor,
         pad_mask: torch.Tensor,
         freqs_cis: torch.Tensor,
-        packed_seqlens: Optional[list[list[int]]] = None,
+        packed_seqlens: Optional[PackedSeqLens] = None,
     ) -> torch.Tensor:
         """Apply the attention sub-layer.
 
         :param torch.Tensor x: Input tensor.
         :param torch.Tensor pad_mask: Additive attention mask.
         :param torch.Tensor freqs_cis: Rotary embedding frequencies.
-        :param list[list[int]] | None packed_seqlens: Packed segment lengths.
+        :param torch.Tensor | list[list[int]] | None packed_seqlens: Packed segment lengths.
         :return torch.Tensor: Attention output.
         """
         batch_size, seq_len, _ = x.shape
@@ -745,13 +740,13 @@ class NeoBERT(NeoBERTPreTrainedModel):
         self,
         src: torch.Tensor,
         pad_mask: Optional[torch.Tensor] = None,
-        packed_seqlens: Optional[list[list[int]]] = None,
+        packed_seqlens: Optional[PackedSeqLens] = None,
     ) -> torch.Tensor:
         """Run the NeoBERT encoder forward pass.
 
         :param torch.Tensor src: Input token IDs.
         :param torch.Tensor | None pad_mask: Additive attention mask.
-        :param list[list[int]] | None packed_seqlens: Packed segment lengths.
+        :param torch.Tensor | list[list[int]] | None packed_seqlens: Packed segment lengths.
         :return torch.Tensor: Encoded hidden states.
         """
         seq_len = src.shape[1]
@@ -880,13 +875,13 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
         self,
         src: torch.Tensor,
         pad_mask: Optional[torch.Tensor] = None,
-        packed_seqlens: Optional[list[list[int]]] = None,
+        packed_seqlens: Optional[PackedSeqLens] = None,
     ) -> torch.Tensor:
         """Run the normalized encoder forward pass.
 
         :param torch.Tensor src: Input token IDs.
         :param torch.Tensor | None pad_mask: Additive attention mask.
-        :param list[list[int]] | None packed_seqlens: Packed segment lengths.
+        :param torch.Tensor | list[list[int]] | None packed_seqlens: Packed segment lengths.
         :return torch.Tensor: Encoded hidden states.
         """
         seq_len = src.shape[1]
@@ -1012,13 +1007,13 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
         self,
         src: torch.Tensor,
         pad_mask: Optional[torch.Tensor] = None,
-        packed_seqlens: Optional[list[list[int]]] = None,
+        packed_seqlens: Optional[PackedSeqLens] = None,
     ) -> Dict[str, torch.Tensor]:
         """Run the LM head forward pass.
 
         :param torch.Tensor src: Input token IDs.
         :param torch.Tensor | None pad_mask: Additive attention mask.
-        :param list[list[int]] | None packed_seqlens: Packed segment lengths.
+        :param torch.Tensor | list[list[int]] | None packed_seqlens: Packed segment lengths.
         :return dict[str, torch.Tensor]: Hidden states and logits.
         """
         hidden_representation = self.model.forward(src, pad_mask, packed_seqlens)

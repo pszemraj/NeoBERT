@@ -100,6 +100,28 @@ class TestModelForward(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown kernel_backend"):
             NeoBERTConfig(kernel_backend="bad_backend")
 
+    def test_neobert_accepts_tensor_packed_seqlens(self):
+        """Ensure tensor packed_seqlens metadata works in model forward."""
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            dropout=0.0,
+            vocab_size=256,
+            max_length=32,
+            attn_backend="sdpa",
+            ngpt=False,
+            hidden_act="gelu",
+        )
+        model = NeoBERT(config)
+        model.eval()
+        x = torch.randint(0, 256, (2, 8))
+        packed = torch.tensor([[8, 0], [6, 0]], dtype=torch.int32)
+        with torch.no_grad():
+            out = model(x, pad_mask=None, packed_seqlens=packed)
+        self.assertEqual(out.shape, (2, 8, 32))
+
     def test_gradient_checkpointing_matches_baseline(self):
         """Ensure checkpointed gradients match non-checkpointed forward."""
         torch.manual_seed(0)

@@ -375,12 +375,14 @@ class TestPretrainComponents(unittest.TestCase):
         self.assertTrue(all(row[row > 0].numel() >= 1 for row in packed))
 
     def test_normalize_packed_seqlens_tensor(self):
-        """Ensure packed_seqlens tensors normalize to list-of-lists."""
+        """Ensure packed_seqlens tensors stay tensor metadata."""
         from neobert.model.model import _normalize_packed_seqlens
 
         packed = torch.tensor([[3, 0, 0], [2, 1, 0]], dtype=torch.int32)
         normalized = _normalize_packed_seqlens(packed)
-        self.assertEqual(normalized, [[3], [2, 1]])
+        self.assertTrue(torch.is_tensor(normalized))
+        self.assertEqual(normalized.dtype, torch.int32)
+        torch.testing.assert_close(normalized, packed)
 
     def test_to_target_batch_size_handles_empty_buffer(self):
         """Ensure batch packing handles empty buffers without crashing."""

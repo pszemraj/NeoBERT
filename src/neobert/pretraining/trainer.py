@@ -290,25 +290,33 @@ def _run_eval(
 
 def _packed_seqlens_to_list(
     packed_seqlens: Any,
-) -> Optional[list[list[int]]]:
+) -> Optional[torch.Tensor | list[list[int]]]:
     """Normalize packed sequence lengths to Python lists.
 
     :param Any packed_seqlens: Packed segment lengths tensor or list.
-    :return list[list[int]] | None: Packed segment lengths as Python lists.
+    :return torch.Tensor | list[list[int]] | None: Packed segment lengths.
     """
     if packed_seqlens is None:
         return None
     if torch.is_tensor(packed_seqlens):
         if packed_seqlens.numel() == 0:
-            return [[] for _ in range(packed_seqlens.shape[0])]
+            rows = int(packed_seqlens.shape[0]) if packed_seqlens.ndim > 0 else 0
+            return torch.zeros((rows, 0), dtype=torch.int32)
         if packed_seqlens.is_cuda:
             raise RuntimeError(
                 "packed_seqlens must be a CPU tensor. This indicates a collator or "
                 "dataloader device placement bug; keep packed_seqlens on CPU to "
                 "avoid GPU syncs."
             )
-        cpu = packed_seqlens.detach().cpu()
-        return [[int(x) for x in row[row > 0].tolist()] for row in cpu]
+        cpu = packed_seqlens.detach().cpu().to(torch.int32)
+        if cpu.ndim == 1:
+            cpu = cpu.unsqueeze(1)
+        if cpu.ndim != 2:
+            raise ValueError(
+                "packed_seqlens tensor must be rank 1 or 2, got "
+                f"shape={tuple(cpu.shape)}"
+            )
+        return cpu
     return packed_seqlens
 
 
