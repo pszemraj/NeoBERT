@@ -3,6 +3,9 @@
 This module stays shape-compatible with ``neobert/model/rotary.py`` and accepts
 both 2D (seq_len, head_dim/2) and 3D (batch, seq_len, head_dim/2) frequency
 tensors for broadcasting.
+
+Keep this numerically aligned with ``neobert.model.rotary``; parity is validated
+by ``tests/model/test_model_forward.py::test_rotary_training_matches_hf_export``.
 """
 
 from __future__ import annotations

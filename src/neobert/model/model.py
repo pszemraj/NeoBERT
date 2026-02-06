@@ -6,6 +6,7 @@
 import logging
 import math
 import warnings
+from copy import deepcopy
 from functools import partial
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
@@ -83,10 +84,9 @@ def _infer_single_segment_packed_seqlens_from_pad_mask(
 
     mask = pad_mask.detach()
     if mask.is_cuda:
-        raise ValueError(
-            "pad_mask is on CUDA; packed_seqlens inference would sync to CPU. "
-            "Provide packed_seqlens from the collator instead."
-        )
+        # Avoid an implicit CPU sync in forward(); gracefully fall back to the
+        # additive-mask path unless packed_seqlens was prepared by the collator.
+        return None
 
     if mask.dim() == 2:
         key_mask = mask
@@ -231,7 +231,7 @@ class NeoBERTConfig(PretrainedConfig):
         rope: bool = True,
         norm_eps: float = 1e-06,
         hidden_act: str = "SwiGLU",
-        vocab_size: int = 32064,
+        vocab_size: int = 30522,  # Keep in sync with ConfigLoader/HF defaults.
         pad_token_id: int = 0,
         max_length: int = 1024,
         attn_backend: str = "sdpa",
@@ -1073,21 +1073,26 @@ class NeoBERTForSequenceClassification(NeoBERTPreTrainedModel):
         :param float classifier_init_range: Init range for classifier.
         :param Any kwargs: Unused extra arguments for compatibility.
         """
-        super().__init__(config)
+        # Clone the incoming config so forcing SDPA here does not mutate caller state.
+        local_config = deepcopy(config)
+        if local_config.attn_backend != "sdpa":
+            logger.warning(
+                "NeoBERTForSequenceClassification does not support packed attention; "
+                "forcing attn_backend='sdpa' for this instance."
+            )
+            local_config.attn_backend = "sdpa"
 
-        self.config = config
+        super().__init__(local_config)
+
+        self.config = local_config
 
         self.num_labels = num_labels
         self.classifier_dropout = classifier_dropout
         self.classifier_init_range = classifier_init_range
 
-        self.model = NormNeoBERT(config) if config.ngpt else NeoBERT(config)
-        if config.attn_backend != "sdpa":
-            logger.warning(
-                "NeoBERTForSequenceClassification does not support packed attention; "
-                "forcing attn_backend='sdpa' for this instance."
-            )
-            self.model.config.attn_backend = "sdpa"
+        self.model = (
+            NormNeoBERT(local_config) if local_config.ngpt else NeoBERT(local_config)
+        )
 
         self.dense = nn.Linear(self.config.hidden_size, self.config.hidden_size)
         self.dropout = nn.Dropout(self.classifier_dropout)
@@ -1137,21 +1142,28 @@ class NeoBERTHFForSequenceClassification(NeoBERTPreTrainedModel):
 
         :param NeoBERTConfig config: Model configuration.
         """
-        super().__init__(config)
-
-        self.config = config
-
-        self.num_labels = getattr(config, "num_labels", 2)
-        self.classifier_dropout = getattr(config, "classifier_dropout", 0.1)
-        self.classifier_init_range = getattr(config, "classifier_init_range", 0.02)
-
-        self.model = NormNeoBERT(config) if config.ngpt else NeoBERT(config)
-        if config.attn_backend != "sdpa":
+        # Clone the incoming config so forcing SDPA here does not mutate caller state.
+        local_config = deepcopy(config)
+        if local_config.attn_backend != "sdpa":
             logger.warning(
                 "NeoBERTHFForSequenceClassification does not support packed attention; "
                 "forcing attn_backend='sdpa' for this instance."
             )
-            self.model.config.attn_backend = "sdpa"
+            local_config.attn_backend = "sdpa"
+
+        super().__init__(local_config)
+
+        self.config = local_config
+
+        self.num_labels = getattr(local_config, "num_labels", 2)
+        self.classifier_dropout = getattr(local_config, "classifier_dropout", 0.1)
+        self.classifier_init_range = getattr(
+            local_config, "classifier_init_range", 0.02
+        )
+
+        self.model = (
+            NormNeoBERT(local_config) if local_config.ngpt else NeoBERT(local_config)
+        )
 
         self.dense = nn.Linear(self.config.hidden_size, self.config.hidden_size)
         self.dropout = nn.Dropout(self.classifier_dropout)

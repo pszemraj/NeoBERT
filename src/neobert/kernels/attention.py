@@ -252,6 +252,7 @@ def _flash_varlen_attention(
     )
     cu_seqlens[0] = 0
     cu_seqlens[1:] = seg_lens_flat.cumsum(dim=0, dtype=torch.int32)
+    # Use the true max segment length (not padded sequence length) for varlen kernel sizing.
     max_seqlen = int(seg_lens_flat.max().item())
 
     softmax_scale = scale if scale is not None else (1.0 / math.sqrt(head_dim))

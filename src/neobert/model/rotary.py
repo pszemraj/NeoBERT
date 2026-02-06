@@ -1,6 +1,9 @@
 """Rotary positional embedding helpers.
 
 Uses real-valued cos/sin (no complex tensors) for torch.compile compatibility.
+
+Keep this numerically aligned with ``neobert.huggingface.rotary``; parity is
+validated by ``tests/model/test_model_forward.py::test_rotary_training_matches_hf_export``.
 """
 
 from typing import Optional, Tuple

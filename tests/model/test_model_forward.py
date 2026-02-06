@@ -2,7 +2,7 @@
 """Test NeoBERT model forward passes and functionality."""
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 import torch
 from tokenizers import Tokenizer, models, pre_tokenizers
@@ -763,6 +763,24 @@ class TestModelForward(unittest.TestCase):
         )
         self.assertIsNone(inferred)
 
+    def test_infer_single_segment_cuda_mask_falls_back(self):
+        """Ensure CUDA masks gracefully skip packed-length inference."""
+        from neobert.model.model import (
+            _infer_single_segment_packed_seqlens_from_pad_mask,
+        )
+
+        pad_mask = torch.zeros((2, 4), dtype=torch.float32)
+        with patch.object(
+            torch.Tensor,
+            "is_cuda",
+            new_callable=PropertyMock,
+            return_value=True,
+        ):
+            inferred = _infer_single_segment_packed_seqlens_from_pad_mask(
+                pad_mask, seq_len=4
+            )
+        self.assertIsNone(inferred)
+
     def test_rotary_accepts_batched_freqs(self):
         """Ensure rotary helper supports batched frequency tensors."""
         from neobert.model.rotary import apply_rotary_emb, precompute_freqs_cis
@@ -781,6 +799,30 @@ class TestModelForward(unittest.TestCase):
         xq_out, xk_out = apply_rotary_emb(xq, xk, batched_freqs)
         self.assertEqual(xq_out.shape, xq.shape)
         self.assertEqual(xk_out.shape, xk.shape)
+
+    def test_rotary_training_matches_hf_export(self):
+        """Ensure training and HF rotary helpers stay numerically aligned."""
+        from neobert.huggingface.rotary import (
+            apply_rotary_emb as hf_apply_rotary_emb,
+            precompute_freqs_cis as hf_precompute_freqs_cis,
+        )
+        from neobert.model.rotary import (
+            apply_rotary_emb as train_apply_rotary_emb,
+            precompute_freqs_cis as train_precompute_freqs_cis,
+        )
+
+        batch_size, seq_len, num_heads, head_dim = 2, 6, 3, 8
+        xq = torch.randn(batch_size, seq_len, num_heads, head_dim)
+        xk = torch.randn(batch_size, seq_len, num_heads, head_dim)
+
+        train_freqs = train_precompute_freqs_cis(head_dim, seq_len)
+        hf_freqs = hf_precompute_freqs_cis(head_dim, seq_len)
+
+        train_q, train_k = train_apply_rotary_emb(xq, xk, train_freqs)
+        hf_q, hf_k = hf_apply_rotary_emb(xq, xk, hf_freqs)
+
+        torch.testing.assert_close(train_q, hf_q, atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(train_k, hf_k, atol=1e-5, rtol=1e-5)
 
     def test_activation_functions(self):
         """Test different activation functions."""
@@ -995,6 +1037,7 @@ class TestModelForward(unittest.TestCase):
         )
         model = NeoBERTForSequenceClassification(config, num_labels=2)
         self.assertEqual(model.model.config.attn_backend, "sdpa")
+        self.assertEqual(config.attn_backend, "flash_attn_varlen")
 
     def test_seq_class_uses_norm_backbone_when_ngpt_enabled(self):
         """Ensure ngpt classification uses NormNeoBERT backbone."""
@@ -1027,6 +1070,12 @@ class TestModelForward(unittest.TestCase):
         )
         model = NeoBERTHFForSequenceClassification(config)
         self.assertEqual(model.model.config.attn_backend, "sdpa")
+        self.assertEqual(config.attn_backend, "flash_attn_varlen")
+
+    def test_training_config_default_vocab_matches_repo_defaults(self):
+        """Ensure training config default vocab matches YAML/HF defaults."""
+        config = NeoBERTConfig()
+        self.assertEqual(config.vocab_size, 30522)
 
     def test_hf_seq_class_uses_norm_backbone_when_ngpt_enabled(self):
         """Ensure HF ngpt classification uses NormNeoBERT backbone."""

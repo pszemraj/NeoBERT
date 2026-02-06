@@ -183,3 +183,22 @@ class TestCollatorPacking(unittest.TestCase):
         self.assertEqual(labels[0, 0], 3)
         self.assertEqual(labels[0, 1], 4)
         self.assertEqual(labels[0, 2], -100)
+
+    def test_packing_raises_when_pad_token_id_is_unresolved(self):
+        """Ensure packing fails loudly when no pad token can be resolved."""
+
+        class NoPadCollator:
+            """Collator stub without tokenizer or pad_token_id metadata."""
+
+            def __call__(self, features, return_tensors=None):
+                return {"input_ids": features}
+
+        collator = DataCollatorWithPacking(
+            start_token_id=10,
+            end_token_id=11,
+            max_length=8,
+            default_data_collator=NoPadCollator(),
+        )
+
+        with self.assertRaisesRegex(ValueError, "Could not resolve pad_token_id"):
+            collator([{"input_ids": [1, 2, 3]}])

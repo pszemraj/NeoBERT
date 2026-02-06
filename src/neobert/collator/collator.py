@@ -212,11 +212,17 @@ class DataCollatorWithPacking(DefaultDataCollator):
             )
             packed_segments.append(current_segments)
 
-        pad_token_id = getattr(
-            getattr(self.default_data_collator, "tokenizer", None), "pad_token_id", None
-        )
+        # Resolve pad token explicitly; never guess with a hard-coded ID.
+        pad_token_id = getattr(self.default_data_collator, "pad_token_id", None)
         if pad_token_id is None:
-            pad_token_id = 0
+            tokenizer = getattr(self.default_data_collator, "tokenizer", None)
+            pad_token_id = getattr(tokenizer, "pad_token_id", None)
+        if pad_token_id is None:
+            raise ValueError(
+                "Could not resolve pad_token_id for DataCollatorWithPacking. "
+                "Ensure the default data collator exposes either `pad_token_id` "
+                "or `tokenizer.pad_token_id`."
+            )
 
         for seq in packed_sequences:
             if len(seq["input_ids"]) > self.max_length:

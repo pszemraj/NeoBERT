@@ -823,6 +823,13 @@ def trainer(cfg: Config) -> None:
                 "per-segment SDPA fallback will be used (slow on GPU). "
                 "Set attn_backend=flash_attn_varlen and install flash-attn for production."
             )
+    if not cfg.datacollator.mask_all:
+        # Keep BERT-style 80/10/10 masking as a supported mode, but make the
+        # methodological difference explicit for NeoBERT-style pretraining runs.
+        logger.warning(
+            "datacollator.mask_all=false uses standard 80/10/10 MLM corruption. "
+            "Set datacollator.mask_all=true to use NeoBERT's 100%% [MASK] strategy."
+        )
 
     # Tokenizer
     with accelerator.main_process_first():
