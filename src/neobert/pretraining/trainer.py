@@ -1485,16 +1485,19 @@ def trainer(cfg: Config) -> None:
             else skipped_train_dataloader
         )
         for batch in dataloader:
-            # Pack or truncate the batch to target batch size (batch size might be variable due to sequence packing).
-            # Skip batch buffering when using packed sequences, as packed_seqlens metadata would be lost.
+            # Pack or truncate to target per-step batch size. Packed mode can emit
+            # variable batch dimensions, so we buffer/merge there too now that
+            # packed_seqlens uses fixed-width tensor metadata.
             is_packed = batch.get("packed_seqlens") is not None
-            if is_packed and _has_stored_batch(stored_batch):
-                # Mixed packed/non-packed collator outputs are not expected in normal
-                # runs. Clear stale buffered fragments to avoid mode-transition leaks.
+            stored_is_packed = stored_batch.get("packed_seqlens") is not None
+            if _has_stored_batch(stored_batch) and is_packed != stored_is_packed:
+                # Mixed packed/non-packed batches are not expected; avoid cross-mode
+                # concatenation if stale buffered fragments remain.
                 _clear_stored_batch(stored_batch)
-            if not is_packed and (
-                batch["input_ids"].shape[0] != cfg.trainer.per_device_train_batch_size
-                or _has_stored_batch(stored_batch)
+            if batch["input_ids"].shape[
+                0
+            ] != cfg.trainer.per_device_train_batch_size or _has_stored_batch(
+                stored_batch
             ):
                 batch, stored_batch = to_target_batch_size(
                     batch, stored_batch, cfg.trainer.per_device_train_batch_size

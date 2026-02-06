@@ -466,6 +466,47 @@ class TestPretrainComponents(unittest.TestCase):
         self.assertIsNone(out["packed_seqlens"])
         self.assertIsNone(stored["packed_seqlens"])
 
+    def test_to_target_batch_size_handles_tensor_packed_seqlens(self):
+        """Ensure packed_seqlens tensors split and buffer with batch resizing."""
+        from neobert.pretraining.trainer import to_target_batch_size
+
+        batch = {
+            "input_ids": torch.zeros((3, 4), dtype=torch.long),
+            "attention_mask": torch.ones((3, 4), dtype=torch.long),
+            "labels": torch.zeros((3, 4), dtype=torch.long),
+            "packed_seqlens": torch.tensor(
+                [[2, 2, 0], [3, 1, 0], [4, 0, 0]], dtype=torch.int32
+            ),
+        }
+        stored_batch = {
+            "input_ids": None,
+            "attention_mask": None,
+            "labels": None,
+            "packed_seqlens": None,
+        }
+
+        out, stored = to_target_batch_size(batch, stored_batch, target_size=2)
+        self.assertEqual(out["input_ids"].shape[0], 2)
+        self.assertTrue(torch.is_tensor(out["packed_seqlens"]))
+        self.assertEqual(tuple(out["packed_seqlens"].shape), (2, 3))
+        self.assertTrue(
+            torch.equal(
+                out["packed_seqlens"][0], torch.tensor([2, 2, 0], dtype=torch.int32)
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                out["packed_seqlens"][1], torch.tensor([3, 1, 0], dtype=torch.int32)
+            )
+        )
+        self.assertTrue(torch.is_tensor(stored["packed_seqlens"]))
+        self.assertEqual(tuple(stored["packed_seqlens"].shape), (1, 3))
+        self.assertTrue(
+            torch.equal(
+                stored["packed_seqlens"][0], torch.tensor([4, 0, 0], dtype=torch.int32)
+            )
+        )
+
     def test_clear_stored_batch_drops_mode_transition_fragments(self):
         """Ensure stale buffered fragments are cleared on packed-mode transitions."""
         from neobert.pretraining.trainer import _clear_stored_batch
