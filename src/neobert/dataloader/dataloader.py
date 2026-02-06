@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from transformers import PreTrainedTokenizer
 
 # Ours
-from ..collator import get_collator
+from neobert.collator import get_collator
 
 
 def get_dataloader(

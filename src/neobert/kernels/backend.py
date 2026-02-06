@@ -225,7 +225,7 @@ def get_rmsnorm(
     if backend in ("liger", "auto") and _LigerRMSNormFunction is not None:
         return _AdaptiveRMSNorm(dim, eps=eps)
 
-    from ..model.rmsnorm import RMSNorm
+    from neobert.model.rmsnorm import RMSNorm
 
     return RMSNorm(dim, eps=eps)
 

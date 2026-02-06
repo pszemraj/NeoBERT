@@ -852,7 +852,7 @@ class ConfigLoader:
         use_cpu = getattr(config.trainer, "use_cpu", False)
         if not use_cpu and hasattr(config.tokenizer, "name") and config.tokenizer.name:
             # Import tokenizer here to avoid circular imports
-            from .tokenizer import get_tokenizer
+            from neobert.tokenizer import get_tokenizer
 
             # Create tokenizer to determine actual vocab size
             tokenizer_source = config.tokenizer.path or config.tokenizer.name

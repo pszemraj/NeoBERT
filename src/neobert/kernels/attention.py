@@ -6,7 +6,7 @@ from typing import Literal, Optional
 
 import torch
 
-from ..modeling_utils import scaled_dot_product_attention_compat
+from neobert.modeling_utils import scaled_dot_product_attention_compat
 
 logger = logging.getLogger(__name__)
 PackedSeqLens = torch.Tensor | list[list[int]]

@@ -27,22 +27,25 @@ from tqdm import tqdm
 from transformers import DataCollatorWithPadding
 
 # Configuration
-from ..collator.collator import _is_right_padded_mask, attention_mask_to_packed_seqlens
-from ..config import Config
-from ..kernels.attention import resolve_runtime_attn_backend
-from ..model import NeoBERT, NeoBERTConfig
-from ..optimizer import get_optimizer
-from ..scheduler import get_scheduler, resolve_scheduler_steps
-from ..tokenizer import get_tokenizer
-from ..training_utils import (
+from neobert.collator.collator import (
+    _is_right_padded_mask,
+    attention_mask_to_packed_seqlens,
+)
+from neobert.config import Config
+from neobert.kernels.attention import resolve_runtime_attn_backend
+from neobert.model import NeoBERT, NeoBERTConfig
+from neobert.optimizer import get_optimizer
+from neobert.scheduler import get_scheduler, resolve_scheduler_steps
+from neobert.tokenizer import get_tokenizer
+from neobert.training_utils import (
     _maybe_compile_model,
     _maybe_prepare_for_forward,
     _resolve_resume_checkpoint,
 )
-from ..utils import configure_tf32, prepare_wandb_config
-from .datasets import get_bsz
-from .loss import SupConLoss
-from .metrics import Metrics
+from neobert.contrastive.datasets import get_bsz
+from neobert.contrastive.loss import SupConLoss
+from neobert.contrastive.metrics import Metrics
+from neobert.utils import configure_tf32, prepare_wandb_config
 
 logger = logging.getLogger(__name__)
 

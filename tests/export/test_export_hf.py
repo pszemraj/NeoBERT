@@ -84,10 +84,9 @@ class TestExportHF(unittest.TestCase):
             self.assertTrue((target_dir / "rotary.py").exists())
             self.assertTrue((target_dir / "modeling_utils.py").exists())
             model_text = (target_dir / "model.py").read_text()
+            self.assertIn('["neobert.modeling_utils", "modeling_utils"]', model_text)
             self.assertIn(
-                "from .modeling_utils import swiglu_intermediate_size", model_text
-            )
-            self.assertIn(
-                "from .modeling_utils import scaled_dot_product_attention_compat",
+                '["neobert.huggingface.rotary", "rotary"]',
                 model_text,
             )
+            self.assertNotIn("from ..modeling_utils import", model_text)

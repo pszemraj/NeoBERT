@@ -1260,7 +1260,7 @@ class MuonClipOptimizer(Optimizer):
         :return tuple[torch.Tensor | None, float | None]: Eta per head and max logit.
         """
         if self.model_config.rope and freqs_cis is not None:
-            from ..model.rotary import apply_rotary_emb
+            from neobert.model.rotary import apply_rotary_emb
 
             freqs_cis = freqs_cis.to(device=xq.device)
             xq, xk = apply_rotary_emb(xq, xk, freqs_cis)

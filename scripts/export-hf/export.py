@@ -15,7 +15,6 @@ import argparse
 import json
 import re
 import shutil
-import sys
 import textwrap
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -232,11 +231,13 @@ def run_forward_sanity_check(
     :param dict[str, torch.Tensor] mapped_state_dict: Remapped state dict.
     :raises ValueError: If forward pass fails or produces invalid outputs.
     """
-    repo_root = Path(__file__).resolve().parents[2]
-    if str(repo_root) not in sys.path:
-        sys.path.insert(0, str(repo_root))
-
-    from neobert.huggingface.modeling_neobert import NeoBERTConfig, NeoBERTLMHead
+    try:
+        from neobert.huggingface.modeling_neobert import NeoBERTConfig, NeoBERTLMHead
+    except ImportError as exc:
+        raise ImportError(
+            "Could not import neobert.huggingface.modeling_neobert. "
+            "Install NeoBERT in the current environment (for example: `pip install -e .`)."
+        ) from exc
 
     model_config = NeoBERTConfig(**hf_config)
     model = NeoBERTLMHead(model_config)

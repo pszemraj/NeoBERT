@@ -26,17 +26,17 @@ from transformers.modeling_outputs import SequenceClassifierOutput
 if TYPE_CHECKING:
     pass
 
-from ..kernels.attention import (
+from neobert.kernels.attention import (
     attention_forward,
     canonicalize_attn_backend,
 )
-from ..kernels.backend import (
+from neobert.kernels.backend import (
     canonicalize_kernel_backend,
     get_rmsnorm,
     swiglu_forward,
 )
-from ..modeling_utils import swiglu_intermediate_size
-from .rotary import apply_rotary_emb, precompute_freqs_cis
+from neobert.model.rotary import apply_rotary_emb, precompute_freqs_cis
+from neobert.modeling_utils import swiglu_intermediate_size
 
 logger = logging.getLogger(__name__)
 PackedSeqLens = torch.Tensor | list[list[int]]

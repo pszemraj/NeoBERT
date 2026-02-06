@@ -34,17 +34,17 @@ from transformers import (
 from neobert.model import NeoBERTConfig, NeoBERTForSequenceClassification
 from neobert.tokenizer import get_tokenizer
 
-from ..config import Config
-from ..optimizer import get_optimizer
-from ..scheduler import get_scheduler
-from ..training_utils import (
+from neobert.config import Config
+from neobert.glue.process import process_function
+from neobert.optimizer import get_optimizer
+from neobert.scheduler import get_scheduler
+from neobert.training_utils import (
     _maybe_compile_model,
     _maybe_prepare_for_forward,
     _unwrap_optimizer,
 )
-from ..utils import configure_tf32
-from ..validation import ValidationError, validate_glue_config
-from .process import process_function
+from neobert.utils import configure_tf32
+from neobert.validation import ValidationError, validate_glue_config
 
 logger = get_logger(__name__)
 

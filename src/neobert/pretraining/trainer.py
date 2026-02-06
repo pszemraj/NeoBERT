@@ -37,23 +37,23 @@ from deepspeed.utils import safe_get_full_fp32_param
 from tqdm import tqdm
 from transformers import BatchEncoding, PreTrainedTokenizerBase
 
-from ..config import Config, ConfigLoader, MuonConfig, round_up_to_multiple
-from ..dataloader import get_dataloader
-from ..kernels.attention import resolve_runtime_attn_backend
-from ..model import NeoBERTConfig, NeoBERTLMHead
-from ..kernels.backend import get_cross_entropy_loss, resolve_kernel_backend
-from ..optimizer import get_optimizer
-from ..scheduler import get_scheduler, resolve_scheduler_steps
-from ..tokenizer import get_tokenizer, resolve_text_column
-from ..training_utils import (
+from neobert.config import Config, ConfigLoader, MuonConfig, round_up_to_multiple
+from neobert.dataloader import get_dataloader
+from neobert.kernels.attention import resolve_runtime_attn_backend
+from neobert.kernels.backend import get_cross_entropy_loss, resolve_kernel_backend
+from neobert.model import NeoBERTConfig, NeoBERTLMHead
+from neobert.optimizer import get_optimizer
+from neobert.scheduler import get_scheduler, resolve_scheduler_steps
+from neobert.tokenizer import get_tokenizer, resolve_text_column
+from neobert.training_utils import (
     _maybe_compile_model,
     _maybe_prepare_for_forward,
     _resolve_resume_checkpoint,
 )
-from ..utils import configure_tf32, model_summary, prepare_wandb_config
+from neobert.utils import configure_tf32, model_summary, prepare_wandb_config
 
 # Our metric object and model
-from .metrics import Metrics, format_metrics
+from neobert.pretraining.metrics import Metrics, format_metrics
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -997,8 +997,6 @@ def trainer(cfg: Config) -> None:
 
         # For non-streaming datasets, check if pre-tokenization is requested
         if not is_streaming and cfg.dataset.pre_tokenize:
-            import subprocess
-
             # Create output directory
             if cfg.dataset.pre_tokenize_output:
                 output_dir = cfg.dataset.pre_tokenize_output
@@ -1009,47 +1007,31 @@ def trainer(cfg: Config) -> None:
             success_flag = Path(output_dir) / ".tokenize_complete"
             failure_flag = Path(output_dir) / ".tokenize_failed"
 
-            # Run tokenization script
             accelerator.print(f"Pre-tokenizing dataset to: {output_dir}")
 
-            # Get absolute path to script
-            repo_root = Path(__file__).resolve().parents[3]
-            script_path = repo_root / "scripts" / "pretraining" / "tokenize_dataset.py"
-
             if accelerator.is_main_process and not success_flag.exists():
-                cmd = [
-                    "python",
-                    str(script_path),
-                    "--dataset",
-                    cfg.dataset.name,
-                    "--tokenizer",
-                    cfg.tokenizer.path or cfg.tokenizer.name,
-                    "--output",
-                    output_dir,
-                    "--max-length",
-                    str(tokenize_max_length),
-                ]
-
-                if cfg.dataset.config:
-                    cmd.extend(["--dataset-config", cfg.dataset.config])
-
-                if cfg.dataset.train_split:
-                    cmd.extend(["--split", cfg.dataset.train_split])
-
-                if cfg.dataset.text_column:
-                    cmd.extend(["--text-column", cfg.dataset.text_column])
-
-                if cfg.dataset.num_proc:
-                    cmd.extend(["--num-proc", str(cfg.dataset.num_proc)])
-                if not add_special_tokens:
-                    cmd.append("--no-special-tokens")
-                if return_special_tokens_mask:
-                    cmd.append("--return-special-tokens-mask")
-
-                # Run the tokenization on the main process only.
-                result = subprocess.run(cmd, capture_output=True, text=True)
-                if result.returncode != 0:
-                    failure_flag.write_text(result.stderr)
+                if failure_flag.exists():
+                    failure_flag.unlink()
+                try:
+                    text_column = resolve_text_column(
+                        train_dataset,
+                        is_streaming=False,
+                        preferred=cfg.dataset.text_column,
+                    )
+                    tokenized_dataset = tokenize(
+                        train_dataset,
+                        tokenizer,
+                        column_name=text_column,
+                        max_length=tokenize_max_length,
+                        remove_columns=True,
+                        truncation=True,
+                        num_proc=cfg.dataset.num_proc,
+                        add_special_tokens=add_special_tokens,
+                        return_special_tokens_mask=return_special_tokens_mask,
+                    )
+                    tokenized_dataset.save_to_disk(output_dir)
+                except Exception as exc:
+                    failure_flag.write_text(str(exc))
                 else:
                     success_flag.write_text("ok")
 
