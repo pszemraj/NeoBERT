@@ -174,6 +174,7 @@ class TrainerConfig:
     mixed_precision: str = "bf16"
     torch_compile: bool = False
     torch_compile_dynamic: Optional[bool] = None
+    torch_compile_backend: str = "inductor"
     resume_from_checkpoint: Optional[str] = None
 
     # Training control
@@ -1080,6 +1081,11 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         "--trainer.torch_compile",
         type=lambda x: x.lower() == "true",
         help="Enable torch.compile for model forward",
+    )
+    parser.add_argument(
+        "--trainer.torch_compile_backend",
+        type=str,
+        help="torch.compile backend: 'inductor', 'aot_eager', or 'eager'",
     )
 
     # Data collator arguments

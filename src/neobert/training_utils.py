@@ -66,6 +66,33 @@ def _maybe_compile_model(
             "trainer.torch_compile is enabled but DeepSpeed is active; skipping torch.compile."
         )
         return model
+    optimizer_cfg = getattr(cfg, "optimizer", None)
+    optimizer_name = str(getattr(optimizer_cfg, "name", "")).lower()
+    is_muonclip = optimizer_name in {"muonclip", "muon-clip", "muon_clip"}
+    if is_muonclip:
+        muon_cfg = getattr(optimizer_cfg, "muon_config", None)
+        clipping_enabled = (
+            True
+            if muon_cfg is None
+            else bool(getattr(muon_cfg, "enable_clipping", True))
+        )
+        if clipping_enabled:
+            log.warning(
+                "trainer.torch_compile is enabled, but MuonClip clipping is active. "
+                "Disabling torch.compile because this combo is currently unstable "
+                "on this stack."
+            )
+            return model
+
+    compile_backend = str(
+        getattr(cfg.trainer, "torch_compile_backend", "inductor")
+    ).lower()
+    if compile_backend not in {"inductor", "aot_eager", "eager"}:
+        log.warning(
+            "Unknown trainer.torch_compile_backend='%s'; using 'inductor'.",
+            compile_backend,
+        )
+        compile_backend = "inductor"
     dynamic_override = getattr(cfg.trainer, "torch_compile_dynamic", None)
     if dynamic_override is None:
         use_dynamic = bool(
@@ -76,8 +103,12 @@ def _maybe_compile_model(
             use_dynamic = True
     else:
         use_dynamic = bool(dynamic_override)
-    log.info("Compiling model with torch.compile (dynamic=%s).", use_dynamic)
-    return torch.compile(model, dynamic=use_dynamic)
+    log.info(
+        "Compiling model with torch.compile (backend=%s, dynamic=%s).",
+        compile_backend,
+        use_dynamic,
+    )
+    return torch.compile(model, backend=compile_backend, dynamic=use_dynamic)
 
 
 def _resolve_resume_checkpoint(
