@@ -5,10 +5,12 @@ import torch
 
 from neobert.kernels.attention import (
     FLASH_ATTN_AVAILABLE,
+    _flash_varlen_attention,
     attention_forward,
     canonicalize_attn_backend,
     packed_seqlens_to_cu_seqlens,
     resolve_attn_backend,
+    resolve_runtime_attn_backend,
 )
 
 
@@ -32,6 +34,39 @@ class TestResolveAttnBackend:
     def test_invalid(self):
         with pytest.raises(ValueError, match="Unknown attn_backend"):
             resolve_attn_backend("invalid")
+
+
+class TestResolveRuntimeAttnBackend:
+    """Tests for runtime backend resolution with optional fallback."""
+
+    def test_runtime_flash_fallbacks_without_cuda(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(
+            "neobert.kernels.attention.FLASH_ATTN_AVAILABLE", True, raising=False
+        )
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+        assert resolve_runtime_attn_backend("flash", fallback_to_sdpa=True) == "sdpa"
+        with pytest.raises(RuntimeError, match="requires CUDA"):
+            resolve_runtime_attn_backend("flash", fallback_to_sdpa=False)
+
+    def test_runtime_flash_fallbacks_when_flash_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(
+            "neobert.kernels.attention.FLASH_ATTN_AVAILABLE", False, raising=False
+        )
+        monkeypatch.setattr(
+            "neobert.kernels.attention.FLASH_ATTN_ERROR",
+            "flash-attn not installed",
+            raising=False,
+        )
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+
+        assert resolve_runtime_attn_backend("flash", fallback_to_sdpa=True) == "sdpa"
+        with pytest.raises(ImportError, match="flash-attn"):
+            resolve_runtime_attn_backend("flash", fallback_to_sdpa=False)
 
 
 class TestCanonicalizeAttnBackend:
@@ -136,6 +171,38 @@ class TestAttentionForwardSDPAPacked:
         )
         with pytest.raises(RuntimeError, match="requires CUDA tensors"):
             attention_forward(xq, xq, xq, None, packed, 0.0, None, "flash_attn_varlen")
+
+
+class TestFlashVarlenAttentionInternals:
+    """Tests for flash varlen metadata flattening internals."""
+
+    def test_flash_varlen_compacts_sparse_segment_columns(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        B, S, H, D = 2, 6, 2, 8
+        xq = torch.randn(B, S, H, D)
+        xk = torch.randn(B, S, H, D)
+        xv = torch.randn(B, S, H, D)
+        packed = torch.tensor([[3, 0, 2], [1, 0, 0]], dtype=torch.int32)
+
+        captured: dict[str, object] = {}
+
+        def _fake_flash(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, **kwargs):
+            captured["tokens"] = q.shape[0]
+            captured["cu"] = kwargs["cu_seqlens_q"].detach().cpu().tolist()
+            return torch.zeros_like(q)
+
+        monkeypatch.setattr(
+            "neobert.kernels.attention._flash_attn_varlen_func",
+            _fake_flash,
+            raising=False,
+        )
+
+        out = _flash_varlen_attention(xq, xk, xv, packed, dropout_p=0.0, scale=None)
+
+        assert out.shape == (B, S, H, D)
+        assert captured["tokens"] == 6
+        assert captured["cu"] == [0, 3, 5, 6]
 
 
 @pytest.mark.skipif(

@@ -39,6 +39,7 @@ from transformers import BatchEncoding, PreTrainedTokenizerBase
 
 from ..config import Config, ConfigLoader, MuonConfig, round_up_to_multiple
 from ..dataloader import get_dataloader
+from ..kernels.attention import resolve_runtime_attn_backend
 from ..model import NeoBERTConfig, NeoBERTLMHead
 from ..kernels.backend import get_cross_entropy_loss, resolve_kernel_backend
 from ..optimizer import get_optimizer
@@ -711,6 +712,10 @@ def trainer(cfg: Config) -> None:
     # All parameters participate in the forward graph; keep DDP in fast-path mode.
     kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
     wandb_enabled = cfg.wandb.enabled and cfg.wandb.mode != "disabled"
+    cfg.model.attn_backend = resolve_runtime_attn_backend(
+        cfg.model.attn_backend,
+        fallback_to_sdpa=True,
+    )
     # Keep dataloader batches on CPU so packed_seqlens stays as CPU metadata.
     disable_dispatch = bool(
         cfg.datacollator.pack_sequences or cfg.model.attn_backend != "sdpa"

@@ -29,6 +29,7 @@ from transformers import DataCollatorWithPadding
 # Configuration
 from ..collator.collator import _is_right_padded_mask, attention_mask_to_packed_seqlens
 from ..config import Config
+from ..kernels.attention import resolve_runtime_attn_backend
 from ..model import NeoBERT, NeoBERTConfig
 from ..optimizer import get_optimizer
 from ..scheduler import get_scheduler, resolve_scheduler_steps
@@ -137,6 +138,10 @@ def trainer(cfg: Config) -> None:
             "Contrastive training requires dataset.path to point to a preprocessed dataset. "
             "Run scripts/contrastive/preprocess.py to build it first."
         )
+    cfg.model.attn_backend = resolve_runtime_attn_backend(
+        cfg.model.attn_backend,
+        fallback_to_sdpa=True,
+    )
 
     # Get the last checkpoint id
     output_dir = Path(cfg.trainer.output_dir)

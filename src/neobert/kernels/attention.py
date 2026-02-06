@@ -66,6 +66,46 @@ def resolve_attn_backend(
     return backend
 
 
+def resolve_runtime_attn_backend(
+    requested: str,
+    *,
+    fallback_to_sdpa: bool = False,
+) -> Literal["sdpa", "flash_attn_varlen"]:
+    """Resolve backend against installed packages and runtime CUDA availability.
+
+    :param str requested: Requested backend (aliases accepted).
+    :param bool fallback_to_sdpa: Whether to fallback to ``"sdpa"`` on unsupported flash-attn runtime.
+    :return str: Resolved backend.
+    :raises ImportError: If flash-attn is requested but unavailable and fallback is disabled.
+    :raises RuntimeError: If flash-attn is requested without CUDA and fallback is disabled.
+    """
+    try:
+        backend = resolve_attn_backend(requested)
+    except ImportError:
+        if fallback_to_sdpa:
+            logger.warning(
+                "attn_backend='%s' requested but flash-attn is not available. "
+                "Falling back to attn_backend='sdpa'.",
+                requested,
+            )
+            return "sdpa"
+        raise
+    if backend != "flash_attn_varlen":
+        return backend
+
+    if torch.cuda.is_available():
+        return backend
+
+    message = (
+        f"attn_backend='{requested}' requires CUDA for packed flash-attn kernels, "
+        "but CUDA is not available."
+    )
+    if fallback_to_sdpa:
+        logger.warning("%s Falling back to attn_backend='sdpa'.", message)
+        return "sdpa"
+    raise RuntimeError(message)
+
+
 # ---------------------------------------------------------------------------
 # flash_attn_varlen helpers
 # ---------------------------------------------------------------------------
@@ -196,26 +236,23 @@ def _flash_varlen_attention(
     k_flat = xk_flat.index_select(0, flat_token_indices)
     v_flat = xv_flat.index_select(0, flat_token_indices)
 
-    seg_counts = (seg_lens_cuda > 0).sum(dim=1, dtype=torch.int64)
-    seg_batch_ids = torch.repeat_interleave(
-        torch.arange(batch_size, device=xq.device, dtype=torch.long), seg_counts
-    )
-    if seg_batch_ids.shape[0] == 0:
+    # Keep only positive segment lengths in row-major order.
+    seg_lens_flat = seg_lens_cuda[seg_lens_cuda > 0]
+    if seg_lens_flat.numel() == 0:
         return torch.zeros_like(xq)
-
-    seg_offsets = torch.cumsum(seg_counts, dim=0) - seg_counts
-    seg_positions = torch.arange(
-        seg_batch_ids.shape[0], device=xq.device, dtype=torch.long
-    )
-    seg_cols = seg_positions - seg_offsets.index_select(0, seg_batch_ids)
-    seg_lens_flat = seg_lens_cuda[seg_batch_ids, seg_cols]
+    if int(seg_lens_flat.sum().item()) != int(batch_ids.shape[0]):
+        raise ValueError(
+            "packed_seqlens metadata is inconsistent: sum of positive segment lengths "
+            f"({int(seg_lens_flat.sum().item())}) does not match flattened token count "
+            f"({int(batch_ids.shape[0])})."
+        )
 
     cu_seqlens = torch.empty(
         seg_lens_flat.shape[0] + 1, dtype=torch.int32, device=xq.device
     )
     cu_seqlens[0] = 0
     cu_seqlens[1:] = seg_lens_flat.cumsum(dim=0, dtype=torch.int32)
-    max_seqlen = seq_len
+    max_seqlen = int(seg_lens_flat.max().item())
 
     softmax_scale = scale if scale is not None else (1.0 / math.sqrt(head_dim))
 
