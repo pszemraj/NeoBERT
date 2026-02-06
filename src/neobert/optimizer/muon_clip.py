@@ -195,8 +195,6 @@ class NeoBERTAttentionHooks:
     stats are computed lazily during the optimizer step.
     """
 
-    _LAYER_IDX_ATTR = "_muonclip_layer_idx"
-
     def __init__(
         self, model_config: Any, layer_mapping: Optional[Dict[str, str]] = None
     ) -> None:
@@ -215,6 +213,7 @@ class NeoBERTAttentionHooks:
         self.layer_freqs: Dict[int, Optional[torch.Tensor]] = {}
         self.layer_packed_seqlens: Dict[int, Optional[list[list[int]]]] = {}
         self.layers: Dict[int, torch.nn.Module] = {}
+        self._module_to_layer_idx: Dict[int, int] = {}
 
         self.enabled = True
         self.hook_handles: List[RemovableHandle] = []
@@ -272,10 +271,10 @@ class NeoBERTAttentionHooks:
                 self.layer_pad_masks[idx] = None
                 self.layer_freqs[idx] = None
                 self.layer_packed_seqlens[idx] = None
-                setattr(layer, self._LAYER_IDX_ATTR, int(idx))
+                self._module_to_layer_idx[id(layer)] = idx
 
                 if hasattr(layer, "qkv"):
-                    setattr(layer.qkv, self._LAYER_IDX_ATTR, int(idx))
+                    self._module_to_layer_idx[id(layer.qkv)] = idx
                     handle = layer.qkv.register_forward_hook(self._qkv_input_hook)
                     registered_handles.append(handle)
                     num_hooks += 1
@@ -291,7 +290,7 @@ class NeoBERTAttentionHooks:
                         raise RuntimeError(
                             f"Encoder block missing projection '{q_proj_name}'"
                         )
-                    setattr(q_proj, self._LAYER_IDX_ATTR, int(idx))
+                    self._module_to_layer_idx[id(q_proj)] = idx
                     handle = q_proj.register_forward_hook(self._qkv_input_hook)
                     registered_handles.append(handle)
                     num_hooks += 1
@@ -311,6 +310,7 @@ class NeoBERTAttentionHooks:
             # Clean up any hooks registered before the failure to prevent dangling hooks.
             for handle in registered_handles:
                 handle.remove()
+            self._module_to_layer_idx.clear()
             raise RuntimeError(f"Hook registration failed on layer {idx}: {e}") from e
 
     def _resolve_transformer_layers(
@@ -340,7 +340,7 @@ class NeoBERTAttentionHooks:
         :param torch.nn.Module module: Hooked module.
         :return int | None: Layer index when present.
         """
-        layer_idx = getattr(module, self._LAYER_IDX_ATTR, None)
+        layer_idx = self._module_to_layer_idx.get(id(module), None)
         if layer_idx is None:
             return None
         try:
@@ -461,6 +461,7 @@ class NeoBERTAttentionHooks:
         for handle in self.hook_handles:
             handle.remove()
         self.hook_handles.clear()
+        self._module_to_layer_idx.clear()
 
 
 # Optimizer

@@ -95,16 +95,18 @@ class TestAttentionHooks:
         assert num_hooks == 4  # 2 hooks per layer
         assert len(hook_system.hook_handles) == 4
 
-    def test_hook_registration_uses_module_layer_attrs(self, model):
-        """Ensure hook callbacks avoid per-layer closure integers."""
+    def test_hook_registration_uses_module_map_without_attrs(self, model):
+        """Ensure hook callbacks avoid per-layer module integer attrs."""
         from neobert.optimizer.muon_clip import NeoBERTAttentionHooks
 
         hook_system = NeoBERTAttentionHooks(model.config)
         hook_system.register_hooks(model)
 
         for idx, layer in enumerate(model.transformer_encoder):
-            assert getattr(layer, "_muonclip_layer_idx") == idx
-            assert getattr(layer.qkv, "_muonclip_layer_idx") == idx
+            assert hook_system._module_to_layer_idx[id(layer)] == idx
+            assert hook_system._module_to_layer_idx[id(layer.qkv)] == idx
+            assert not hasattr(layer, "_muonclip_layer_idx")
+            assert not hasattr(layer.qkv, "_muonclip_layer_idx")
             qkv_hook = next(iter(layer.qkv._forward_hooks.values()))
             if hasattr(qkv_hook, "__func__"):
                 assert qkv_hook.__func__.__closure__ is None
