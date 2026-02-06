@@ -28,27 +28,41 @@ except (ImportError, RuntimeError) as exc:
 _WARNED_SDPA_PACKED_GPU = False
 
 
-def resolve_attn_backend(
+def canonicalize_attn_backend(
     requested: str,
 ) -> Literal["sdpa", "flash_attn_varlen"]:
-    """Resolve the attention backend to use.
+    """Canonicalize the attention backend string without environment checks.
 
-    :param str requested: One of ``"sdpa"`` or ``"flash_attn_varlen"``.
-    :return str: Resolved backend name.
+    :param str requested: One of ``"sdpa"``, ``"flash_attn_varlen"``, ``"flash_attn"``, or ``"flash"``.
+    :return str: Canonical backend name.
+    :raises ValueError: If *requested* is unknown.
     """
-    requested = requested.lower().strip()
-    if requested == "sdpa":
+    normalized = str(requested).lower().strip()
+    if normalized == "sdpa":
         return "sdpa"
-    if requested in ("flash_attn_varlen", "flash_attn", "flash"):
-        if not FLASH_ATTN_AVAILABLE:
-            raise ImportError(
-                f"attn_backend='{requested}' requested but flash-attn is not available: "
-                f"{FLASH_ATTN_ERROR}"
-            )
+    if normalized in ("flash_attn_varlen", "flash_attn", "flash"):
         return "flash_attn_varlen"
     raise ValueError(
         f"Unknown attn_backend '{requested}'. Expected: 'sdpa' or 'flash_attn_varlen'."
     )
+
+
+def resolve_attn_backend(
+    requested: str,
+) -> Literal["sdpa", "flash_attn_varlen"]:
+    """Resolve and validate the attention backend against installed packages.
+
+    :param str requested: One of ``"sdpa"`` or ``"flash_attn_varlen"`` (aliases accepted).
+    :return str: Resolved backend name.
+    :raises ImportError: If flash-attn backend is requested but unavailable.
+    """
+    backend = canonicalize_attn_backend(requested)
+    if backend == "flash_attn_varlen" and not FLASH_ATTN_AVAILABLE:
+        raise ImportError(
+            f"attn_backend='{requested}' requested but flash-attn is not available: "
+            f"{FLASH_ATTN_ERROR}"
+        )
+    return backend
 
 
 # ---------------------------------------------------------------------------
@@ -238,9 +252,20 @@ def attention_forward(
     :param str attn_backend: ``"sdpa"`` or ``"flash_attn_varlen"``.
     :return torch.Tensor: Attention output ``(B, S, H, D)``.
     """
+    attn_backend = canonicalize_attn_backend(attn_backend)
     if packed_seqlens is not None:
         # Packed sequences
-        if attn_backend == "flash_attn_varlen" and FLASH_ATTN_AVAILABLE:
+        if attn_backend == "flash_attn_varlen":
+            if not xq.is_cuda:
+                raise RuntimeError(
+                    "attn_backend='flash_attn_varlen' requires CUDA tensors for packed "
+                    f"attention, but input is on {xq.device}."
+                )
+            if not FLASH_ATTN_AVAILABLE:
+                raise ImportError(
+                    "attn_backend='flash_attn_varlen' requested but flash-attn is not "
+                    f"available: {FLASH_ATTN_ERROR}"
+                )
             return _flash_varlen_attention(xq, xk, xv, packed_seqlens, dropout_p, scale)
         # SDPA per-segment fallback (works on CPU + GPU)
         return _sdpa_packed_fallback(xq, xk, xv, packed_seqlens, dropout_p, scale)

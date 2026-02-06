@@ -25,8 +25,15 @@ from transformers.modeling_outputs import SequenceClassifierOutput
 if TYPE_CHECKING:
     pass
 
-from ..kernels.attention import attention_forward
-from ..kernels.backend import get_rmsnorm, swiglu_forward
+from ..kernels.attention import (
+    attention_forward,
+    canonicalize_attn_backend,
+)
+from ..kernels.backend import (
+    canonicalize_kernel_backend,
+    get_rmsnorm,
+    swiglu_forward,
+)
 from ..modeling_utils import swiglu_intermediate_size
 from .rotary import apply_rotary_emb, precompute_freqs_cis
 
@@ -319,8 +326,8 @@ class NeoBERTConfig(PretrainedConfig):
         # Keep the HF-style attribute for compatibility with downstream tooling.
         self.max_position_embeddings = self.max_length
 
-        self.attn_backend = attn_backend
-        self.kernel_backend = kernel_backend
+        self.attn_backend = canonicalize_attn_backend(attn_backend)
+        self.kernel_backend = canonicalize_kernel_backend(kernel_backend)
         self.base_scale = base_scale
         self.ngpt = ngpt
 
@@ -809,6 +816,12 @@ class NeoBERT(NeoBERTPreTrainedModel):
                 def custom_forward(
                     hidden_states: torch.Tensor, layer: EncoderBlock = layer
                 ) -> torch.Tensor:
+                    """Run one encoder block for gradient checkpointing.
+
+                    :param torch.Tensor hidden_states: Input hidden states.
+                    :param EncoderBlock layer: Bound layer instance.
+                    :return torch.Tensor: Updated hidden states.
+                    """
                     return layer(hidden_states, pad_mask, freqs_cis, packed_seqlens)
 
                 x = checkpoint(
@@ -938,6 +951,12 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
                 def custom_forward(
                     hidden_states: torch.Tensor, layer: NormEncoderBlock = layer
                 ) -> torch.Tensor:
+                    """Run one normalized encoder block for checkpointing.
+
+                    :param torch.Tensor hidden_states: Input hidden states.
+                    :param NormEncoderBlock layer: Bound layer instance.
+                    :return torch.Tensor: Updated hidden states.
+                    """
                     return layer(hidden_states, pad_mask, freqs_cis, packed_seqlens)
 
                 x = checkpoint(

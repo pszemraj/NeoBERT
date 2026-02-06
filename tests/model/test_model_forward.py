@@ -72,10 +72,33 @@ class TestModelForward(unittest.TestCase):
             self.tiny_config.hidden_size,
         )
         self.assertEqual(outputs.shape, expected_shape)
-
         # Check that outputs are not NaN or inf
         self.assertFalse(torch.isnan(outputs).any())
         self.assertFalse(torch.isinf(outputs).any())
+
+    def test_config_canonicalizes_attn_backend_alias(self):
+        """Ensure attention backend aliases are canonicalized."""
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=128,
+            max_length=16,
+            attn_backend="flash",
+            hidden_act="gelu",
+        )
+        self.assertEqual(config.attn_backend, "flash_attn_varlen")
+
+    def test_config_rejects_invalid_attn_backend(self):
+        """Ensure invalid attention backend values fail fast."""
+        with self.assertRaisesRegex(ValueError, "Unknown attn_backend"):
+            NeoBERTConfig(attn_backend="bad_backend")
+
+    def test_config_rejects_invalid_kernel_backend(self):
+        """Ensure invalid kernel backend values fail fast."""
+        with self.assertRaisesRegex(ValueError, "Unknown kernel_backend"):
+            NeoBERTConfig(kernel_backend="bad_backend")
 
     def test_gradient_checkpointing_matches_baseline(self):
         """Ensure checkpointed gradients match non-checkpointed forward."""

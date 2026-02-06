@@ -7,6 +7,7 @@ from torch import nn
 from neobert.kernels.backend import (
     LIGER_AVAILABLE,
     _AdaptiveRMSNorm,
+    canonicalize_kernel_backend,
     get_cross_entropy_loss,
     get_rmsnorm,
     resolve_kernel_backend,
@@ -33,6 +34,19 @@ class TestResolveKernelBackend:
             if LIGER_AVAILABLE:
                 with pytest.raises(RuntimeError, match="CUDA"):
                     resolve_kernel_backend("liger")
+
+
+class TestCanonicalizeKernelBackend:
+    """Tests for canonicalize_kernel_backend()."""
+
+    def test_valid_values(self):
+        assert canonicalize_kernel_backend("torch") == "torch"
+        assert canonicalize_kernel_backend("auto") == "auto"
+        assert canonicalize_kernel_backend("liger") == "liger"
+
+    def test_invalid_raises(self):
+        with pytest.raises(ValueError, match="Unknown kernel_backend"):
+            canonicalize_kernel_backend("bad_backend")
 
 
 class TestGetRMSNorm:
@@ -79,6 +93,10 @@ class TestGetRMSNorm:
         rms = (out**2).mean(dim=-1).sqrt()
         assert rms.mean().item() == pytest.approx(1.0, abs=0.5)
 
+    def test_invalid_backend_raises(self):
+        with pytest.raises(ValueError, match="Unknown kernel_backend"):
+            get_rmsnorm(64, 1e-5, "bad_backend")
+
 
 class TestSwiGLUForward:
     """Tests for swiglu_forward() dispatch."""
@@ -104,6 +122,12 @@ class TestSwiGLUForward:
         expected = nn.functional.silu(gate) * up
         torch.testing.assert_close(result, expected)
 
+    def test_invalid_backend_raises(self):
+        gate = torch.randn(2, 4, 8)
+        up = torch.randn(2, 4, 8)
+        with pytest.raises(ValueError, match="Unknown kernel_backend"):
+            swiglu_forward(gate, up, "bad_backend")
+
 
 class TestGetCrossEntropyLoss:
     """Tests for get_cross_entropy_loss() dispatch."""
@@ -128,3 +152,7 @@ class TestGetCrossEntropyLoss:
         loss = loss_fn(logits, targets)
         assert loss.ndim == 0
         assert loss.item() > 0
+
+    def test_invalid_backend_raises(self):
+        with pytest.raises(ValueError, match="Unknown kernel_backend"):
+            get_cross_entropy_loss(reduction="mean", backend="bad_backend")

@@ -6,6 +6,7 @@ import torch
 from neobert.kernels.attention import (
     FLASH_ATTN_AVAILABLE,
     attention_forward,
+    canonicalize_attn_backend,
     packed_seqlens_to_cu_seqlens,
     resolve_attn_backend,
 )
@@ -31,6 +32,19 @@ class TestResolveAttnBackend:
     def test_invalid(self):
         with pytest.raises(ValueError, match="Unknown attn_backend"):
             resolve_attn_backend("invalid")
+
+
+class TestCanonicalizeAttnBackend:
+    """Tests for canonicalize_attn_backend()."""
+
+    def test_canonicalize_aliases(self):
+        assert canonicalize_attn_backend("flash") == "flash_attn_varlen"
+        assert canonicalize_attn_backend("flash_attn") == "flash_attn_varlen"
+        assert canonicalize_attn_backend("sdpa") == "sdpa"
+
+    def test_invalid_raises(self):
+        with pytest.raises(ValueError, match="Unknown attn_backend"):
+            canonicalize_attn_backend("bad_backend")
 
 
 class TestPackedSeqlensToCuSeqlens:
@@ -100,6 +114,19 @@ class TestAttentionForwardSDPAPacked:
         out = attention_forward(xq, xk, xv, None, packed, 0.0, None, "sdpa")
         # Tokens 4-7 should be zero (padding region)
         assert torch.allclose(out[0, 4:], torch.zeros(4, H, D))
+
+    def test_flash_backend_on_cpu_raises(self, monkeypatch: pytest.MonkeyPatch):
+        B, S, H, D = 1, 8, 2, 4
+        xq = torch.randn(B, S, H, D)
+        packed = [[8]]
+        monkeypatch.setattr(
+            "neobert.kernels.attention.FLASH_ATTN_AVAILABLE", True, raising=False
+        )
+        monkeypatch.setattr(
+            "neobert.kernels.attention._flash_attn_varlen_func", object(), raising=False
+        )
+        with pytest.raises(RuntimeError, match="requires CUDA tensors"):
+            attention_forward(xq, xq, xq, None, packed, 0.0, None, "flash_attn_varlen")
 
 
 @pytest.mark.skipif(

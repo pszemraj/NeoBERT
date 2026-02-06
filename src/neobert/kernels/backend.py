@@ -11,7 +11,7 @@ later moved to GPU without issues.
 """
 
 import logging
-from typing import Literal, Optional
+from typing import Any, Callable, Literal, Optional, TypeVar
 
 import torch
 from torch import nn
@@ -27,6 +27,29 @@ LIGER_ERROR: Optional[str] = None
 _LigerRMSNormFunction = None
 _LigerSiLUMulFunction = None
 _LigerCrossEntropyLoss = None
+
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def _identity_decorator(fn: _F) -> _F:
+    """Return *fn* unchanged.
+
+    :param callable fn: Function to decorate.
+    :return callable: Original function.
+    """
+    return fn
+
+
+try:
+    _compile_disable = torch.compiler.disable  # type: ignore[attr-defined]
+except AttributeError:
+    try:
+        import torch._dynamo as _dynamo
+
+        _compile_disable = _dynamo.disable
+    except ImportError:
+        _compile_disable = _identity_decorator
 
 try:
     from liger_kernel.ops.rms_norm import (
@@ -53,6 +76,12 @@ if LIGER_AVAILABLE:
 
                 @staticmethod
                 def apply(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+                    """Apply fused SwiGLU pointwise op.
+
+                    :param torch.Tensor gate: Gate tensor.
+                    :param torch.Tensor up: Up tensor.
+                    :return torch.Tensor: Activated tensor.
+                    """
                     return _liger_swiglu_fn(gate, up)
 
         except ImportError:
@@ -80,6 +109,7 @@ def _should_use_liger(backend: str, tensor: torch.Tensor) -> bool:
     :param torch.Tensor tensor: A representative input tensor (for device check).
     :return bool: True if Liger should be used.
     """
+    backend = canonicalize_kernel_backend(backend)
     if backend == "torch":
         return False
     if not LIGER_AVAILABLE:
@@ -100,6 +130,23 @@ def _should_use_liger(backend: str, tensor: torch.Tensor) -> bool:
     return True
 
 
+def canonicalize_kernel_backend(
+    requested: str,
+) -> Literal["auto", "liger", "torch"]:
+    """Canonicalize the kernel backend string without environment checks.
+
+    :param str requested: One of ``"auto"``, ``"liger"``, or ``"torch"``.
+    :return str: Canonical backend name.
+    :raises ValueError: If *requested* is unknown.
+    """
+    normalized = str(requested).lower().strip()
+    if normalized in {"auto", "liger", "torch"}:
+        return normalized  # type: ignore[return-value]
+    raise ValueError(
+        f"Unknown kernel_backend '{requested}'. Expected: 'auto', 'liger', or 'torch'."
+    )
+
+
 def resolve_kernel_backend(
     requested: str,
 ) -> Literal["torch", "liger"]:
@@ -112,7 +159,7 @@ def resolve_kernel_backend(
     :param str requested: One of ``"auto"``, ``"liger"``, or ``"torch"``.
     :return str: Resolved backend name.
     """
-    requested = requested.lower().strip()
+    requested = canonicalize_kernel_backend(requested)
     if requested == "torch":
         return "torch"
     if requested == "liger":
@@ -130,9 +177,48 @@ def resolve_kernel_backend(
         if LIGER_AVAILABLE and torch.cuda.is_available():
             return "liger"
         return "torch"
-    raise ValueError(
-        f"Unknown kernel_backend '{requested}'. Expected: 'auto', 'liger', or 'torch'."
-    )
+    raise AssertionError(f"Unhandled kernel_backend state: {requested}")
+
+
+@_compile_disable
+def _liger_rmsnorm_forward(
+    x: torch.Tensor, weight: torch.Tensor, eps: float
+) -> torch.Tensor:
+    """Run Liger RMSNorm outside torch.compile graphs.
+
+    :param torch.Tensor x: Input tensor.
+    :param torch.Tensor weight: RMSNorm weight.
+    :param float eps: Numerical epsilon.
+    :return torch.Tensor: Normalized tensor.
+    """
+    assert _LigerRMSNormFunction is not None
+    return _LigerRMSNormFunction.apply(x, weight, eps)
+
+
+@_compile_disable
+def _liger_swiglu_forward(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    """Run Liger SwiGLU pointwise op outside torch.compile graphs.
+
+    :param torch.Tensor gate: Gate tensor.
+    :param torch.Tensor up: Up tensor.
+    :return torch.Tensor: Activated tensor.
+    """
+    assert _LigerSiLUMulFunction is not None
+    return _LigerSiLUMulFunction.apply(gate, up)
+
+
+@_compile_disable
+def _liger_cross_entropy_forward(
+    loss_module: nn.Module, input: torch.Tensor, target: torch.Tensor
+) -> torch.Tensor:
+    """Run Liger cross-entropy outside torch.compile graphs.
+
+    :param nn.Module loss_module: Liger loss module.
+    :param torch.Tensor input: Input logits.
+    :param torch.Tensor target: Target labels.
+    :return torch.Tensor: Scalar/tensor loss.
+    """
+    return loss_module(input, target)
 
 
 # ---------------------------------------------------------------------------
@@ -149,19 +235,33 @@ class _AdaptiveRMSNorm(nn.Module):
     """
 
     def __init__(self, dim: int, eps: float = 1e-6) -> None:
+        """Initialize the adaptive RMSNorm module.
+
+        :param int dim: Feature dimension.
+        :param float eps: Numerical epsilon.
+        """
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply RMS normalization with dynamic kernel dispatch.
+
+        :param torch.Tensor x: Input tensor.
+        :return torch.Tensor: Normalized tensor.
+        """
         if x.is_cuda and _LigerRMSNormFunction is not None:
-            return _LigerRMSNormFunction.apply(x, self.weight, self.eps)
+            return _liger_rmsnorm_forward(x, self.weight, self.eps)
         # Native torch path (CPU or Liger unavailable)
         x_float = x.float()
         rms = torch.rsqrt(x_float.pow(2).mean(-1, keepdim=True) + self.eps)
         return (x_float * rms).to(x.dtype) * self.weight
 
     def extra_repr(self) -> str:
+        """Return a concise module representation for debugging.
+
+        :return str: Extra module representation.
+        """
         return (
             f"{self.weight.shape[0]}, eps={self.eps}, "
             f"liger={'available' if _LigerRMSNormFunction is not None else 'unavailable'}"
@@ -185,6 +285,7 @@ def get_rmsnorm(
     :param str backend: ``"auto"``, ``"liger"``, or ``"torch"``.
     :return nn.Module: RMSNorm instance.
     """
+    backend = canonicalize_kernel_backend(backend)
     if backend in ("liger", "auto") and _LigerRMSNormFunction is not None:
         return _AdaptiveRMSNorm(dim, eps=eps)
 
@@ -212,8 +313,9 @@ def swiglu_forward(
     :param str backend: ``"auto"``, ``"liger"``, or ``"torch"``.
     :return torch.Tensor: Activated tensor.
     """
+    backend = canonicalize_kernel_backend(backend)
     if _LigerSiLUMulFunction is not None and _should_use_liger(backend, gate):
-        return _LigerSiLUMulFunction.apply(gate, up)
+        return _liger_swiglu_forward(gate, up)
     return nn.functional.silu(gate) * up
 
 
@@ -225,7 +327,12 @@ def swiglu_forward(
 class _AdaptiveCrossEntropyLoss(nn.Module):
     """CrossEntropy loss that dispatches to Liger on CUDA, PyTorch on CPU."""
 
-    def __init__(self, reduction: str = "mean", **kwargs) -> None:
+    def __init__(self, reduction: str = "mean", **kwargs: Any) -> None:
+        """Initialize the adaptive CE loss module.
+
+        :param str reduction: Loss reduction mode.
+        :param Any kwargs: Forwarded kwargs for CE constructors.
+        """
         super().__init__()
         self._torch_ce = nn.CrossEntropyLoss(reduction=reduction, **kwargs)
         self._liger_ce = (
@@ -235,15 +342,21 @@ class _AdaptiveCrossEntropyLoss(nn.Module):
         )
 
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Compute CE loss with dynamic kernel dispatch.
+
+        :param torch.Tensor input: Input logits.
+        :param torch.Tensor target: Target labels.
+        :return torch.Tensor: Computed loss.
+        """
         if input.is_cuda and self._liger_ce is not None:
-            return self._liger_ce(input, target)
+            return _liger_cross_entropy_forward(self._liger_ce, input, target)
         return self._torch_ce(input, target)
 
 
 def get_cross_entropy_loss(
     reduction: str = "mean",
     backend: str = "torch",
-    **kwargs,
+    **kwargs: Any,
 ) -> nn.Module:
     """Return a CrossEntropyLoss module.
 
@@ -252,8 +365,10 @@ def get_cross_entropy_loss(
 
     :param str reduction: Loss reduction mode.
     :param str backend: ``"auto"``, ``"liger"``, or ``"torch"``.
+    :param Any kwargs: Forwarded kwargs for CE constructors.
     :return nn.Module: CrossEntropyLoss instance.
     """
+    backend = canonicalize_kernel_backend(backend)
     if backend in ("liger", "auto") and _LigerCrossEntropyLoss is not None:
         return _AdaptiveCrossEntropyLoss(reduction=reduction, **kwargs)
     return nn.CrossEntropyLoss(reduction=reduction, **kwargs)
