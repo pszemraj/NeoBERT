@@ -102,7 +102,7 @@ Pretraining **model checkpoints** are written under `trainer.output_dir/model_ch
 outputs/neobert_pretrain/
 └── model_checkpoints/
     ├── 10000/
-    │   ├── state_dict.pt
+    │   ├── model.safetensors
     │   └── config.yaml
     ├── 20000/
     └── latest

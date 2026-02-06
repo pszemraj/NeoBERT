@@ -2,7 +2,7 @@
 """Export NeoBERT pretraining checkpoint to HuggingFace format.
 
 This script converts a NeoBERT checkpoint from the training format
-(state_dict.pt + config.yaml or a DeepSpeed ZeRO checkpoint) to HuggingFace
+(model.safetensors + config.yaml or a DeepSpeed ZeRO checkpoint) to HuggingFace
 format with all necessary files for loading with transformers library.
 
 Usage:
@@ -22,7 +22,7 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 import transformers
 import yaml
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 from transformers import AutoTokenizer
 
 
@@ -82,16 +82,16 @@ def load_tokenizer_info(tokenizer_info_path: Path) -> Optional[Dict[str, Any]]:
 def load_state_dict_from_checkpoint(checkpoint_path: Path) -> Dict[str, torch.Tensor]:
     """Load a training state dict from a checkpoint directory.
 
-    Supports native ``state_dict.pt`` checkpoints and DeepSpeed ZeRO checkpoints.
+    Supports native ``model.safetensors`` checkpoints and DeepSpeed ZeRO checkpoints.
 
     :param Path checkpoint_path: Checkpoint directory.
     :return dict[str, torch.Tensor]: Loaded state dict.
     :raises FileNotFoundError: If no supported checkpoint is found.
     :raises ValueError: If the loaded state dict is empty.
     """
-    state_dict_path = checkpoint_path / "state_dict.pt"
+    state_dict_path = checkpoint_path / "model.safetensors"
     if state_dict_path.exists():
-        state_dict = torch.load(state_dict_path, map_location="cpu")
+        state_dict = load_file(str(state_dict_path), device="cpu")
         if not state_dict:
             raise ValueError(f"Loaded state dict is empty from {state_dict_path}")
         return state_dict
@@ -102,14 +102,16 @@ def load_state_dict_from_checkpoint(checkpoint_path: Path) -> Dict[str, torch.Te
         )
     except Exception as exc:
         raise FileNotFoundError(
-            f"state_dict.pt not found in {checkpoint_path} and DeepSpeed is unavailable."
+            "model.safetensors not found in "
+            f"{checkpoint_path} and DeepSpeed is unavailable."
         ) from exc
 
     try:
         state_dict = get_fp32_state_dict_from_zero_checkpoint(str(checkpoint_path))
     except Exception as exc:
         raise FileNotFoundError(
-            f"state_dict.pt not found in {checkpoint_path} and DeepSpeed conversion failed."
+            "model.safetensors not found in "
+            f"{checkpoint_path} and DeepSpeed conversion failed."
         ) from exc
 
     if not state_dict:
@@ -460,7 +462,7 @@ def copy_hf_modeling_files(target_dir: Path) -> None:
 def export_checkpoint(checkpoint_path: Path, output_dir: Path | None = None) -> Path:
     """Export a NeoBERT checkpoint to HuggingFace format.
 
-    :param Path checkpoint_path: Checkpoint directory with state_dict.pt and config.yaml.
+    :param Path checkpoint_path: Checkpoint directory with model.safetensors and config.yaml.
     :param Path | None output_dir: Optional output directory.
     :return Path: Output directory containing exported files.
     """
@@ -801,7 +803,7 @@ def main() -> None:
         type=str,
         help=(
             "Path to checkpoint directory containing config.yaml plus "
-            "state_dict.pt or a DeepSpeed ZeRO checkpoint"
+            "model.safetensors or a DeepSpeed ZeRO checkpoint"
         ),
     )
     parser.add_argument(

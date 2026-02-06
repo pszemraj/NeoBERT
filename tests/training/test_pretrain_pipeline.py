@@ -530,14 +530,14 @@ class TestPretrainComponents(unittest.TestCase):
             final_ckpt = root / "100"
             tmp_ckpt.mkdir()
             final_ckpt.mkdir()
-            (tmp_ckpt / "state_dict.pt").write_text("new")
-            (final_ckpt / "state_dict.pt").write_text("old")
+            (tmp_ckpt / "model.safetensors").write_text("new")
+            (final_ckpt / "model.safetensors").write_text("old")
 
             _promote_tmp_checkpoint_dir(tmp_ckpt, final_ckpt)
 
             self.assertFalse(tmp_ckpt.exists())
             self.assertTrue(final_ckpt.exists())
-            self.assertEqual((final_ckpt / "state_dict.pt").read_text(), "new")
+            self.assertEqual((final_ckpt / "model.safetensors").read_text(), "new")
             self.assertFalse((root / "100.old").exists())
 
     def test_optimizer_creation(self):

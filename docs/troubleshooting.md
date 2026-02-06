@@ -35,10 +35,10 @@ Common issues and their solutions when training and using NeoBERT.
 
 ```python
 # ❌ Wrong - saves accelerator wrapper
-torch.save(model.state_dict(), "checkpoint.pt")
+save_model_safetensors(model, "checkpoint_dir")
 
 # ✅ Correct - saves actual model weights
-torch.save(accelerator.unwrap_model(model).state_dict(), "checkpoint.pt")
+save_model_safetensors(accelerator.unwrap_model(model), "checkpoint_dir")
 ```
 
 This issue was fixed in `trainer.py`.

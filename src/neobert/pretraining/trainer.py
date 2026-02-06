@@ -37,6 +37,7 @@ from deepspeed.utils import safe_get_full_fp32_param
 from tqdm import tqdm
 from transformers import BatchEncoding, PreTrainedTokenizerBase
 
+from neobert.checkpointing import save_model_safetensors
 from neobert.config import Config, ConfigLoader, MuonConfig, round_up_to_multiple
 from neobert.dataloader import get_dataloader
 from neobert.kernels.attention import resolve_runtime_attn_backend
@@ -1719,7 +1720,7 @@ def trainer(cfg: Config) -> None:
                                         limit,
                                     )
 
-                # Save the pytorch model
+                # Save model weights checkpoint
                 if metrics["train/steps"] % cfg.trainer.save_steps == 0:
                     # Model checkpoints are used for inference/export and can be pruned independently.
                     # Save the checkpoint
@@ -1742,9 +1743,9 @@ def trainer(cfg: Config) -> None:
                         # atomically alongside config/tokenizer for a single cohesive checkpoint.
                         model.save_checkpoint(model_checkpoint_dir, tag=tmp_tag)
                     else:
-                        torch.save(
-                            accelerator.unwrap_model(model).state_dict(),
-                            checkpoint_path / "state_dict.pt",
+                        save_model_safetensors(
+                            accelerator.unwrap_model(model),
+                            checkpoint_path,
                         )
 
                     # Save config and tokenizer info (only from main process)

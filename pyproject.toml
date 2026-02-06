@@ -17,6 +17,7 @@ dependencies = [
     "mteb",
     "numpy",
     "pyyaml",
+    "safetensors",
     "scikit-learn",
     "torch",
     "tqdm",

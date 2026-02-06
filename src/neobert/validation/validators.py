@@ -4,6 +4,8 @@ import logging
 from pathlib import Path
 from typing import Any, Dict
 
+from neobert.checkpointing import MODEL_WEIGHTS_NAME, load_model_safetensors
+
 logger = logging.getLogger(__name__)
 
 
@@ -167,8 +169,6 @@ def validate_checkpoint_compatibility(
     :param str checkpoint_path: Path to checkpoint directory.
     :raises ValidationError: If checkpoint is incompatible.
     """
-    import torch
-
     checkpoint_dir = Path(checkpoint_path)
     if not checkpoint_dir.exists():
         raise ValidationError(f"Checkpoint not found: {checkpoint_path}")
@@ -181,12 +181,12 @@ def validate_checkpoint_compatibility(
             if not (checkpoint_dir / file).exists():
                 logger.warning(f"DeepSpeed checkpoint missing {file}")
     else:
-        state_dict_path = checkpoint_dir / "state_dict.pt"
+        state_dict_path = checkpoint_dir / MODEL_WEIGHTS_NAME
         if not state_dict_path.exists():
-            raise ValidationError(f"No state_dict.pt found at {state_dict_path}")
+            raise ValidationError(f"No {MODEL_WEIGHTS_NAME} found at {state_dict_path}")
 
         try:
-            state_dict = torch.load(state_dict_path, map_location="cpu")
+            state_dict = load_model_safetensors(checkpoint_dir, map_location="cpu")
 
             has_embeddings = any("embeddings" in k for k in state_dict.keys())
             has_encoder = any("encoder" in k for k in state_dict.keys())

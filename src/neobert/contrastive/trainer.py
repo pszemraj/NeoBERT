@@ -27,6 +27,11 @@ from tqdm import tqdm
 from transformers import DataCollatorWithPadding
 
 # Configuration
+from neobert.checkpointing import (
+    MODEL_WEIGHTS_NAME,
+    load_model_safetensors,
+    save_model_safetensors,
+)
 from neobert.collator.collator import (
     _is_right_padded_mask,
     attention_mask_to_packed_seqlens,
@@ -352,13 +357,16 @@ def trainer(cfg: Config) -> None:
                 model, pretrained_checkpoint_dir, tag=str(tag)
             )
         else:
-            state_dict_path = pretrained_checkpoint_dir / str(tag) / "state_dict.pt"
+            state_dict_path = pretrained_checkpoint_dir / str(tag) / MODEL_WEIGHTS_NAME
             if not state_dict_path.exists():
                 raise ValueError(
-                    f"Expected state_dict.pt at {state_dict_path}. "
+                    f"Expected {MODEL_WEIGHTS_NAME} at {state_dict_path}. "
                     "Set pretrained_checkpoint_dir or enable DeepSpeed loading."
                 )
-            state_dict = torch.load(state_dict_path, map_location="cpu")
+            state_dict = load_model_safetensors(
+                pretrained_checkpoint_dir / str(tag),
+                map_location="cpu",
+            )
             # NOTE: We allow partial loads for flexibility; checkpoint/config mismatches
             # are not validated beyond this strict=False load.
             model.load_state_dict(state_dict, strict=False)
@@ -508,6 +516,12 @@ def trainer(cfg: Config) -> None:
         def _prepare_attention(
             mask: torch.Tensor, *, name: str
         ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+            """Build additive pad mask or packed seqlens from a 0/1 attention mask.
+
+            :param torch.Tensor mask: Binary attention mask.
+            :param str name: Batch name for validation errors.
+            :return tuple[torch.Tensor | None, torch.Tensor | None]: Pad mask and packed metadata.
+            """
             if use_packed:
                 return None, _build_packed_seqlens(mask, name=name)
             pad_mask = torch.where(mask == 1, float(0.0), float("-inf")).type(
@@ -710,7 +724,7 @@ def trainer(cfg: Config) -> None:
             if metrics["train/steps"] % cfg.trainer.save_steps == 0:
                 accelerator.save_state()
 
-            # Save the pytorch model
+            # Save model weights checkpoint
             if metrics["train/steps"] % cfg.trainer.save_steps == 0:
                 save_total_limit = getattr(cfg.trainer, "save_total_limit", 0)
                 max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
@@ -737,9 +751,9 @@ def trainer(cfg: Config) -> None:
                 else:
                     path = model_checkpoint_dir / str(metrics["train/steps"])
                     path.mkdir(parents=True, exist_ok=True)
-                    torch.save(
-                        model.state_dict(),
-                        path / "state_dict.pt",
+                    save_model_safetensors(
+                        accelerator.unwrap_model(model),
+                        path,
                     )
 
             if metrics["train/steps"] >= cfg.trainer.max_steps:

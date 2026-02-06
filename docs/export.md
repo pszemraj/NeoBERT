@@ -9,7 +9,7 @@ This guide covers exporting NeoBERT checkpoints to Hugging Face format.
 
 Your checkpoint directory must contain:
 
-- `state_dict.pt`
+- `model.safetensors`
 - `config.yaml`
 - `tokenizer_info.json` (recommended; saved by the trainer and validated if present)
 - `tokenizer/` (with `special_tokens_map.json`, vocab, etc.)

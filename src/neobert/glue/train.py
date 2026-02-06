@@ -31,6 +31,11 @@ from transformers import (
     DataCollatorWithPadding,
 )
 
+from neobert.checkpointing import (
+    MODEL_WEIGHTS_NAME,
+    load_model_safetensors,
+    save_model_safetensors,
+)
 from neobert.model import NeoBERTConfig, NeoBERTForSequenceClassification
 from neobert.tokenizer import get_tokenizer
 
@@ -632,12 +637,14 @@ def load_pretrained_weights(
             raise
     else:
         # Load state_dict directly
-        state_dict_path = checkpoint_path / "state_dict.pt"
+        state_dict_path = checkpoint_path / MODEL_WEIGHTS_NAME
         if not state_dict_path.exists():
-            raise FileNotFoundError(f"No state_dict.pt found at {state_dict_path}")
+            raise FileNotFoundError(
+                f"No {MODEL_WEIGHTS_NAME} found at {state_dict_path}"
+            )
 
         logger.info(f"Loading state dict from {state_dict_path}")
-        state_dict = torch.load(state_dict_path)
+        state_dict = load_model_safetensors(checkpoint_path, map_location="cpu")
 
         # Log state dict info
         logger.info(f"Loaded state dict with {len(state_dict)} keys")
@@ -709,9 +716,9 @@ def save_training_checkpoint(
     else:
         path = model_checkpoint_dir / str(completed_steps)
         path.mkdir(parents=True, exist_ok=True)
-        torch.save(
-            model.state_dict(),
-            path / "state_dict.pt",
+        save_model_safetensors(
+            accelerator.unwrap_model(model),
+            path,
         )
 
 
