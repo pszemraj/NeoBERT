@@ -109,9 +109,28 @@ class TestAttentionHooks:
             assert not hasattr(layer.qkv, "_muonclip_layer_idx")
             qkv_hook = next(iter(layer.qkv._forward_hooks.values()))
             if hasattr(qkv_hook, "__func__"):
-                assert qkv_hook.__func__.__closure__ is None
+                closure = qkv_hook.__func__.__closure__
             else:
-                assert qkv_hook.__closure__ is None
+                closure = qkv_hook.__closure__
+            # Dynamo disable wrappers may introduce closures; ensure they do not
+            # capture per-layer integer state.
+            if closure is not None:
+                assert all(not isinstance(cell.cell_contents, int) for cell in closure)
+
+    def test_hook_callbacks_are_dynamo_disabled(self):
+        """Ensure hook callbacks are excluded from torch.compile tracing."""
+        from neobert.optimizer.muon_clip import NeoBERTAttentionHooks
+
+        if not hasattr(torch, "_dynamo") or not hasattr(torch._dynamo, "disable"):
+            pytest.skip("torch._dynamo.disable is unavailable in this torch build")
+
+        for method_name in (
+            "_module_layer_idx",
+            "_qkv_input_hook",
+            "_block_context_hook",
+        ):
+            method = getattr(NeoBERTAttentionHooks, method_name)
+            assert bool(getattr(method, "_torchdynamo_disable", False))
 
     def test_hook_captures_data(self, model):
         """Test hooks actually capture attention data."""

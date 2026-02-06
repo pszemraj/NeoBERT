@@ -16,6 +16,14 @@ from torch.utils.hooks import RemovableHandle
 
 logger = logging.getLogger(__name__)
 
+try:
+    _dynamo_disable = torch._dynamo.disable  # pyright: ignore[reportAttributeAccessIssue]
+except Exception:
+
+    def _dynamo_disable(fn: Callable[..., Any]) -> Callable[..., Any]:
+        """Return ``fn`` unchanged when torch Dynamo is unavailable."""
+        return fn
+
 
 # Configuration
 
@@ -334,6 +342,7 @@ class NeoBERTAttentionHooks:
 
         return None
 
+    @_dynamo_disable
     def _module_layer_idx(self, module: torch.nn.Module) -> Optional[int]:
         """Resolve the cached layer index for a hook module.
 
@@ -348,6 +357,7 @@ class NeoBERTAttentionHooks:
         except (TypeError, ValueError):
             return None
 
+    @_dynamo_disable
     def _qkv_input_hook(
         self, module: torch.nn.Module, inputs: tuple[Any, ...], output: Any
     ) -> None:
@@ -375,6 +385,7 @@ class NeoBERTAttentionHooks:
         # Move to CPU to avoid retaining GPU activations when clipping is enabled.
         self.layer_inputs[layer_idx] = x.detach().to("cpu")
 
+    @_dynamo_disable
     def _block_context_hook(
         self, module: torch.nn.Module, inputs: tuple[Any, ...], output: Any
     ) -> None:
