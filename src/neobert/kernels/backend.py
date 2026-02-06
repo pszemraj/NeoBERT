@@ -11,7 +11,7 @@ later moved to GPU without issues.
 """
 
 import logging
-from typing import Any, Callable, Literal, Optional, TypeVar
+from typing import Any, Literal, Optional
 
 import torch
 from torch import nn
@@ -27,29 +27,6 @@ LIGER_ERROR: Optional[str] = None
 _LigerRMSNormFunction = None
 _LigerSiLUMulFunction = None
 _LigerCrossEntropyLoss = None
-
-
-_F = TypeVar("_F", bound=Callable[..., Any])
-
-
-def _identity_decorator(fn: _F) -> _F:
-    """Return *fn* unchanged.
-
-    :param callable fn: Function to decorate.
-    :return callable: Original function.
-    """
-    return fn
-
-
-try:
-    _compile_disable = torch.compiler.disable  # type: ignore[attr-defined]
-except AttributeError:
-    try:
-        import torch._dynamo as _dynamo
-
-        _compile_disable = _dynamo.disable
-    except ImportError:
-        _compile_disable = _identity_decorator
 
 try:
     from liger_kernel.ops.rms_norm import (
@@ -180,47 +157,6 @@ def resolve_kernel_backend(
     raise AssertionError(f"Unhandled kernel_backend state: {requested}")
 
 
-@_compile_disable
-def _liger_rmsnorm_forward(
-    x: torch.Tensor, weight: torch.Tensor, eps: float
-) -> torch.Tensor:
-    """Run Liger RMSNorm outside torch.compile graphs.
-
-    :param torch.Tensor x: Input tensor.
-    :param torch.Tensor weight: RMSNorm weight.
-    :param float eps: Numerical epsilon.
-    :return torch.Tensor: Normalized tensor.
-    """
-    assert _LigerRMSNormFunction is not None
-    return _LigerRMSNormFunction.apply(x, weight, eps)
-
-
-@_compile_disable
-def _liger_swiglu_forward(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    """Run Liger SwiGLU pointwise op outside torch.compile graphs.
-
-    :param torch.Tensor gate: Gate tensor.
-    :param torch.Tensor up: Up tensor.
-    :return torch.Tensor: Activated tensor.
-    """
-    assert _LigerSiLUMulFunction is not None
-    return _LigerSiLUMulFunction.apply(gate, up)
-
-
-@_compile_disable
-def _liger_cross_entropy_forward(
-    loss_module: nn.Module, input: torch.Tensor, target: torch.Tensor
-) -> torch.Tensor:
-    """Run Liger cross-entropy outside torch.compile graphs.
-
-    :param nn.Module loss_module: Liger loss module.
-    :param torch.Tensor input: Input logits.
-    :param torch.Tensor target: Target labels.
-    :return torch.Tensor: Scalar/tensor loss.
-    """
-    return loss_module(input, target)
-
-
 # ---------------------------------------------------------------------------
 # RMSNorm dispatch
 # ---------------------------------------------------------------------------
@@ -251,7 +187,7 @@ class _AdaptiveRMSNorm(nn.Module):
         :return torch.Tensor: Normalized tensor.
         """
         if x.is_cuda and _LigerRMSNormFunction is not None:
-            return _liger_rmsnorm_forward(x, self.weight, self.eps)
+            return _LigerRMSNormFunction.apply(x, self.weight, self.eps)
         # Native torch path (CPU or Liger unavailable)
         x_float = x.float()
         rms = torch.rsqrt(x_float.pow(2).mean(-1, keepdim=True) + self.eps)
@@ -315,7 +251,7 @@ def swiglu_forward(
     """
     backend = canonicalize_kernel_backend(backend)
     if _LigerSiLUMulFunction is not None and _should_use_liger(backend, gate):
-        return _liger_swiglu_forward(gate, up)
+        return _LigerSiLUMulFunction.apply(gate, up)
     return nn.functional.silu(gate) * up
 
 
@@ -349,7 +285,7 @@ class _AdaptiveCrossEntropyLoss(nn.Module):
         :return torch.Tensor: Computed loss.
         """
         if input.is_cuda and self._liger_ce is not None:
-            return _liger_cross_entropy_forward(self._liger_ce, input, target)
+            return self._liger_ce(input, target)
         return self._torch_ce(input, target)
 
 

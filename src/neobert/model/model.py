@@ -62,7 +62,7 @@ def _normalize_pad_mask(pad_mask: torch.Tensor) -> torch.Tensor:
 
 def _infer_single_segment_packed_seqlens_from_pad_mask(
     pad_mask: torch.Tensor, seq_len: int
-) -> Optional[PackedSeqLens]:
+) -> Optional[list[list[int]]]:
     """Infer packed lengths from an additive pad mask.
 
     This only works for prefix padding masks where tokens are unmasked first and
@@ -105,12 +105,12 @@ def _normalize_packed_seqlens(
     packed_seqlens: Any,
     *,
     seq_len: Optional[int] = None,
-) -> Optional[PackedSeqLens]:
+) -> Optional[list[list[int]]]:
     """Normalize packed sequence lengths to Python lists.
 
     :param Any packed_seqlens: Packed segment lengths tensor or list.
     :param int | None seq_len: Optional sequence length for validation.
-    :return torch.Tensor | list[list[int]] | None: Packed segment lengths.
+    :return list[list[int]] | None: Packed segment lengths.
     """
     if packed_seqlens is None:
         return None
@@ -118,7 +118,7 @@ def _normalize_packed_seqlens(
     if torch.is_tensor(packed_seqlens):
         if packed_seqlens.numel() == 0:
             rows = int(packed_seqlens.shape[0]) if packed_seqlens.ndim > 0 else 0
-            return torch.zeros((rows, 0), dtype=torch.int32)
+            return [[] for _ in range(rows)]
         tensor = packed_seqlens.detach()
         if tensor.is_cuda:
             raise RuntimeError(
@@ -132,17 +132,15 @@ def _normalize_packed_seqlens(
             tensor = tensor.unsqueeze(1)
 
         if tensor.ndim == 2:
-            if seq_len is not None:
-                sums = tensor.clamp_min(0).sum(dim=-1)
-                bad = sums > seq_len
-                if bad.any():
-                    bad_idx = int(torch.where(bad)[0][0].item())
+            out: list[list[int]] = []
+            for row in tensor.tolist():
+                segs = [int(x) for x in row if int(x) > 0]
+                if seq_len is not None and sum(segs) > seq_len:
                     raise ValueError(
-                        "packed_seqlens sum exceeds seq_len "
-                        f"(row={bad_idx}, sum={int(sums[bad_idx].item())}, "
-                        f"seq_len={seq_len})."
+                        f"packed_seqlens sums to {sum(segs)} > seq_len={seq_len}: {segs}"
                     )
-            return tensor
+                out.append(segs)
+            return out
 
         raise ValueError(
             "packed_seqlens tensor must be rank 1 or 2, got "
@@ -164,27 +162,6 @@ def _normalize_packed_seqlens(
         return out
 
     raise TypeError(f"Unsupported packed_seqlens type: {type(packed_seqlens).__name__}")
-
-
-def _packed_seqlens_tensor_to_list(packed_seqlens: torch.Tensor) -> list[list[int]]:
-    """Convert packed sequence lengths tensor into nested Python lists once.
-
-    :param torch.Tensor packed_seqlens: CPU tensor shaped ``[B, N]`` (or ``[B]``).
-    :return list[list[int]]: Per-sample positive segment lengths.
-    """
-    if packed_seqlens.is_cuda:
-        raise RuntimeError("packed_seqlens tensor must stay on CPU metadata path.")
-    tensor = packed_seqlens.detach().cpu().to(torch.int32)
-    if tensor.ndim == 1:
-        tensor = tensor.unsqueeze(1)
-    if tensor.ndim != 2:
-        raise ValueError(
-            "packed_seqlens tensor must be rank 1 or 2, got "
-            f"shape={tuple(tensor.shape)}"
-        )
-    if tensor.numel() == 0:
-        return [[] for _ in range(int(tensor.shape[0]))]
-    return [[int(x) for x in row if int(x) > 0] for row in tensor.tolist()]
 
 
 class SwiGLU(nn.Module):
@@ -245,7 +222,6 @@ class NeoBERTConfig(PretrainedConfig):
         max_length: int = 1024,
         attn_backend: str = "sdpa",
         kernel_backend: str = "auto",
-        precompute_packed_seqlens: bool = True,
         tie_word_embeddings: bool = True,
         base_scale: float = 1.0 / (960.0**0.5),
         ngpt: bool = False,
@@ -269,8 +245,6 @@ class NeoBERTConfig(PretrainedConfig):
         :param int max_length: Maximum sequence length.
         :param str attn_backend: Attention backend (``"sdpa"`` or ``"flash_attn_varlen"``).
         :param str kernel_backend: Kernel backend (``"auto"``, ``"liger"``, or ``"torch"``).
-        :param bool precompute_packed_seqlens: Convert packed sequence metadata to
-            Python lists once per batch before layer execution.
         :param bool tie_word_embeddings: Whether to tie input/output embeddings.
         :param float base_scale: Base scaling factor for NGPT.
         :param bool ngpt: Whether to enable NGPT mode.
@@ -347,7 +321,6 @@ class NeoBERTConfig(PretrainedConfig):
 
         self.attn_backend = canonicalize_attn_backend(attn_backend)
         self.kernel_backend = canonicalize_kernel_backend(kernel_backend)
-        self.precompute_packed_seqlens = bool(precompute_packed_seqlens)
         self.base_scale = base_scale
         self.ngpt = ngpt
 
@@ -794,12 +767,6 @@ class NeoBERT(NeoBERTPreTrainedModel):
                     "packed_seqlens provided; ignoring pad_mask for packed attention."
                 )
                 pad_mask = None
-            if (
-                packed_seqlens is not None
-                and torch.is_tensor(packed_seqlens)
-                and getattr(self.config, "precompute_packed_seqlens", True)
-            ):
-                packed_seqlens = _packed_seqlens_tensor_to_list(packed_seqlens)
 
         # Normalize to broadcast-friendly shapes to avoid O(S^2) materialization.
         if pad_mask is not None and torch.is_tensor(pad_mask):
@@ -935,12 +902,6 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
                     "packed_seqlens provided; ignoring pad_mask for packed attention."
                 )
                 pad_mask = None
-            if (
-                packed_seqlens is not None
-                and torch.is_tensor(packed_seqlens)
-                and getattr(self.config, "precompute_packed_seqlens", True)
-            ):
-                packed_seqlens = _packed_seqlens_tensor_to_list(packed_seqlens)
 
         # Normalize to broadcast-friendly shapes to avoid O(S^2) materialization.
         if pad_mask is not None and torch.is_tensor(pad_mask):

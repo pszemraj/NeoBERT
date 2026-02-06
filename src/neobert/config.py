@@ -44,7 +44,6 @@ class ModelConfig:
     classifier_init_range: float = 0.02
     attn_backend: str = "sdpa"  # "sdpa" or "flash_attn_varlen"
     kernel_backend: str = "auto"  # "auto", "liger", or "torch"
-    precompute_packed_seqlens: bool = True
     ngpt: bool = False
     base_scale: float = 1.0 / (960.0**0.5)
     pad_token_id: int = 0

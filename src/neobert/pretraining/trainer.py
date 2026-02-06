@@ -290,18 +290,18 @@ def _run_eval(
 
 def _packed_seqlens_to_list(
     packed_seqlens: Any,
-) -> Optional[torch.Tensor | list[list[int]]]:
+) -> Optional[list[list[int]]]:
     """Normalize packed sequence lengths to Python lists.
 
     :param Any packed_seqlens: Packed segment lengths tensor or list.
-    :return torch.Tensor | list[list[int]] | None: Packed segment lengths.
+    :return list[list[int]] | None: Packed segment lengths.
     """
     if packed_seqlens is None:
         return None
     if torch.is_tensor(packed_seqlens):
         if packed_seqlens.numel() == 0:
             rows = int(packed_seqlens.shape[0]) if packed_seqlens.ndim > 0 else 0
-            return torch.zeros((rows, 0), dtype=torch.int32)
+            return [[] for _ in range(rows)]
         if packed_seqlens.is_cuda:
             raise RuntimeError(
                 "packed_seqlens must be a CPU tensor. This indicates a collator or "
@@ -316,8 +316,8 @@ def _packed_seqlens_to_list(
                 "packed_seqlens tensor must be rank 1 or 2, got "
                 f"shape={tuple(cpu.shape)}"
             )
-        return cpu
-    return packed_seqlens
+        return [[int(x) for x in row if int(x) > 0] for row in cpu.tolist()]
+    return [[int(x) for x in row if int(x) > 0] for row in packed_seqlens]
 
 
 def _scale_gradients(model: torch.nn.Module, scale: torch.Tensor) -> None:
@@ -1128,7 +1128,6 @@ def trainer(cfg: Config) -> None:
         pad_token_id=tokenizer.pad_token_id,
         attn_backend=cfg.model.attn_backend,
         kernel_backend=cfg.model.kernel_backend,
-        precompute_packed_seqlens=cfg.model.precompute_packed_seqlens,
         ngpt=cfg.model.ngpt,
         base_scale=cfg.model.base_scale,
     )

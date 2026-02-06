@@ -2,7 +2,7 @@
 
 import logging
 import math
-from typing import Any, Callable, Literal, Optional, TypeVar
+from typing import Literal, Optional
 
 import torch
 
@@ -27,28 +27,6 @@ except (ImportError, RuntimeError) as exc:
     FLASH_ATTN_ERROR = str(exc)
 
 _WARNED_SDPA_PACKED_GPU = False
-
-_F = TypeVar("_F", bound=Callable[..., Any])
-
-
-def _identity_decorator(fn: _F) -> _F:
-    """Return *fn* unchanged.
-
-    :param callable fn: Function to decorate.
-    :return callable: Original function.
-    """
-    return fn
-
-
-try:
-    _compile_disable = torch.compiler.disable  # type: ignore[attr-defined]
-except AttributeError:
-    try:
-        import torch._dynamo as _dynamo
-
-        _compile_disable = _dynamo.disable
-    except ImportError:
-        _compile_disable = _identity_decorator
 
 
 def canonicalize_attn_backend(
@@ -113,26 +91,6 @@ def packed_seqlens_to_cu_seqlens(
         cu.append(cu[-1] + length)
     max_seqlen = max(all_lens)
     return torch.tensor(cu, dtype=torch.int32, device=device), max_seqlen
-
-
-@_compile_disable
-def _packed_seqlens_to_list(packed_seqlens: torch.Tensor) -> list[list[int]]:
-    """Convert packed seqlens tensor to normalized Python nested lists.
-
-    :param torch.Tensor packed_seqlens: Packed sequence lengths tensor.
-    :return list[list[int]]: Normalized packed segment lengths.
-    """
-    if packed_seqlens.is_cuda:
-        raise RuntimeError("packed_seqlens metadata must stay on CPU.")
-    tensor = packed_seqlens.detach().cpu().to(torch.int32)
-    if tensor.ndim == 1:
-        tensor = tensor.unsqueeze(1)
-    if tensor.ndim != 2:
-        raise ValueError(
-            "packed_seqlens tensor must be rank 1 or 2, got "
-            f"shape={tuple(tensor.shape)}"
-        )
-    return [[int(x) for x in row if int(x) > 0] for row in tensor.tolist()]
 
 
 def _flash_varlen_attention(
@@ -297,11 +255,22 @@ def attention_forward(
     """
     attn_backend = canonicalize_attn_backend(attn_backend)
     if packed_seqlens is not None:
-        packed_list = (
-            _packed_seqlens_to_list(packed_seqlens)
-            if torch.is_tensor(packed_seqlens)
-            else packed_seqlens
-        )
+        if torch.is_tensor(packed_seqlens):
+            if packed_seqlens.is_cuda:
+                raise RuntimeError("packed_seqlens metadata must stay on CPU.")
+            tensor = packed_seqlens.detach().cpu().to(torch.int32)
+            if tensor.ndim == 1:
+                tensor = tensor.unsqueeze(1)
+            if tensor.ndim != 2:
+                raise ValueError(
+                    "packed_seqlens tensor must be rank 1 or 2, got "
+                    f"shape={tuple(tensor.shape)}"
+                )
+            packed_list = [
+                [int(x) for x in row if int(x) > 0] for row in tensor.tolist()
+            ]
+        else:
+            packed_list = packed_seqlens
         # Packed sequences
         if attn_backend == "flash_attn_varlen":
             if not xq.is_cuda:
