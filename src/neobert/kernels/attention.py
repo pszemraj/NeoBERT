@@ -29,6 +29,12 @@ except (ImportError, RuntimeError) as exc:
 _WARNED_SDPA_PACKED_GPU = False
 
 
+try:
+    _dynamo_disable = torch.compiler.disable
+except (AttributeError, RuntimeError):
+    _dynamo_disable = torch._dynamo.disable  # type: ignore[attr-defined]
+
+
 def _is_torch_compiling() -> bool:
     """Return whether execution is inside a torch.compile trace."""
     compiler = getattr(torch, "compiler", None)
@@ -203,6 +209,7 @@ def _normalize_packed_seqlens_tensor(
     return tensor
 
 
+@_dynamo_disable
 def _flash_varlen_attention(
     xq: torch.Tensor,
     xk: torch.Tensor,
