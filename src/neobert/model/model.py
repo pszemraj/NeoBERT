@@ -988,7 +988,10 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
             self.tie_weights()
 
     def get_input_embeddings(self) -> nn.Embedding:
-        """Return input token embeddings for weight tying."""
+        """Return input token embeddings for weight tying.
+
+        :return nn.Embedding: Input embedding module.
+        """
         return self.model.encoder
 
     def set_input_embeddings(self, new_embeddings: nn.Embedding) -> None:
@@ -996,7 +999,10 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
         self.model.encoder = new_embeddings
 
     def get_output_embeddings(self) -> nn.Linear:
-        """Return output embeddings for weight tying."""
+        """Return output embeddings for weight tying.
+
+        :return nn.Linear: Output projection module.
+        """
         return self.decoder
 
     def set_output_embeddings(self, new_embeddings: nn.Linear) -> None:

@@ -423,7 +423,11 @@ def _select_train_split(
 
 
 def _has_stored_batch(stored_batch: BatchEncoding) -> bool:
-    """Return True if any buffered batch fragments are present."""
+    """Return whether buffered batch fragments are present.
+
+    :param BatchEncoding stored_batch: Buffered batch fragments.
+    :return bool: True when any buffered tensor/value is present.
+    """
     return any(value is not None for value in stored_batch.values())
 
 
@@ -1190,6 +1194,11 @@ def trainer(cfg: Config) -> None:
         def _prepare_loader(
             dataloader: torch.utils.data.DataLoader,
         ) -> torch.utils.data.DataLoader:
+            """Prepare dataloaders with explicit CPU placement for metadata.
+
+            :param torch.utils.data.DataLoader dataloader: Dataloader to prepare.
+            :return torch.utils.data.DataLoader: Prepared dataloader.
+            """
             kwargs = {"device_placement": False}
             try:
                 supports_dispatch = (

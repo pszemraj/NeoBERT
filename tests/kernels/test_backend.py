@@ -93,10 +93,6 @@ class TestGetRMSNorm:
         rms = (out**2).mean(dim=-1).sqrt()
         assert rms.mean().item() == pytest.approx(1.0, abs=0.5)
 
-    def test_invalid_backend_raises(self):
-        with pytest.raises(ValueError, match="Unknown kernel_backend"):
-            get_rmsnorm(64, 1e-5, "bad_backend")
-
 
 class TestSwiGLUForward:
     """Tests for swiglu_forward() dispatch."""
@@ -121,12 +117,6 @@ class TestSwiGLUForward:
         result = swiglu_forward(gate, up, "auto")
         expected = nn.functional.silu(gate) * up
         torch.testing.assert_close(result, expected)
-
-    def test_invalid_backend_raises(self):
-        gate = torch.randn(2, 4, 8)
-        up = torch.randn(2, 4, 8)
-        with pytest.raises(ValueError, match="Unknown kernel_backend"):
-            swiglu_forward(gate, up, "bad_backend")
 
 
 class TestGetCrossEntropyLoss:
@@ -153,6 +143,24 @@ class TestGetCrossEntropyLoss:
         assert loss.ndim == 0
         assert loss.item() > 0
 
-    def test_invalid_backend_raises(self):
-        with pytest.raises(ValueError, match="Unknown kernel_backend"):
-            get_cross_entropy_loss(reduction="mean", backend="bad_backend")
+
+@pytest.mark.parametrize(
+    ("call", "args", "kwargs"),
+    [
+        (get_rmsnorm, (64, 1e-5, "bad_backend"), {}),
+        (
+            swiglu_forward,
+            (torch.randn(2, 4, 8), torch.randn(2, 4, 8), "bad_backend"),
+            {},
+        ),
+        (get_cross_entropy_loss, (), {"reduction": "mean", "backend": "bad_backend"}),
+    ],
+)
+def test_invalid_backend_raises_across_dispatchers(
+    call,
+    args,
+    kwargs,
+):
+    """Ensure all kernel dispatch entrypoints reject invalid backend strings."""
+    with pytest.raises(ValueError, match="Unknown kernel_backend"):
+        call(*args, **kwargs)

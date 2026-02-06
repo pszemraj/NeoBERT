@@ -268,7 +268,6 @@ def get_evaluation(
     dtype_pad_mask: torch.dtype = torch.float32,
     return_predictions: bool = False,
     compute_metric: bool = True,
-    flash_attention: bool = False,
 ) -> dict[str, Any]:
     """Run evaluation over a dataloader and return metrics/predictions.
 
@@ -280,7 +279,6 @@ def get_evaluation(
     :param torch.dtype dtype_pad_mask: Dtype for attention mask.
     :param bool return_predictions: Whether to return predictions tensor.
     :param bool compute_metric: Whether to compute metric values.
-    :param bool flash_attention: Whether to use flash attention masking.
     :return dict[str, Any]: Evaluation outputs (metrics, predictions).
     """
     samples_seen = 0
@@ -293,10 +291,6 @@ def get_evaluation(
     sdp_context = (
         sdpa_kernel(SDPBackend.MATH) if torch.cuda.is_available() else nullcontext()
     )
-    if flash_attention:
-        logger.debug(
-            "GLUE attention_mask is already additive; flash_attention flag is ignored."
-        )
     with sdp_context:
         for step, batch in tqdm(enumerate(dataloader)):
             progress_bar.update(1)
@@ -358,7 +352,6 @@ def run_evaluation_and_save(
     accelerator: Accelerator,
     dtype_pad_mask: torch.dtype,
     is_regression: bool,
-    flash_attention: bool,
     completed_steps: int,
     epoch: int,
     train_metric: Optional[dict[str, float]],
@@ -376,7 +369,6 @@ def run_evaluation_and_save(
     :param Accelerator accelerator: Accelerator for logging/sync.
     :param torch.dtype dtype_pad_mask: Dtype for attention mask.
     :param bool is_regression: Whether task is regression.
-    :param bool flash_attention: Whether to use flash attention masking.
     :param int completed_steps: Completed training steps.
     :param int epoch: Current epoch.
     :param dict[str, float] | None train_metric: Training metric values.
@@ -395,7 +387,6 @@ def run_evaluation_and_save(
         dtype_pad_mask=dtype_pad_mask,
         is_regression=is_regression,
         return_predictions=False,
-        flash_attention=flash_attention,
     )
     eval_metric = eval_result["eval_metric"]
 
@@ -429,7 +420,6 @@ def run_evaluation_and_save(
                 dtype_pad_mask=dtype_pad_mask,
                 is_regression=is_regression,
                 return_predictions=False,
-                flash_attention=flash_attention,
             )
             mm_eval_metric = mm_eval_result["eval_metric"]
             results["accuracy_mm"] = mm_eval_metric["accuracy"]
@@ -757,7 +747,7 @@ def trainer(cfg: Config) -> None:
             "Packed attention is not supported for GLUE evaluation due to "
             "variable-length sequences. Forcing attn_backend='sdpa'."
         )
-    flash_attention = False  # Always use SDPA (eager) attention for GLUE
+    # Always use SDPA (eager) attention for GLUE.
 
     # Check from_hub in raw model dict for GLUE tasks
     from_hub = False
@@ -1452,7 +1442,6 @@ def trainer(cfg: Config) -> None:
                             dtype_pad_mask=dtype_pad_mask,
                             is_regression=is_regression,
                             return_predictions=False,
-                            flash_attention=flash_attention,
                         )["eval_metric"]
 
                         # Log all metrics properly for STS-B (both Pearson and Spearman)
@@ -1488,7 +1477,6 @@ def trainer(cfg: Config) -> None:
                                 dtype_pad_mask=dtype_pad_mask,
                                 is_regression=is_regression,
                                 return_predictions=False,
-                                flash_attention=flash_attention,
                             )["eval_metric"]
                             results["accuracy_mm"] = mm_eval_metric["accuracy"]
 
