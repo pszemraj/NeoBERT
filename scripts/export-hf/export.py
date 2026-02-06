@@ -13,6 +13,7 @@ The script will create an hf/ directory in the parent folder with the exported m
 
 import argparse
 import json
+import re
 import shutil
 import sys
 import textwrap
@@ -411,9 +412,12 @@ def _rewrite_export_model_imports(model_path: Path) -> None:
     :param Path model_path: Path to the exported model.py file.
     """
     contents = model_path.read_text()
-    updated = contents.replace(
-        "from ..modeling_utils import swiglu_intermediate_size",
-        "from .modeling_utils import swiglu_intermediate_size",
+    # Rewrite all parent-relative modeling_utils imports so flat exported repos
+    # can rely on a consistent local ``.modeling_utils`` module path.
+    updated = re.sub(
+        r"from \.\.modeling_utils import ([A-Za-z0-9_, ]+)",
+        r"from .modeling_utils import \1",
+        contents,
     )
     if updated != contents:
         model_path.write_text(updated)

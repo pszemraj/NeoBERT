@@ -259,6 +259,48 @@ def _save_metrics(output_dir: str, split: str, metrics: dict[str, Any]) -> None:
         json.dump(serializable, fp, indent=2, sort_keys=True)
 
 
+def _extract_logits(outputs: Any) -> torch.Tensor:
+    """Extract logits tensor from dict-style or HF output objects.
+
+    :param Any outputs: Model forward outputs.
+    :return torch.Tensor: Logits tensor.
+    """
+    if isinstance(outputs, dict):
+        return outputs["logits"]
+    logits = getattr(outputs, "logits", None)
+    if logits is None:
+        raise TypeError(
+            "Model output does not expose logits as dict['logits'] or .logits."
+        )
+    return logits
+
+
+def _forward_classifier_logits(
+    model: torch.nn.Module,
+    *,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    use_hf_signature: bool,
+) -> torch.Tensor:
+    """Run classifier forward with explicit kwargs to avoid positional drift.
+
+    HF export models use ``(input_ids, position_ids=None, attention_mask=...)``
+    while training models use ``(src, pad_mask)``. Always use explicit keywords so
+    attention masks are never accidentally bound to position IDs.
+
+    :param torch.nn.Module model: Model to execute.
+    :param torch.Tensor input_ids: Input token IDs.
+    :param torch.Tensor attention_mask: Additive attention mask.
+    :param bool use_hf_signature: Whether to call HF-style kwargs.
+    :return torch.Tensor: Logits tensor.
+    """
+    if use_hf_signature:
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+    else:
+        outputs = model(src=input_ids, pad_mask=attention_mask)
+    return _extract_logits(outputs)
+
+
 def get_evaluation(
     model: torch.nn.Module,
     dataloader: DataLoader,
@@ -268,6 +310,7 @@ def get_evaluation(
     dtype_pad_mask: torch.dtype = torch.float32,
     return_predictions: bool = False,
     compute_metric: bool = True,
+    use_hf_signature: bool = False,
 ) -> dict[str, Any]:
     """Run evaluation over a dataloader and return metrics/predictions.
 
@@ -279,6 +322,7 @@ def get_evaluation(
     :param torch.dtype dtype_pad_mask: Dtype for attention mask.
     :param bool return_predictions: Whether to return predictions tensor.
     :param bool compute_metric: Whether to compute metric values.
+    :param bool use_hf_signature: Whether to call model with HF-style kwargs.
     :return dict[str, Any]: Evaluation outputs (metrics, predictions).
     """
     samples_seen = 0
@@ -296,7 +340,12 @@ def get_evaluation(
             progress_bar.update(1)
             with torch.no_grad(), torch.inference_mode():
                 pad_mask = batch["attention_mask"].type(dtype_pad_mask)
-                logits = model(batch["input_ids"], pad_mask)["logits"]
+                logits = _forward_classifier_logits(
+                    model,
+                    input_ids=batch["input_ids"],
+                    attention_mask=pad_mask,
+                    use_hf_signature=use_hf_signature,
+                )
 
             if not is_regression:
                 batch_predictions = logits.argmax(dim=-1)
@@ -359,6 +408,7 @@ def run_evaluation_and_save(
     logger: logging.Logger,
     mm_eval_dataloader: DataLoader | None = None,
     mm_metric: Any | None = None,
+    use_hf_signature: bool = False,
 ) -> tuple[dict[str, float], float, bool]:
     """Run evaluation, log metrics, and save results.
 
@@ -376,6 +426,7 @@ def run_evaluation_and_save(
     :param logging.Logger logger: Logger for output.
     :param DataLoader | None mm_eval_dataloader: MNLI mismatched dataloader.
     :param Any | None mm_metric: Metric for mismatched evaluation.
+    :param bool use_hf_signature: Whether to call model with HF-style kwargs.
     :return tuple[dict[str, float], float, bool]: Metrics, score, early-stop flag.
     """
     model.eval()
@@ -387,6 +438,7 @@ def run_evaluation_and_save(
         dtype_pad_mask=dtype_pad_mask,
         is_regression=is_regression,
         return_predictions=False,
+        use_hf_signature=use_hf_signature,
     )
     eval_metric = eval_result["eval_metric"]
 
@@ -420,6 +472,7 @@ def run_evaluation_and_save(
                 dtype_pad_mask=dtype_pad_mask,
                 is_regression=is_regression,
                 return_predictions=False,
+                use_hf_signature=use_hf_signature,
             )
             mm_eval_metric = mm_eval_result["eval_metric"]
             results["accuracy_mm"] = mm_eval_metric["accuracy"]
@@ -927,6 +980,8 @@ def trainer(cfg: Config) -> None:
         :return dict[str, Any]: Collated batch with attention mask.
         """
         batch = data_collator(batch)
+        # Training model boundary uses additive masks (0 keep / -inf mask) for
+        # SDPA/packed paths. HF export/inference wrappers still accept 0/1 masks.
         batch["attention_mask"] = torch.where(
             batch["attention_mask"] == 1, float(0.0), float("-inf")
         ).type(dtype_pad_mask)
@@ -1364,7 +1419,12 @@ def trainer(cfg: Config) -> None:
                     is_last_microbatch=is_last_microbatch,
                 )
 
-                logits = model(batch["input_ids"], batch["attention_mask"])["logits"]
+                logits = _forward_classifier_logits(
+                    model,
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    use_hf_signature=from_hub,
+                )
 
                 # Debug logging for first few steps
                 if completed_steps < 3 and is_last_microbatch:
@@ -1442,6 +1502,7 @@ def trainer(cfg: Config) -> None:
                             dtype_pad_mask=dtype_pad_mask,
                             is_regression=is_regression,
                             return_predictions=False,
+                            use_hf_signature=from_hub,
                         )["eval_metric"]
 
                         # Log all metrics properly for STS-B (both Pearson and Spearman)
@@ -1477,6 +1538,7 @@ def trainer(cfg: Config) -> None:
                                 dtype_pad_mask=dtype_pad_mask,
                                 is_regression=is_regression,
                                 return_predictions=False,
+                                use_hf_signature=from_hub,
                             )["eval_metric"]
                             results["accuracy_mm"] = mm_eval_metric["accuracy"]
 

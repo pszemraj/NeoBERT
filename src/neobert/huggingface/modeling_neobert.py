@@ -605,9 +605,8 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
         # Language modeling head (decoder)
         self.decoder = nn.Linear(config.hidden_size, config.vocab_size)
 
+        # ``post_init()`` applies HF init + tie_word_embeddings when configured.
         self.post_init()
-        if getattr(self.config, "tie_word_embeddings", False):
-            self.tie_weights()
 
     def get_input_embeddings(self) -> nn.Embedding:
         """Return input token embeddings for weight tying."""

@@ -6,8 +6,8 @@ import logging
 import math
 import os
 import re
+import shutil
 from pathlib import Path
-from contextlib import nullcontext
 from typing import Any, Callable, Optional, Tuple
 
 # PyTorch
@@ -70,6 +70,34 @@ def _move_batch_to_device(batch: BatchEncoding, device: torch.device) -> BatchEn
         batch = dict(batch)
     # ``non_blocking`` overlaps copies when DataLoader uses pinned host memory.
     return send_to_device(batch, device, non_blocking=True)
+
+
+def _promote_tmp_checkpoint_dir(tmp_path: Path, final_path: Path) -> None:
+    """Promote ``tmp_path`` to ``final_path`` with crash-safe replacement.
+
+    Keep the previous final checkpoint as ``*.old`` until the tmp->final rename
+    succeeds. This avoids deleting the prior checkpoint before the new one is in
+    place when running on shared filesystems.
+
+    :param Path tmp_path: Newly written temporary checkpoint directory.
+    :param Path final_path: Final checkpoint directory path.
+    """
+    backup_path = final_path.with_name(f"{final_path.name}.old")
+    if backup_path.exists():
+        shutil.rmtree(backup_path)
+
+    if final_path.exists():
+        final_path.replace(backup_path)
+
+    try:
+        tmp_path.replace(final_path)
+    except Exception:
+        if backup_path.exists() and not final_path.exists():
+            backup_path.replace(final_path)
+        raise
+
+    if backup_path.exists():
+        shutil.rmtree(backup_path)
 
 
 def _parse_split_slice(split: str) -> Tuple[str, Optional[str], Optional[str]]:
@@ -261,8 +289,8 @@ def _run_eval(
                     else batch.get("attention_mask", None)
                 )
                 logits = model(
-                    batch["input_ids"],
-                    pad_mask,
+                    src=batch["input_ids"],
+                    pad_mask=pad_mask,
                     packed_seqlens=packed_seqlens,
                 )["logits"]
                 loss_sum = loss_fn(
@@ -1499,6 +1527,9 @@ def trainer(cfg: Config) -> None:
             ] != cfg.trainer.per_device_train_batch_size or _has_stored_batch(
                 stored_batch
             ):
+                # ``to_target_batch_size`` may emit variable-size microbatches
+                # at epoch tails; update correctness is preserved by token-based
+                # gradient rescaling in ``_gradient_token_scale``.
                 batch, stored_batch = to_target_batch_size(
                     batch, stored_batch, cfg.trainer.per_device_train_batch_size
                 )
@@ -1518,22 +1549,23 @@ def trainer(cfg: Config) -> None:
                 else batch.get("attention_mask", None)
             )
 
-            sync_gradients = (
-                metrics["train/batches"] % cfg.trainer.gradient_accumulation_steps == 0
-            )
-            _maybe_prepare_for_forward(
-                optimizer,
-                update_step=metrics["train/steps"],
-                is_last_microbatch=sync_gradients,
-            )
-            context = nullcontext() if sync_gradients else accelerator.no_sync(model)
-            with context:
+            # Keep all accumulation semantics backend-agnostic (DDP/FSDP/DeepSpeed).
+            with accelerator.accumulate(model):
+                sync_gradients = bool(accelerator.sync_gradients)
+                _maybe_prepare_for_forward(
+                    optimizer,
+                    update_step=metrics["train/steps"],
+                    is_last_microbatch=sync_gradients,
+                )
                 # Forward pass
                 logits = model(
-                    batch["input_ids"],
-                    pad_mask,
+                    src=batch["input_ids"],
+                    pad_mask=pad_mask,
                     packed_seqlens=packed_seqlens,
                 )["logits"]
+                # NOTE: this path still materializes full logits (B,S,V). At the
+                # current default packed lengths this is acceptable; for very long
+                # contexts a chunked decoder+CE path would be the next optimization.
                 loss_sum = train_loss_fn(
                     logits.view(-1, model_config.vocab_size), batch["labels"].view(-1)
                 )
@@ -1698,8 +1730,6 @@ def trainer(cfg: Config) -> None:
                             ]:
                                 old_path = checkpoint_dir / str(old_ckpt)
                                 if old_path.exists():
-                                    import shutil
-
                                     shutil.rmtree(old_path)
                                     logger.info(
                                         "Removed old accelerator checkpoint: %s (limit=%s)",
@@ -1718,8 +1748,6 @@ def trainer(cfg: Config) -> None:
                     # Clean up any stale tmp directory from a previous failed save.
                     # Use exist_ok pattern to avoid TOCTOU race conditions in distributed setting.
                     if accelerator.is_main_process:
-                        import shutil
-
                         if tmp_path.exists():
                             shutil.rmtree(tmp_path)
                         tmp_path.mkdir(parents=True, exist_ok=True)
@@ -1765,11 +1793,7 @@ def trainer(cfg: Config) -> None:
 
                     if accelerator.is_main_process:
                         final_path = model_checkpoint_dir / step_tag
-                        if final_path.exists():
-                            import shutil
-
-                            shutil.rmtree(final_path)
-                        checkpoint_path.replace(final_path)
+                        _promote_tmp_checkpoint_dir(checkpoint_path, final_path)
                         checkpoint_path = final_path
                         # Use logger instead of accelerator.print to avoid progress bar interference
                         logger.info(
@@ -1802,8 +1826,6 @@ def trainer(cfg: Config) -> None:
                             for old_ckpt in checkpoints[: len(checkpoints) - limit]:
                                 old_path = model_checkpoint_dir / str(old_ckpt)
                                 if old_path.exists():
-                                    import shutil
-
                                     shutil.rmtree(old_path)
                                     # Use logger instead of accelerator.print to avoid progress bar interference
                                     logger.info(

@@ -48,7 +48,8 @@ def _normalize_pad_mask(pad_mask: torch.Tensor) -> torch.Tensor:
     :param torch.Tensor pad_mask: Additive mask in 2D or 3D form.
     :return torch.Tensor: Mask shaped (B, 1, 1, S) or (B, 1, S, S).
     """
-    # Training path expects additive float masks (0 for keep, -inf for mask).
+    # Training API intentionally standardizes on additive masks (0 keep / -inf
+    # mask) for the hot path. HF export wrappers normalize 0/1 masks separately.
     if not pad_mask.is_floating_point():
         raise TypeError(
             "pad_mask must be an additive floating mask with 0 for keep and -inf for masked positions."

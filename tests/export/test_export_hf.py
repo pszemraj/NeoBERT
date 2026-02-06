@@ -87,3 +87,7 @@ class TestExportHF(unittest.TestCase):
             self.assertIn(
                 "from .modeling_utils import swiglu_intermediate_size", model_text
             )
+            self.assertIn(
+                "from .modeling_utils import scaled_dot_product_attention_compat",
+                model_text,
+            )
