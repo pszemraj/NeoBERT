@@ -44,6 +44,7 @@ class ModelConfig:
     classifier_init_range: float = 0.02
     attn_backend: str = "sdpa"  # "sdpa" or "flash_attn_varlen"
     kernel_backend: str = "auto"  # "auto", "liger", or "torch"
+    precompute_packed_seqlens: bool = True
     ngpt: bool = False
     base_scale: float = 1.0 / (960.0**0.5)
     pad_token_id: int = 0
@@ -58,6 +59,9 @@ class DatasetConfig:
     config: Optional[str] = None
     path: str = ""
     num_workers: int = 16
+    pin_memory: bool = False
+    persistent_workers: bool = True
+    prefetch_factor: Optional[int] = None
     streaming: bool = True
     cache_dir: Optional[str] = None
     trust_remote_code: bool = False
@@ -170,6 +174,7 @@ class TrainerConfig:
     gradient_clipping: Optional[float] = None
     mixed_precision: str = "bf16"
     torch_compile: bool = False
+    torch_compile_dynamic: Optional[bool] = None
     resume_from_checkpoint: Optional[str] = None
 
     # Training control

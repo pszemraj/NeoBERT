@@ -166,6 +166,27 @@ def _normalize_packed_seqlens(
     raise TypeError(f"Unsupported packed_seqlens type: {type(packed_seqlens).__name__}")
 
 
+def _packed_seqlens_tensor_to_list(packed_seqlens: torch.Tensor) -> list[list[int]]:
+    """Convert packed sequence lengths tensor into nested Python lists once.
+
+    :param torch.Tensor packed_seqlens: CPU tensor shaped ``[B, N]`` (or ``[B]``).
+    :return list[list[int]]: Per-sample positive segment lengths.
+    """
+    if packed_seqlens.is_cuda:
+        raise RuntimeError("packed_seqlens tensor must stay on CPU metadata path.")
+    tensor = packed_seqlens.detach().cpu().to(torch.int32)
+    if tensor.ndim == 1:
+        tensor = tensor.unsqueeze(1)
+    if tensor.ndim != 2:
+        raise ValueError(
+            "packed_seqlens tensor must be rank 1 or 2, got "
+            f"shape={tuple(tensor.shape)}"
+        )
+    if tensor.numel() == 0:
+        return [[] for _ in range(int(tensor.shape[0]))]
+    return [[int(x) for x in row if int(x) > 0] for row in tensor.tolist()]
+
+
 class SwiGLU(nn.Module):
     """SwiGLU activation with Liger kernel dispatch (unpacked w1/w2/w3)."""
 
@@ -224,6 +245,7 @@ class NeoBERTConfig(PretrainedConfig):
         max_length: int = 1024,
         attn_backend: str = "sdpa",
         kernel_backend: str = "auto",
+        precompute_packed_seqlens: bool = True,
         tie_word_embeddings: bool = True,
         base_scale: float = 1.0 / (960.0**0.5),
         ngpt: bool = False,
@@ -247,6 +269,8 @@ class NeoBERTConfig(PretrainedConfig):
         :param int max_length: Maximum sequence length.
         :param str attn_backend: Attention backend (``"sdpa"`` or ``"flash_attn_varlen"``).
         :param str kernel_backend: Kernel backend (``"auto"``, ``"liger"``, or ``"torch"``).
+        :param bool precompute_packed_seqlens: Convert packed sequence metadata to
+            Python lists once per batch before layer execution.
         :param bool tie_word_embeddings: Whether to tie input/output embeddings.
         :param float base_scale: Base scaling factor for NGPT.
         :param bool ngpt: Whether to enable NGPT mode.
@@ -323,6 +347,7 @@ class NeoBERTConfig(PretrainedConfig):
 
         self.attn_backend = canonicalize_attn_backend(attn_backend)
         self.kernel_backend = canonicalize_kernel_backend(kernel_backend)
+        self.precompute_packed_seqlens = bool(precompute_packed_seqlens)
         self.base_scale = base_scale
         self.ngpt = ngpt
 
@@ -769,6 +794,12 @@ class NeoBERT(NeoBERTPreTrainedModel):
                     "packed_seqlens provided; ignoring pad_mask for packed attention."
                 )
                 pad_mask = None
+            if (
+                packed_seqlens is not None
+                and torch.is_tensor(packed_seqlens)
+                and getattr(self.config, "precompute_packed_seqlens", True)
+            ):
+                packed_seqlens = _packed_seqlens_tensor_to_list(packed_seqlens)
 
         # Normalize to broadcast-friendly shapes to avoid O(S^2) materialization.
         if pad_mask is not None and torch.is_tensor(pad_mask):
@@ -904,6 +935,12 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
                     "packed_seqlens provided; ignoring pad_mask for packed attention."
                 )
                 pad_mask = None
+            if (
+                packed_seqlens is not None
+                and torch.is_tensor(packed_seqlens)
+                and getattr(self.config, "precompute_packed_seqlens", True)
+            ):
+                packed_seqlens = _packed_seqlens_tensor_to_list(packed_seqlens)
 
         # Normalize to broadcast-friendly shapes to avoid O(S^2) materialization.
         if pad_mask is not None and torch.is_tensor(pad_mask):

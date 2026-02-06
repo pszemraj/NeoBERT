@@ -116,25 +116,23 @@ def packed_seqlens_to_cu_seqlens(
 
 
 @_compile_disable
-def _packed_seqlens_to_list(packed_seqlens: PackedSeqLens) -> list[list[int]]:
-    """Convert packed seqlens input to normalized Python nested lists.
+def _packed_seqlens_to_list(packed_seqlens: torch.Tensor) -> list[list[int]]:
+    """Convert packed seqlens tensor to normalized Python nested lists.
 
-    :param torch.Tensor | list[list[int]] packed_seqlens: Packed sequence lengths.
+    :param torch.Tensor packed_seqlens: Packed sequence lengths tensor.
     :return list[list[int]]: Normalized packed segment lengths.
     """
-    if torch.is_tensor(packed_seqlens):
-        if packed_seqlens.is_cuda:
-            raise RuntimeError("packed_seqlens metadata must stay on CPU.")
-        tensor = packed_seqlens.detach().cpu().to(torch.int32)
-        if tensor.ndim == 1:
-            tensor = tensor.unsqueeze(1)
-        if tensor.ndim != 2:
-            raise ValueError(
-                "packed_seqlens tensor must be rank 1 or 2, got "
-                f"shape={tuple(tensor.shape)}"
-            )
-        return [[int(x) for x in row if int(x) > 0] for row in tensor.tolist()]
-    return [[int(x) for x in row if int(x) > 0] for row in packed_seqlens]
+    if packed_seqlens.is_cuda:
+        raise RuntimeError("packed_seqlens metadata must stay on CPU.")
+    tensor = packed_seqlens.detach().cpu().to(torch.int32)
+    if tensor.ndim == 1:
+        tensor = tensor.unsqueeze(1)
+    if tensor.ndim != 2:
+        raise ValueError(
+            "packed_seqlens tensor must be rank 1 or 2, got "
+            f"shape={tuple(tensor.shape)}"
+        )
+    return [[int(x) for x in row if int(x) > 0] for row in tensor.tolist()]
 
 
 def _flash_varlen_attention(
@@ -299,7 +297,11 @@ def attention_forward(
     """
     attn_backend = canonicalize_attn_backend(attn_backend)
     if packed_seqlens is not None:
-        packed_list = _packed_seqlens_to_list(packed_seqlens)
+        packed_list = (
+            _packed_seqlens_to_list(packed_seqlens)
+            if torch.is_tensor(packed_seqlens)
+            else packed_seqlens
+        )
         # Packed sequences
         if attn_backend == "flash_attn_varlen":
             if not xq.is_cuda:
