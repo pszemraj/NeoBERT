@@ -12,8 +12,8 @@ from datasets import Dataset, DatasetDict
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 
-from neobert.config import ConfigLoader
-from neobert.pretraining.trainer import trainer
+from neobert.config import Config, ConfigLoader
+from neobert.pretraining.trainer import _resolve_loader_perf_settings, trainer
 
 
 class TestPretrainPipeline(unittest.TestCase):
@@ -238,10 +238,41 @@ class TestPretrainComponents(unittest.TestCase):
         ]
 
         collated = collator(batch)
-
         self.assertIn("input_ids", collated)
         self.assertIn("labels", collated)
         self.assertIn("attention_mask", collated)
+
+    def test_resolve_loader_perf_settings_cuda_defaults(self):
+        """Ensure CUDA runs get throughput-friendly loader defaults."""
+        cfg = Config()
+        cfg.dataset.num_workers = 4
+        cfg.dataset.pin_memory = False
+        cfg.dataset.persistent_workers = True
+        cfg.dataset.prefetch_factor = None
+
+        pin_memory, persistent_workers, prefetch_factor, notes = (
+            _resolve_loader_perf_settings(cfg, device=torch.device("cuda"))
+        )
+        self.assertTrue(pin_memory)
+        self.assertTrue(persistent_workers)
+        self.assertEqual(prefetch_factor, 4)
+        self.assertGreater(len(notes), 0)
+
+    def test_resolve_loader_perf_settings_cpu_respects_config(self):
+        """Ensure CPU runs keep user-configured loader values."""
+        cfg = Config()
+        cfg.dataset.num_workers = 3
+        cfg.dataset.pin_memory = False
+        cfg.dataset.persistent_workers = True
+        cfg.dataset.prefetch_factor = 2
+
+        pin_memory, persistent_workers, prefetch_factor, notes = (
+            _resolve_loader_perf_settings(cfg, device=torch.device("cpu"))
+        )
+        self.assertFalse(pin_memory)
+        self.assertTrue(persistent_workers)
+        self.assertEqual(prefetch_factor, 2)
+        self.assertEqual(notes, [])
 
     def test_mlm_collator_returns_packed_seqlens_metadata(self):
         """Ensure non-packed collator can emit packed_seqlens metadata."""

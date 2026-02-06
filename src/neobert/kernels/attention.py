@@ -139,17 +139,15 @@ def _normalize_packed_seqlens_tensor(
     batch_size: int,
     seq_len: int,
 ) -> torch.Tensor:
-    """Normalize packed metadata to a fixed-rank CPU int32 tensor.
+    """Normalize packed metadata to a fixed-rank int32 tensor.
 
     :param torch.Tensor | list[list[int]] packed_seqlens: Packed segment lengths.
     :param int batch_size: Expected batch size.
     :param int seq_len: Expected padded sequence length.
-    :return torch.Tensor: CPU ``int32`` tensor of shape ``[B, N]``.
+    :return torch.Tensor: ``int32`` tensor of shape ``[B, N]``.
     """
     if torch.is_tensor(packed_seqlens):
-        if packed_seqlens.is_cuda:
-            raise RuntimeError("packed_seqlens metadata must stay on CPU.")
-        tensor = packed_seqlens.detach().cpu()
+        tensor = packed_seqlens.detach()
         if tensor.ndim == 1:
             tensor = tensor.unsqueeze(1)
         if tensor.ndim != 2:
@@ -206,7 +204,7 @@ def _flash_varlen_attention(
     :param torch.Tensor xq: Query ``(B, S, H, D)``.
     :param torch.Tensor xk: Key ``(B, S, H, D)``.
     :param torch.Tensor xv: Value ``(B, S, H, D)``.
-    :param torch.Tensor packed_seqlens: Packed lengths ``[B, N]`` on CPU.
+    :param torch.Tensor packed_seqlens: Packed lengths ``[B, N]``.
     :param float dropout_p: Dropout probability.
     :param float | None scale: Softmax scale.
     :return torch.Tensor: Output ``(B, S, H, D)``.
@@ -290,7 +288,7 @@ def _sdpa_packed_fallback(
     :param torch.Tensor xq: Query ``(B, S, H, D)``.
     :param torch.Tensor xk: Key ``(B, S, H, D)``.
     :param torch.Tensor xv: Value ``(B, S, H, D)``.
-    :param torch.Tensor packed_seqlens: Packed lengths ``[B, N]`` on CPU.
+    :param torch.Tensor packed_seqlens: Packed lengths ``[B, N]``.
     :param float dropout_p: Dropout probability.
     :param float | None scale: Softmax scale.
     :return torch.Tensor: Output ``(B, S, H, D)``.

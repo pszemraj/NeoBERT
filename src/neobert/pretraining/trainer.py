@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 
 
 def _move_batch_to_device(batch: BatchEncoding, device: torch.device) -> BatchEncoding:
-    """Move batch tensors to device while keeping packed_seqlens on CPU.
+    """Move batch tensors to device with async H2D copies when possible.
 
     :param BatchEncoding batch: Batch to move.
     :param torch.device device: Target device.
@@ -68,7 +68,8 @@ def _move_batch_to_device(batch: BatchEncoding, device: torch.device) -> BatchEn
     """
     if hasattr(batch, "to") and not torch.is_tensor(batch):
         batch = dict(batch)
-    return send_to_device(batch, device, skip_keys=["packed_seqlens"])
+    # ``non_blocking`` overlaps copies when DataLoader uses pinned host memory.
+    return send_to_device(batch, device, non_blocking=True)
 
 
 def _parse_split_slice(split: str) -> Tuple[str, Optional[str], Optional[str]]:
@@ -219,6 +220,7 @@ def _run_eval(
     accelerator: Accelerator,
     model_config: NeoBERTConfig,
     max_batches: Optional[int] = None,
+    manual_device_move: bool = True,
 ) -> dict[str, float]:
     """Run a lightweight evaluation loop for masked LM perplexity.
 
@@ -228,6 +230,7 @@ def _run_eval(
     :param Accelerator accelerator: Accelerator for distributed reductions.
     :param NeoBERTConfig model_config: Model config with vocab size.
     :param int | None max_batches: Optional cap on eval batches.
+    :param bool manual_device_move: Whether to manually move each batch to device.
     :return dict[str, float]: Evaluation metrics for logging.
     """
     was_training = model.training
@@ -249,7 +252,8 @@ def _run_eval(
                     and eval_batches >= max_batches_per_rank
                 ):
                     break
-                batch = _move_batch_to_device(batch, accelerator.device)
+                if manual_device_move:
+                    batch = _move_batch_to_device(batch, accelerator.device)
                 packed_seqlens = _packed_seqlens_to_tensor(batch.get("packed_seqlens"))
                 pad_mask = (
                     None
@@ -292,7 +296,7 @@ def _run_eval(
 def _packed_seqlens_to_tensor(
     packed_seqlens: Any,
 ) -> Optional[torch.Tensor]:
-    """Normalize packed sequence lengths to CPU int32 tensors.
+    """Normalize packed sequence lengths to rank-2 int32 tensors.
 
     :param Any packed_seqlens: Packed segment lengths tensor or list.
     :return torch.Tensor | None: Packed segment lengths.
@@ -300,21 +304,15 @@ def _packed_seqlens_to_tensor(
     if packed_seqlens is None:
         return None
     if torch.is_tensor(packed_seqlens):
-        if packed_seqlens.is_cuda:
-            raise RuntimeError(
-                "packed_seqlens must be a CPU tensor. This indicates a collator or "
-                "dataloader device placement bug; keep packed_seqlens on CPU to "
-                "avoid GPU syncs."
-            )
-        cpu = packed_seqlens.detach().cpu()
-        if cpu.ndim == 1:
-            cpu = cpu.unsqueeze(1)
-        if cpu.ndim != 2:
+        tensor = packed_seqlens.detach()
+        if tensor.ndim == 1:
+            tensor = tensor.unsqueeze(1)
+        if tensor.ndim != 2:
             raise ValueError(
                 "packed_seqlens tensor must be rank 1 or 2, got "
-                f"shape={tuple(cpu.shape)}"
+                f"shape={tuple(tensor.shape)}"
             )
-        return cpu.to(torch.int32)
+        return tensor.to(torch.int32)
 
     normalized_rows: list[list[int]] = []
     max_segments = 0
@@ -331,6 +329,52 @@ def _packed_seqlens_to_tensor(
         if segs:
             tensor[idx, : len(segs)] = torch.tensor(segs, dtype=torch.int32)
     return tensor
+
+
+def _resolve_loader_perf_settings(
+    cfg: Config,
+    *,
+    device: torch.device,
+) -> tuple[bool, bool, Optional[int], list[str]]:
+    """Resolve effective dataloader performance settings.
+
+    Applies conservative CUDA-friendly defaults when users leave knobs unset:
+    - ``pin_memory=True`` on CUDA
+    - ``prefetch_factor=4`` when workers are enabled and no value is provided
+
+    :param Config cfg: Training config.
+    :param torch.device device: Active accelerator device.
+    :return tuple[bool, bool, int | None, list[str]]: Effective
+        ``(pin_memory, persistent_workers, prefetch_factor, notes)``.
+    """
+    num_workers = max(0, int(cfg.dataset.num_workers))
+    pin_memory = bool(cfg.dataset.pin_memory)
+    persistent_workers = bool(cfg.dataset.persistent_workers and num_workers > 0)
+    prefetch_factor = cfg.dataset.prefetch_factor
+    if num_workers <= 0:
+        prefetch_factor = None
+    elif prefetch_factor is not None:
+        prefetch_factor = int(prefetch_factor)
+        if prefetch_factor <= 0:
+            raise ValueError(
+                f"dataset.prefetch_factor must be > 0 when set, got {prefetch_factor}."
+            )
+
+    notes: list[str] = []
+    if device.type == "cuda":
+        if not pin_memory:
+            pin_memory = True
+            notes.append(
+                "dataset.pin_memory was false; enabling pin_memory=True on CUDA "
+                "to improve host->device transfer overlap."
+            )
+        if num_workers > 0 and prefetch_factor is None:
+            prefetch_factor = 4
+            notes.append(
+                "dataset.prefetch_factor was unset; using prefetch_factor=4 for CUDA throughput."
+            )
+
+    return pin_memory, persistent_workers, prefetch_factor, notes
 
 
 def _scale_gradients(model: torch.nn.Module, scale: torch.Tensor) -> None:
@@ -716,16 +760,13 @@ def trainer(cfg: Config) -> None:
         cfg.model.attn_backend,
         fallback_to_sdpa=True,
     )
-    # Keep dataloader batches on CPU so packed_seqlens stays as CPU metadata.
-    disable_dispatch = bool(
-        cfg.datacollator.pack_sequences or cfg.model.attn_backend != "sdpa"
-    )
+    # Keep manual placement for packed mode only; in non-packed mode we use
+    # Accelerate's device placement for better overlap.
+    disable_dispatch = bool(cfg.datacollator.pack_sequences)
     dataloader_config = None
     if disable_dispatch:
         dataloader_config = DataLoaderConfiguration(dispatch_batches=False)
-        logger.info(
-            "Disabling Accelerate dispatch_batches because packed_seqlens must stay on CPU."
-        )
+        logger.info("Disabling Accelerate dispatch_batches for packed-sequence mode.")
     accelerator = Accelerator(
         step_scheduler_with_optimizer=False,  # enable manual control of the scheduler
         mixed_precision=cfg.trainer.mixed_precision,
@@ -1123,6 +1164,12 @@ def trainer(cfg: Config) -> None:
             print_fn=accelerator.print,
         )
 
+    pin_memory, persistent_workers, prefetch_factor, loader_perf_notes = (
+        _resolve_loader_perf_settings(cfg, device=accelerator.device)
+    )
+    for note in loader_perf_notes:
+        logger.info(note)
+
     # Dataloader
     collator_max_length = cfg.datacollator.max_length or cfg.dataset.max_seq_length
     train_dataloader = get_dataloader(
@@ -1130,9 +1177,9 @@ def trainer(cfg: Config) -> None:
         tokenizer,
         batch_size=cfg.trainer.per_device_train_batch_size,
         num_workers=cfg.dataset.num_workers,
-        pin_memory=cfg.dataset.pin_memory,
-        persistent_workers=cfg.dataset.persistent_workers,
-        prefetch_factor=cfg.dataset.prefetch_factor,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor,
         mlm_probability=cfg.datacollator.mlm_probability,
         pad_to_multiple_of=cfg.datacollator.pad_to_multiple_of,
         mask_all=cfg.datacollator.mask_all,
@@ -1148,9 +1195,9 @@ def trainer(cfg: Config) -> None:
             tokenizer,
             batch_size=cfg.trainer.per_device_eval_batch_size,
             num_workers=cfg.dataset.num_workers,
-            pin_memory=cfg.dataset.pin_memory,
-            persistent_workers=cfg.dataset.persistent_workers,
-            prefetch_factor=cfg.dataset.prefetch_factor,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers,
+            prefetch_factor=prefetch_factor,
             mlm_probability=cfg.datacollator.mlm_probability,
             pad_to_multiple_of=cfg.datacollator.pad_to_multiple_of,
             mask_all=cfg.datacollator.mask_all,
@@ -1260,12 +1307,12 @@ def trainer(cfg: Config) -> None:
         def _prepare_loader(
             dataloader: torch.utils.data.DataLoader,
         ) -> torch.utils.data.DataLoader:
-            """Prepare dataloaders with explicit CPU placement for metadata.
+            """Prepare dataloaders with tuned dispatch/device placement.
 
             :param torch.utils.data.DataLoader dataloader: Dataloader to prepare.
             :return torch.utils.data.DataLoader: Prepared dataloader.
             """
-            kwargs = {"device_placement": False}
+            kwargs = {"device_placement": not disable_dispatch}
             try:
                 supports_dispatch = (
                     "dispatch_batches"
@@ -1276,7 +1323,7 @@ def trainer(cfg: Config) -> None:
                 return accelerator.prepare_data_loader(dataloader, **kwargs)
             except TypeError:
                 return accelerator.prepare_data_loader(
-                    dataloader, device_placement=False
+                    dataloader, device_placement=not disable_dispatch
                 )
 
         train_dataloader = _prepare_loader(train_dataloader)
@@ -1343,6 +1390,12 @@ def trainer(cfg: Config) -> None:
                     scheduler,
                     device_placement=[False, True, True, True],
                 )
+
+    # Packed mode keeps manual batch transfers; non-packed mode uses Accelerate
+    # device placement for lower Python overhead and better overlap.
+    manual_device_move = disable_dispatch or not hasattr(
+        accelerator, "prepare_data_loader"
+    )
 
     if wandb_enabled and accelerator.is_main_process:
         wandb_watch = os.environ.get("WANDB_WATCH")
@@ -1447,7 +1500,8 @@ def trainer(cfg: Config) -> None:
                     batch, stored_batch, cfg.trainer.per_device_train_batch_size
                 )
 
-            batch = _move_batch_to_device(batch, accelerator.device)
+            if manual_device_move:
+                batch = _move_batch_to_device(batch, accelerator.device)
 
             # Update number of batches only when we will execute a backward pass.
             metrics["train/batches"] += 1
@@ -1766,6 +1820,7 @@ def trainer(cfg: Config) -> None:
                         accelerator,
                         model_config,
                         max_batches=eval_max_batches,
+                        manual_device_move=manual_device_move,
                     )
                     accelerator.log(
                         format_metrics(eval_metrics), step=metrics["train/steps"]
@@ -1790,6 +1845,7 @@ def trainer(cfg: Config) -> None:
                 accelerator,
                 model_config,
                 max_batches=eval_max_batches,
+                manual_device_move=manual_device_move,
             )
             accelerator.log(format_metrics(eval_metrics), step=metrics["train/steps"])
 

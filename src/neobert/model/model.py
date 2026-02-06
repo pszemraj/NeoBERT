@@ -115,7 +115,7 @@ def _normalize_packed_seqlens(
     *,
     seq_len: Optional[int] = None,
 ) -> Optional[torch.Tensor]:
-    """Normalize packed sequence lengths to CPU int32 tensors.
+    """Normalize packed sequence lengths to rank-2 int32 tensors.
 
     :param Any packed_seqlens: Packed segment lengths tensor or list.
     :param int | None seq_len: Optional sequence length for validation.
@@ -126,13 +126,6 @@ def _normalize_packed_seqlens(
 
     if torch.is_tensor(packed_seqlens):
         tensor = packed_seqlens.detach()
-        if tensor.is_cuda:
-            raise RuntimeError(
-                "packed_seqlens must be a CPU tensor. This indicates a collator or "
-                "dataloader device placement bug; keep packed_seqlens on CPU to "
-                "avoid GPU syncs."
-            )
-        tensor = tensor.cpu()
         if tensor.ndim == 1:
             tensor = tensor.unsqueeze(1)
         if tensor.ndim != 2:

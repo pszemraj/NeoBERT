@@ -124,8 +124,7 @@ class DataCollatorWithPacking(DefaultDataCollator):
         current_sequence: list[int] = []
         current_special_mask: list[int] = []
         current_attention_mask: list[int] = []
-        current_segments: list[int] = []
-        current_segment_id = 0
+        current_segment_lengths: list[int] = []
 
         for feature in features:
             seq = feature["input_ids"]
@@ -174,18 +173,16 @@ class DataCollatorWithPacking(DefaultDataCollator):
                         "special_tokens_mask": current_special_mask,
                     }
                 )
-                packed_segments.append(current_segments)
+                packed_segments.append(current_segment_lengths)
                 current_sequence = []
                 current_special_mask = []
                 current_attention_mask = []
-                current_segments = []
-                current_segment_id = 0
+                current_segment_lengths = []
 
             current_sequence.extend(segment_tokens)
             current_special_mask.extend(segment_special_mask)
             current_attention_mask.extend([1] * len(segment_tokens))
-            current_segments.extend([current_segment_id] * len(segment_tokens))
-            current_segment_id += 1
+            current_segment_lengths.append(len(segment_tokens))
 
             if len(current_sequence) == self.max_length:
                 packed_sequences.append(
@@ -195,12 +192,11 @@ class DataCollatorWithPacking(DefaultDataCollator):
                         "special_tokens_mask": current_special_mask,
                     }
                 )
-                packed_segments.append(current_segments)
+                packed_segments.append(current_segment_lengths)
                 current_sequence = []
                 current_special_mask = []
                 current_attention_mask = []
-                current_segments = []
-                current_segment_id = 0
+                current_segment_lengths = []
 
         if current_sequence:
             packed_sequences.append(
@@ -210,7 +206,7 @@ class DataCollatorWithPacking(DefaultDataCollator):
                     "special_tokens_mask": current_special_mask,
                 }
             )
-            packed_segments.append(current_segments)
+            packed_segments.append(current_segment_lengths)
 
         # Resolve pad token explicitly; never guess with a hard-coded ID.
         pad_token_id = getattr(self.default_data_collator, "pad_token_id", None)
@@ -240,24 +236,9 @@ class DataCollatorWithPacking(DefaultDataCollator):
         if not packed_segments:
             return batch
 
-        packed_seqlens: list[list[int]] = []
-        for seg in packed_segments:
-            if not seg:
-                packed_seqlens.append([])
-                continue
-            lengths: list[int] = []
-            current = seg[0]
-            count = 0
-            for seg_id in seg:
-                if seg_id != current:
-                    lengths.append(count)
-                    current = seg_id
-                    count = 1
-                else:
-                    count += 1
-            if count > 0:
-                lengths.append(count)
-            packed_seqlens.append(lengths)
+        # Segment lengths were tracked directly while packing; avoid an extra
+        # per-token scan over segment IDs.
+        packed_seqlens: list[list[int]] = packed_segments
 
         max_segments = self.max_segments if packed_seqlens else 0
         if max_segments and any(

@@ -572,15 +572,17 @@ class TestModelForward(unittest.TestCase):
         )
         self.assertFalse(model.config.tie_word_embeddings)
 
-    def test_packed_seqlens_cuda_raises(self):
-        """Ensure CUDA packed_seqlens fails fast to avoid syncs."""
+    def test_packed_seqlens_cuda_is_supported(self):
+        """Ensure CUDA packed_seqlens metadata is accepted."""
         if not torch.cuda.is_available():
-            self.skipTest("CUDA required to validate packed_seqlens guard.")
+            self.skipTest("CUDA required to validate packed_seqlens on-device path.")
         from neobert.model.model import _normalize_packed_seqlens
 
         packed = torch.tensor([[1, 2]], device="cuda", dtype=torch.int32)
-        with self.assertRaises(RuntimeError):
-            _normalize_packed_seqlens(packed, seq_len=2)
+        normalized = _normalize_packed_seqlens(packed, seq_len=3)
+        assert normalized is not None
+        self.assertEqual(normalized.device.type, "cuda")
+        self.assertEqual(normalized.dtype, torch.int32)
 
     def test_hf_rope_disabled_uses_positional_embeddings(self):
         """Ensure HF model runs when RoPE is disabled."""
