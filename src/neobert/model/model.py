@@ -62,7 +62,7 @@ def _normalize_pad_mask(pad_mask: torch.Tensor) -> torch.Tensor:
 
 def _infer_single_segment_packed_seqlens_from_pad_mask(
     pad_mask: torch.Tensor, seq_len: int
-) -> Optional[list[list[int]]]:
+) -> Optional[torch.Tensor]:
     """Infer packed lengths from an additive pad mask.
 
     This only works for prefix padding masks where tokens are unmasked first and
@@ -70,7 +70,7 @@ def _infer_single_segment_packed_seqlens_from_pad_mask(
 
     :param torch.Tensor pad_mask: Additive pad mask (0/-inf).
     :param int seq_len: Sequence length for validation.
-    :return torch.Tensor | list[list[int]] | None: Packed lengths per batch item.
+    :return torch.Tensor | None: Packed lengths tensor shaped ``[B, 1]``.
     """
     if not torch.is_tensor(pad_mask):
         raise TypeError("pad_mask must be a torch.Tensor")
@@ -97,28 +97,25 @@ def _infer_single_segment_packed_seqlens_from_pad_mask(
     if not torch.all(keep_int.cummin(dim=-1).values == keep_int):
         return None
 
-    lengths = keep_int.sum(dim=-1).tolist()
-    return [[int(min(seq_len, length))] for length in lengths]
+    lengths = keep_int.sum(dim=-1).clamp(max=seq_len).to(torch.int32)
+    return lengths.unsqueeze(1).cpu()
 
 
 def _normalize_packed_seqlens(
     packed_seqlens: Any,
     *,
     seq_len: Optional[int] = None,
-) -> Optional[list[list[int]]]:
-    """Normalize packed sequence lengths to Python lists.
+) -> Optional[torch.Tensor]:
+    """Normalize packed sequence lengths to CPU int32 tensors.
 
     :param Any packed_seqlens: Packed segment lengths tensor or list.
     :param int | None seq_len: Optional sequence length for validation.
-    :return list[list[int]] | None: Packed segment lengths.
+    :return torch.Tensor | None: Packed segment lengths tensor of shape ``[B, N]``.
     """
     if packed_seqlens is None:
         return None
 
     if torch.is_tensor(packed_seqlens):
-        if packed_seqlens.numel() == 0:
-            rows = int(packed_seqlens.shape[0]) if packed_seqlens.ndim > 0 else 0
-            return [[] for _ in range(rows)]
         tensor = packed_seqlens.detach()
         if tensor.is_cuda:
             raise RuntimeError(
@@ -126,42 +123,50 @@ def _normalize_packed_seqlens(
                 "dataloader device placement bug; keep packed_seqlens on CPU to "
                 "avoid GPU syncs."
             )
-        tensor = tensor.cpu().to(torch.int32)
-
+        tensor = tensor.cpu()
         if tensor.ndim == 1:
             tensor = tensor.unsqueeze(1)
-
-        if tensor.ndim == 2:
-            out: list[list[int]] = []
-            for row in tensor.tolist():
-                segs = [int(x) for x in row if int(x) > 0]
-                if seq_len is not None and sum(segs) > seq_len:
-                    raise ValueError(
-                        f"packed_seqlens sums to {sum(segs)} > seq_len={seq_len}: {segs}"
-                    )
-                out.append(segs)
-            return out
-
-        raise ValueError(
-            "packed_seqlens tensor must be rank 1 or 2, got "
-            f"shape={tuple(tensor.shape)}"
-        )
-
-    if isinstance(packed_seqlens, list):
-        out: list[list[int]] = []
+        if tensor.ndim != 2:
+            raise ValueError(
+                "packed_seqlens tensor must be rank 1 or 2, got "
+                f"shape={tuple(tensor.shape)}"
+            )
+        tensor = tensor.to(torch.int32)
+    elif isinstance(packed_seqlens, list):
+        normalized_rows: list[list[int]] = []
+        max_segments = 0
         for row in packed_seqlens:
             if row is None:
-                out.append([])
-                continue
-            segs = [int(x) for x in row if int(x) > 0]
-            if seq_len is not None and sum(segs) > seq_len:
-                raise ValueError(
-                    f"packed_seqlens sums to {sum(segs)} > seq_len={seq_len}: {segs}"
-                )
-            out.append(segs)
-        return out
+                segs: list[int] = []
+            else:
+                segs = [int(x) for x in row if int(x) > 0]
+            normalized_rows.append(segs)
+            max_segments = max(max_segments, len(segs))
 
-    raise TypeError(f"Unsupported packed_seqlens type: {type(packed_seqlens).__name__}")
+        tensor = torch.zeros(
+            (len(normalized_rows), max_segments),
+            dtype=torch.int32,
+        )
+        for idx, segs in enumerate(normalized_rows):
+            if not segs:
+                continue
+            tensor[idx, : len(segs)] = torch.tensor(segs, dtype=torch.int32)
+    else:
+        raise TypeError(
+            f"Unsupported packed_seqlens type: {type(packed_seqlens).__name__}"
+        )
+
+    if seq_len is not None:
+        sums = tensor.clamp_min(0).sum(dim=1)
+        bad = sums > seq_len
+        if bad.any():
+            bad_idx = int(torch.where(bad)[0][0].item())
+            raise ValueError(
+                "packed_seqlens sum exceeds seq_len "
+                f"(row={bad_idx}, sum={int(sums[bad_idx].item())}, seq_len={seq_len})."
+            )
+
+    return tensor
 
 
 class SwiGLU(nn.Module):

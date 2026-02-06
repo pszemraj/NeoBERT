@@ -249,7 +249,7 @@ def _run_eval(
                 ):
                     break
                 batch = _move_batch_to_device(batch, accelerator.device)
-                packed_seqlens = _packed_seqlens_to_list(batch.get("packed_seqlens"))
+                packed_seqlens = _packed_seqlens_to_tensor(batch.get("packed_seqlens"))
                 pad_mask = (
                     None
                     if packed_seqlens is not None
@@ -288,27 +288,24 @@ def _run_eval(
             model.train()
 
 
-def _packed_seqlens_to_list(
+def _packed_seqlens_to_tensor(
     packed_seqlens: Any,
-) -> Optional[list[list[int]]]:
-    """Normalize packed sequence lengths to Python lists.
+) -> Optional[torch.Tensor]:
+    """Normalize packed sequence lengths to CPU int32 tensors.
 
     :param Any packed_seqlens: Packed segment lengths tensor or list.
-    :return list[list[int]] | None: Packed segment lengths.
+    :return torch.Tensor | None: Packed segment lengths.
     """
     if packed_seqlens is None:
         return None
     if torch.is_tensor(packed_seqlens):
-        if packed_seqlens.numel() == 0:
-            rows = int(packed_seqlens.shape[0]) if packed_seqlens.ndim > 0 else 0
-            return [[] for _ in range(rows)]
         if packed_seqlens.is_cuda:
             raise RuntimeError(
                 "packed_seqlens must be a CPU tensor. This indicates a collator or "
                 "dataloader device placement bug; keep packed_seqlens on CPU to "
                 "avoid GPU syncs."
             )
-        cpu = packed_seqlens.detach().cpu().to(torch.int32)
+        cpu = packed_seqlens.detach().cpu()
         if cpu.ndim == 1:
             cpu = cpu.unsqueeze(1)
         if cpu.ndim != 2:
@@ -316,8 +313,23 @@ def _packed_seqlens_to_list(
                 "packed_seqlens tensor must be rank 1 or 2, got "
                 f"shape={tuple(cpu.shape)}"
             )
-        return [[int(x) for x in row if int(x) > 0] for row in cpu.tolist()]
-    return [[int(x) for x in row if int(x) > 0] for row in packed_seqlens]
+        return cpu.to(torch.int32)
+
+    normalized_rows: list[list[int]] = []
+    max_segments = 0
+    for row in packed_seqlens:
+        if row is None:
+            segs: list[int] = []
+        else:
+            segs = [int(x) for x in row if int(x) > 0]
+        normalized_rows.append(segs)
+        max_segments = max(max_segments, len(segs))
+
+    tensor = torch.zeros((len(normalized_rows), max_segments), dtype=torch.int32)
+    for idx, segs in enumerate(normalized_rows):
+        if segs:
+            tensor[idx, : len(segs)] = torch.tensor(segs, dtype=torch.int32)
+    return tensor
 
 
 def _scale_gradients(model: torch.nn.Module, scale: torch.Tensor) -> None:
@@ -1385,7 +1397,7 @@ def trainer(cfg: Config) -> None:
 
             num_pred = (batch["labels"] != -100).sum()
             num_tokens = (batch["input_ids"] != model_config.pad_token_id).sum()
-            packed_seqlens = _packed_seqlens_to_list(batch.get("packed_seqlens"))
+            packed_seqlens = _packed_seqlens_to_tensor(batch.get("packed_seqlens"))
             pad_mask = (
                 None
                 if packed_seqlens is not None

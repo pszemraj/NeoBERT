@@ -93,11 +93,68 @@ def packed_seqlens_to_cu_seqlens(
     return torch.tensor(cu, dtype=torch.int32, device=device), max_seqlen
 
 
+def _normalize_packed_seqlens_tensor(
+    packed_seqlens: PackedSeqLens,
+    *,
+    batch_size: int,
+    seq_len: int,
+) -> torch.Tensor:
+    """Normalize packed metadata to a fixed-rank CPU int32 tensor.
+
+    :param torch.Tensor | list[list[int]] packed_seqlens: Packed segment lengths.
+    :param int batch_size: Expected batch size.
+    :param int seq_len: Expected padded sequence length.
+    :return torch.Tensor: CPU ``int32`` tensor of shape ``[B, N]``.
+    """
+    if torch.is_tensor(packed_seqlens):
+        if packed_seqlens.is_cuda:
+            raise RuntimeError("packed_seqlens metadata must stay on CPU.")
+        tensor = packed_seqlens.detach().cpu()
+        if tensor.ndim == 1:
+            tensor = tensor.unsqueeze(1)
+        if tensor.ndim != 2:
+            raise ValueError(
+                "packed_seqlens tensor must be rank 1 or 2, got "
+                f"shape={tuple(tensor.shape)}"
+            )
+        tensor = tensor.to(torch.int32)
+    else:
+        normalized_rows: list[list[int]] = []
+        max_segments = 0
+        for row in packed_seqlens:
+            if row is None:
+                segs: list[int] = []
+            else:
+                segs = [int(x) for x in row if int(x) > 0]
+            normalized_rows.append(segs)
+            max_segments = max(max_segments, len(segs))
+        tensor = torch.zeros((len(normalized_rows), max_segments), dtype=torch.int32)
+        for idx, segs in enumerate(normalized_rows):
+            if not segs:
+                continue
+            tensor[idx, : len(segs)] = torch.tensor(segs, dtype=torch.int32)
+
+    if tensor.shape[0] != batch_size:
+        raise ValueError(
+            "packed_seqlens batch mismatch: "
+            f"{tensor.shape[0]} != batch_size={batch_size}"
+        )
+    sums = tensor.clamp_min(0).sum(dim=1)
+    bad = sums > seq_len
+    if bad.any():
+        bad_idx = int(torch.where(bad)[0][0].item())
+        raise ValueError(
+            "packed_seqlens sums exceed seq_len "
+            f"(row={bad_idx}, sum={int(sums[bad_idx].item())}, seq_len={seq_len})."
+        )
+    return tensor
+
+
 def _flash_varlen_attention(
     xq: torch.Tensor,
     xk: torch.Tensor,
     xv: torch.Tensor,
-    packed_seqlens: list[list[int]],
+    packed_seqlens: torch.Tensor,
     dropout_p: float,
     scale: float | None = None,
 ) -> torch.Tensor:
@@ -109,39 +166,56 @@ def _flash_varlen_attention(
     :param torch.Tensor xq: Query ``(B, S, H, D)``.
     :param torch.Tensor xk: Key ``(B, S, H, D)``.
     :param torch.Tensor xv: Value ``(B, S, H, D)``.
-    :param list[list[int]] packed_seqlens: Segment lengths per batch item.
+    :param torch.Tensor packed_seqlens: Packed lengths ``[B, N]`` on CPU.
     :param float dropout_p: Dropout probability.
     :param float | None scale: Softmax scale.
     :return torch.Tensor: Output ``(B, S, H, D)``.
     """
     assert _flash_attn_varlen_func is not None
     batch_size, seq_len, num_heads, head_dim = xq.shape
+    seg_lens_cuda = packed_seqlens.clamp_min(0).to(device=xq.device, dtype=torch.int32)
+    valid_tokens = seg_lens_cuda.sum(dim=1, dtype=torch.int64)
 
-    # Flatten valid segments into a 1-D token stream
-    q_parts: list[torch.Tensor] = []
-    k_parts: list[torch.Tensor] = []
-    v_parts: list[torch.Tensor] = []
-    for b, segs in enumerate(packed_seqlens):
-        start = 0
-        for seg_len in segs:
-            if seg_len <= 0:
-                continue
-            end = start + seg_len
-            q_parts.append(xq[b, start:end])  # (seg_len, H, D)
-            k_parts.append(xk[b, start:end])
-            v_parts.append(xv[b, start:end])
-            start = end
-
-    if not q_parts:
+    batch_ids = torch.repeat_interleave(
+        torch.arange(batch_size, device=xq.device, dtype=torch.long), valid_tokens
+    )
+    if batch_ids.shape[0] == 0:
         return torch.zeros_like(xq)
 
-    q_flat = torch.cat(q_parts, dim=0)  # (total_tokens, H, D)
-    k_flat = torch.cat(k_parts, dim=0)
-    v_flat = torch.cat(v_parts, dim=0)
-
-    cu_seqlens, max_seqlen = packed_seqlens_to_cu_seqlens(
-        packed_seqlens, device=xq.device
+    token_offsets = torch.cumsum(valid_tokens, dim=0) - valid_tokens
+    stream_positions = torch.arange(
+        batch_ids.shape[0], device=xq.device, dtype=torch.long
     )
+    positions_in_batch = stream_positions - token_offsets.index_select(0, batch_ids)
+    flat_token_indices = batch_ids * seq_len + positions_in_batch
+
+    xq_flat = xq.reshape(batch_size * seq_len, num_heads, head_dim)
+    xk_flat = xk.reshape(batch_size * seq_len, num_heads, head_dim)
+    xv_flat = xv.reshape(batch_size * seq_len, num_heads, head_dim)
+    q_flat = xq_flat.index_select(0, flat_token_indices)
+    k_flat = xk_flat.index_select(0, flat_token_indices)
+    v_flat = xv_flat.index_select(0, flat_token_indices)
+
+    seg_counts = (seg_lens_cuda > 0).sum(dim=1, dtype=torch.int64)
+    seg_batch_ids = torch.repeat_interleave(
+        torch.arange(batch_size, device=xq.device, dtype=torch.long), seg_counts
+    )
+    if seg_batch_ids.shape[0] == 0:
+        return torch.zeros_like(xq)
+
+    seg_offsets = torch.cumsum(seg_counts, dim=0) - seg_counts
+    seg_positions = torch.arange(
+        seg_batch_ids.shape[0], device=xq.device, dtype=torch.long
+    )
+    seg_cols = seg_positions - seg_offsets.index_select(0, seg_batch_ids)
+    seg_lens_flat = seg_lens_cuda[seg_batch_ids, seg_cols]
+
+    cu_seqlens = torch.empty(
+        seg_lens_flat.shape[0] + 1, dtype=torch.int32, device=xq.device
+    )
+    cu_seqlens[0] = 0
+    cu_seqlens[1:] = seg_lens_flat.cumsum(dim=0, dtype=torch.int32)
+    max_seqlen = seq_len
 
     softmax_scale = scale if scale is not None else (1.0 / math.sqrt(head_dim))
 
@@ -158,27 +232,16 @@ def _flash_varlen_attention(
     )
 
     # Reconstruct back to (B, S, H, D)
-    attn = torch.zeros_like(xq)
-    seg_idx = 0
-    for b, segs in enumerate(packed_seqlens):
-        start = 0
-        for seg_len in segs:
-            if seg_len <= 0:
-                continue
-            end = start + seg_len
-            token_count = seg_len
-            attn[b, start:end] = out_flat[seg_idx : seg_idx + token_count]
-            seg_idx += token_count
-            start = end
-
-    return attn
+    attn_flat = torch.zeros_like(xq_flat)
+    attn_flat.index_copy_(0, flat_token_indices, out_flat)
+    return attn_flat.view(batch_size, seq_len, num_heads, head_dim)
 
 
 def _sdpa_packed_fallback(
     xq: torch.Tensor,
     xk: torch.Tensor,
     xv: torch.Tensor,
-    packed_seqlens: list[list[int]],
+    packed_seqlens: torch.Tensor,
     dropout_p: float,
     scale: float | None = None,
 ) -> torch.Tensor:
@@ -189,7 +252,7 @@ def _sdpa_packed_fallback(
     :param torch.Tensor xq: Query ``(B, S, H, D)``.
     :param torch.Tensor xk: Key ``(B, S, H, D)``.
     :param torch.Tensor xv: Value ``(B, S, H, D)``.
-    :param list[list[int]] packed_seqlens: Segment lengths per batch item.
+    :param torch.Tensor packed_seqlens: Packed lengths ``[B, N]`` on CPU.
     :param float dropout_p: Dropout probability.
     :param float | None scale: Softmax scale.
     :return torch.Tensor: Output ``(B, S, H, D)``.
@@ -203,9 +266,11 @@ def _sdpa_packed_fallback(
         _WARNED_SDPA_PACKED_GPU = True
 
     attn = torch.zeros_like(xq)
-    for b, segs in enumerate(packed_seqlens):
+    seg_lens = packed_seqlens.clamp_min(0)
+    for b in range(seg_lens.shape[0]):
         start = 0
-        for seg_len in segs:
+        for seg_len_tensor in seg_lens[b]:
+            seg_len = int(seg_len_tensor.item())
             if seg_len <= 0:
                 continue
             end = start + seg_len
@@ -255,22 +320,11 @@ def attention_forward(
     """
     attn_backend = canonicalize_attn_backend(attn_backend)
     if packed_seqlens is not None:
-        if torch.is_tensor(packed_seqlens):
-            if packed_seqlens.is_cuda:
-                raise RuntimeError("packed_seqlens metadata must stay on CPU.")
-            tensor = packed_seqlens.detach().cpu().to(torch.int32)
-            if tensor.ndim == 1:
-                tensor = tensor.unsqueeze(1)
-            if tensor.ndim != 2:
-                raise ValueError(
-                    "packed_seqlens tensor must be rank 1 or 2, got "
-                    f"shape={tuple(tensor.shape)}"
-                )
-            packed_list = [
-                [int(x) for x in row if int(x) > 0] for row in tensor.tolist()
-            ]
-        else:
-            packed_list = packed_seqlens
+        packed_tensor = _normalize_packed_seqlens_tensor(
+            packed_seqlens,
+            batch_size=xq.shape[0],
+            seq_len=xq.shape[1],
+        )
         # Packed sequences
         if attn_backend == "flash_attn_varlen":
             if not xq.is_cuda:
@@ -283,9 +337,9 @@ def attention_forward(
                     "attn_backend='flash_attn_varlen' requested but flash-attn is not "
                     f"available: {FLASH_ATTN_ERROR}"
                 )
-            return _flash_varlen_attention(xq, xk, xv, packed_list, dropout_p, scale)
+            return _flash_varlen_attention(xq, xk, xv, packed_tensor, dropout_p, scale)
         # SDPA per-segment fallback (works on CPU + GPU)
-        return _sdpa_packed_fallback(xq, xk, xv, packed_list, dropout_p, scale)
+        return _sdpa_packed_fallback(xq, xk, xv, packed_tensor, dropout_p, scale)
 
     # Unpacked: always use SDPA
     # SDPA expects (B, H, S, D), our input is (B, S, H, D)
