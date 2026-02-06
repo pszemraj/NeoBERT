@@ -355,6 +355,42 @@ def _scale_gradients(model: torch.nn.Module, scale: torch.Tensor) -> None:
                 grad.mul_(scale_value)
 
 
+def _gradient_token_scale(
+    tokens_global: torch.Tensor,
+    *,
+    num_processes: int,
+    grad_accumulation_steps: int,
+) -> tuple[Optional[torch.Tensor], bool]:
+    """Compute safe post-accumulation gradient scale.
+
+    We target per-token mean gradients for summed MLM losses, but clamp the
+    denominator to at least one masked token per rank per accumulation step to
+    avoid pathological gradient amplification on near-empty masked batches.
+
+    :param torch.Tensor tokens_global: Global masked-token count for the update.
+    :param int num_processes: Number of distributed processes.
+    :param int grad_accumulation_steps: Gradient accumulation steps.
+    :return tuple[torch.Tensor | None, bool]: ``(scale, clamped)``; ``scale`` is
+        ``None`` when no masked tokens are present.
+    """
+    if int(tokens_global.item()) <= 0:
+        return None, False
+
+    min_tokens = max(1, int(num_processes) * int(grad_accumulation_steps))
+    clamped_tokens = torch.clamp(tokens_global.float(), min=float(min_tokens))
+    scale = (float(min_tokens) / clamped_tokens).to(tokens_global.device)
+    return scale, bool(tokens_global.item() < min_tokens)
+
+
+def _clear_stored_batch(stored_batch: BatchEncoding) -> None:
+    """Drop buffered batch fragments in-place.
+
+    :param BatchEncoding stored_batch: Batch fragment buffer.
+    """
+    for key in list(stored_batch.keys()):
+        stored_batch[key] = None
+
+
 def _resolve_pack_token_limits(
     tokenizer: PreTrainedTokenizerBase, max_length: int
 ) -> Tuple[int, Optional[int], Optional[int]]:
@@ -1320,7 +1356,11 @@ def trainer(cfg: Config) -> None:
 
     # Loss function — use Liger CE when available, else standard PyTorch
     resolved_kb = resolve_kernel_backend(cfg.model.kernel_backend)
-    train_loss_fn = get_cross_entropy_loss(reduction="sum", backend=resolved_kb)
+    train_loss_fn = get_cross_entropy_loss(
+        reduction="sum",
+        ignore_index=-100,
+        backend=resolved_kb,
+    )
     eval_max_batches = getattr(cfg.trainer, "eval_max_batches", None)
     if isinstance(eval_max_batches, int) and eval_max_batches <= 0:
         eval_max_batches = None
@@ -1371,6 +1411,7 @@ def trainer(cfg: Config) -> None:
         "labels": None,
         "packed_seqlens": None,
     }
+    warned_low_token_scale = False
     while cfg.trainer.max_steps > metrics["train/steps"]:
         # Use skipped_train_dataloader the first epoch after resuming
         dataloader = (
@@ -1382,6 +1423,10 @@ def trainer(cfg: Config) -> None:
             # Pack or truncate the batch to target batch size (batch size might be variable due to sequence packing).
             # Skip batch buffering when using packed sequences, as packed_seqlens metadata would be lost.
             is_packed = batch.get("packed_seqlens") is not None
+            if is_packed and _has_stored_batch(stored_batch):
+                # Mixed packed/non-packed collator outputs are not expected in normal
+                # runs. Clear stale buffered fragments to avoid mode-transition leaks.
+                _clear_stored_batch(stored_batch)
             if not is_packed and (
                 batch["input_ids"].shape[0] != cfg.trainer.per_device_train_batch_size
                 or _has_stored_batch(stored_batch)
@@ -1438,20 +1483,32 @@ def trainer(cfg: Config) -> None:
             if sync_gradients:
                 # Reduce to global token count to handle uneven sharding across ranks.
                 tokens_global = accelerator.reduce(accum_tokens, reduction="sum")
-                if tokens_global.item() > 0:
+                scale, clamped = _gradient_token_scale(
+                    tokens_global,
+                    num_processes=accelerator.num_processes,
+                    grad_accumulation_steps=accelerator.gradient_accumulation_steps,
+                )
+                if scale is not None:
                     # Match full-batch normalization across variable-length microbatches.
                     # accelerator.backward() already divides by grad_accumulation_steps, and DDP averages
                     # across processes on the sync step, so we rescale by
-                    # (num_processes * grad_accum_steps) / tokens_global
-                    # to recover per-token mean gradients for the global batch size.
+                    # (num_processes * grad_accum_steps) / tokens_global.
+                    # For near-empty masked updates, we floor tokens_global to one token
+                    # per rank per accumulation step to avoid gradient amplification.
                     # This post-accumulation rescale is equivalent to scaling each microbatch loss
                     # because gradients are linear in the loss scalar.
                     # Ref: Unsloth blog (archived) https://archive.ph/RmO0U
-                    scale = (
-                        accelerator.num_processes
-                        * accelerator.gradient_accumulation_steps
-                    ) / tokens_global.float()
                     _scale_gradients(model, scale)
+                    if clamped and not warned_low_token_scale:
+                        warned_low_token_scale = True
+                        logger.warning(
+                            "Masked-token count was below the safe minimum for an update "
+                            "(tokens_global=%s, min=%s); clamped gradient scale to avoid "
+                            "pathological amplification.",
+                            int(tokens_global.item()),
+                            accelerator.num_processes
+                            * accelerator.gradient_accumulation_steps,
+                        )
                 else:
                     for param in model.parameters():
                         if param.grad is not None:

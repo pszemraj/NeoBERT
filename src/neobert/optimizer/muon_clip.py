@@ -1547,9 +1547,12 @@ class MuonClipOptimizer(Optimizer):
         num_heads = self.model_config.num_attention_heads
         head_dim = hidden_size // num_heads
 
-        if param.numel() != 3 * hidden_size * hidden_size:
+        expected_shape = (3 * hidden_size, hidden_size)
+        if param.shape != expected_shape:
             raise RuntimeError(
-                f"Unexpected QKV parameter shape {tuple(param.shape)} for hidden_size={hidden_size}"
+                "Unexpected fused QKV parameter layout "
+                f"{tuple(param.shape)}; expected {expected_shape} for per-head interleaved "
+                "rows [Q_h, K_h, V_h]."
             )
 
         # Ensure scaling factors are finite and on the right device/dtype
@@ -1560,8 +1563,8 @@ class MuonClipOptimizer(Optimizer):
         eta_q = eta.pow(alpha).view(num_heads, 1, 1)
         eta_k = eta.pow(1 - alpha).view(num_heads, 1, 1)
 
-        # Reshape parameter to [num_heads, 3 * head_dim, hidden_size] to match
-        # the model's per-head interleaved fused-QKV layout.
+        # Reshape to [H, 3*D, hidden] to match EncoderBlock._att_block:
+        # self.qkv(x).view(B,S,H,3*D).chunk(3, dim=-1).
         param_view = param.view(num_heads, 3 * head_dim, hidden_size)
         q_slice = slice(0, head_dim)
         k_slice = slice(head_dim, 2 * head_dim)

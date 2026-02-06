@@ -435,6 +435,19 @@ class TestPretrainComponents(unittest.TestCase):
         self.assertIsNone(out["packed_seqlens"])
         self.assertIsNone(stored["packed_seqlens"])
 
+    def test_clear_stored_batch_drops_mode_transition_fragments(self):
+        """Ensure stale buffered fragments are cleared on packed-mode transitions."""
+        from neobert.pretraining.trainer import _clear_stored_batch
+
+        stored_batch = {
+            "input_ids": torch.zeros((2, 4), dtype=torch.long),
+            "attention_mask": torch.ones((2, 4), dtype=torch.float32),
+            "labels": torch.zeros((2, 4), dtype=torch.long),
+            "packed_seqlens": None,
+        }
+        _clear_stored_batch(stored_batch)
+        self.assertTrue(all(value is None for value in stored_batch.values()))
+
     def test_optimizer_creation(self):
         """Test optimizer creation from config."""
         config = ConfigLoader.load(

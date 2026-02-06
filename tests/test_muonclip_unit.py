@@ -204,6 +204,29 @@ class TestMuonClipOptimizer:
         view[:, : config.dim_head].mul_(eta.view(-1, 1, 1))
         assert torch.allclose(qkv_param, expected)
 
+    def test_qkv_scaling_rejects_non_interleaved_layout(self):
+        """Ensure fused QKV scaling fails fast on incompatible weight layouts."""
+        config = NeoBERTConfig(
+            hidden_size=4,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=16,
+            vocab_size=32,
+            max_length=8,
+            attn_backend="sdpa",
+            hidden_act="gelu",
+            rope=False,
+        )
+        model = NeoBERT(config)
+        optimizer = MuonClipOptimizer(
+            model, config, MuonClipConfig(enable_clipping=False)
+        )
+        bad_layout = torch.nn.Parameter(torch.zeros(4, 12))
+        eta = torch.tensor([0.5, 0.25], dtype=bad_layout.dtype)
+
+        with pytest.raises(RuntimeError, match="Unexpected fused QKV parameter layout"):
+            optimizer._scale_qkv_weights(bad_layout, eta, alpha=1.0)
+
     def test_packed_attention_logit_max_ignores_cross_segment(self):
         """Cross-segment logits must not affect max in packed mode."""
         config = NeoBERTConfig(

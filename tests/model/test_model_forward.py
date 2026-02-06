@@ -552,6 +552,26 @@ class TestModelForward(unittest.TestCase):
             hf_model.decoder.weight.data_ptr(), hf_model.model.encoder.weight.data_ptr()
         )
 
+    def test_lm_head_ngpt_does_not_tie_embeddings(self):
+        """Ensure ngpt LM head does not tie token embeddings to decoder weights."""
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            intermediate_size=64,
+            vocab_size=16,
+            max_length=8,
+            attn_backend="sdpa",
+            ngpt=True,
+            hidden_act="gelu",
+            tie_word_embeddings=True,
+        )
+        model = NeoBERTLMHead(config)
+        self.assertNotEqual(
+            model.decoder.weight.data_ptr(), model.model.encoder.weight.data_ptr()
+        )
+        self.assertFalse(model.config.tie_word_embeddings)
+
     def test_packed_seqlens_cuda_raises(self):
         """Ensure CUDA packed_seqlens fails fast to avoid syncs."""
         if not torch.cuda.is_available():
@@ -702,6 +722,8 @@ class TestModelForward(unittest.TestCase):
         buffers = dict(model.named_buffers())
         self.assertIn("freqs_cis", buffers)
         self.assertNotIn("freqs_cis", model.state_dict())
+        self.assertEqual(model.freqs_cis.shape[0], rope_config.max_length)
+        ptr_before = model.freqs_cis.data_ptr()
 
         with torch.no_grad():
             _ = model(self.input_ids, self.pad_mask)
@@ -709,6 +731,37 @@ class TestModelForward(unittest.TestCase):
         self.assertIn("freqs_cis", buffers)
         self.assertNotIn("freqs_cis", model.state_dict())
         self.assertGreater(model.freqs_cis.numel(), 0)
+        self.assertEqual(model.freqs_cis.data_ptr(), ptr_before)
+
+    def test_normalize_pad_mask_upcasts_to_float32(self):
+        """Ensure additive masks are upcast to float32 for softmax stability."""
+        from neobert.model.model import _normalize_pad_mask
+
+        pad_mask = torch.zeros((2, 4), dtype=torch.bfloat16)
+        normalized = _normalize_pad_mask(pad_mask)
+        self.assertEqual(normalized.dtype, torch.float32)
+        self.assertEqual(normalized.shape, (2, 1, 1, 4))
+
+    def test_normalize_pad_mask_rejects_non_floating_masks(self):
+        """Ensure integer masks fail fast to enforce additive-mask semantics."""
+        from neobert.model.model import _normalize_pad_mask
+
+        int_mask = torch.ones((2, 4), dtype=torch.int64)
+        with self.assertRaises(TypeError):
+            _normalize_pad_mask(int_mask)
+
+    def test_infer_single_segment_rejects_fully_padded_rows(self):
+        """Ensure packed inference falls back when any sample has zero valid tokens."""
+        from neobert.model.model import (
+            _infer_single_segment_packed_seqlens_from_pad_mask,
+        )
+
+        pad_mask = torch.full((2, 4), float("-inf"), dtype=torch.float32)
+        pad_mask[1, :2] = 0.0
+        inferred = _infer_single_segment_packed_seqlens_from_pad_mask(
+            pad_mask, seq_len=4
+        )
+        self.assertIsNone(inferred)
 
     def test_rotary_accepts_batched_freqs(self):
         """Ensure rotary helper supports batched frequency tensors."""
@@ -943,6 +996,22 @@ class TestModelForward(unittest.TestCase):
         model = NeoBERTForSequenceClassification(config, num_labels=2)
         self.assertEqual(model.model.config.attn_backend, "sdpa")
 
+    def test_seq_class_uses_norm_backbone_when_ngpt_enabled(self):
+        """Ensure ngpt classification uses NormNeoBERT backbone."""
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=8,
+            attn_backend="sdpa",
+            ngpt=True,
+            hidden_act="gelu",
+        )
+        model = NeoBERTForSequenceClassification(config, num_labels=2)
+        self.assertIsInstance(model.model, NormNeoBERT)
+
     def test_hf_seq_class_forces_sdpa_backend(self):
         """Ensure NeoBERTHFForSequenceClassification forces attn_backend='sdpa'."""
         config = NeoBERTConfig(
@@ -958,6 +1027,23 @@ class TestModelForward(unittest.TestCase):
         )
         model = NeoBERTHFForSequenceClassification(config)
         self.assertEqual(model.model.config.attn_backend, "sdpa")
+
+    def test_hf_seq_class_uses_norm_backbone_when_ngpt_enabled(self):
+        """Ensure HF ngpt classification uses NormNeoBERT backbone."""
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=8,
+            attn_backend="sdpa",
+            ngpt=True,
+            hidden_act="gelu",
+            num_labels=3,
+        )
+        model = NeoBERTHFForSequenceClassification(config)
+        self.assertIsInstance(model.model, NormNeoBERT)
 
     def test_mteb_encode_with_sdpa_backend(self):
         """Ensure MTEB encode works with attn_backend='sdpa'."""

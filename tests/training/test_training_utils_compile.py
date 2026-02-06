@@ -9,7 +9,7 @@ import pytest
 import torch
 from accelerate.utils import DistributedType
 
-from neobert.config import Config, MuonConfig
+from neobert.config import Config
 from neobert.training_utils import _maybe_compile_model
 
 
@@ -30,14 +30,12 @@ def _make_accelerator() -> SimpleNamespace:
     return SimpleNamespace(distributed_type=DistributedType.NO)
 
 
-def test_maybe_compile_model_skips_for_muonclip_clipping(
+def test_maybe_compile_model_allows_muonclip_clipping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Ensure MuonClip clipping disables compile to avoid crashes."""
+    """Ensure MuonClip clipping does not block torch.compile."""
     cfg = _make_cfg()
     cfg.optimizer.name = "muonclip"
-    cfg.optimizer.muon_config = MuonConfig()
-    cfg.optimizer.muon_config.enable_clipping = True
     model = torch.nn.Linear(8, 8)
 
     called = {"count": 0}
@@ -56,7 +54,7 @@ def test_maybe_compile_model_skips_for_muonclip_clipping(
     )
 
     assert out is model
-    assert called["count"] == 0
+    assert called["count"] == 1
 
 
 def test_maybe_compile_model_uses_configured_backend(

@@ -66,24 +66,6 @@ def _maybe_compile_model(
             "trainer.torch_compile is enabled but DeepSpeed is active; skipping torch.compile."
         )
         return model
-    optimizer_cfg = getattr(cfg, "optimizer", None)
-    optimizer_name = str(getattr(optimizer_cfg, "name", "")).lower()
-    is_muonclip = optimizer_name in {"muonclip", "muon-clip", "muon_clip"}
-    if is_muonclip:
-        muon_cfg = getattr(optimizer_cfg, "muon_config", None)
-        clipping_enabled = (
-            True
-            if muon_cfg is None
-            else bool(getattr(muon_cfg, "enable_clipping", True))
-        )
-        if clipping_enabled:
-            log.warning(
-                "trainer.torch_compile is enabled, but MuonClip clipping is active. "
-                "Disabling torch.compile because this combo is currently unstable "
-                "on this stack."
-            )
-            return model
-
     compile_backend = str(
         getattr(cfg.trainer, "torch_compile_backend", "inductor")
     ).lower()

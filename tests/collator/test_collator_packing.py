@@ -4,11 +4,12 @@
 import unittest
 import warnings
 
+import numpy as np
 import torch
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 
-from neobert.collator import DataCollatorWithPacking, get_collator
+from neobert.collator import CustomCollatorForMLM, DataCollatorWithPacking, get_collator
 
 
 class DummyPadCollator:
@@ -160,3 +161,25 @@ class TestCollatorPacking(unittest.TestCase):
             any("Skipping packed_seqlens" in str(w.message) for w in caught)
         )
         self.assertNotIn("packed_seqlens", batch)
+
+    def test_mask_all_numpy_path_masks_without_801010_split(self):
+        """Ensure numpy masking path follows 100% mask-all semantics."""
+        tokenizer = self._make_tokenizer()
+        collator = CustomCollatorForMLM(
+            tokenizer=tokenizer,
+            mlm_probability=1.0,
+        )
+        inputs = np.array([[3, 4, 0]], dtype=np.int64)
+        special_tokens_mask = np.array([[0, 0, 1]], dtype=np.int64)
+
+        masked_inputs, labels = collator.numpy_mask_tokens(
+            inputs.copy(),
+            special_tokens_mask=special_tokens_mask,
+        )
+
+        self.assertEqual(masked_inputs[0, 0], tokenizer.mask_token_id)
+        self.assertEqual(masked_inputs[0, 1], tokenizer.mask_token_id)
+        self.assertEqual(masked_inputs[0, 2], 0)
+        self.assertEqual(labels[0, 0], 3)
+        self.assertEqual(labels[0, 1], 4)
+        self.assertEqual(labels[0, 2], -100)

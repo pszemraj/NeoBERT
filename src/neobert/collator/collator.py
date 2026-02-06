@@ -4,6 +4,7 @@ from typing import Any, Callable, Optional, Tuple
 
 import warnings
 
+import numpy as np
 import torch
 from transformers import (
     DataCollatorForLanguageModeling,
@@ -45,6 +46,38 @@ class CustomCollatorForMLM(DataCollatorForLanguageModeling):
             self.tokenizer.mask_token
         )
 
+        return inputs, labels
+
+    def numpy_mask_tokens(
+        self, inputs: Any, special_tokens_mask: Optional[Any] = None
+    ) -> Tuple[Any, Any]:
+        """Prepare masked tokens/labels for MLM numpy path (100% mask).
+
+        :param Any inputs: Input token IDs.
+        :param Any | None special_tokens_mask: Optional special-token mask.
+        :return tuple[Any, Any]: Masked inputs and labels.
+        """
+        labels = inputs.copy()
+        probability_matrix = np.full(
+            labels.shape, self.mlm_probability, dtype=np.float32
+        )
+        if special_tokens_mask is None:
+            special_tokens_mask = [
+                self.tokenizer.get_special_tokens_mask(
+                    val, already_has_special_tokens=True
+                )
+                for val in labels.tolist()
+            ]
+            special_tokens_mask = np.asarray(special_tokens_mask, dtype=bool)
+        else:
+            special_tokens_mask = special_tokens_mask.astype(bool, copy=False)
+
+        probability_matrix[special_tokens_mask] = 0.0
+        masked_indices = np.random.binomial(1, probability_matrix).astype(bool)
+        labels[~masked_indices] = -100
+        inputs[masked_indices] = self.tokenizer.convert_tokens_to_ids(
+            self.tokenizer.mask_token
+        )
         return inputs, labels
 
 
@@ -369,11 +402,21 @@ def get_collator(
         )
 
         def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
+            """Collate tokenized features with packing enabled.
+
+            :param list[dict[str, Any]] batch: Pre-tokenized examples.
+            :return dict[str, Any]: Packed and collated batch.
+            """
             return collator(batch)
 
     else:
 
         def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
+            """Collate tokenized features for standard MLM pretraining.
+
+            :param list[dict[str, Any]] batch: Pre-tokenized examples.
+            :return dict[str, Any]: Collated MLM batch.
+            """
             batch = mlm_collator(batch)
             attention_mask = _ensure_attention_mask(
                 batch, getattr(tokenizer, "pad_token_id", None)

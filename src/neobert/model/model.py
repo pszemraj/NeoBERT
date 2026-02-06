@@ -45,10 +45,16 @@ def _normalize_pad_mask(pad_mask: torch.Tensor) -> torch.Tensor:
     """Normalize additive pad masks to a broadcast-friendly 4D shape.
 
     :param torch.Tensor pad_mask: Additive mask in 2D or 3D form.
-    :param int num_heads: Number of attention heads for validation.
     :return torch.Tensor: Mask shaped (B, 1, 1, S) or (B, 1, S, S).
     """
     # Training path expects additive float masks (0 for keep, -inf for mask).
+    if not pad_mask.is_floating_point():
+        raise TypeError(
+            "pad_mask must be an additive floating mask with 0 for keep and -inf for masked positions."
+        )
+    if pad_mask.dtype != torch.float32:
+        pad_mask = pad_mask.to(torch.float32)
+
     if pad_mask.dim() == 2:
         # Key padding mask; broadcast across query positions + heads.
         return pad_mask[:, None, None, :]
@@ -65,7 +71,7 @@ def _infer_single_segment_packed_seqlens_from_pad_mask(
 ) -> Optional[torch.Tensor]:
     """Infer packed lengths from an additive pad mask.
 
-    This only works for prefix padding masks where tokens are unmasked first and
+    This only works for right-padded masks where tokens are unmasked first and
     masked only at the tail. Returns None if the mask is not a simple padding mask.
 
     :param torch.Tensor pad_mask: Additive pad mask (0/-inf).
@@ -98,6 +104,9 @@ def _infer_single_segment_packed_seqlens_from_pad_mask(
         return None
 
     lengths = keep_int.sum(dim=-1).clamp(max=seq_len).to(torch.int32)
+    # Fully padded rows are not valid packed segments; keep additive-mask path.
+    if (lengths <= 0).any():
+        return None
     return lengths.unsqueeze(1).cpu()
 
 
@@ -712,8 +721,12 @@ class NeoBERT(NeoBERTPreTrainedModel):
         )
 
         if self.config.rope:
-            # Lazy RoPE cache; populated on first forward for the active device/length.
-            self.register_buffer("freqs_cis", torch.empty(0), persistent=False)
+            # Keep a fixed-size RoPE cache to avoid mutating buffers in forward().
+            self.register_buffer(
+                "freqs_cis",
+                precompute_freqs_cis(config.dim_head, config.max_length),
+                persistent=False,
+            )
         else:
             # Use a fixed padding index (0) for positional embeddings to decouple
             # position IDs from token padding IDs.
@@ -784,19 +797,17 @@ class NeoBERT(NeoBERTPreTrainedModel):
             if seq_len > self.config.max_length:
                 warnings.warn(
                     f"Sequence length {seq_len} exceeds max_length {self.config.max_length}; "
-                    "RoPE cache will grow to accommodate. Consider truncating inputs.",
+                    "using a transient RoPE cache for this forward. Consider truncating inputs.",
                     stacklevel=2,
                 )
-            target_len = max(self.config.max_length, seq_len)
-            if (
-                self.freqs_cis.numel() == 0
-                or self.freqs_cis.device != src.device
-                or self.freqs_cis.shape[0] < target_len
-            ):
-                self.freqs_cis = precompute_freqs_cis(
-                    self.config.dim_head, target_len, device=src.device
+                freqs_cis = precompute_freqs_cis(
+                    self.config.dim_head, seq_len, device=src.device
                 )
-            freqs_cis = self.freqs_cis[:seq_len]
+            else:
+                freqs_cis = self.freqs_cis
+                if freqs_cis.device != src.device:
+                    freqs_cis = freqs_cis.to(src.device)
+                freqs_cis = freqs_cis[:seq_len]
 
         # Embedding
         x = self.encoder(src)
@@ -854,8 +865,12 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
         )
 
         if self.config.rope:
-            # Lazy RoPE cache; populated on first forward for the active device/length.
-            self.register_buffer("freqs_cis", torch.empty(0), persistent=False)
+            # Keep a fixed-size RoPE cache to avoid mutating buffers in forward().
+            self.register_buffer(
+                "freqs_cis",
+                precompute_freqs_cis(config.dim_head, config.max_length),
+                persistent=False,
+            )
         else:
             # Use a fixed padding index (0) for positional embeddings to decouple
             # position IDs from token padding IDs.
@@ -919,19 +934,17 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
             if seq_len > self.config.max_length:
                 warnings.warn(
                     f"Sequence length {seq_len} exceeds max_length {self.config.max_length}; "
-                    "RoPE cache will grow to accommodate. Consider truncating inputs.",
+                    "using a transient RoPE cache for this forward. Consider truncating inputs.",
                     stacklevel=2,
                 )
-            target_len = max(self.config.max_length, seq_len)
-            if (
-                self.freqs_cis.numel() == 0
-                or self.freqs_cis.device != src.device
-                or self.freqs_cis.shape[0] < target_len
-            ):
-                self.freqs_cis = precompute_freqs_cis(
-                    self.config.dim_head, target_len, device=src.device
+                freqs_cis = precompute_freqs_cis(
+                    self.config.dim_head, seq_len, device=src.device
                 )
-            freqs_cis = self.freqs_cis[:seq_len]
+            else:
+                freqs_cis = self.freqs_cis
+                if freqs_cis.device != src.device:
+                    freqs_cis = freqs_cis.to(src.device)
+                freqs_cis = freqs_cis[:seq_len]
 
         # Embedding
         x = self.encoder(src)
@@ -986,8 +999,18 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
         self.model = NormNeoBERT(config) if self.config.ngpt else NeoBERT(config)
         self.decoder = nn.Linear(config.hidden_size, config.vocab_size)
 
+        should_tie = bool(getattr(self.config, "tie_word_embeddings", False))
+        if self.config.ngpt and should_tie:
+            logger.warning(
+                "Disabling tie_word_embeddings for ngpt=True. "
+                "NormNeoBERT emits unit-normalized hidden states, so tying decoder "
+                "weights to raw token embeddings is not a stable parameterization."
+            )
+            self.config.tie_word_embeddings = False
+            should_tie = False
+
         self.post_init()
-        if getattr(self.config, "tie_word_embeddings", False):
+        if should_tie:
             self.tie_weights()
 
     def get_input_embeddings(self) -> nn.Embedding:
@@ -1058,7 +1081,7 @@ class NeoBERTForSequenceClassification(NeoBERTPreTrainedModel):
         self.classifier_dropout = classifier_dropout
         self.classifier_init_range = classifier_init_range
 
-        self.model = NeoBERT(config)
+        self.model = NormNeoBERT(config) if config.ngpt else NeoBERT(config)
         if config.attn_backend != "sdpa":
             logger.warning(
                 "NeoBERTForSequenceClassification does not support packed attention; "
@@ -1122,7 +1145,7 @@ class NeoBERTHFForSequenceClassification(NeoBERTPreTrainedModel):
         self.classifier_dropout = getattr(config, "classifier_dropout", 0.1)
         self.classifier_init_range = getattr(config, "classifier_init_range", 0.02)
 
-        self.model = NeoBERT(config)
+        self.model = NormNeoBERT(config) if config.ngpt else NeoBERT(config)
         if config.attn_backend != "sdpa":
             logger.warning(
                 "NeoBERTHFForSequenceClassification does not support packed attention; "
@@ -1403,8 +1426,9 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
             if self.config.attn_backend != "sdpa":
                 # Packed path: compute packed_seqlens on CPU to avoid CUDA sync,
                 # then pass pad_mask=None so the model uses packed attention.
-                seqlens = int_mask.sum(dim=1).tolist()
-                packed_seqlens = [[int(s)] for s in seqlens]
+                packed_seqlens = int_mask.sum(dim=1, keepdim=True).to(
+                    device="cpu", dtype=torch.int32
+                )
                 outputs = self.model(input_ids, None, packed_seqlens=packed_seqlens)
                 pool_mask = int_mask.to(device=device, dtype=mask_dtype)
             else:
