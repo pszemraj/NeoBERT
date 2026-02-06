@@ -110,3 +110,31 @@ def test_maybe_compile_model_invalid_backend_falls_back_to_inductor(
 
     assert out is model
     assert captured["backend"] == "inductor"
+
+
+def test_maybe_compile_model_defaults_dynamic_false_for_packed_flash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure packed flash-attn still defaults to static compile."""
+    cfg = _make_cfg()
+    cfg.datacollator.pack_sequences = True
+    cfg.model.attn_backend = "flash_attn_varlen"
+    model = torch.nn.Linear(8, 8)
+
+    captured: dict[str, object] = {}
+
+    def _fake_compile(module: torch.nn.Module, **kwargs: object) -> torch.nn.Module:
+        captured.update(kwargs)
+        return module
+
+    monkeypatch.setattr(torch, "compile", _fake_compile)
+
+    out = _maybe_compile_model(
+        model=model,
+        cfg=cfg,
+        accelerator=_make_accelerator(),
+        log=logging.getLogger("test"),
+    )
+
+    assert out is model
+    assert captured["dynamic"] is False

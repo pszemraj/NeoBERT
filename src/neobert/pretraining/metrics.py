@@ -67,6 +67,7 @@ class Metrics(defaultdict):
             self[key] = 0
         for key in self.LOCAL_FLOAT_KEYS:
             self[key] = 0.0
+        self["train/compute_accuracy"] = 1
         self._last_log_time: float | None = None
         self._last_log_step: int | None = None
 
@@ -133,10 +134,11 @@ class Metrics(defaultdict):
                 / metrics_agg["train/local_num_pred"]
             )
             metrics_log["train/perplexity"] = math.exp(metrics_log["train/loss"])
-            metrics_log["train/accuracy"] = (
-                metrics_agg["train/local_num_correct"]
-                / metrics_agg["train/local_num_pred"]
-            )
+            if bool(self.get("train/compute_accuracy", 1)):
+                metrics_log["train/accuracy"] = (
+                    metrics_agg["train/local_num_correct"]
+                    / metrics_agg["train/local_num_pred"]
+                )
 
         # Extract the step value to pass separately to accelerator.log
         current_step = self.get("train/steps", 0)

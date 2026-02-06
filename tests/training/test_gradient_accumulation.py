@@ -87,13 +87,15 @@ class TestGradientAccumulationTokenWeighting(unittest.TestCase):
         assert scale is not None
         self.assertAlmostEqual(float(scale.item()), 1.0, places=6)
 
-    def test_gradient_token_scale_zero_tokens_returns_none(self):
-        """Ensure empty masked batches do not produce a scale factor."""
+    def test_gradient_token_scale_zero_tokens_clamps_to_safe_scale(self):
+        """Ensure empty masked batches use a safe clamped scale."""
         scale, clamped = _gradient_token_scale(
             torch.tensor(0, dtype=torch.long),
             num_processes=2,
             grad_accumulation_steps=2,
         )
 
-        self.assertIsNone(scale)
-        self.assertFalse(clamped)
+        self.assertIsNotNone(scale)
+        self.assertTrue(clamped)
+        assert scale is not None
+        self.assertAlmostEqual(float(scale.item()), 1.0, places=6)

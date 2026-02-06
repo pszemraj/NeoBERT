@@ -167,6 +167,8 @@ class TrainerConfig:
     eval_steps: int = 10000
     eval_max_batches: Optional[int] = None
     logging_steps: int = 100
+    log_train_accuracy: bool = False
+    log_grad_norm: bool = False
     output_dir: str = "./output"
     overwrite_output_dir: bool = True
     gradient_checkpointing: bool = False
@@ -1063,6 +1065,16 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         help="Gradient accumulation steps",
     )
     parser.add_argument("--trainer.max_steps", type=int, help="Maximum training steps")
+    parser.add_argument(
+        "--trainer.log_train_accuracy",
+        type=lambda x: x.lower() == "true",
+        help="Log MLM token accuracy during training (expensive)",
+    )
+    parser.add_argument(
+        "--trainer.log_grad_norm",
+        type=lambda x: x.lower() == "true",
+        help="Log gradient norm during training",
+    )
     parser.add_argument(
         "--trainer.save_steps", type=int, help="Save checkpoint every N steps"
     )

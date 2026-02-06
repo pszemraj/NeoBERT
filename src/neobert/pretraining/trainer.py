@@ -434,7 +434,7 @@ def _gradient_token_scale(
     *,
     num_processes: int,
     grad_accumulation_steps: int,
-) -> tuple[Optional[torch.Tensor], bool]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute safe post-accumulation gradient scale.
 
     We target per-token mean gradients for summed MLM losses, but clamp the
@@ -444,16 +444,14 @@ def _gradient_token_scale(
     :param torch.Tensor tokens_global: Global masked-token count for the update.
     :param int num_processes: Number of distributed processes.
     :param int grad_accumulation_steps: Gradient accumulation steps.
-    :return tuple[torch.Tensor | None, bool]: ``(scale, clamped)``; ``scale`` is
-        ``None`` when no masked tokens are present.
+    :return tuple[torch.Tensor, torch.Tensor]: ``(scale, clamped)``.
     """
-    if int(tokens_global.item()) <= 0:
-        return None, False
-
     min_tokens = max(1, int(num_processes) * int(grad_accumulation_steps))
-    clamped_tokens = torch.clamp(tokens_global.float(), min=float(min_tokens))
-    scale = (float(min_tokens) / clamped_tokens).to(tokens_global.device)
-    return scale, bool(tokens_global.item() < min_tokens)
+    min_tokens_f = float(min_tokens)
+    clamped_tokens = torch.clamp(tokens_global.float(), min=min_tokens_f)
+    scale = (min_tokens_f / clamped_tokens).to(tokens_global.device)
+    clamped = tokens_global < min_tokens
+    return scale, clamped
 
 
 def _clear_stored_batch(stored_batch: BatchEncoding) -> None:
@@ -463,6 +461,37 @@ def _clear_stored_batch(stored_batch: BatchEncoding) -> None:
     """
     for key in list(stored_batch.keys()):
         stored_batch[key] = None
+
+
+def _append_to_stored_batch(
+    stored_batch: BatchEncoding, batch: BatchEncoding
+) -> BatchEncoding:
+    """Append a batch fragment into the stored buffer.
+
+    :param BatchEncoding stored_batch: Fragment buffer.
+    :param BatchEncoding batch: Batch fragment to append.
+    :return BatchEncoding: Updated fragment buffer.
+    """
+    for key, value in batch.items():
+        stored_batch.setdefault(key, None)
+        if value is None:
+            continue
+        existing = stored_batch.get(key)
+        if existing is None:
+            stored_batch[key] = value
+            continue
+        if torch.is_tensor(existing) and torch.is_tensor(value):
+            if existing.device != value.device:
+                value = value.to(existing.device)
+            stored_batch[key] = torch.cat([existing, value], dim=0)
+        elif isinstance(existing, list) and isinstance(value, list):
+            stored_batch[key] = existing + value
+        else:
+            raise TypeError(
+                "Stored batch key '%s' has incompatible types: %s vs %s"
+                % (key, type(existing).__name__, type(value).__name__)
+            )
+    return stored_batch
 
 
 def _resolve_pack_token_limits(
@@ -550,7 +579,22 @@ def _has_stored_batch(stored_batch: BatchEncoding) -> bool:
     :param BatchEncoding stored_batch: Buffered batch fragments.
     :return bool: True when any buffered tensor/value is present.
     """
-    return any(value is not None for value in stored_batch.values())
+    for value in stored_batch.values():
+        if value is None:
+            continue
+        if torch.is_tensor(value):
+            if value.ndim == 0:
+                if value.numel() > 0:
+                    return True
+            elif value.shape[0] > 0:
+                return True
+            continue
+        if isinstance(value, (list, tuple, dict, str, bytes)):
+            if len(value) > 0:
+                return True
+            continue
+        return True
+    return False
 
 
 def to_target_batch_size(
@@ -873,6 +917,9 @@ def trainer(cfg: Config) -> None:
     metrics = Metrics()
     accelerator.register_for_checkpointing(metrics)
     log_interval = max(1, cfg.trainer.logging_steps)
+    log_train_accuracy = bool(getattr(cfg.trainer, "log_train_accuracy", False))
+    log_grad_norm = bool(getattr(cfg.trainer, "log_grad_norm", False))
+    metrics["train/compute_accuracy"] = int(log_train_accuracy)
 
     is_streaming = cfg.dataset.streaming
     if cfg.trainer.resume_from_checkpoint and is_streaming:
@@ -1516,6 +1563,16 @@ def trainer(cfg: Config) -> None:
                 batch, stored_batch = to_target_batch_size(
                     batch, stored_batch, cfg.trainer.per_device_train_batch_size
                 )
+            if (
+                cfg.datacollator.pack_sequences
+                and batch["input_ids"].shape[0]
+                < cfg.trainer.per_device_train_batch_size
+            ):
+                # Packed collation can emit undersized batches when source text is
+                # short. Buffer and combine these fragments to keep full-size
+                # microbatches for better kernel efficiency and compile stability.
+                _append_to_stored_batch(stored_batch, batch)
+                continue
 
             if manual_device_move:
                 batch = _move_batch_to_device(batch, accelerator.device)
@@ -1562,9 +1619,11 @@ def trainer(cfg: Config) -> None:
                 local_tokens += num_tokens
                 local_num_pred += num_pred
                 local_sum_loss += loss_sum.detach().float()
-                local_num_correct += _count_masked_correct(logits, batch["labels"])
+                if log_train_accuracy:
+                    local_num_correct += _count_masked_correct(logits, batch["labels"])
 
             if sync_gradients:
+                should_log = (metrics["train/steps"] + 1) % log_interval == 0
                 # Reduce to global token count to handle uneven sharding across ranks.
                 tokens_global = accelerator.reduce(accum_tokens, reduction="sum")
                 scale, clamped = _gradient_token_scale(
@@ -1572,33 +1631,31 @@ def trainer(cfg: Config) -> None:
                     num_processes=accelerator.num_processes,
                     grad_accumulation_steps=accelerator.gradient_accumulation_steps,
                 )
-                if scale is not None:
-                    # Match full-batch normalization across variable-length microbatches.
-                    # accelerator.backward() already divides by grad_accumulation_steps, and DDP averages
-                    # across processes on the sync step, so we rescale by
-                    # (num_processes * grad_accum_steps) / tokens_global.
-                    # For near-empty masked updates, we floor tokens_global to one token
-                    # per rank per accumulation step to avoid gradient amplification.
-                    # This post-accumulation rescale is equivalent to scaling each microbatch loss
-                    # because gradients are linear in the loss scalar.
-                    # Ref: Unsloth blog (archived) https://archive.ph/RmO0U
-                    _scale_gradients(model, scale)
-                    if clamped and not warned_low_token_scale:
-                        warned_low_token_scale = True
-                        logger.warning(
-                            "Masked-token count was below the safe minimum for an update "
-                            "(tokens_global=%s, min=%s); clamped gradient scale to avoid "
-                            "pathological amplification.",
-                            int(tokens_global.item()),
-                            accelerator.num_processes
-                            * accelerator.gradient_accumulation_steps,
-                        )
-                else:
-                    for param in model.parameters():
-                        if param.grad is not None:
-                            param.grad.zero_()
+                # Match full-batch normalization across variable-length microbatches.
+                # accelerator.backward() already divides by grad_accumulation_steps, and DDP averages
+                # across processes on the sync step, so we rescale by
+                # (num_processes * grad_accum_steps) / tokens_global.
+                # For near-empty masked updates, we floor tokens_global to one token
+                # per rank per accumulation step to avoid gradient amplification.
+                # This post-accumulation rescale is equivalent to scaling each microbatch loss
+                # because gradients are linear in the loss scalar.
+                # Ref: Unsloth blog (archived) https://archive.ph/RmO0U
+                _scale_gradients(model, scale)
+                if (
+                    should_log
+                    and not warned_low_token_scale
+                    and bool(clamped.detach().cpu().item())
+                ):
+                    warned_low_token_scale = True
+                    logger.warning(
+                        "Masked-token count was below the safe minimum for an update "
+                        "(tokens_global=%s, min=%s); clamped gradient scale to avoid "
+                        "pathological amplification.",
+                        int(tokens_global.item()),
+                        accelerator.num_processes
+                        * accelerator.gradient_accumulation_steps,
+                    )
 
-                should_log = (metrics["train/steps"] + 1) % log_interval == 0
                 grad_norm_value = None
 
                 # Optional gradient clipping for stability on deep/long-context runs.
@@ -1614,7 +1671,7 @@ def trainer(cfg: Config) -> None:
                             if isinstance(grad_norm_pre_clip, torch.Tensor)
                             else grad_norm_pre_clip
                         )
-                elif should_log:
+                elif should_log and log_grad_norm:
                     if accelerator.distributed_type is DistributedType.DEEPSPEED:
                         get_global_grad = getattr(model, "get_global_grad_norm", None)
                         if callable(get_global_grad):
@@ -1624,18 +1681,15 @@ def trainer(cfg: Config) -> None:
                             elif grad_norm is not None:
                                 grad_norm_value = float(grad_norm)
                     else:
-                        grad_norm_sq = None
-                        for param in model.parameters():
-                            if param.grad is None:
-                                continue
-                            param_norm = param.grad.norm(2)
-                            grad_norm_sq = (
-                                param_norm**2
-                                if grad_norm_sq is None
-                                else grad_norm_sq + param_norm**2
+                        grad_norm = accelerator.clip_grad_norm_(
+                            model.parameters(), float("inf")
+                        )
+                        if grad_norm is not None:
+                            grad_norm_value = float(
+                                grad_norm.item()
+                                if isinstance(grad_norm, torch.Tensor)
+                                else grad_norm
                             )
-                        if grad_norm_sq is not None:
-                            grad_norm_value = float(torch.sqrt(grad_norm_sq).item())
 
                 # Log metrics
                 pbar.update(1)

@@ -77,12 +77,10 @@ def _maybe_compile_model(
         compile_backend = "inductor"
     dynamic_override = getattr(cfg.trainer, "torch_compile_dynamic", None)
     if dynamic_override is None:
-        use_dynamic = bool(
-            getattr(getattr(cfg, "datacollator", None), "pack_sequences", False)
-        )
-        model_backend = getattr(getattr(cfg, "model", None), "attn_backend", None)
-        if isinstance(model_backend, str) and model_backend != "sdpa":
-            use_dynamic = True
+        # Prefer static-shape compilation by default. In packed mode this avoids
+        # aggressive shape-specialization/recompile churn when occasional short
+        # batches slip through; users can still opt into dynamic mode explicitly.
+        use_dynamic = False
     else:
         use_dynamic = bool(dynamic_override)
     log.info(
