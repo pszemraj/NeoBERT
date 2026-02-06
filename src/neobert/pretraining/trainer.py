@@ -943,6 +943,9 @@ def trainer(cfg: Config) -> None:
     metrics = Metrics()
     accelerator.register_for_checkpointing(metrics)
     log_interval = max(1, cfg.trainer.logging_steps)
+    enforce_full_packed_batches = bool(
+        getattr(cfg.trainer, "enforce_full_packed_batches", True)
+    )
     log_train_accuracy = bool(getattr(cfg.trainer, "log_train_accuracy", False))
     log_grad_norm = bool(getattr(cfg.trainer, "log_grad_norm", False))
     metrics["train/compute_accuracy"] = int(log_train_accuracy)
@@ -1590,7 +1593,8 @@ def trainer(cfg: Config) -> None:
                     batch, stored_batch, cfg.trainer.per_device_train_batch_size
                 )
             if (
-                cfg.datacollator.pack_sequences
+                enforce_full_packed_batches
+                and cfg.datacollator.pack_sequences
                 and batch["input_ids"].shape[0]
                 < cfg.trainer.per_device_train_batch_size
             ):

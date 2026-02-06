@@ -50,6 +50,7 @@ class TestConfigSystem(unittest.TestCase):
         self.assertEqual(config.trainer.per_device_train_batch_size, 16)
         self.assertFalse(config.trainer.torch_compile)
         self.assertEqual(config.trainer.torch_compile_backend, "inductor")
+        self.assertTrue(config.trainer.enforce_full_packed_batches)
 
     def test_config_from_yaml(self):
         """Test loading config from YAML file."""
@@ -87,6 +88,8 @@ class TestConfigSystem(unittest.TestCase):
             "true",
             "--trainer.torch_compile_backend",
             "aot_eager",
+            "--trainer.enforce_full_packed_batches",
+            "false",
         ]
 
         # Mock sys.argv
@@ -106,6 +109,7 @@ class TestConfigSystem(unittest.TestCase):
             self.assertTrue(config.datacollator.pack_sequences)
             self.assertTrue(config.trainer.torch_compile)
             self.assertEqual(config.trainer.torch_compile_backend, "aot_eager")
+            self.assertFalse(config.trainer.enforce_full_packed_batches)
 
             # Check that non-overridden values remain the same
             self.assertEqual(config.model.num_hidden_layers, 2)

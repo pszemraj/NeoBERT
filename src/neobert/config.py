@@ -167,6 +167,7 @@ class TrainerConfig:
     eval_steps: int = 10000
     eval_max_batches: Optional[int] = None
     logging_steps: int = 100
+    enforce_full_packed_batches: bool = True
     log_train_accuracy: bool = False
     log_grad_norm: bool = False
     output_dir: str = "./output"
@@ -1065,6 +1066,14 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         help="Gradient accumulation steps",
     )
     parser.add_argument("--trainer.max_steps", type=int, help="Maximum training steps")
+    parser.add_argument(
+        "--trainer.enforce_full_packed_batches",
+        type=lambda x: x.lower() == "true",
+        help=(
+            "If true, buffer undersized packed batches to emit full microbatches. "
+            "Improves token throughput stability but lowers step/s."
+        ),
+    )
     parser.add_argument(
         "--trainer.log_train_accuracy",
         type=lambda x: x.lower() == "true",
