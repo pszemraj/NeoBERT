@@ -188,32 +188,27 @@ class _AdaptiveRMSNorm(nn.Module):
         """
         if x.is_cuda and _LigerRMSNormFunction is not None:
             return _LigerRMSNormFunction.apply(x, self.weight, self.eps)
-        # Native torch path (CPU or Liger unavailable). Prefer the fused torch
-        # kernel when available; keep a legacy math fallback for older versions.
-        if hasattr(nn.functional, "rms_norm"):
-            if x.device.type == "cpu" and x.dtype in (torch.float16, torch.bfloat16):
-                # CPU half/bfloat16 paths are less stable; normalize in fp32 then cast back.
-                out = nn.functional.rms_norm(
-                    x.float(),
-                    (self.weight.shape[0],),
-                    self.weight.float(),
-                    self.eps,
-                )
-                return out.to(dtype=x.dtype)
-
-            weight = self.weight
-            if weight.dtype != x.dtype:
-                weight = weight.to(dtype=x.dtype)
-            return nn.functional.rms_norm(
-                x,
+        # Native torch path (CPU or Liger unavailable). Torch>=2.6.0 guarantees
+        # fused ``rms_norm`` availability.
+        if x.device.type == "cpu" and x.dtype in (torch.float16, torch.bfloat16):
+            # CPU half/bfloat16 paths are less stable; normalize in fp32 then cast back.
+            out = nn.functional.rms_norm(
+                x.float(),
                 (self.weight.shape[0],),
-                weight,
+                self.weight.float(),
                 self.eps,
             )
+            return out.to(dtype=x.dtype)
 
-        x_float = x.float()
-        rms = torch.rsqrt(x_float.pow(2).mean(-1, keepdim=True) + self.eps)
-        return (x_float * rms).to(x.dtype) * self.weight
+        weight = self.weight
+        if weight.dtype != x.dtype:
+            weight = weight.to(dtype=x.dtype)
+        return nn.functional.rms_norm(
+            x,
+            (self.weight.shape[0],),
+            weight,
+            self.eps,
+        )
 
     def extra_repr(self) -> str:
         """Return a concise module representation for debugging.
