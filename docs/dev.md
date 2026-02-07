@@ -1,130 +1,126 @@
 # Development Notes
 
-This page tracks known limitations and TODOs that need follow-up work as well as lessons learned during development.
+This page tracks the current engineering status and near-term TODOs for NeoBERT
+training performance and stability work.
 
 ---
 
-- [Development Notes](#development-notes)
-  - [Pretraining: `datacollator.pack_sequences`](#pretraining-datacollatorpack_sequences)
-    - [Next Step: FlashAttention varlen training path (cu\_seqlens)](#next-step-flashattention-varlen-training-path-cu_seqlens)
-  - [Contrastive Training](#contrastive-training)
-  - [Pretraining: Chunked / Fused Cross-Entropy](#pretraining-chunked--fused-cross-entropy)
+- [Current Status](#current-status)
+- [Recently Landed](#recently-landed)
+- [Known Gaps](#known-gaps)
+- [Next PR TODOs](#next-pr-todos)
+- [Longer-Term Backlog](#longer-term-backlog)
 
 ---
 
-## Pretraining: `datacollator.pack_sequences`
+## Current Status
 
-Status: **experimental**. Pretraining uses `flash_attn_varlen_func` for packed
-sequences without materializing a dense mask.
+### Pretraining packed path
 
-Why: Packed sequences must prevent cross-sequence attention. We use flash-attn
-varlen kernels (`cu_seqlens` + `max_seqlen`) with a flattened packed layout.
-A segmented-SDPA fallback exists for CPU/testing but is slow on GPU.
+Status: **implemented and production-usable** for training.
 
-TODO scope:
+- Packed pretraining uses FlashAttention varlen kernels via
+  `model.attn_backend: flash_attn_varlen`.
+- The training collator emits `packed_seqlens` metadata and avoids dense packed
+  block masks.
+- `src/neobert/model/model.py` routes packed batches through flash varlen on GPU
+  and falls back to segmented SDPA where needed (correct but slower).
+- HF export model (`src/neobert/huggingface/modeling_neobert.py`) intentionally
+  remains standard/unpacked.
 
-- If varlen: add collator support for `cu_seqlens`/`max_seqlen` and route through
-  a training model that supports FlashAttention varlen. (The HF export model is
-  intentionally vanilla Transformers and does **not** support packed inputs.)
-- Validate memory footprint for long sequences and document limits.
-- Add end-to-end tests for packed batches with correct masking and training loss.
+### Compile and runtime behavior
 
-### Next Step: FlashAttention varlen training path (cu_seqlens)
+Status: **improved but not fully optimized**.
 
-Goal: eliminate any remaining O(seq²) paths by using FlashAttention varlen kernels
-for packed sequences during pretraining.
+- Major `torch.compile` graph-break sources from scalar `.item()` extraction in
+  packed attention were reduced.
+- MuonClip hook-related recompilation issues were reduced by compile guards.
+- Some symbolic-shape warnings and occasional recompiles can still appear in
+  real runs.
 
-Current state:
+### Checkpointing and serialization
 
-- `src/neobert/collator/collator.py` emits `packed_seqlens` as a padded int
-  tensor for packed batches and keeps a 2D padding `attention_mask`; it does
-  **not** build dense block masks.
-- `src/neobert/pretraining/trainer.py` passes `packed_seqlens` into `NeoBERTLMHead`
-  and skips additive masks for packed batches.
-- `src/neobert/model/model.py` uses `flash_attn_varlen_func` for packed batches
-  when `model.attn_backend: flash_attn_varlen`; falls back to segmented SDPA otherwise.
-- `src/neobert/huggingface/modeling_neobert.py` intentionally **does not**
-  support packed/varlen inputs; the exported HF model stays within vanilla
-  Transformers expectations.
-- `src/neobert/collator/collator.py::DataCollatorWithPacking` is the training-only
-  collator; exported HF models expect standard (unpacked) attention masks.
+Status: **standardized**.
 
-Implementation plan:
+- Training checkpoints have been standardized on `safetensors`.
+- This is compatible with the current pretraining flow and keeps export paths
+  straightforward.
 
-- Collator: add a varlen packing mode in `src/neobert/collator/collator.py` that
-  emits `input_ids`, `labels`, `position_ids`, `cu_seqlens` (int32), and
-  `max_seqlen` **without** building a dense mask. Consider config like:
-  `datacollator.pack_sequences_mode: "block" | "varlen"` (default "block").
-- Trainer: when varlen mode is active:
-  - pass `cu_seqlens` and `max_seqlen` into the model
-  - **do not** create/expand `attention_mask`
-  - ensure `position_ids` is used for RoPE (or compute from segments)
-- Model:
-  - add a varlen path to `src/neobert/model/model.py` using flash-attn.
-  - if a separate module is needed, keep it training-only; do **not** route
-    through the HF export model (packing is intentionally unsupported there).
-  - require `flash_attn` on GPU; error clearly if missing.
-  - keep additive-mask path unchanged for non-packed batches.
+## Recently Landed
 
-Constraints / gotchas:
+Key landed changes on `feat/liger` include:
 
-- RoPE in packed mode needs correct `position_ids` per segment. The training
-  collator will need to provide these; the training model must consume them.
-- `flash_attn_varlen_func` expects q/k/v shaped `[total_tokens, nheads, head_dim]`
-  with `cu_seqlens` and `max_seqlen`.
-- Packed varlen only works on CUDA; make the failure mode explicit.
+- Packed varlen path hardening and backend resolution fixes.
+- Packed metadata tensor-first normalization and compile-path fixes.
+- Liger integration and kernel backend cleanup.
+- Runtime import cleanup (remove `sys.path` hacks / normalize imports).
+- Safetensors checkpoint standardization.
+- Optional full packed-batch enforcement:
+  `trainer.enforce_full_packed_batches`.
+- Training-loop overhead reductions:
+  - optional expensive accuracy logging,
+  - worker env defaults,
+  - reduced compile-unfriendly control flow.
+- Packed flash metadata reuse across layers:
+  compute once per forward and reuse in all encoder layers.
 
-Tests to add:
+## Known Gaps
 
-- Unit test for varlen collator output (`cu_seqlens`, `max_seqlen`, `position_ids`).
-- Parity test: varlen-packed output vs non-packed output on a tiny example
-  (same weights, disable dropout).
-- Training smoke test with `datacollator.pack_sequences_mode="varlen"` on a tiny
-  dataset (GPU-only, likely skipped in CI).
+These are the biggest remaining reasons we do not consistently hit target
+throughput/tokens-per-second:
 
-## Contrastive Training
+1. Input-side CPU work still creates bubbles in streaming + packing mode.
+2. Packing logic still has Python-heavy sections in the collator hot path.
+3. We do not yet have first-class in-trainer timing attribution (data wait vs
+   forward/backward/optimizer), so regressions can hide.
+4. Some compile warnings/recompiles remain in long-running scenarios,
+   particularly with dynamic behavior around hooks and shapes.
 
-Status: **not fully validated end-to-end**.
+## Next PR TODOs
 
-Notes / TODOs:
+Priority order for next performance PR:
 
-- Requires preprocessed datasets under `dataset.path` via
-  `scripts/contrastive/preprocess.py`.
-- Validate dataset schema consistency across all sources (query/corpus/negative).
-- Run a short smoke training job to validate loss + checkpointing behavior.
+1. Add trainer timing attribution (required first)
+- Add step-time timers for: dataloader wait, collate, forward, backward,
+  optimizer step, logging/checkpoint sections.
+- Log p50/p95 and moving averages every N steps.
+- Keep overhead negligible and disable by default for clean production runs.
 
-## Pretraining: Chunked / Fused Cross-Entropy
+2. Add a deterministic perf harness for A/B
+- Single script/config overlay to run short, reproducible throughput probes.
+- Standard report: warmup-trimmed `tokens/sec`, `steps/sec`, and timing
+  breakdown from (1).
+- Use this harness for all optimizer/backend comparisons.
 
-Goal: avoid materializing full logits `(B, S, V)` for long contexts.
+3. Move packing upstream out of collator hot path
+- Implement dataset-side/stateful iterable packing to reduce per-step Python
+  list operations and collator surgery.
+- Keep collator simple: mask + MLM corruption + tensorization.
 
-Current state:
+4. Tensorize remaining collator packing operations
+- Remove remaining `.tolist()` and per-token Python loops in common paths.
+- Keep behavior identical with regression tests.
 
-- `src/neobert/pretraining/trainer.py` computes full logits from
-  `NeoBERTLMHead` and applies `CrossEntropyLoss(reduction="sum")`.
-- There is a note in the trainer warning about full logits memory.
+5. Reduce train-loop overhead in perf mode
+- Gate expensive metrics and low-value per-step bookkeeping behind explicit
+  config flags.
+- Keep debug richness available, but make fast mode lean by default.
 
-Implementation options:
+6. Continue compile/recompile stabilization
+- Collect recompile reasons under the harness above.
+- Remove avoidable dynamic guards and static-attribute churn in hot modules.
 
-- Chunked logits:
-  - modify `NeoBERTLMHead` to optionally return hidden states only, or expose the
-    decoder linear layer so trainer can compute logits in chunks.
-  - split hidden states along sequence dimension, compute per-chunk logits and
-    `CrossEntropyLoss(reduction="sum")`, then accumulate.
-  - must preserve current per-token scaling semantics (loss sum over masked tokens).
-- Fused kernels:
-  - integrate `xentropy` / `liger-kernel` (if available) for fused CE to reduce
-    memory and potentially improve speed.
-  - keep a fallback path for CPU / missing dependency.
+## Longer-Term Backlog
 
-Constraints / gotchas:
+1. Chunked/fused cross-entropy for long contexts
+- Avoid full `(B, S, V)` logits materialization in the default path.
+- Maintain exact sum-reduction semantics used by current gradient scaling.
 
-- Needs to preserve the sum-reduction for `train_loss_fn` to keep existing
-  gradient scaling logic unchanged.
-- Keep dtype handling stable for bf16/fp16 (AMP).
-- Ensure accuracy metrics (`_count_masked_correct`) still computed with logits;
-  either compute logits in chunks a second time or compute `argmax` in chunks.
+2. Contrastive training end-to-end hardening
+- Validate schema consistency and full smoke runs for preprocess + train +
+  checkpoint + resume.
 
-Tests to add:
-
-- Unit test comparing chunked CE vs full CE on a tiny batch (same loss to ~1e-6).
-- Integration test: trainer step with chunked CE enabled on a tiny config.
+3. Optional packed metadata ABI cleanup
+- Evaluate whether collator should emit a richer packed metadata object
+  (precomputed/reusable forms) when that gives measurable net wins without
+  overcomplicating APIs.
