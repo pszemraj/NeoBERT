@@ -1,36 +1,36 @@
-# Test Configuration Files
+# Test Config Files
 
-Test configs live here and are optimized for quick runs and regression coverage.
+Small, fast configs used by unit/integration tests and smoke runs.
 
-## Directory Structure
+## Layout
 
 - `pretraining/`
-  - `test_tiny_pretrain.yaml` - Minimal CPU-friendly pretraining
-  - `test_streaming*.yaml` - Streaming dataset coverage
-  - `test_gpu*.yaml` - GPU-oriented smoke tests
-  - `test_pretokenized.yaml` / `test_tiny_pretrain_tokenized.yaml` - Pretokenized pipeline
-  - `test_smollm2_*.yaml` - SmolLM2 dataset variants
-
+  - `test_tiny_pretrain.yaml`
+  - `test_tiny_pretrain_tokenized.yaml`
+  - `test_gpu_pretrain.yaml`
+  - `test_gpu_small.yaml`
+  - `test_streaming.yaml`
+  - `test_streaming_pretrain.yaml`
+  - `test_streaming_gpu.yaml`
+  - `test_pretokenized.yaml`
+  - `test_simple_wiki.yaml`
+  - `test_smollm2_streaming.yaml`
+  - `test_smollm2_200steps.yaml`
 - `evaluation/`
-  - `test_tiny_glue.yaml` / `test_tiny_glue_random.yaml` - Minimal GLUE runs
-
+  - `test_tiny_glue.yaml`
+  - `test_tiny_glue_random.yaml`
 - `contrastive/`
-  - `test_tiny_contrastive.yaml` - Minimal contrastive fine-tuning
+  - `test_tiny_contrastive.yaml`
 
-## Usage
+## Example Usage
 
 ```bash
-# Pretraining smoke test
 python scripts/pretraining/pretrain.py tests/configs/pretraining/test_tiny_pretrain.yaml
-
-# GLUE evaluation smoke test
 python scripts/evaluation/run_glue.py tests/configs/evaluation/test_tiny_glue.yaml
-
-# Contrastive fine-tuning smoke test
 python scripts/contrastive/finetune.py tests/configs/contrastive/test_tiny_contrastive.yaml
 ```
 
 ## Notes
 
-- These configs are intentionally small and may use CPU-friendly settings.
-- For full training runs, use configs under `configs/`.
+- These are intentionally tiny and not representative of production throughput.
+- For production experiments, use configs under `configs/`.

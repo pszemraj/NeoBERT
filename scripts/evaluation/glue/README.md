@@ -1,14 +1,26 @@
-# GLUE Helpers
+# GLUE Evaluation Helpers
 
-Utilities for generating configs, launching sweeps, and summarizing results for GLUE fine-tuning runs.
+Automation helpers for generating, running, and summarizing GLUE configs.
 
-## Available scripts
+## Scripts
 
-- `build_configs.sh` - Iterate over a sweep directory and call `build_glue_configs.py` for each checkpoint bundle.
-- `build_glue_configs.py` - Generate task-specific configs under `configs/glue/generated`.
-- `run_quick_glue.sh` - Launch the smaller GLUE tasks for smoke-testing checkpoints.
-- `run_all_glue.sh` - Execute the full GLUE suite and capture per-task logs.
-- `summarize_glue.py` - Aggregate GLUE metrics across runs into a table.
-- `validate_glue_config.py` - Sanity-check generated configs before launching jobs.
+- `build_configs.sh` - iterate sweep outputs and generate GLUE configs
+- `build_glue_configs.py` - Python config generator
+- `run_quick_glue.sh` - smoke subset launcher
+- `run_all_glue.sh` - full GLUE launcher
+- `summarize_glue.py` - aggregate metrics table
+- `validate_glue_config.py` - config sanity checks
 
-All scripts assume they are invoked from the repository root. They rely on the shared evaluation code in `scripts/evaluation/run_glue.py`.
+## Usage Notes
+
+- Invoke from repository root.
+- Generated configs typically land under `configs/glue/generated/`.
+- Execution uses `scripts/evaluation/run_glue.py`.
+
+## Examples
+
+```bash
+bash scripts/evaluation/glue/run_quick_glue.sh configs/glue
+bash scripts/evaluation/glue/run_all_glue.sh configs/glue
+python scripts/evaluation/glue/summarize_glue.py outputs/glue/<run>
+```

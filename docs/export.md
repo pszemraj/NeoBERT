@@ -1,107 +1,73 @@
 # Hugging Face Export Guide
 
-This guide covers exporting NeoBERT checkpoints to Hugging Face format.
+Export NeoBERT training checkpoints to a Hugging Face-compatible folder.
 
-> [!NOTE]
-> Script details live in [scripts/export-hf/README.md](../scripts/export-hf/README.md).
+## Supported Inputs
 
-## Prerequisites
-
-Your checkpoint directory must contain:
-
-- `model.safetensors`
+Point export to a checkpoint directory containing:
 - `config.yaml`
-- `tokenizer_info.json` (recommended; saved by the trainer and validated if present)
-- `tokenizer/` (with `special_tokens_map.json`, vocab, etc.)
+- either `model.safetensors` (native) or DeepSpeed ZeRO checkpoint state
+- `tokenizer/` directory (required)
+- `tokenizer_info.json` (recommended; validated when present)
 
-Install dependencies:
-
-```bash
-pip install transformers safetensors pyyaml
-```
-
-## Export
-
-```bash
-# Export a specific checkpoint
-python scripts/export-hf/export.py outputs/neobert_pretrain/model_checkpoints/100000
-```
-
-By default, the export lands in:
-
-```
-outputs/neobert_pretrain/hf/neobert_pretrain_100000/
-```
-
-You can override the destination:
+## Export Command
 
 ```bash
 python scripts/export-hf/export.py \
-  outputs/neobert_pretrain/model_checkpoints/100000 \
-  --output my_exported_model
+  outputs/<run>/model_checkpoints/<step>
 ```
 
-## Output Files
+Optional output override:
 
-The exporter writes:
+```bash
+python scripts/export-hf/export.py \
+  outputs/<run>/model_checkpoints/<step> \
+  --output outputs/<run>/hf/my_export
+```
 
+## Export Output
+
+Generated folder contains:
 - `config.json`
 - `model.safetensors`
 - `pytorch_model.bin`
-- `model.py` (HF modeling file)
+- `model.py`
 - `rotary.py`
-- tokenizer assets (`tokenizer.json`, `vocab.txt`, `special_tokens_map.json`, ...)
-- `README.md` (auto-generated)
-
-## Config Mapping
-
-The export script maps NeoBERT config fields to HF config fields, including:
-
-| NeoBERT                   | HF                        | Notes               |
-| ------------------------- | ------------------------- | ------------------- |
-| `hidden_size`             | `hidden_size`             | Model dimension     |
-| `num_hidden_layers`       | `num_hidden_layers`       | Layers              |
-| `num_attention_heads`     | `num_attention_heads`     | Heads               |
-| `intermediate_size`       | `intermediate_size`       | FFN size            |
-| `max_position_embeddings` | `max_length` + `max_position_embeddings` | HF config sets both length fields |
-| `norm_eps`                | `norm_eps`                | Norm epsilon        |
-| `vocab_size`              | `vocab_size`              | Vocab size          |
-| `pad_token_id`            | `pad_token_id`            | Padding token       |
-| `rms_norm`                | `rms_norm`                | Norm choice         |
-| `rope`                    | `rope`                    | Rotary embeddings   |
-| `hidden_act`              | `hidden_act`              | `swiglu` or `gelu`  |
-| `dropout_prob`            | `dropout`                 | Dropout probability |
-| `attn_backend`            | `flash_attention`         | Backend toggle      |
-
-Notes:
-
-- Export supports `hidden_act: swiglu` and `hidden_act: gelu` only.
-- `ngpt` (NormNeoBERT) checkpoints are not exportable via the HF path.
-- The HF export expects **unpacked** SwiGLU weights (`w1/w2/w3`) from training.
-- `attn_backend` is carried through as `flash_attention` for HF config parity
-  but is **ignored** by the exported HF model (it always uses SDPA/eager attention).
-- Packed-sequence inputs are **not** supported in the exported HF model. Vanilla
-  Transformers expect standard (unpadded) batches + attention masks; do not pass
-  `cu_seqlens`/`max_seqlen` or block-diagonal packed masks to the exported model.
+- `modeling_utils.py`
+- tokenizer assets (`tokenizer.json`, `special_tokens_map.json`, etc.)
+- `README.md`
 
 ## Validation
 
 ```bash
-python scripts/export-hf/validate.py outputs/neobert_pretrain/hf/neobert_pretrain_100000
+python scripts/export-hf/validate.py outputs/<run>/hf/<export_name>
 ```
 
-The validator checks file presence, model loading, tokenizer loading, MLM head, end-to-end encode, and a cosine-similarity sanity check. The exporter also validates tensor shapes and runs a lightweight forward-pass sanity check before writing files.
+Validator checks file presence, model/tokenizer loading, MLM forward pass, and
+basic output sanity.
+
+## Mapping Notes
+
+- Export supports `hidden_act: swiglu|gelu`.
+- `ngpt: true` checkpoints are not supported by HF export path.
+- Export expects unpacked SwiGLU weights (`w1/w2/w3`).
+- `attn_backend` is converted to HF `flash_attention` flag for config parity,
+  but exported HF model remains standard/unpacked.
+
+## Constraints
+
+- Packed inputs/metadata are training-only and not supported in exported HF
+  model.
+- Exported model expects normal HF batches and attention masks.
 
 ## Troubleshooting
 
-- **Missing tokenizer files**: ensure the checkpoint has a complete `tokenizer/` directory.
-- **Missing required config fields**: confirm `config.yaml` includes the `model` section with required keys.
-- **Attention backend confusion**: exported HF models use PyTorch SDPA. It will select
-  flash/mem-efficient kernels if your PyTorch build supports them; installing `flash-attn`
-  does not change behavior unless you modify the exported model code.
+- Missing tokenizer: ensure checkpoint has `tokenizer/`.
+- Config mismatch: ensure `config.yaml` and checkpoint weights match dimensions.
+- Missing weights: verify checkpoint folder contains expected model files.
 
-## Next Steps
+## Related Docs
 
-- Evaluation guide: [docs/evaluation.md](evaluation.md)
-- Training guide: [docs/training.md](training.md)
-- Configuration reference: [docs/configuration.md](configuration.md)
+- [scripts/export-hf/README.md](../scripts/export-hf/README.md)
+- [Troubleshooting](troubleshooting.md)
+- [Evaluation](evaluation.md)

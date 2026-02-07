@@ -1,106 +1,79 @@
 # Evaluation Guide
 
-This guide covers evaluating NeoBERT on GLUE and MTEB.
+NeoBERT evaluation currently focuses on GLUE and MTEB.
 
-> [!NOTE]
-> Script-level notes live in [scripts/evaluation/README.md](../scripts/evaluation/README.md).
+## GLUE
 
-## GLUE Benchmark
-
-### Run a single task
+### Run one task
 
 ```bash
 python scripts/evaluation/run_glue.py configs/glue/cola.yaml
 ```
 
-### Run the full suite
+### Run quick/full suites
 
 ```bash
-bash scripts/evaluation/glue/run_all_glue.sh
+bash scripts/evaluation/glue/run_quick_glue.sh configs/glue
+bash scripts/evaluation/glue/run_all_glue.sh configs/glue
 ```
 
-### Config essentials
+### Important GLUE behavior
 
-GLUE configs live in `configs/glue/` and include both **model** and **glue** sections. Pretrained-model metadata now lives under `glue.*`:
+- GLUE always runs with SDPA attention in classifier wrappers.
+- Pretrained weights are required unless `glue.allow_random_weights: true`.
+- Results are stored under `trainer.output_dir` as JSON metrics.
 
-```yaml
-task: glue
-
-model:
-  # Optional when testing with random weights:
-  hidden_size: 768
-  num_hidden_layers: 12
-  num_attention_heads: 12
-  intermediate_size: 3072
-  dropout_prob: 0.1
-  vocab_size: 30522
-  max_position_embeddings: 512
-  hidden_act: swiglu
-
-glue:
-  task_name: cola
-  num_labels: 2
-  max_seq_length: 512
-  pretrained_checkpoint_dir: ./outputs/neobert_pretrain
-  pretrained_checkpoint: 100000  # or "latest"
-  pretrained_model_path: ./outputs/neobert_pretrain/model_checkpoints/100000/config.yaml
-  allow_random_weights: false
-```
-
-### Random-weights sanity checks
-
-For smoke tests, set:
-
-```yaml
-glue:
-  allow_random_weights: true
-```
-
-### Attention backend behavior
-
-GLUE runs always force `attn_backend: sdpa` to avoid variable-length alignment issues with packed attention.
-
-### Summarize results
+### Summarize GLUE outputs
 
 ```bash
-python scripts/evaluation/glue/summarize_glue.py outputs/glue/neobert-100m
+python scripts/evaluation/glue/summarize_glue.py outputs/glue/<run>
 ```
 
-### Generate configs from a sweep
+### Build generated GLUE configs from sweeps
 
 ```bash
-bash scripts/evaluation/glue/build_configs.sh outputs/my_sweep neobert/glue \
+bash scripts/evaluation/glue/build_configs.sh outputs/my_sweep my-tag \
   --config-output-dir configs/glue/generated \
   --tasks cola,qnli
 ```
 
-## MTEB Benchmark
+## MTEB
 
-### Run evaluation
+### Run MTEB
 
 ```bash
 python scripts/evaluation/run_mteb.py \
-  outputs/<pretrain_run>/model_checkpoints/<step>/config.yaml \
+  configs/pretraining/pretrain_neobert.yaml \
   --model_name_or_path outputs/<pretrain_run>
 ```
 
-Notes:
+### Important MTEB behavior
 
-- Requires the `mteb` package.
-- If `use_deepspeed: true`, the script loads weights via DeepSpeed utilities.
-- Outputs land under `outputs/<pretrain_run>/mteb/<step>/<max_length>/`.
-- The MTEB runner currently reads `tokenizer.name`; if you trained with a local tokenizer, set `tokenizer.name` to that path in the config.
-- To filter task families, set `mteb_task_type` in the config (`all`, `classification`, `retrieval`, etc.). The `--task_types` CLI flag is currently unused.
-- For direct `NeoBERTForMTEB.encode(...)` usage, you can override DataLoader settings with `num_workers` (default `0`) and `pin_memory` (defaults to `True` only on CUDA).
+- Runner loads checkpoints from `<model_name_or_path>/model_checkpoints/`.
+- Task family selection is read from config field `mteb_task_type`.
+- `--task_types` is currently parsed but not wired into task selection logic.
+- Output path is currently derived from run dir + checkpoint + max length:
+  `outputs/<run>/mteb/<ckpt>/<max_length>/`.
+- If using a local tokenizer, point `tokenizer.name` to that path.
 
-## Troubleshooting
+## Common Evaluation Pitfalls
 
-- Attention backend errors on GLUE: GLUE forces SDPA; packed attention is disabled.
-- OOM: lower `trainer.per_device_train_batch_size` and/or enable `trainer.gradient_checkpointing`.
-- Random or flat metrics: verify `glue.pretrained_model_path` and checkpoint paths.
+1. Wrong checkpoint path
+- verify `glue.pretrained_checkpoint_dir`, `glue.pretrained_checkpoint`, and
+  `glue.pretrained_model_path` in GLUE configs.
 
-## Next Steps
+2. Flat/random GLUE metrics
+- confirm pretrained weights were actually loaded (or intentionally set
+  `allow_random_weights: true`).
 
-- Configuration reference: [docs/configuration.md](configuration.md)
-- Training workflows: [docs/training.md](training.md)
-- Export guide: [docs/export.md](export.md)
+3. OOM during eval
+- reduce eval batch size and/or sequence length.
+
+4. Attention backend confusion
+- GLUE path is SDPA-oriented; packed flash varlen is a training optimization.
+
+## Related Docs
+
+- [Configuration](configuration.md)
+- [Training](training.md)
+- [Troubleshooting](troubleshooting.md)

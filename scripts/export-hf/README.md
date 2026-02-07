@@ -1,16 +1,26 @@
-# HuggingFace Export Scripts
+# Hugging Face Export Scripts
 
-Scripts for exporting NeoBERT checkpoints to HuggingFace format.
+Scripts for exporting and validating NeoBERT checkpoints in HF format.
 
-> [!NOTE]
-> See [docs/export.md](../../docs/export.md) for usage, constraints, and validation details.
+## Scripts
 
-## Scripts in this Directory
+- `export.py` - convert a training checkpoint to HF-compatible model folder
+- `validate.py` - run structural + forward-pass validation on exported folder
 
-- **`export.py`** - Main export script that converts checkpoints to HuggingFace format
-- **`validate.py`** - Validation script to test exported models
+## Typical Flow
+
+```bash
+python scripts/export-hf/export.py outputs/<run>/model_checkpoints/<step>
+python scripts/export-hf/validate.py outputs/<run>/hf/<export_name>
+```
 
 ## Notes
 
-- Metaspace tokenizer handling and MLM `[MASK]` quirks: see [docs/troubleshooting.md](../../docs/troubleshooting.md#mlm-always-predicts-same-token).
-- Export constraints, validation checks, and config/weight mapping details are documented in [docs/export.md](../../docs/export.md).
+- Input checkpoint can be native safetensors or DeepSpeed ZeRO state.
+- Export writes both `model.safetensors` and `pytorch_model.bin`.
+- Exported model is standard/unpacked HF path (no packed metadata inputs).
+
+## Related Docs
+
+- [docs/export.md](../../docs/export.md)
+- [docs/troubleshooting.md](../../docs/troubleshooting.md)

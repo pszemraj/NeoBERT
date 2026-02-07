@@ -1,58 +1,79 @@
 # NeoBERT Architecture
 
-This document summarizes the implemented NeoBERT architecture and points to the source of truth in code.
+This document summarizes the implemented architecture and runtime behavior.
+Source of truth remains the code under `src/neobert/`.
 
 ## Overview
 
-NeoBERT is a transformer encoder with modernized components:
+NeoBERT is a transformer encoder with:
+- fused QKV projection,
+- optional RoPE position encoding,
+- RMSNorm or LayerNorm,
+- SwiGLU or GELU feed-forward,
+- backend-selectable attention (`sdpa` or `flash_attn_varlen` for packed training),
+- optional nGPT-style normalized residual path (`ngpt=true`).
 
-- **Fused QKV attention** (single linear projection, split into Q/K/V)
-- **RoPE positional embeddings** (optional)
-- **RMSNorm or LayerNorm** (configurable)
-- **SwiGLU or GELU** feed-forward (configurable)
-- **SDPA or flash-attn varlen** attention backends (configurable)
-- **Liger kernel** primitives for RMSNorm, SwiGLU, and CrossEntropy (optional, CUDA)
-- **Optional nGPT-style normalization** (NormNeoBERT)
+## Source Files
 
-## Source of Truth
-
-- Core model blocks: `src/neobert/model/model.py`
+- Core model: `src/neobert/model/model.py`
+- Attention dispatch and packed varlen helpers: `src/neobert/kernels/attention.py`
 - Rotary embeddings: `src/neobert/model/rotary.py`
-- RMSNorm: `src/neobert/model/rmsnorm.py`
+- RMSNorm backend wrappers: `src/neobert/kernels/backend.py`, `src/neobert/model/rmsnorm.py`
 - HF export model: `src/neobert/huggingface/modeling_neobert.py`
 
-## Core Components (Implementation Summary)
+## Embeddings and Positions
 
-### Embeddings
+- Token embeddings use `pad_token_id` as the embedding padding index.
+- With `rope: true`, Q/K receive rotary embeddings.
+- With `rope: false`, learned positional embeddings are used.
+- In learned-position mode, position IDs reserve `0` for padding and start real
+  tokens at `1`.
 
-- Token embeddings only (no token-type embeddings).
-- Position information is injected with RoPE when enabled; otherwise learned positional embeddings are used.
-- Token embedding padding uses `pad_token_id`. Positional embeddings use a fixed padding index (0), and positions start at 0 for non-pad tokens.
+## Attention Paths
 
-### Attention
+### Unpacked path
 
-- Single `qkv` projection (`hidden_size -> 3 * hidden_size`) split into Q/K/V.
-- RoPE applied to Q/K when `model.rope: true`.
-- Attention backend (`model.attn_backend`):
-  - `"sdpa"` (default): PyTorch `scaled_dot_product_attention`.
-  - `"flash_attn_varlen"`: `flash_attn.flash_attn_varlen_func` for packed sequences.
-- Attention masks are additive (0 = keep, -inf = mask).
+- Uses PyTorch SDPA (`scaled_dot_product_attention`).
+- Training API expects additive masks (`0` keep, `-inf` masked).
 
-### Feed-Forward Network
+### Packed path
 
-- `model.hidden_act: swiglu` uses the native PyTorch SwiGLU block (unpacked w1/w2/w3).
-- `model.hidden_act: gelu` uses a standard 2-layer GELU MLP.
+- For packed batches, model can use flash-attn varlen kernels when
+  `attn_backend: flash_attn_varlen` and CUDA + flash-attn are available.
+- Packed metadata is represented as `packed_seqlens` and converted to varlen
+  flattening metadata (`flat_token_indices`, `cu_seqlens`, `max_seqlen`).
+- Metadata is prepared once per forward pass and reused across all encoder
+  layers to reduce host overhead.
+- SDPA segmented fallback exists for correctness/testing when flash-attn is not
+  used, but is slower.
 
-### Normalization
+## Feed-Forward
 
-- `model.rms_norm: true` uses RMSNorm.
-- `model.rms_norm: false` uses LayerNorm.
+- `hidden_act: swiglu`: unpacked `w1/w2/w3` SwiGLU block.
+- `hidden_act: gelu`: standard 2-layer GELU MLP.
 
-### NormNeoBERT (nGPT-style)
+## Normalization
 
-If `model.ngpt: true`, `NeoBERTLMHead` builds `NormNeoBERT`, which applies nGPT-style normalization and scaling inside the encoder block.
+- `rms_norm: true`: RMSNorm path.
+- `rms_norm: false`: LayerNorm path.
+- Kernel backend (`kernel_backend`) selects torch vs Liger primitives where
+  available.
 
-## Key Configuration Knobs
+## nGPT Mode
+
+When `ngpt: true`, `NormNeoBERT` is used:
+- normalized residual interpolation,
+- learned scaling parameters for attention/MLP branches,
+- custom normalization dynamics relative to standard encoder blocks.
+
+## HF Export Model Differences
+
+- Exported HF model is intentionally standard/unpacked.
+- It does not support packed-sequence inputs/metadata.
+- Attention-mask normalization in HF path accepts bool/additive/binary forms and
+  normalizes internally for compatibility.
+
+## Key Config Knobs
 
 ```yaml
 model:
@@ -61,33 +82,16 @@ model:
   num_attention_heads: 12
   intermediate_size: 3072
   max_position_embeddings: 4096
-  dropout_prob: 0.0
+  hidden_act: swiglu
   rope: true
   rms_norm: true
-  hidden_act: swiglu
-  attn_backend: sdpa         # or "flash_attn_varlen" for packed sequences
-  kernel_backend: auto        # "auto" uses Liger on CUDA, torch on CPU
+  attn_backend: sdpa           # or flash_attn_varlen
+  kernel_backend: auto         # auto | liger | torch
   ngpt: false
 ```
 
-Notes:
+## Related Docs
 
-- RoPE frequency scaling (`theta`) is currently fixed at 10,000 in `src/neobert/model/rotary.py`.
-- Packed-sequence training requires `flash-attn` (`pip install flash-attn`). Exported HF
-  models always use standard SDPA and ignore `model.attn_backend`.
-
-## Differences from BERT (High Level)
-
-| Feature           | BERT      | NeoBERT              |
-| ----------------- | --------- | -------------------- |
-| Position encoding | Learned   | RoPE (optional)      |
-| Normalization     | LayerNorm | RMSNorm or LayerNorm |
-| Activation        | GELU      | SwiGLU or GELU       |
-| Attention backend | Standard  | SDPA / flash-attn    |
-| Token types       | Yes       | No                   |
-
-## Next Steps
-
-- Training workflows: [docs/training.md](training.md)
-- Configuration reference: [docs/configuration.md](configuration.md)
-- Evaluation guide: [docs/evaluation.md](evaluation.md)
+- [Training](training.md)
+- [Configuration](configuration.md)
+- [Evaluation](evaluation.md)
