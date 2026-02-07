@@ -19,7 +19,7 @@ dependencies = [
     "pyyaml",
     "safetensors",
     "scikit-learn",
-    "torch",
+    "torch>=2.6.0",
     "tqdm",
     "transformers",
     "wandb",
