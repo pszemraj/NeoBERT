@@ -27,21 +27,30 @@ from tqdm import tqdm
 from transformers import DataCollatorWithPadding
 
 # Configuration
-from ..collator.collator import _is_right_padded_mask, attention_mask_to_packed_seqlens
-from ..config import Config
-from ..model import NeoBERT, NeoBERTConfig
-from ..optimizer import get_optimizer
-from ..scheduler import get_scheduler, resolve_scheduler_steps
-from ..tokenizer import get_tokenizer
-from ..training_utils import (
+from neobert.checkpointing import (
+    MODEL_WEIGHTS_NAME,
+    load_model_safetensors,
+    save_model_safetensors,
+)
+from neobert.collator.collator import (
+    _is_right_padded_mask,
+    attention_mask_to_packed_seqlens,
+)
+from neobert.config import Config
+from neobert.kernels.attention import resolve_runtime_attn_backend
+from neobert.model import NeoBERT, NeoBERTConfig
+from neobert.optimizer import get_optimizer
+from neobert.scheduler import get_scheduler, resolve_scheduler_steps
+from neobert.tokenizer import get_tokenizer
+from neobert.training_utils import (
     _maybe_compile_model,
     _maybe_prepare_for_forward,
     _resolve_resume_checkpoint,
 )
-from ..utils import configure_tf32, prepare_wandb_config
-from .datasets import get_bsz
-from .loss import SupConLoss
-from .metrics import Metrics
+from neobert.contrastive.datasets import get_bsz
+from neobert.contrastive.loss import SupConLoss
+from neobert.contrastive.metrics import Metrics
+from neobert.utils import configure_tf32, prepare_wandb_config
 
 logger = logging.getLogger(__name__)
 
@@ -63,9 +72,9 @@ def _build_packed_seqlens(attention_mask: torch.Tensor, *, name: str) -> torch.T
         mask_cpu = mask_cpu.cpu()
     if not _is_right_padded_mask(mask_cpu):
         raise ValueError(
-            f"xFormers attention requires right-padded attention_mask; '{name}' is not "
-            "right-padded. Set tokenizer.padding_side='right' or disable "
-            "model.xformers_attention."
+            f"Packed attention requires right-padded attention_mask; '{name}' is not "
+            "right-padded. Set tokenizer.padding_side='right' or use "
+            "model.attn_backend='sdpa'."
         )
     return attention_mask_to_packed_seqlens(mask_cpu)
 
@@ -137,6 +146,10 @@ def trainer(cfg: Config) -> None:
             "Contrastive training requires dataset.path to point to a preprocessed dataset. "
             "Run scripts/contrastive/preprocess.py to build it first."
         )
+    cfg.model.attn_backend = resolve_runtime_attn_backend(
+        cfg.model.attn_backend,
+        fallback_to_sdpa=True,
+    )
 
     # Get the last checkpoint id
     output_dir = Path(cfg.trainer.output_dir)
@@ -220,14 +233,14 @@ def trainer(cfg: Config) -> None:
         pretrained_model_name_or_path=cfg.tokenizer.path or cfg.tokenizer.name,
         max_length=cfg.tokenizer.max_length,
     )
-    use_xformers = bool(cfg.model.xformers_attention)
-    if use_xformers and tokenizer.padding_side != "right":
+    use_packed = cfg.model.attn_backend != "sdpa"
+    if use_packed and tokenizer.padding_side != "right":
         logger.warning(
-            "tokenizer.padding_side=%s is incompatible with xFormers packed attention; "
-            "disabling model.xformers_attention.",
+            "tokenizer.padding_side=%s is incompatible with packed attention; "
+            "falling back to attn_backend='sdpa'.",
             tokenizer.padding_side,
         )
-        use_xformers = False
+        use_packed = False
 
     # Dataset
     dataset_path = Path(cfg.dataset.path)
@@ -286,7 +299,8 @@ def trainer(cfg: Config) -> None:
         norm_eps=cfg.model.norm_eps,
         embedding_init_range=cfg.model.embedding_init_range,
         decoder_init_range=cfg.model.decoder_init_range,
-        flash_attention=use_xformers,
+        attn_backend=cfg.model.attn_backend if use_packed else "sdpa",
+        kernel_backend=cfg.model.kernel_backend,
         ngpt=cfg.model.ngpt,
         base_scale=cfg.model.base_scale,
         pad_token_id=tokenizer.pad_token_id,
@@ -343,13 +357,16 @@ def trainer(cfg: Config) -> None:
                 model, pretrained_checkpoint_dir, tag=str(tag)
             )
         else:
-            state_dict_path = pretrained_checkpoint_dir / str(tag) / "state_dict.pt"
+            state_dict_path = pretrained_checkpoint_dir / str(tag) / MODEL_WEIGHTS_NAME
             if not state_dict_path.exists():
                 raise ValueError(
-                    f"Expected state_dict.pt at {state_dict_path}. "
+                    f"Expected {MODEL_WEIGHTS_NAME} at {state_dict_path}. "
                     "Set pretrained_checkpoint_dir or enable DeepSpeed loading."
                 )
-            state_dict = torch.load(state_dict_path, map_location="cpu")
+            state_dict = load_model_safetensors(
+                pretrained_checkpoint_dir / str(tag),
+                map_location="cpu",
+            )
             # NOTE: We allow partial loads for flexibility; checkpoint/config mismatches
             # are not validated beyond this strict=False load.
             model.load_state_dict(state_dict, strict=False)
@@ -499,7 +516,13 @@ def trainer(cfg: Config) -> None:
         def _prepare_attention(
             mask: torch.Tensor, *, name: str
         ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-            if use_xformers:
+            """Build additive pad mask or packed seqlens from a 0/1 attention mask.
+
+            :param torch.Tensor mask: Binary attention mask.
+            :param str name: Batch name for validation errors.
+            :return tuple[torch.Tensor | None, torch.Tensor | None]: Pad mask and packed metadata.
+            """
+            if use_packed:
                 return None, _build_packed_seqlens(mask, name=name)
             pad_mask = torch.where(mask == 1, float(0.0), float("-inf")).type(
                 dtype_pad_mask
@@ -701,7 +724,7 @@ def trainer(cfg: Config) -> None:
             if metrics["train/steps"] % cfg.trainer.save_steps == 0:
                 accelerator.save_state()
 
-            # Save the pytorch model
+            # Save model weights checkpoint
             if metrics["train/steps"] % cfg.trainer.save_steps == 0:
                 save_total_limit = getattr(cfg.trainer, "save_total_limit", 0)
                 max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
@@ -728,9 +751,9 @@ def trainer(cfg: Config) -> None:
                 else:
                     path = model_checkpoint_dir / str(metrics["train/steps"])
                     path.mkdir(parents=True, exist_ok=True)
-                    torch.save(
-                        model.state_dict(),
-                        path / "state_dict.pt",
+                    save_model_safetensors(
+                        accelerator.unwrap_model(model),
+                        path,
                     )
 
             if metrics["train/steps"] >= cfg.trainer.max_steps:

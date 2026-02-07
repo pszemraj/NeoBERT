@@ -1,56 +1,67 @@
 # Testing Guide
 
-This guide covers running and extending the NeoBERT test suite.
+This guide covers running and extending the NeoBERT regression suite.
 
-> [!NOTE]
-> Test layout is documented in [tests/README.md](../tests/README.md). Tiny configs live in [tests/configs/README.md](../tests/configs/README.md).
+## Run Tests
 
-## Running Tests
-
-### Run the full suite
+### Full suite
 
 ```bash
 pytest -q
 ```
 
-Or use the repo helper:
+Or via helper:
 
 ```bash
 python tests/run_tests.py
 ```
 
-By default the helper uses pytest; pass `--no-pytest` to force unittest discovery.
-
-### Run a subset
+### Subsets
 
 ```bash
 # One file
-pytest tests/training/test_pretrain_pipeline.py -q
+pytest tests/kernels/test_attention.py -q
 
-# A directory
+# One directory
 pytest tests/model -q
-```
 
-### Verbose debugging
-
-```bash
+# Verbose investigation
 pytest tests/model/test_model_forward.py -vv --showlocals
 ```
 
-## Writing Tests
+### Helper flags
 
-- Prefer **small configs** from `tests/configs/` to keep runs fast.
-- Avoid external network calls when possible (or mark as slow/integration).
-- Disable W&B in tests that launch trainers: set `wandb.mode: "disabled"`.
-- Keep GPU-only logic guarded with `torch.cuda.is_available()`.
+```bash
+python tests/run_tests.py --test-dir training
+python tests/run_tests.py --pattern "test_*compile*.py"
+python tests/run_tests.py --no-pytest
+```
 
-## Common Issues
+## Test Authoring Guidelines
 
-- **Import errors**: ensure the package is installed (`pip install -e .[dev]`).
-- **CUDA/CPU mismatch**: move tensors/model to the same device before asserting shapes.
-- **Slow tests**: reduce `max_steps`, batch size, or dataset size in the config.
+- Prefer tiny configs in `tests/configs/`.
+- Keep tests deterministic and local (avoid network where possible).
+- Disable external logging for training tests (`wandb.mode: disabled`).
+- Guard GPU-only assertions with `torch.cuda.is_available()`.
+- For performance-sensitive paths (packing/compile), include regression tests for
+  both correctness and expected control-flow behavior.
 
-## Next Steps
+## Common Failures
 
-- Config reference: [docs/configuration.md](configuration.md)
-- Training workflows: [docs/training.md](training.md)
+1. Import errors
+
+- install editable package (`pip install -e .[dev]`).
+
+1. Device mismatches
+
+- ensure tensors and models are on the same device in assertions.
+
+1. Slow tests
+
+- lower steps/batch sizes and use tiny configs.
+
+## Related Docs
+
+- [tests/README.md](../tests/README.md)
+- [tests/configs/README.md](../tests/configs/README.md)
+- [Configuration](configuration.md)

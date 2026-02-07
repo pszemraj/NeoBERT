@@ -169,7 +169,7 @@ def main():
         intermediate_size=1536,
         vocab_size=tokenizer.vocab_size,
         max_length=seq_len,
-        flash_attention=False,  # Disable for compatibility
+        attn_backend="sdpa",  # Disable for compatibility
         hidden_act="gelu",
         rope=False,  # Disable for simplicity
         pad_token_id=tokenizer.pad_token_id,

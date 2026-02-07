@@ -20,7 +20,7 @@ class TestGradientCheckpointing(unittest.TestCase):
             dropout=0.0,
             vocab_size=128,
             max_length=64,
-            flash_attention=False,
+            attn_backend="sdpa",
             rope=True,
         )
 
@@ -53,7 +53,7 @@ class TestGradientCheckpointing(unittest.TestCase):
             dropout=0.1,
             vocab_size=128,
             max_length=32,
-            flash_attention=False,
+            attn_backend="sdpa",
             rope=True,
         )
 

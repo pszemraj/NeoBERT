@@ -2,7 +2,7 @@
 """Export NeoBERT pretraining checkpoint to HuggingFace format.
 
 This script converts a NeoBERT checkpoint from the training format
-(state_dict.pt + config.yaml or a DeepSpeed ZeRO checkpoint) to HuggingFace
+(model.safetensors + config.yaml or a DeepSpeed ZeRO checkpoint) to HuggingFace
 format with all necessary files for loading with transformers library.
 
 Usage:
@@ -13,8 +13,8 @@ The script will create an hf/ directory in the parent folder with the exported m
 
 import argparse
 import json
+import re
 import shutil
-import sys
 import textwrap
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -22,8 +22,8 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 import transformers
 import yaml
-from safetensors.torch import save_file
-from transformers import AutoTokenizer
+from safetensors.torch import load_file, save_file
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 
 def load_config(config_path: Path) -> Dict[str, Any]:
@@ -52,19 +52,10 @@ def get_torch_dtype_from_state_dict(state_dict: Dict[str, torch.Tensor]) -> str:
         raise ValueError(f"Expected torch.Tensor, got {type(first_weight)}")
 
     dtype = first_weight.dtype
-    if dtype == torch.float32:
-        return "float32"
-    elif dtype == torch.float16:
-        return "float16"
-    elif dtype == torch.bfloat16:
-        return "bfloat16"
-    elif dtype == torch.float64:
-        return "float64"
-    else:
-        # For any other dtype, fall back to the string representation
-        dtype_str = str(dtype).replace("torch.", "")
+    dtype_str = str(dtype).split(".")[-1]
+    if dtype_str not in {"float16", "bfloat16", "float32", "float64"}:
         print(f"Warning: Found unexpected dtype {dtype}, using '{dtype_str}'")
-        return dtype_str
+    return dtype_str
 
 
 def load_tokenizer_info(tokenizer_info_path: Path) -> Optional[Dict[str, Any]]:
@@ -79,19 +70,71 @@ def load_tokenizer_info(tokenizer_info_path: Path) -> Optional[Dict[str, Any]]:
         return json.load(f)
 
 
+def _is_deepspeed_tag_dir(path: Path) -> bool:
+    """Return True when ``path`` looks like a DeepSpeed ZeRO tag directory.
+
+    :param Path path: Candidate checkpoint directory.
+    :return bool: True when DeepSpeed shard files are present.
+    """
+    if not path.is_dir():
+        return False
+    patterns = (
+        "mp_rank_*_model_states.pt",
+        "zero_pp_rank_*_mp_rank_*_optim_states.pt",
+        "bf16_zero_pp_rank_*_mp_rank_*_optim_states.pt",
+    )
+    return any(any(path.glob(pattern)) for pattern in patterns)
+
+
+def _align_tokenizer_vocab_for_export(
+    tokenizer: PreTrainedTokenizerBase,
+    target_vocab_size: int,
+) -> int:
+    """Align tokenizer length with model vocab size for exported artifacts.
+
+    :param PreTrainedTokenizerBase tokenizer: Tokenizer loaded from checkpoint.
+    :param int target_vocab_size: Expected model vocabulary size.
+    :return int: Number of added placeholder tokens.
+    :raises ValueError: If tokenizer length exceeds model vocab size.
+    """
+    current_size = len(tokenizer)
+    if current_size == target_vocab_size:
+        return 0
+    if current_size > target_vocab_size:
+        raise ValueError(
+            "Tokenizer length exceeds model vocab_size in checkpoint: "
+            f"len(tokenizer)={current_size} > vocab_size={target_vocab_size}."
+        )
+
+    needed = target_vocab_size - current_size
+    extra_tokens = [
+        f"<|neobert_extra_token_{idx}|>"
+        for idx in range(current_size, current_size + needed)
+    ]
+    added = tokenizer.add_tokens(extra_tokens, special_tokens=False)
+    final_size = len(tokenizer)
+    if added != needed or final_size != target_vocab_size:
+        raise ValueError(
+            "Failed to align tokenizer vocabulary for export: "
+            f"needed={needed}, added={added}, final_size={final_size}, "
+            f"target={target_vocab_size}."
+        )
+    return added
+
+
 def load_state_dict_from_checkpoint(checkpoint_path: Path) -> Dict[str, torch.Tensor]:
     """Load a training state dict from a checkpoint directory.
 
-    Supports native ``state_dict.pt`` checkpoints and DeepSpeed ZeRO checkpoints.
+    Supports native ``model.safetensors`` checkpoints and DeepSpeed ZeRO checkpoints.
 
     :param Path checkpoint_path: Checkpoint directory.
     :return dict[str, torch.Tensor]: Loaded state dict.
     :raises FileNotFoundError: If no supported checkpoint is found.
     :raises ValueError: If the loaded state dict is empty.
     """
-    state_dict_path = checkpoint_path / "state_dict.pt"
+    state_dict_path = checkpoint_path / "model.safetensors"
     if state_dict_path.exists():
-        state_dict = torch.load(state_dict_path, map_location="cpu")
+        state_dict = load_file(str(state_dict_path), device="cpu")
         if not state_dict:
             raise ValueError(f"Loaded state dict is empty from {state_dict_path}")
         return state_dict
@@ -102,14 +145,24 @@ def load_state_dict_from_checkpoint(checkpoint_path: Path) -> Dict[str, torch.Te
         )
     except Exception as exc:
         raise FileNotFoundError(
-            f"state_dict.pt not found in {checkpoint_path} and DeepSpeed is unavailable."
+            "model.safetensors not found in "
+            f"{checkpoint_path} and DeepSpeed is unavailable."
         ) from exc
 
     try:
-        state_dict = get_fp32_state_dict_from_zero_checkpoint(str(checkpoint_path))
+        if _is_deepspeed_tag_dir(checkpoint_path):
+            # Trainer checkpoints are step-tag directories (e.g. ".../100000").
+            # zero_to_fp32 expects (root, tag) in this layout.
+            state_dict = get_fp32_state_dict_from_zero_checkpoint(
+                str(checkpoint_path.parent),
+                tag=checkpoint_path.name,
+            )
+        else:
+            state_dict = get_fp32_state_dict_from_zero_checkpoint(str(checkpoint_path))
     except Exception as exc:
         raise FileNotFoundError(
-            f"state_dict.pt not found in {checkpoint_path} and DeepSpeed conversion failed."
+            "model.safetensors not found in "
+            f"{checkpoint_path} and DeepSpeed conversion failed."
         ) from exc
 
     if not state_dict:
@@ -231,11 +284,13 @@ def run_forward_sanity_check(
     :param dict[str, torch.Tensor] mapped_state_dict: Remapped state dict.
     :raises ValueError: If forward pass fails or produces invalid outputs.
     """
-    repo_root = Path(__file__).resolve().parents[2]
-    if str(repo_root) not in sys.path:
-        sys.path.insert(0, str(repo_root))
-
-    from neobert.huggingface.modeling_neobert import NeoBERTConfig, NeoBERTLMHead
+    try:
+        from neobert.huggingface.modeling_neobert import NeoBERTConfig, NeoBERTLMHead
+    except ImportError as exc:
+        raise ImportError(
+            "Could not import neobert.huggingface.modeling_neobert. "
+            "Install NeoBERT in the current environment (for example: `pip install -e .`)."
+        ) from exc
 
     model_config = NeoBERTConfig(**hf_config)
     model = NeoBERTLMHead(model_config)
@@ -339,9 +394,7 @@ def create_hf_config(
         "rope": model_config.get("rope", True),
         "hidden_act": hidden_act,
         "dropout": model_config.get("dropout", model_config.get("dropout_prob", 0.0)),
-        "flash_attention": model_config.get(
-            "xformers_attention", model_config.get("flash_attention", False)
-        ),
+        "flash_attention": model_config.get("attn_backend", "sdpa") != "sdpa",
         "pad_token_id": model_config["pad_token_id"],
         "torch_dtype": torch_dtype,
         "transformers_version": transformers.__version__,
@@ -413,9 +466,12 @@ def _rewrite_export_model_imports(model_path: Path) -> None:
     :param Path model_path: Path to the exported model.py file.
     """
     contents = model_path.read_text()
-    updated = contents.replace(
-        "from ..modeling_utils import swiglu_intermediate_size",
-        "from .modeling_utils import swiglu_intermediate_size",
+    # Rewrite all parent-relative modeling_utils imports so flat exported repos
+    # can rely on a consistent local ``.modeling_utils`` module path.
+    updated = re.sub(
+        r"from \.\.modeling_utils import ([A-Za-z0-9_, ]+)",
+        r"from .modeling_utils import \1",
+        contents,
     )
     if updated != contents:
         model_path.write_text(updated)
@@ -457,7 +513,7 @@ def copy_hf_modeling_files(target_dir: Path) -> None:
 def export_checkpoint(checkpoint_path: Path, output_dir: Path | None = None) -> Path:
     """Export a NeoBERT checkpoint to HuggingFace format.
 
-    :param Path checkpoint_path: Checkpoint directory with state_dict.pt and config.yaml.
+    :param Path checkpoint_path: Checkpoint directory with model.safetensors and config.yaml.
     :param Path | None output_dir: Optional output directory.
     :return Path: Output directory containing exported files.
     """
@@ -564,6 +620,16 @@ def export_checkpoint(checkpoint_path: Path, output_dir: Path | None = None) -> 
 
         # Load the tokenizer
         tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_dir))
+        added_tokens = _align_tokenizer_vocab_for_export(
+            tokenizer,
+            int(model_config["vocab_size"]),
+        )
+        if added_tokens > 0:
+            print(
+                "  Added "
+                f"{added_tokens} tokenizer placeholder tokens to match model vocab_size="
+                f"{model_config['vocab_size']}"
+            )
 
         # Get max_position_embeddings from model config
         max_pos = model_config["max_position_embeddings"]
@@ -798,7 +864,7 @@ def main() -> None:
         type=str,
         help=(
             "Path to checkpoint directory containing config.yaml plus "
-            "state_dict.pt or a DeepSpeed ZeRO checkpoint"
+            "model.safetensors or a DeepSpeed ZeRO checkpoint"
         ),
     )
     parser.add_argument(

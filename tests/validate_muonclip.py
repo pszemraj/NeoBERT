@@ -26,7 +26,7 @@ def validate_basic_functionality():
             intermediate_size=256,
             vocab_size=1000,
             max_length=128,
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="gelu",
             rope=False,
         )
@@ -184,7 +184,7 @@ def validate_hook_system():
             intermediate_size=256,
             vocab_size=1000,
             max_length=128,
-            flash_attention=False,
+            attn_backend="sdpa",
             rope=False,
         )
         model = NeoBERT(config)

@@ -5,7 +5,11 @@ import unittest
 
 import torch
 
-from neobert.pretraining.trainer import to_target_batch_size
+from neobert.pretraining.trainer import (
+    _append_to_stored_batch,
+    _has_stored_batch,
+    to_target_batch_size,
+)
 
 
 class TestToTargetBatchSizeDevice(unittest.TestCase):
@@ -137,3 +141,37 @@ class TestStoredBatchListConcat(unittest.TestCase):
         # Merge path puts stored_batch first: stored + batch
         self.assertEqual(out["tags"], ["y", "x"])
         self.assertIsNone(stored["tags"])
+
+
+class TestPackedFragmentBuffering(unittest.TestCase):
+    """Regression tests for packed fragment buffering behavior."""
+
+    def test_undersized_packed_fragments_accumulate_to_target(self):
+        """Ensure undersized packed fragments are buffered and merged correctly."""
+        stored_batch = {
+            "input_ids": None,
+            "attention_mask": None,
+            "labels": None,
+            "packed_seqlens": None,
+        }
+        frag_a = {
+            "input_ids": torch.arange(6, dtype=torch.long).view(2, 3),
+            "attention_mask": torch.ones((2, 3), dtype=torch.long),
+            "labels": torch.zeros((2, 3), dtype=torch.long),
+            "packed_seqlens": torch.tensor([[3, 0], [2, 1]], dtype=torch.int32),
+        }
+        frag_b = {
+            "input_ids": torch.arange(9, dtype=torch.long).view(3, 3),
+            "attention_mask": torch.ones((3, 3), dtype=torch.long),
+            "labels": torch.zeros((3, 3), dtype=torch.long),
+            "packed_seqlens": torch.tensor([[1, 1], [2, 0], [3, 0]], dtype=torch.int32),
+        }
+
+        _append_to_stored_batch(stored_batch, frag_a)
+        self.assertTrue(_has_stored_batch(stored_batch))
+        out, stored = to_target_batch_size(frag_b, stored_batch, target_size=4)
+
+        self.assertEqual(out["input_ids"].shape[0], 4)
+        self.assertEqual(out["packed_seqlens"].shape[0], 4)
+        self.assertIsNotNone(stored["input_ids"])
+        self.assertEqual(stored["input_ids"].shape[0], 1)

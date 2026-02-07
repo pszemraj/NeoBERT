@@ -144,9 +144,9 @@ for task in "${SMALL_TASKS[@]}"; do
         CHECK_DIRS+=("$output")
     fi
 done
-if [ ${#CHECK_DIRS[@]} -gt 0 ] && find "${CHECK_DIRS[@]}" -name "state_dict.pt" -o -name "*.safetensors" 2>/dev/null | grep -q .; then
+if [ ${#CHECK_DIRS[@]} -gt 0 ] && find "${CHECK_DIRS[@]}" -name "*.safetensors" 2>/dev/null | grep -q .; then
     echo "WARNING: Found model checkpoints that shouldn't be saved!"
-    find "${CHECK_DIRS[@]}" -name "state_dict.pt" -o -name "*.safetensors"
+    find "${CHECK_DIRS[@]}" -name "*.safetensors"
 else
     echo -e "${GREEN}✓ No model checkpoints found (correct behavior)${NC}"
 fi

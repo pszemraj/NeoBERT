@@ -1,24 +1,25 @@
 # NeoBERT Documentation
 
-Core documentation for training, evaluating, and using NeoBERT models.
+Core documentation for training, evaluating, exporting, and maintaining NeoBERT.
 
 ## Essential Guides
 
-- **[Training](training.md)** - Pretraining and fine-tuning models
-- **[Evaluation](evaluation.md)** - Running GLUE and MTEB benchmarks
-- **[Export](export.md)** - Exporting models to Hugging Face format
-- **[Configuration](configuration.md)** - Understanding the config system
+- [Training](training.md) - pretraining, contrastive runs, checkpointing, launch patterns
+- [Evaluation](evaluation.md) - GLUE/MTEB workflows and caveats
+- [Export](export.md) - checkpoint export to Hugging Face format
+- [Configuration](configuration.md) - config schema and key runtime knobs
 
 ## Technical Reference
 
-- **[Architecture](architecture.md)** - Model architecture details
-- **[Testing](testing.md)** - Running the test suite
-- **[Troubleshooting](troubleshooting.md)** - Common issues and solutions
-- **[Dev Notes](dev.md)** - Known limitations and roadmap items
+- [Architecture](architecture.md) - model internals and backend behavior
+- [Testing](testing.md) - test execution and test authoring notes
+- [Troubleshooting](troubleshooting.md) - common runtime/perf issues and fixes
+- [Dev Notes](dev.md) - current status + next performance TODOs
 
-## Quick Links
+## Project Links
 
 - [Main README](../README.md)
-- [Example Configs](../configs/README.md)
-- [GLUE Configs](../configs/glue/)
-- [Hugging Face Export](../scripts/export-hf/README.md)
+- [Configs](../configs/README.md)
+- [Scripts](../scripts/README.md)
+- [Export Script Notes](../scripts/export-hf/README.md)
+- [Test Configs](../tests/configs/README.md)

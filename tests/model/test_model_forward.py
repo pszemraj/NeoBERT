@@ -2,7 +2,7 @@
 """Test NeoBERT model forward passes and functionality."""
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 import torch
 from tokenizers import Tokenizer, models, pre_tokenizers
@@ -15,6 +15,9 @@ from neobert.model import (
     NeoBERTHFForSequenceClassification,
     NeoBERTLMHead,
     NormNeoBERT,
+)
+from neobert.kernels.attention import (
+    prepare_packed_flash_metadata as _prepare_packed_flash_metadata_real,
 )
 
 
@@ -43,7 +46,7 @@ class TestModelForward(unittest.TestCase):
             dropout=0.1,
             vocab_size=1000,
             max_length=128,
-            flash_attention=False,  # Use regular attention for CPU testing
+            attn_backend="sdpa",  # Use SDPA attention for CPU testing
             ngpt=False,
             hidden_act="gelu",  # Use GELU instead of SwiGLU for CPU testing
         )
@@ -72,10 +75,119 @@ class TestModelForward(unittest.TestCase):
             self.tiny_config.hidden_size,
         )
         self.assertEqual(outputs.shape, expected_shape)
-
         # Check that outputs are not NaN or inf
         self.assertFalse(torch.isnan(outputs).any())
         self.assertFalse(torch.isinf(outputs).any())
+
+    def test_config_canonicalizes_attn_backend_alias(self):
+        """Ensure attention backend aliases are canonicalized."""
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=128,
+            max_length=16,
+            attn_backend="flash",
+            hidden_act="gelu",
+        )
+        self.assertEqual(config.attn_backend, "flash_attn_varlen")
+
+    def test_config_rejects_invalid_attn_backend(self):
+        """Ensure invalid attention backend values fail fast."""
+        with self.assertRaisesRegex(ValueError, "Unknown attn_backend"):
+            NeoBERTConfig(attn_backend="bad_backend")
+
+    def test_config_rejects_invalid_kernel_backend(self):
+        """Ensure invalid kernel backend values fail fast."""
+        with self.assertRaisesRegex(ValueError, "Unknown kernel_backend"):
+            NeoBERTConfig(kernel_backend="bad_backend")
+
+    def test_neobert_accepts_tensor_packed_seqlens(self):
+        """Ensure tensor packed_seqlens metadata works in model forward."""
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            dropout=0.0,
+            vocab_size=256,
+            max_length=32,
+            attn_backend="sdpa",
+            ngpt=False,
+            hidden_act="gelu",
+        )
+        model = NeoBERT(config)
+        model.eval()
+        x = torch.randint(0, 256, (2, 8))
+        packed = torch.tensor([[8, 0], [6, 0]], dtype=torch.int32)
+        with torch.no_grad():
+            out = model(x, pad_mask=None, packed_seqlens=packed)
+        self.assertEqual(out.shape, (2, 8, 32))
+
+    def test_flash_metadata_is_reused_across_layers(self):
+        """Ensure flash packed metadata is prepared once and reused in all layers."""
+        import neobert.model.model as model_module
+
+        calls: dict[str, list[int] | int] = {"prepare": 0, "meta_ids": []}
+
+        def _count_prepare(*args, **kwargs):
+            calls["prepare"] = int(calls["prepare"]) + 1
+            return _prepare_packed_flash_metadata_real(*args, **kwargs)
+
+        def _fake_attention_forward(
+            xq: torch.Tensor,
+            xk: torch.Tensor,
+            xv: torch.Tensor,
+            pad_mask: torch.Tensor | None,
+            packed_seqlens: torch.Tensor | list[list[int]] | None,
+            dropout_p: float,
+            scale: float | None,
+            attn_backend: str,
+            packed_flash_metadata=None,
+        ) -> torch.Tensor:
+            assert packed_flash_metadata is not None
+            meta_ids = calls["meta_ids"]
+            assert isinstance(meta_ids, list)
+            meta_ids.append(id(packed_flash_metadata))
+            return torch.zeros_like(xq)
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=2,
+            num_attention_heads=2,
+            intermediate_size=64,
+            dropout=0.0,
+            vocab_size=256,
+            max_length=32,
+            attn_backend="flash_attn_varlen",
+            ngpt=False,
+            hidden_act="gelu",
+        )
+        model = NeoBERT(config)
+        model.eval()
+        x = torch.randint(0, 256, (2, 8))
+        packed = torch.tensor([[8, 0], [6, 0]], dtype=torch.int32)
+
+        with (
+            patch.object(
+                model_module,
+                "prepare_packed_flash_metadata",
+                side_effect=_count_prepare,
+            ),
+            patch.object(
+                model_module, "attention_forward", side_effect=_fake_attention_forward
+            ),
+        ):
+            with torch.no_grad():
+                out = model(x, pad_mask=None, packed_seqlens=packed)
+
+        self.assertEqual(out.shape, (2, 8, 32))
+        self.assertEqual(calls["prepare"], 1)
+        meta_ids = calls["meta_ids"]
+        assert isinstance(meta_ids, list)
+        self.assertEqual(len(meta_ids), config.num_hidden_layers)
+        self.assertEqual(len(set(meta_ids)), 1)
 
     def test_gradient_checkpointing_matches_baseline(self):
         """Ensure checkpointed gradients match non-checkpointed forward."""
@@ -88,7 +200,7 @@ class TestModelForward(unittest.TestCase):
             dropout=0.0,
             vocab_size=256,
             max_length=32,
-            flash_attention=False,
+            attn_backend="sdpa",
             ngpt=False,
             hidden_act="gelu",
         )
@@ -131,7 +243,7 @@ class TestModelForward(unittest.TestCase):
             dropout=0.0,
             vocab_size=100,
             max_length=16,
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="swiglu",
         )
 
@@ -162,7 +274,7 @@ class TestModelForward(unittest.TestCase):
             dropout=0.1,
             vocab_size=1000,
             max_length=128,
-            flash_attention=False,
+            attn_backend="sdpa",
             ngpt=True,  # Enable nGPT mode
         )
 
@@ -259,7 +371,7 @@ class TestModelForward(unittest.TestCase):
             dropout=0.1,
             vocab_size=1000,
             max_length=128,
-            flash_attention=False,
+            attn_backend="sdpa",
             ngpt=False,
             num_labels=2,
             hidden_act="gelu",
@@ -413,10 +525,10 @@ class TestModelForward(unittest.TestCase):
         )
 
     def test_hf_flash_attention_silently_ignored(self):
-        """Ensure flash_attention=True is silently accepted for config compat."""
+        """Ensure flash_attention=True is silently accepted for HF config compat."""
         from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
 
-        # flash_attention=True should be accepted without warning
+        # flash_attention=True should be accepted without warning (HF config compat)
         config = NeoBERTConfig(
             hidden_size=32,
             num_hidden_layers=1,
@@ -448,7 +560,7 @@ class TestModelForward(unittest.TestCase):
             intermediate_size=64,
             vocab_size=10,
             max_length=8,
-            flash_attention=False,
+            attn_backend="sdpa",
             ngpt=False,
             hidden_act="gelu",
         )
@@ -481,7 +593,7 @@ class TestModelForward(unittest.TestCase):
             intermediate_size=64,
             vocab_size=16,
             max_length=8,
-            flash_attention=False,
+            attn_backend="sdpa",
             ngpt=False,
             hidden_act="gelu",
             tie_word_embeddings=True,
@@ -507,15 +619,37 @@ class TestModelForward(unittest.TestCase):
             hf_model.decoder.weight.data_ptr(), hf_model.model.encoder.weight.data_ptr()
         )
 
-    def test_packed_seqlens_cuda_raises(self):
-        """Ensure CUDA packed_seqlens fails fast to avoid syncs."""
+    def test_lm_head_ngpt_does_not_tie_embeddings(self):
+        """Ensure ngpt LM head does not tie token embeddings to decoder weights."""
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            intermediate_size=64,
+            vocab_size=16,
+            max_length=8,
+            attn_backend="sdpa",
+            ngpt=True,
+            hidden_act="gelu",
+            tie_word_embeddings=True,
+        )
+        model = NeoBERTLMHead(config)
+        self.assertNotEqual(
+            model.decoder.weight.data_ptr(), model.model.encoder.weight.data_ptr()
+        )
+        self.assertFalse(model.config.tie_word_embeddings)
+
+    def test_packed_seqlens_cuda_is_supported(self):
+        """Ensure CUDA packed_seqlens metadata is accepted."""
         if not torch.cuda.is_available():
-            self.skipTest("CUDA required to validate packed_seqlens guard.")
+            self.skipTest("CUDA required to validate packed_seqlens on-device path.")
         from neobert.model.model import _normalize_packed_seqlens
 
         packed = torch.tensor([[1, 2]], device="cuda", dtype=torch.int32)
-        with self.assertRaises(RuntimeError):
-            _normalize_packed_seqlens(packed, seq_len=2)
+        normalized = _normalize_packed_seqlens(packed, seq_len=3)
+        assert normalized is not None
+        self.assertEqual(normalized.device.type, "cuda")
+        self.assertEqual(normalized.dtype, torch.int32)
 
     def test_hf_rope_disabled_uses_positional_embeddings(self):
         """Ensure HF model runs when RoPE is disabled."""
@@ -584,7 +718,7 @@ class TestModelForward(unittest.TestCase):
             num_hidden_layers=2,
             num_attention_heads=2,
             rope=True,
-            flash_attention=False,
+            attn_backend="sdpa",
             vocab_size=1000,
             hidden_act="gelu",
         )
@@ -596,7 +730,7 @@ class TestModelForward(unittest.TestCase):
             num_hidden_layers=2,
             num_attention_heads=2,
             rope=False,
-            flash_attention=False,
+            attn_backend="sdpa",
             vocab_size=1000,
             hidden_act="gelu",
         )
@@ -625,7 +759,7 @@ class TestModelForward(unittest.TestCase):
             max_length=8,
             pad_token_id=7,
             rope=False,
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="gelu",
         )
         model = NeoBERT(pos_config)
@@ -649,7 +783,7 @@ class TestModelForward(unittest.TestCase):
             num_hidden_layers=1,
             num_attention_heads=2,
             rope=True,
-            flash_attention=False,
+            attn_backend="sdpa",
             vocab_size=1000,
             hidden_act="gelu",
         )
@@ -657,6 +791,8 @@ class TestModelForward(unittest.TestCase):
         buffers = dict(model.named_buffers())
         self.assertIn("freqs_cis", buffers)
         self.assertNotIn("freqs_cis", model.state_dict())
+        self.assertEqual(model.freqs_cis.shape[0], rope_config.max_length)
+        ptr_before = model.freqs_cis.data_ptr()
 
         with torch.no_grad():
             _ = model(self.input_ids, self.pad_mask)
@@ -664,6 +800,55 @@ class TestModelForward(unittest.TestCase):
         self.assertIn("freqs_cis", buffers)
         self.assertNotIn("freqs_cis", model.state_dict())
         self.assertGreater(model.freqs_cis.numel(), 0)
+        self.assertEqual(model.freqs_cis.data_ptr(), ptr_before)
+
+    def test_normalize_pad_mask_upcasts_to_float32(self):
+        """Ensure additive masks are upcast to float32 for softmax stability."""
+        from neobert.model.model import _normalize_pad_mask
+
+        pad_mask = torch.zeros((2, 4), dtype=torch.bfloat16)
+        normalized = _normalize_pad_mask(pad_mask)
+        self.assertEqual(normalized.dtype, torch.float32)
+        self.assertEqual(normalized.shape, (2, 1, 1, 4))
+
+    def test_normalize_pad_mask_rejects_non_floating_masks(self):
+        """Ensure integer masks fail fast to enforce additive-mask semantics."""
+        from neobert.model.model import _normalize_pad_mask
+
+        int_mask = torch.ones((2, 4), dtype=torch.int64)
+        with self.assertRaises(TypeError):
+            _normalize_pad_mask(int_mask)
+
+    def test_infer_single_segment_rejects_fully_padded_rows(self):
+        """Ensure packed inference falls back when any sample has zero valid tokens."""
+        from neobert.model.model import (
+            _infer_single_segment_packed_seqlens_from_pad_mask,
+        )
+
+        pad_mask = torch.full((2, 4), float("-inf"), dtype=torch.float32)
+        pad_mask[1, :2] = 0.0
+        inferred = _infer_single_segment_packed_seqlens_from_pad_mask(
+            pad_mask, seq_len=4
+        )
+        self.assertIsNone(inferred)
+
+    def test_infer_single_segment_cuda_mask_falls_back(self):
+        """Ensure CUDA masks gracefully skip packed-length inference."""
+        from neobert.model.model import (
+            _infer_single_segment_packed_seqlens_from_pad_mask,
+        )
+
+        pad_mask = torch.zeros((2, 4), dtype=torch.float32)
+        with patch.object(
+            torch.Tensor,
+            "is_cuda",
+            new_callable=PropertyMock,
+            return_value=True,
+        ):
+            inferred = _infer_single_segment_packed_seqlens_from_pad_mask(
+                pad_mask, seq_len=4
+            )
+        self.assertIsNone(inferred)
 
     def test_rotary_accepts_batched_freqs(self):
         """Ensure rotary helper supports batched frequency tensors."""
@@ -684,6 +869,30 @@ class TestModelForward(unittest.TestCase):
         self.assertEqual(xq_out.shape, xq.shape)
         self.assertEqual(xk_out.shape, xk.shape)
 
+    def test_rotary_training_matches_hf_export(self):
+        """Ensure training and HF rotary helpers stay numerically aligned."""
+        from neobert.huggingface.rotary import (
+            apply_rotary_emb as hf_apply_rotary_emb,
+            precompute_freqs_cis as hf_precompute_freqs_cis,
+        )
+        from neobert.model.rotary import (
+            apply_rotary_emb as train_apply_rotary_emb,
+            precompute_freqs_cis as train_precompute_freqs_cis,
+        )
+
+        batch_size, seq_len, num_heads, head_dim = 2, 6, 3, 8
+        xq = torch.randn(batch_size, seq_len, num_heads, head_dim)
+        xk = torch.randn(batch_size, seq_len, num_heads, head_dim)
+
+        train_freqs = train_precompute_freqs_cis(head_dim, seq_len)
+        hf_freqs = hf_precompute_freqs_cis(head_dim, seq_len)
+
+        train_q, train_k = train_apply_rotary_emb(xq, xk, train_freqs)
+        hf_q, hf_k = hf_apply_rotary_emb(xq, xk, hf_freqs)
+
+        torch.testing.assert_close(train_q, hf_q, atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(train_k, hf_k, atol=1e-5, rtol=1e-5)
+
     def test_activation_functions(self):
         """Test different activation functions."""
         # Test SwiGLU
@@ -692,7 +901,7 @@ class TestModelForward(unittest.TestCase):
             num_hidden_layers=1,
             num_attention_heads=2,
             hidden_act="swiglu",
-            flash_attention=False,
+            attn_backend="sdpa",
             vocab_size=1000,
         )
         swiglu_model = NeoBERT(swiglu_config)
@@ -703,7 +912,7 @@ class TestModelForward(unittest.TestCase):
             num_hidden_layers=1,
             num_attention_heads=2,
             hidden_act="GELU",
-            flash_attention=False,
+            attn_backend="sdpa",
             vocab_size=1000,
         )
         gelu_model = NeoBERT(gelu_config)
@@ -763,7 +972,7 @@ class TestModelForward(unittest.TestCase):
                 num_hidden_layers=1,
                 num_attention_heads=2,
                 hidden_act="relu",
-                flash_attention=False,
+                attn_backend="sdpa",
                 vocab_size=1000,
             )
 
@@ -864,7 +1073,7 @@ class TestModelForward(unittest.TestCase):
             intermediate_size=64,
             vocab_size=100,
             max_length=8,
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="gelu",
             decoder_init_range=0.02,
         )
@@ -883,8 +1092,8 @@ class TestModelForward(unittest.TestCase):
                 f"({config.decoder_init_range}); _init_weights may be overwriting backbone.",
             )
 
-    def test_seq_class_disables_flash_attention(self):
-        """Ensure NeoBERTForSequenceClassification forces flash_attention=False."""
+    def test_seq_class_forces_sdpa_backend(self):
+        """Ensure NeoBERTForSequenceClassification forces attn_backend='sdpa'."""
         config = NeoBERTConfig(
             hidden_size=32,
             num_hidden_layers=1,
@@ -892,14 +1101,15 @@ class TestModelForward(unittest.TestCase):
             intermediate_size=64,
             vocab_size=100,
             max_length=8,
-            flash_attention=True,
+            attn_backend="flash_attn_varlen",
             hidden_act="gelu",
         )
         model = NeoBERTForSequenceClassification(config, num_labels=2)
-        self.assertFalse(model.model.config.flash_attention)
+        self.assertEqual(model.model.config.attn_backend, "sdpa")
+        self.assertEqual(config.attn_backend, "flash_attn_varlen")
 
-    def test_hf_seq_class_disables_flash_attention(self):
-        """Ensure NeoBERTHFForSequenceClassification forces flash_attention=False."""
+    def test_seq_class_uses_norm_backbone_when_ngpt_enabled(self):
+        """Ensure ngpt classification uses NormNeoBERT backbone."""
         config = NeoBERTConfig(
             hidden_size=32,
             num_hidden_layers=1,
@@ -907,15 +1117,54 @@ class TestModelForward(unittest.TestCase):
             intermediate_size=64,
             vocab_size=100,
             max_length=8,
-            flash_attention=True,
+            attn_backend="sdpa",
+            ngpt=True,
+            hidden_act="gelu",
+        )
+        model = NeoBERTForSequenceClassification(config, num_labels=2)
+        self.assertIsInstance(model.model, NormNeoBERT)
+
+    def test_hf_seq_class_forces_sdpa_backend(self):
+        """Ensure NeoBERTHFForSequenceClassification forces attn_backend='sdpa'."""
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=8,
+            attn_backend="flash_attn_varlen",
             hidden_act="gelu",
             num_labels=3,
         )
         model = NeoBERTHFForSequenceClassification(config)
-        self.assertFalse(model.model.config.flash_attention)
+        self.assertEqual(model.model.config.attn_backend, "sdpa")
+        self.assertEqual(config.attn_backend, "flash_attn_varlen")
 
-    def test_mteb_encode_with_flash_off(self):
-        """Ensure MTEB encode works with flash_attention=False."""
+    def test_training_config_default_vocab_matches_repo_defaults(self):
+        """Ensure training config default vocab matches YAML/HF defaults."""
+        config = NeoBERTConfig()
+        self.assertEqual(config.vocab_size, 30522)
+
+    def test_hf_seq_class_uses_norm_backbone_when_ngpt_enabled(self):
+        """Ensure HF ngpt classification uses NormNeoBERT backbone."""
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=8,
+            attn_backend="sdpa",
+            ngpt=True,
+            hidden_act="gelu",
+            num_labels=3,
+        )
+        model = NeoBERTHFForSequenceClassification(config)
+        self.assertIsInstance(model.model, NormNeoBERT)
+
+    def test_mteb_encode_with_sdpa_backend(self):
+        """Ensure MTEB encode works with attn_backend='sdpa'."""
         from neobert.model import NeoBERTConfig, NeoBERTForMTEB
 
         tokenizer = self._make_tokenizer()
@@ -926,7 +1175,7 @@ class TestModelForward(unittest.TestCase):
             intermediate_size=64,
             vocab_size=10,
             max_length=8,
-            flash_attention=False,
+            attn_backend="sdpa",
             ngpt=False,
             hidden_act="gelu",
         )
@@ -943,15 +1192,17 @@ class TestModelForward(unittest.TestCase):
         self.assertEqual(embeddings.shape[1], config.hidden_size)
 
     @unittest.skipUnless(
-        torch.cuda.is_available(), "CUDA required for flash_attention MTEB test"
+        torch.cuda.is_available(), "CUDA required for flash_attn_varlen MTEB test"
     )
-    def test_mteb_encode_flash_attention_no_crash(self):
-        """Ensure MTEB encode does not crash with flash_attention=True on CUDA."""
+    def test_mteb_encode_flash_attn_varlen_no_crash(self):
+        """Ensure MTEB encode does not crash with attn_backend='flash_attn_varlen' on CUDA."""
         from neobert.model import NeoBERTConfig, NeoBERTForMTEB
-        from neobert.model.model import XFORMERS_AVAILABLE
+        from neobert.kernels.attention import FLASH_ATTN_AVAILABLE
 
-        if not XFORMERS_AVAILABLE:
-            self.skipTest("xFormers not installed; flash_attention MTEB test skipped.")
+        if not FLASH_ATTN_AVAILABLE:
+            self.skipTest(
+                "flash-attn not installed; flash_attn_varlen MTEB test skipped."
+            )
 
         tokenizer = self._make_tokenizer()
         device = torch.device("cuda")
@@ -962,7 +1213,7 @@ class TestModelForward(unittest.TestCase):
             intermediate_size=64,
             vocab_size=10,
             max_length=8,
-            flash_attention=True,
+            attn_backend="flash_attn_varlen",
             ngpt=False,
             hidden_act="gelu",
         )
@@ -973,7 +1224,7 @@ class TestModelForward(unittest.TestCase):
             batch_size=2,
             pooling="avg",
         )
-        model.to(device)
+        model.to(device=device, dtype=torch.bfloat16)
         model.eval()
         embeddings = model.encode(["hello world", "hello"])
         self.assertEqual(embeddings.shape[0], 2)

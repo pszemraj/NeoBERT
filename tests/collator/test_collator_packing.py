@@ -4,11 +4,12 @@
 import unittest
 import warnings
 
+import numpy as np
 import torch
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 
-from neobert.collator import DataCollatorWithPacking, get_collator
+from neobert.collator import CustomCollatorForMLM, DataCollatorWithPacking, get_collator
 
 
 class DummyPadCollator:
@@ -160,3 +161,67 @@ class TestCollatorPacking(unittest.TestCase):
             any("Skipping packed_seqlens" in str(w.message) for w in caught)
         )
         self.assertNotIn("packed_seqlens", batch)
+
+    def test_mask_all_numpy_path_masks_without_801010_split(self):
+        """Ensure numpy masking path follows 100% mask-all semantics."""
+        tokenizer = self._make_tokenizer()
+        collator = CustomCollatorForMLM(
+            tokenizer=tokenizer,
+            mlm_probability=1.0,
+        )
+        inputs = np.array([[3, 4, 0]], dtype=np.int64)
+        special_tokens_mask = np.array([[0, 0, 1]], dtype=np.int64)
+
+        masked_inputs, labels = collator.numpy_mask_tokens(
+            inputs.copy(),
+            special_tokens_mask=special_tokens_mask,
+        )
+
+        self.assertEqual(masked_inputs[0, 0], tokenizer.mask_token_id)
+        self.assertEqual(masked_inputs[0, 1], tokenizer.mask_token_id)
+        self.assertEqual(masked_inputs[0, 2], 0)
+        self.assertEqual(labels[0, 0], 3)
+        self.assertEqual(labels[0, 1], 4)
+        self.assertEqual(labels[0, 2], -100)
+
+    def test_mask_all_false_keeps_hf_801010_corruption(self):
+        """Ensure default collator path does not force 100% [MASK] replacement."""
+        tokenizer = self._make_tokenizer()
+        collator = get_collator(
+            tokenizer=tokenizer,
+            mlm_probability=1.0,
+            mask_all=False,
+        )
+        features = [{"input_ids": [3] * 128}, {"input_ids": [4] * 128}]
+
+        with torch.random.fork_rng():
+            torch.manual_seed(0)
+            batch = collator(features)
+
+        labels = batch["labels"]
+        masked_positions = labels.ne(-100)
+        self.assertTrue(masked_positions.any())
+        replaced_ids = batch["input_ids"][masked_positions]
+        self.assertTrue(
+            (replaced_ids != tokenizer.mask_token_id).any(),
+            "Expected some masked positions to be random/original tokens under 80/10/10.",
+        )
+
+    def test_packing_raises_when_pad_token_id_is_unresolved(self):
+        """Ensure packing fails loudly when no pad token can be resolved."""
+
+        class NoPadCollator:
+            """Collator stub without tokenizer or pad_token_id metadata."""
+
+            def __call__(self, features, return_tensors=None):
+                return {"input_ids": features}
+
+        collator = DataCollatorWithPacking(
+            start_token_id=10,
+            end_token_id=11,
+            max_length=8,
+            default_data_collator=NoPadCollator(),
+        )
+
+        with self.assertRaisesRegex(ValueError, "Could not resolve pad_token_id"):
+            collator([{"input_ids": [1, 2, 3]}])

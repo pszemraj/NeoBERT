@@ -6,8 +6,8 @@ import logging
 import math
 import os
 import re
+import shutil
 from pathlib import Path
-from contextlib import nullcontext
 from typing import Any, Callable, Optional, Tuple
 
 # PyTorch
@@ -34,33 +34,34 @@ from datasets import (
 
 # Deepspeed
 from deepspeed.utils import safe_get_full_fp32_param
-from torch.nn import CrossEntropyLoss
 from tqdm import tqdm
 from transformers import BatchEncoding, PreTrainedTokenizerBase
 
-from ..config import Config, ConfigLoader, MuonConfig, round_up_to_multiple
-from ..dataloader import get_dataloader
-from ..model import NeoBERTConfig, NeoBERTLMHead
-from ..model.model import XFORMERS_AVAILABLE, XFORMERS_ERROR
-from ..optimizer import get_optimizer
-from ..scheduler import get_scheduler, resolve_scheduler_steps
-from ..tokenizer import get_tokenizer, resolve_text_column
-from ..training_utils import (
+from neobert.checkpointing import save_model_safetensors
+from neobert.config import Config, ConfigLoader, MuonConfig, round_up_to_multiple
+from neobert.dataloader import get_dataloader
+from neobert.kernels.attention import resolve_runtime_attn_backend
+from neobert.kernels.backend import get_cross_entropy_loss, resolve_kernel_backend
+from neobert.model import NeoBERTConfig, NeoBERTLMHead
+from neobert.optimizer import get_optimizer
+from neobert.scheduler import get_scheduler, resolve_scheduler_steps
+from neobert.tokenizer import get_tokenizer, resolve_text_column
+from neobert.training_utils import (
     _maybe_compile_model,
     _maybe_prepare_for_forward,
     _resolve_resume_checkpoint,
 )
-from ..utils import configure_tf32, model_summary, prepare_wandb_config
+from neobert.utils import configure_tf32, model_summary, prepare_wandb_config
 
 # Our metric object and model
-from .metrics import Metrics, format_metrics
+from neobert.pretraining.metrics import Metrics, format_metrics
 
 # Set up logger
 logger = logging.getLogger(__name__)
 
 
 def _move_batch_to_device(batch: BatchEncoding, device: torch.device) -> BatchEncoding:
-    """Move batch tensors to device while keeping packed_seqlens on CPU.
+    """Move batch tensors to device with async H2D copies when possible.
 
     :param BatchEncoding batch: Batch to move.
     :param torch.device device: Target device.
@@ -68,7 +69,166 @@ def _move_batch_to_device(batch: BatchEncoding, device: torch.device) -> BatchEn
     """
     if hasattr(batch, "to") and not torch.is_tensor(batch):
         batch = dict(batch)
-    return send_to_device(batch, device, skip_keys=["packed_seqlens"])
+    # ``non_blocking`` overlaps copies when DataLoader uses pinned host memory.
+    return send_to_device(batch, device, non_blocking=True)
+
+
+def _ensure_pinned_cpu_batch(batch: BatchEncoding) -> BatchEncoding:
+    """Pin CPU tensor values in a batch for async host->device transfer.
+
+    ``torch.cat``/``torch.split`` on pinned tensors produce non-pinned outputs.
+    Packed-batch stitching can therefore drop pinned memory guarantees unless we
+    re-pin the final CPU tensors before ``send_to_device(..., non_blocking=True)``.
+
+    :param BatchEncoding batch: Batch mapping of tensors/lists/scalars.
+    :return BatchEncoding: Batch with CPU tensors pinned when needed.
+    """
+
+    def _pin_value(value: Any) -> tuple[Any, bool]:
+        if torch.is_tensor(value):
+            if value.device.type != "cpu" or value.is_pinned():
+                return value, False
+            return value.pin_memory(), True
+
+        if isinstance(value, dict):
+            updated: dict[Any, Any] = {}
+            changed = False
+            for key, inner in value.items():
+                pinned_inner, inner_changed = _pin_value(inner)
+                updated[key] = pinned_inner
+                changed = changed or inner_changed
+            if not changed:
+                return value, False
+            return updated, True
+
+        if isinstance(value, list):
+            updated_list: list[Any] = []
+            changed = False
+            for inner in value:
+                pinned_inner, inner_changed = _pin_value(inner)
+                updated_list.append(pinned_inner)
+                changed = changed or inner_changed
+            if not changed:
+                return value, False
+            return updated_list, True
+
+        if isinstance(value, tuple):
+            updated_items: list[Any] = []
+            changed = False
+            for inner in value:
+                pinned_inner, inner_changed = _pin_value(inner)
+                updated_items.append(pinned_inner)
+                changed = changed or inner_changed
+            if not changed:
+                return value, False
+            return tuple(updated_items), True
+
+        return value, False
+
+    pinned_batch, repinned = _pin_value(dict(batch))
+    if not repinned:
+        return batch
+    return pinned_batch
+
+
+def _promote_tmp_checkpoint_dir(tmp_path: Path, final_path: Path) -> None:
+    """Promote ``tmp_path`` to ``final_path`` with crash-safe replacement.
+
+    Keep the previous final checkpoint as ``*.old`` until the tmp->final rename
+    succeeds. This avoids deleting the prior checkpoint before the new one is in
+    place when running on shared filesystems.
+
+    :param Path tmp_path: Newly written temporary checkpoint directory.
+    :param Path final_path: Final checkpoint directory path.
+    """
+    backup_path = final_path.with_name(f"{final_path.name}.old")
+    if backup_path.exists():
+        shutil.rmtree(backup_path)
+
+    if final_path.exists():
+        final_path.replace(backup_path)
+
+    try:
+        tmp_path.replace(final_path)
+    except Exception:
+        if backup_path.exists() and not final_path.exists():
+            backup_path.replace(final_path)
+        raise
+
+    if backup_path.exists():
+        shutil.rmtree(backup_path)
+
+
+def _write_deepspeed_latest_file(checkpoint_root: Path, tag: str) -> None:
+    """Write DeepSpeed ``latest`` indirection for a checkpoint root.
+
+    DeepSpeed's fp32 conversion helper resolves ``tag=None`` via this file, so
+    we keep it updated after tmp->final tag promotion.
+
+    :param Path checkpoint_root: DeepSpeed checkpoint root directory.
+    :param str tag: Active checkpoint tag directory name.
+    """
+    latest_path = checkpoint_root / "latest"
+    latest_path.write_text(f"{tag}\n", encoding="utf-8")
+
+
+def _pad_tokenizer_to_multiple(
+    tokenizer: PreTrainedTokenizerBase,
+    *,
+    multiple: int = 128,
+) -> tuple[int, int, int]:
+    """Pad tokenizer length to ``multiple`` by adding inert extra tokens.
+
+    The model uses rounded embedding sizes for tensor-core efficiency. Adding
+    explicit placeholder tokens keeps tokenizer/model vocab contracts aligned.
+
+    :param PreTrainedTokenizerBase tokenizer: Tokenizer to mutate.
+    :param int multiple: Target rounding multiple.
+    :return tuple[int, int, int]: ``(original_size, padded_size, added_count)``.
+    """
+    original_size = len(tokenizer)
+    padded_size = round_up_to_multiple(original_size, multiple)
+    if padded_size == original_size:
+        return original_size, padded_size, 0
+
+    needed = padded_size - original_size
+    extra_tokens = [
+        f"<|neobert_extra_token_{idx}|>"
+        for idx in range(original_size, original_size + needed)
+    ]
+    added = tokenizer.add_tokens(extra_tokens, special_tokens=False)
+    final_size = len(tokenizer)
+    if added != needed or final_size != padded_size:
+        raise RuntimeError(
+            "Failed to pad tokenizer vocabulary to requested multiple: "
+            f"needed={needed}, added={added}, final_size={final_size}, "
+            f"target={padded_size}."
+        )
+    return original_size, final_size, added
+
+
+def _sync_tokenizer_derived_config(
+    cfg: Config,
+    tokenizer: PreTrainedTokenizerBase,
+) -> tuple[int, int, int]:
+    """Synchronize tokenizer-derived model config fields.
+
+    :param Config cfg: Runtime configuration to mutate.
+    :param PreTrainedTokenizerBase tokenizer: Active tokenizer instance.
+    :return tuple[int, int, int]: ``(original_vocab_size, resolved_vocab_size, added)``.
+    """
+    original_vocab_size, resolved_vocab_size, added_tokens = _pad_tokenizer_to_multiple(
+        tokenizer,
+        multiple=128,
+    )
+
+    cfg.model.vocab_size = resolved_vocab_size
+    cfg.tokenizer.vocab_size = resolved_vocab_size
+    if tokenizer.pad_token_id is None:
+        raise ValueError("Tokenizer must define pad_token_id for pretraining.")
+    cfg.model.pad_token_id = int(tokenizer.pad_token_id)
+
+    return original_vocab_size, resolved_vocab_size, added_tokens
 
 
 def _parse_split_slice(split: str) -> Tuple[str, Optional[str], Optional[str]]:
@@ -189,11 +349,36 @@ def _count_masked_correct(
     :param int ignore_index: Label value to ignore (default: -100).
     :return torch.Tensor: Scalar tensor of correct predictions on unmasked tokens.
     """
-    mask = labels != ignore_index
-    if not mask.any():
-        return torch.zeros((), device=logits.device, dtype=torch.long)
     preds = logits.argmax(dim=-1)
-    return (preds[mask] == labels[mask]).sum()
+    mask = labels != ignore_index
+    # Avoid Python branching on CUDA scalar tensors (implicit sync via .item()).
+    return (preds.eq(labels) & mask).sum(dtype=torch.long)
+
+
+def _set_default_worker_env(num_workers: int) -> None:
+    """Set conservative host-thread env defaults for data workers.
+
+    Existing user-provided values take precedence.
+
+    :param int num_workers: DataLoader worker count.
+    """
+    if num_workers <= 0:
+        return
+    defaults = {
+        "TOKENIZERS_PARALLELISM": "false",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+    }
+    applied: dict[str, str] = {}
+    for key, value in defaults.items():
+        if os.environ.get(key) is None:
+            os.environ[key] = value
+            applied[key] = value
+    if applied:
+        logger.info(
+            "Set default worker env: %s",
+            ", ".join(f"{k}={v}" for k, v in sorted(applied.items())),
+        )
 
 
 def _resolve_eval_max_batches(
@@ -219,6 +404,7 @@ def _run_eval(
     accelerator: Accelerator,
     model_config: NeoBERTConfig,
     max_batches: Optional[int] = None,
+    manual_device_move: bool = True,
 ) -> dict[str, float]:
     """Run a lightweight evaluation loop for masked LM perplexity.
 
@@ -228,6 +414,7 @@ def _run_eval(
     :param Accelerator accelerator: Accelerator for distributed reductions.
     :param NeoBERTConfig model_config: Model config with vocab size.
     :param int | None max_batches: Optional cap on eval batches.
+    :param bool manual_device_move: Whether to manually move each batch to device.
     :return dict[str, float]: Evaluation metrics for logging.
     """
     was_training = model.training
@@ -249,16 +436,17 @@ def _run_eval(
                     and eval_batches >= max_batches_per_rank
                 ):
                     break
-                batch = _move_batch_to_device(batch, accelerator.device)
-                packed_seqlens = _packed_seqlens_to_list(batch.get("packed_seqlens"))
+                if manual_device_move:
+                    batch = _move_batch_to_device(batch, accelerator.device)
+                packed_seqlens = _packed_seqlens_to_tensor(batch.get("packed_seqlens"))
                 pad_mask = (
                     None
                     if packed_seqlens is not None
                     else batch.get("attention_mask", None)
                 )
                 logits = model(
-                    batch["input_ids"],
-                    pad_mask,
+                    src=batch["input_ids"],
+                    pad_mask=pad_mask,
                     packed_seqlens=packed_seqlens,
                 )["logits"]
                 loss_sum = loss_fn(
@@ -289,28 +477,88 @@ def _run_eval(
             model.train()
 
 
-def _packed_seqlens_to_list(
+def _packed_seqlens_to_tensor(
     packed_seqlens: Any,
-) -> Optional[list[list[int]]]:
-    """Normalize packed sequence lengths to Python lists.
+) -> Optional[torch.Tensor]:
+    """Normalize packed sequence lengths to rank-2 int32 tensors.
 
     :param Any packed_seqlens: Packed segment lengths tensor or list.
-    :return list[list[int]] | None: Packed segment lengths as Python lists.
+    :return torch.Tensor | None: Packed segment lengths.
     """
     if packed_seqlens is None:
         return None
     if torch.is_tensor(packed_seqlens):
-        if packed_seqlens.numel() == 0:
-            return [[] for _ in range(packed_seqlens.shape[0])]
-        if packed_seqlens.is_cuda:
-            raise RuntimeError(
-                "packed_seqlens must be a CPU tensor. This indicates a collator or "
-                "dataloader device placement bug; keep packed_seqlens on CPU to "
-                "avoid GPU syncs."
+        tensor = packed_seqlens.detach()
+        if tensor.ndim == 1:
+            tensor = tensor.unsqueeze(1)
+        if tensor.ndim != 2:
+            raise ValueError(
+                "packed_seqlens tensor must be rank 1 or 2, got "
+                f"shape={tuple(tensor.shape)}"
             )
-        cpu = packed_seqlens.detach().cpu()
-        return [[int(x) for x in row[row > 0].tolist()] for row in cpu]
-    return packed_seqlens
+        return tensor.to(torch.int32)
+
+    normalized_rows: list[list[int]] = []
+    max_segments = 0
+    for row in packed_seqlens:
+        if row is None:
+            segs: list[int] = []
+        else:
+            segs = [int(x) for x in row if int(x) > 0]
+        normalized_rows.append(segs)
+        max_segments = max(max_segments, len(segs))
+
+    tensor = torch.zeros((len(normalized_rows), max_segments), dtype=torch.int32)
+    for idx, segs in enumerate(normalized_rows):
+        if segs:
+            tensor[idx, : len(segs)] = torch.tensor(segs, dtype=torch.int32)
+    return tensor
+
+
+def _resolve_loader_perf_settings(
+    cfg: Config,
+    *,
+    device: torch.device,
+) -> tuple[bool, bool, Optional[int], list[str]]:
+    """Resolve effective dataloader performance settings.
+
+    Applies conservative CUDA-friendly defaults when users leave knobs unset:
+    - ``pin_memory=True`` on CUDA
+    - ``prefetch_factor=4`` when workers are enabled and no value is provided
+
+    :param Config cfg: Training config.
+    :param torch.device device: Active accelerator device.
+    :return tuple[bool, bool, int | None, list[str]]: Effective
+        ``(pin_memory, persistent_workers, prefetch_factor, notes)``.
+    """
+    num_workers = max(0, int(cfg.dataset.num_workers))
+    pin_memory = bool(cfg.dataset.pin_memory)
+    persistent_workers = bool(cfg.dataset.persistent_workers and num_workers > 0)
+    prefetch_factor = cfg.dataset.prefetch_factor
+    if num_workers <= 0:
+        prefetch_factor = None
+    elif prefetch_factor is not None:
+        prefetch_factor = int(prefetch_factor)
+        if prefetch_factor <= 0:
+            raise ValueError(
+                f"dataset.prefetch_factor must be > 0 when set, got {prefetch_factor}."
+            )
+
+    notes: list[str] = []
+    if device.type == "cuda":
+        if not pin_memory:
+            pin_memory = True
+            notes.append(
+                "dataset.pin_memory was false; enabling pin_memory=True on CUDA "
+                "to improve host->device transfer overlap."
+            )
+        if num_workers > 0 and prefetch_factor is None:
+            prefetch_factor = 4
+            notes.append(
+                "dataset.prefetch_factor was unset; using prefetch_factor=4 for CUDA throughput."
+            )
+
+    return pin_memory, persistent_workers, prefetch_factor, notes
 
 
 def _scale_gradients(model: torch.nn.Module, scale: torch.Tensor) -> None:
@@ -334,6 +582,73 @@ def _scale_gradients(model: torch.nn.Module, scale: torch.Tensor) -> None:
             # Older PyTorch fallback; dtype/device mismatches should surface as errors.
             for grad in grads:
                 grad.mul_(scale_value)
+
+
+def _gradient_token_scale(
+    tokens_global: torch.Tensor,
+    *,
+    num_processes: int,
+    grad_accumulation_steps: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute safe post-accumulation gradient scale.
+
+    For normal updates, this matches standard token-mean scaling exactly:
+    ``scale = (num_processes * grad_accumulation_steps) / tokens_global``.
+    We only clamp the denominator to a small floor (one masked token per rank
+    per accumulation step) to avoid pathological amplification on near-empty
+    masked batches.
+
+    :param torch.Tensor tokens_global: Global masked-token count for the update.
+    :param int num_processes: Number of distributed processes.
+    :param int grad_accumulation_steps: Gradient accumulation steps.
+    :return tuple[torch.Tensor, torch.Tensor]: ``(scale, clamped)``.
+    """
+    token_floor = max(1, int(num_processes) * int(grad_accumulation_steps))
+    token_floor_f = float(token_floor)
+    clamped_tokens = torch.clamp(tokens_global.float(), min=token_floor_f)
+    scale = (token_floor_f / clamped_tokens).to(tokens_global.device)
+    clamped = tokens_global < token_floor
+    return scale, clamped
+
+
+def _clear_stored_batch(stored_batch: BatchEncoding) -> None:
+    """Drop buffered batch fragments in-place.
+
+    :param BatchEncoding stored_batch: Batch fragment buffer.
+    """
+    for key in list(stored_batch.keys()):
+        stored_batch[key] = None
+
+
+def _append_to_stored_batch(
+    stored_batch: BatchEncoding, batch: BatchEncoding
+) -> BatchEncoding:
+    """Append a batch fragment into the stored buffer.
+
+    :param BatchEncoding stored_batch: Fragment buffer.
+    :param BatchEncoding batch: Batch fragment to append.
+    :return BatchEncoding: Updated fragment buffer.
+    """
+    for key, value in batch.items():
+        stored_batch.setdefault(key, None)
+        if value is None:
+            continue
+        existing = stored_batch.get(key)
+        if existing is None:
+            stored_batch[key] = value
+            continue
+        if torch.is_tensor(existing) and torch.is_tensor(value):
+            if existing.device != value.device:
+                value = value.to(existing.device)
+            stored_batch[key] = torch.cat([existing, value], dim=0)
+        elif isinstance(existing, list) and isinstance(value, list):
+            stored_batch[key] = existing + value
+        else:
+            raise TypeError(
+                "Stored batch key '%s' has incompatible types: %s vs %s"
+                % (key, type(existing).__name__, type(value).__name__)
+            )
+    return stored_batch
 
 
 def _resolve_pack_token_limits(
@@ -416,8 +731,27 @@ def _select_train_split(
 
 
 def _has_stored_batch(stored_batch: BatchEncoding) -> bool:
-    """Return True if any buffered batch fragments are present."""
-    return any(value is not None for value in stored_batch.values())
+    """Return whether buffered batch fragments are present.
+
+    :param BatchEncoding stored_batch: Buffered batch fragments.
+    :return bool: True when any buffered tensor/value is present.
+    """
+    for value in stored_batch.values():
+        if value is None:
+            continue
+        if torch.is_tensor(value):
+            if value.ndim == 0:
+                if value.numel() > 0:
+                    return True
+            elif value.shape[0] > 0:
+                return True
+            continue
+        if isinstance(value, (list, tuple, dict, str, bytes)):
+            if len(value) > 0:
+                return True
+            continue
+        return True
+    return False
 
 
 def to_target_batch_size(
@@ -652,16 +986,17 @@ def trainer(cfg: Config) -> None:
     # All parameters participate in the forward graph; keep DDP in fast-path mode.
     kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
     wandb_enabled = cfg.wandb.enabled and cfg.wandb.mode != "disabled"
-    # Keep dataloader batches on CPU so packed_seqlens stays as CPU metadata.
-    disable_dispatch = bool(
-        cfg.datacollator.pack_sequences or cfg.model.xformers_attention
+    cfg.model.attn_backend = resolve_runtime_attn_backend(
+        cfg.model.attn_backend,
+        fallback_to_sdpa=True,
     )
+    # Keep manual placement for packed mode only; in non-packed mode we use
+    # Accelerate's device placement for better overlap.
+    disable_dispatch = bool(cfg.datacollator.pack_sequences)
     dataloader_config = None
     if disable_dispatch:
         dataloader_config = DataLoaderConfiguration(dispatch_batches=False)
-        logger.info(
-            "Disabling Accelerate dispatch_batches because packed_seqlens must stay on CPU."
-        )
+        logger.info("Disabling Accelerate dispatch_batches for packed-sequence mode.")
     accelerator = Accelerator(
         step_scheduler_with_optimizer=False,  # enable manual control of the scheduler
         mixed_precision=cfg.trainer.mixed_precision,
@@ -731,6 +1066,7 @@ def trainer(cfg: Config) -> None:
 
     # Set the seed
     set_seed(cfg.seed)
+    _set_default_worker_env(int(cfg.dataset.num_workers))
 
     # Configure TF32 precision for GPUs with compute capability >= 8.0
     configure_tf32(enabled=cfg.trainer.tf32, print_fn=accelerator.print)
@@ -739,6 +1075,12 @@ def trainer(cfg: Config) -> None:
     metrics = Metrics()
     accelerator.register_for_checkpointing(metrics)
     log_interval = max(1, cfg.trainer.logging_steps)
+    enforce_full_packed_batches = bool(
+        getattr(cfg.trainer, "enforce_full_packed_batches", True)
+    )
+    log_train_accuracy = bool(getattr(cfg.trainer, "log_train_accuracy", False))
+    log_grad_norm = bool(getattr(cfg.trainer, "log_grad_norm", False))
+    metrics["train/compute_accuracy"] = int(log_train_accuracy)
 
     is_streaming = cfg.dataset.streaming
     if cfg.trainer.resume_from_checkpoint and is_streaming:
@@ -750,17 +1092,22 @@ def trainer(cfg: Config) -> None:
 
     if cfg.datacollator.pack_sequences:
         logger.info(
-            "Using packed sequences with xFormers block-diagonal attention (experimental)."
+            "Using packed sequences (experimental). "
+            "Recommended: attn_backend=flash_attn_varlen with flash-attn installed."
         )
-        if not cfg.model.xformers_attention:
-            raise ValueError(
-                "Packed sequences require model.xformers_attention=true (xFormers)."
+        if cfg.model.attn_backend == "sdpa":
+            logger.warning(
+                "pack_sequences is enabled with attn_backend=sdpa; "
+                "per-segment SDPA fallback will be used (slow on GPU). "
+                "Set attn_backend=flash_attn_varlen and install flash-attn for production."
             )
-        if not XFORMERS_AVAILABLE:
-            raise ImportError(
-                "Packed sequences require xformers. Install with: pip install xformers. "
-                f"Import error: {XFORMERS_ERROR}"
-            )
+    if not cfg.datacollator.mask_all:
+        # Keep BERT-style 80/10/10 masking as a supported mode, but make the
+        # methodological difference explicit for NeoBERT-style pretraining runs.
+        logger.warning(
+            "datacollator.mask_all=false uses standard 80/10/10 MLM corruption. "
+            "Set datacollator.mask_all=true to use NeoBERT's 100%% [MASK] strategy."
+        )
 
     # Tokenizer
     with accelerator.main_process_first():
@@ -769,21 +1116,30 @@ def trainer(cfg: Config) -> None:
             max_length=cfg.tokenizer.max_length,
         )
 
-    actual_vocab_size = len(tokenizer)
-    rounded_vocab_size = round_up_to_multiple(actual_vocab_size, 128)
-    if (
-        cfg.model.vocab_size != rounded_vocab_size
-        or cfg.tokenizer.vocab_size != rounded_vocab_size
+    prior_model_vocab_size = int(cfg.model.vocab_size)
+    prior_tokenizer_vocab_size = int(cfg.tokenizer.vocab_size)
+    original_vocab_size, resolved_vocab_size, added_tokens = (
+        _sync_tokenizer_derived_config(
+            cfg,
+            tokenizer,
+        )
+    )
+    if accelerator.is_main_process and (
+        prior_model_vocab_size != resolved_vocab_size
+        or prior_tokenizer_vocab_size != resolved_vocab_size
     ):
-        if accelerator.is_main_process:
-            logger.warning(
-                "Config vocab_size updated: tokenizer=%s rounded to %s (was model=%s).",
-                actual_vocab_size,
-                rounded_vocab_size,
-                cfg.model.vocab_size,
-            )
-    cfg.model.vocab_size = rounded_vocab_size
-    cfg.tokenizer.vocab_size = rounded_vocab_size
+        logger.warning(
+            "Config vocab_size updated: tokenizer len=%s -> %s (was model=%s).",
+            original_vocab_size,
+            resolved_vocab_size,
+            prior_model_vocab_size,
+        )
+    if accelerator.is_main_process and added_tokens > 0:
+        logger.info(
+            "Added %s inert tokenizer tokens to align tokenizer/model vocab_size=%s.",
+            added_tokens,
+            resolved_vocab_size,
+        )
 
     # Tokenization strategy for packed sequences: strip special tokens and reinsert
     # boundaries in the collator to avoid duplicate BOS/EOS/SEP tokens.
@@ -859,8 +1215,6 @@ def trainer(cfg: Config) -> None:
 
         # For non-streaming datasets, check if pre-tokenization is requested
         if not is_streaming and cfg.dataset.pre_tokenize:
-            import subprocess
-
             # Create output directory
             if cfg.dataset.pre_tokenize_output:
                 output_dir = cfg.dataset.pre_tokenize_output
@@ -871,47 +1225,31 @@ def trainer(cfg: Config) -> None:
             success_flag = Path(output_dir) / ".tokenize_complete"
             failure_flag = Path(output_dir) / ".tokenize_failed"
 
-            # Run tokenization script
             accelerator.print(f"Pre-tokenizing dataset to: {output_dir}")
 
-            # Get absolute path to script
-            repo_root = Path(__file__).resolve().parents[3]
-            script_path = repo_root / "scripts" / "pretraining" / "tokenize_dataset.py"
-
             if accelerator.is_main_process and not success_flag.exists():
-                cmd = [
-                    "python",
-                    str(script_path),
-                    "--dataset",
-                    cfg.dataset.name,
-                    "--tokenizer",
-                    cfg.tokenizer.path or cfg.tokenizer.name,
-                    "--output",
-                    output_dir,
-                    "--max-length",
-                    str(tokenize_max_length),
-                ]
-
-                if cfg.dataset.config:
-                    cmd.extend(["--dataset-config", cfg.dataset.config])
-
-                if cfg.dataset.train_split:
-                    cmd.extend(["--split", cfg.dataset.train_split])
-
-                if cfg.dataset.text_column:
-                    cmd.extend(["--text-column", cfg.dataset.text_column])
-
-                if cfg.dataset.num_proc:
-                    cmd.extend(["--num-proc", str(cfg.dataset.num_proc)])
-                if not add_special_tokens:
-                    cmd.append("--no-special-tokens")
-                if return_special_tokens_mask:
-                    cmd.append("--return-special-tokens-mask")
-
-                # Run the tokenization on the main process only.
-                result = subprocess.run(cmd, capture_output=True, text=True)
-                if result.returncode != 0:
-                    failure_flag.write_text(result.stderr)
+                if failure_flag.exists():
+                    failure_flag.unlink()
+                try:
+                    text_column = resolve_text_column(
+                        train_dataset,
+                        is_streaming=False,
+                        preferred=cfg.dataset.text_column,
+                    )
+                    tokenized_dataset = tokenize(
+                        train_dataset,
+                        tokenizer,
+                        column_name=text_column,
+                        max_length=tokenize_max_length,
+                        remove_columns=True,
+                        truncation=True,
+                        num_proc=cfg.dataset.num_proc,
+                        add_special_tokens=add_special_tokens,
+                        return_special_tokens_mask=return_special_tokens_mask,
+                    )
+                    tokenized_dataset.save_to_disk(output_dir)
+                except Exception as exc:
+                    failure_flag.write_text(str(exc))
                 else:
                     success_flag.write_text("ok")
 
@@ -1054,6 +1392,12 @@ def trainer(cfg: Config) -> None:
             print_fn=accelerator.print,
         )
 
+    pin_memory, persistent_workers, prefetch_factor, loader_perf_notes = (
+        _resolve_loader_perf_settings(cfg, device=accelerator.device)
+    )
+    for note in loader_perf_notes:
+        logger.info(note)
+
     # Dataloader
     collator_max_length = cfg.datacollator.max_length or cfg.dataset.max_seq_length
     train_dataloader = get_dataloader(
@@ -1061,12 +1405,15 @@ def trainer(cfg: Config) -> None:
         tokenizer,
         batch_size=cfg.trainer.per_device_train_batch_size,
         num_workers=cfg.dataset.num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor,
         mlm_probability=cfg.datacollator.mlm_probability,
         pad_to_multiple_of=cfg.datacollator.pad_to_multiple_of,
         mask_all=cfg.datacollator.mask_all,
         pack_sequences=cfg.datacollator.pack_sequences,
         max_length=collator_max_length,
-        return_packed_seqlens=cfg.model.xformers_attention,
+        return_packed_seqlens=cfg.model.attn_backend != "sdpa",
     )
 
     eval_dataloader = None
@@ -1076,13 +1423,16 @@ def trainer(cfg: Config) -> None:
             tokenizer,
             batch_size=cfg.trainer.per_device_eval_batch_size,
             num_workers=cfg.dataset.num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers,
+            prefetch_factor=prefetch_factor,
             mlm_probability=cfg.datacollator.mlm_probability,
             pad_to_multiple_of=cfg.datacollator.pad_to_multiple_of,
             mask_all=cfg.datacollator.mask_all,
             pack_sequences=cfg.datacollator.pack_sequences,
             max_length=collator_max_length,
             shuffle=False,
-            return_packed_seqlens=cfg.model.xformers_attention,
+            return_packed_seqlens=cfg.model.attn_backend != "sdpa",
         )
 
     # Model
@@ -1090,8 +1440,8 @@ def trainer(cfg: Config) -> None:
     # Debug print
     if cfg.debug:
         print(f"Config model.vocab_size: {cfg.model.vocab_size}")
-        print(f"Tokenizer vocab_size: {tokenizer.vocab_size}")
-        print(f"Tokenizer len(): {len(tokenizer)}")
+        print(f"Tokenizer base vocab_size: {tokenizer.vocab_size}")
+        print(f"Tokenizer total len(): {len(tokenizer)}")
         print(f"Tokenizer pad_token_id: {tokenizer.pad_token_id}")
 
     # Keep this mapping in sync with ModelConfig fields to avoid config drift.
@@ -1110,8 +1460,9 @@ def trainer(cfg: Config) -> None:
         embedding_init_range=cfg.model.embedding_init_range,
         decoder_init_range=cfg.model.decoder_init_range,
         classifier_init_range=cfg.model.classifier_init_range,
-        pad_token_id=tokenizer.pad_token_id,
-        flash_attention=cfg.model.xformers_attention,
+        pad_token_id=cfg.model.pad_token_id,
+        attn_backend=cfg.model.attn_backend,
+        kernel_backend=cfg.model.kernel_backend,
         ngpt=cfg.model.ngpt,
         base_scale=cfg.model.base_scale,
     )
@@ -1184,7 +1535,12 @@ def trainer(cfg: Config) -> None:
         def _prepare_loader(
             dataloader: torch.utils.data.DataLoader,
         ) -> torch.utils.data.DataLoader:
-            kwargs = {"device_placement": False}
+            """Prepare dataloaders with tuned dispatch/device placement.
+
+            :param torch.utils.data.DataLoader dataloader: Dataloader to prepare.
+            :return torch.utils.data.DataLoader: Prepared dataloader.
+            """
+            kwargs = {"device_placement": not disable_dispatch}
             try:
                 supports_dispatch = (
                     "dispatch_batches"
@@ -1195,7 +1551,7 @@ def trainer(cfg: Config) -> None:
                 return accelerator.prepare_data_loader(dataloader, **kwargs)
             except TypeError:
                 return accelerator.prepare_data_loader(
-                    dataloader, device_placement=False
+                    dataloader, device_placement=not disable_dispatch
                 )
 
         train_dataloader = _prepare_loader(train_dataloader)
@@ -1263,6 +1619,12 @@ def trainer(cfg: Config) -> None:
                     device_placement=[False, True, True, True],
                 )
 
+    # Packed mode keeps manual batch transfers; non-packed mode uses Accelerate
+    # device placement for lower Python overhead and better overlap.
+    manual_device_move = disable_dispatch or not hasattr(
+        accelerator, "prepare_data_loader"
+    )
+
     if wandb_enabled and accelerator.is_main_process:
         wandb_watch = os.environ.get("WANDB_WATCH")
         if wandb_watch is not None:
@@ -1285,9 +1647,13 @@ def trainer(cfg: Config) -> None:
                     log_freq=getattr(cfg.wandb, "log_interval", 100),
                 )
 
-    # Loss function
-    # Note: logits are fully materialized; consider fused/chunked CE for very long contexts.
-    train_loss_fn = CrossEntropyLoss(reduction="sum")
+    # Loss function - use Liger CE when available, else standard PyTorch
+    resolved_kb = resolve_kernel_backend(cfg.model.kernel_backend)
+    train_loss_fn = get_cross_entropy_loss(
+        reduction="sum",
+        ignore_index=-100,
+        backend=resolved_kb,
+    )
     eval_max_batches = getattr(cfg.trainer, "eval_max_batches", None)
     if isinstance(eval_max_batches, int) and eval_max_batches <= 0:
         eval_max_batches = None
@@ -1338,6 +1704,7 @@ def trainer(cfg: Config) -> None:
         "labels": None,
         "packed_seqlens": None,
     }
+    warned_low_token_scale = False
     while cfg.trainer.max_steps > metrics["train/steps"]:
         # Use skipped_train_dataloader the first epoch after resuming
         dataloader = (
@@ -1346,47 +1713,72 @@ def trainer(cfg: Config) -> None:
             else skipped_train_dataloader
         )
         for batch in dataloader:
-            # Pack or truncate the batch to target batch size (batch size might be variable due to sequence packing).
-            # Skip batch buffering when using packed sequences, as packed_seqlens metadata would be lost.
+            # Pack or truncate to target per-step batch size. Packed mode can emit
+            # variable batch dimensions, so we buffer/merge there too now that
+            # packed_seqlens uses fixed-width tensor metadata.
             is_packed = batch.get("packed_seqlens") is not None
-            if not is_packed and (
-                batch["input_ids"].shape[0] != cfg.trainer.per_device_train_batch_size
-                or _has_stored_batch(stored_batch)
+            stored_is_packed = stored_batch.get("packed_seqlens") is not None
+            if _has_stored_batch(stored_batch) and is_packed != stored_is_packed:
+                # Mixed packed/non-packed batches are not expected; avoid cross-mode
+                # concatenation if stale buffered fragments remain.
+                _clear_stored_batch(stored_batch)
+            if batch["input_ids"].shape[
+                0
+            ] != cfg.trainer.per_device_train_batch_size or _has_stored_batch(
+                stored_batch
             ):
+                # ``to_target_batch_size`` may emit variable-size microbatches
+                # at epoch tails; update correctness is preserved by token-based
+                # gradient rescaling in ``_gradient_token_scale``.
                 batch, stored_batch = to_target_batch_size(
                     batch, stored_batch, cfg.trainer.per_device_train_batch_size
                 )
+            if (
+                enforce_full_packed_batches
+                and cfg.datacollator.pack_sequences
+                and batch["input_ids"].shape[0]
+                < cfg.trainer.per_device_train_batch_size
+            ):
+                # Packed collation can emit undersized batches when source text is
+                # short. Buffer and combine these fragments to keep full-size
+                # microbatches for better kernel efficiency and compile stability.
+                _append_to_stored_batch(stored_batch, batch)
+                continue
 
-            batch = _move_batch_to_device(batch, accelerator.device)
+            if manual_device_move:
+                if pin_memory and accelerator.device.type == "cuda":
+                    batch = _ensure_pinned_cpu_batch(batch)
+                batch = _move_batch_to_device(batch, accelerator.device)
 
             # Update number of batches only when we will execute a backward pass.
             metrics["train/batches"] += 1
 
             num_pred = (batch["labels"] != -100).sum()
             num_tokens = (batch["input_ids"] != model_config.pad_token_id).sum()
-            packed_seqlens = _packed_seqlens_to_list(batch.get("packed_seqlens"))
+            packed_seqlens = _packed_seqlens_to_tensor(batch.get("packed_seqlens"))
             pad_mask = (
                 None
                 if packed_seqlens is not None
                 else batch.get("attention_mask", None)
             )
 
-            sync_gradients = (
-                metrics["train/batches"] % cfg.trainer.gradient_accumulation_steps == 0
-            )
-            _maybe_prepare_for_forward(
-                optimizer,
-                update_step=metrics["train/steps"],
-                is_last_microbatch=sync_gradients,
-            )
-            context = nullcontext() if sync_gradients else accelerator.no_sync(model)
-            with context:
+            # Keep all accumulation semantics backend-agnostic (DDP/FSDP/DeepSpeed).
+            with accelerator.accumulate(model):
+                sync_gradients = bool(accelerator.sync_gradients)
+                _maybe_prepare_for_forward(
+                    optimizer,
+                    update_step=metrics["train/steps"],
+                    is_last_microbatch=sync_gradients,
+                )
                 # Forward pass
                 logits = model(
-                    batch["input_ids"],
-                    pad_mask,
+                    src=batch["input_ids"],
+                    pad_mask=pad_mask,
                     packed_seqlens=packed_seqlens,
                 )["logits"]
+                # NOTE: this path still materializes full logits (B,S,V). At the
+                # current default packed lengths this is acceptable; for very long
+                # contexts a chunked decoder+CE path would be the next optimization.
                 loss_sum = train_loss_fn(
                     logits.view(-1, model_config.vocab_size), batch["labels"].view(-1)
                 )
@@ -1400,31 +1792,43 @@ def trainer(cfg: Config) -> None:
                 local_tokens += num_tokens
                 local_num_pred += num_pred
                 local_sum_loss += loss_sum.detach().float()
-                local_num_correct += _count_masked_correct(logits, batch["labels"])
+                if log_train_accuracy:
+                    local_num_correct += _count_masked_correct(logits, batch["labels"])
 
             if sync_gradients:
+                should_log = (metrics["train/steps"] + 1) % log_interval == 0
                 # Reduce to global token count to handle uneven sharding across ranks.
                 tokens_global = accelerator.reduce(accum_tokens, reduction="sum")
-                if tokens_global.item() > 0:
-                    # Match full-batch normalization across variable-length microbatches.
-                    # accelerator.backward() already divides by grad_accumulation_steps, and DDP averages
-                    # across processes on the sync step, so we rescale by
-                    # (num_processes * grad_accum_steps) / tokens_global
-                    # to recover per-token mean gradients for the global batch size.
-                    # This post-accumulation rescale is equivalent to scaling each microbatch loss
-                    # because gradients are linear in the loss scalar.
-                    # Ref: Unsloth blog (archived) https://archive.ph/RmO0U
-                    scale = (
+                scale, clamped = _gradient_token_scale(
+                    tokens_global,
+                    num_processes=accelerator.num_processes,
+                    grad_accumulation_steps=accelerator.gradient_accumulation_steps,
+                )
+                # Match full-batch normalization across variable-length microbatches.
+                # accelerator.backward() already divides by grad_accumulation_steps, and DDP averages
+                # across processes on the sync step, so we rescale by
+                # (num_processes * grad_accum_steps) / tokens_global.
+                # For near-empty masked updates, we floor tokens_global to one token
+                # per rank per accumulation step to avoid gradient amplification.
+                # This post-accumulation rescale is equivalent to scaling each microbatch loss
+                # because gradients are linear in the loss scalar.
+                # Ref: Unsloth blog (archived) https://archive.ph/RmO0U
+                _scale_gradients(model, scale)
+                if (
+                    should_log
+                    and not warned_low_token_scale
+                    and bool(clamped.detach().cpu().item())
+                ):
+                    warned_low_token_scale = True
+                    logger.warning(
+                        "Masked-token count was below the safe minimum for an update "
+                        "(tokens_global=%s, min=%s); clamped gradient scale to avoid "
+                        "pathological amplification.",
+                        int(tokens_global.item()),
                         accelerator.num_processes
-                        * accelerator.gradient_accumulation_steps
-                    ) / tokens_global.float()
-                    _scale_gradients(model, scale)
-                else:
-                    for param in model.parameters():
-                        if param.grad is not None:
-                            param.grad.zero_()
+                        * accelerator.gradient_accumulation_steps,
+                    )
 
-                should_log = (metrics["train/steps"] + 1) % log_interval == 0
                 grad_norm_value = None
 
                 # Optional gradient clipping for stability on deep/long-context runs.
@@ -1440,7 +1844,7 @@ def trainer(cfg: Config) -> None:
                             if isinstance(grad_norm_pre_clip, torch.Tensor)
                             else grad_norm_pre_clip
                         )
-                elif should_log:
+                elif should_log and log_grad_norm:
                     if accelerator.distributed_type is DistributedType.DEEPSPEED:
                         get_global_grad = getattr(model, "get_global_grad_norm", None)
                         if callable(get_global_grad):
@@ -1450,18 +1854,15 @@ def trainer(cfg: Config) -> None:
                             elif grad_norm is not None:
                                 grad_norm_value = float(grad_norm)
                     else:
-                        grad_norm_sq = None
-                        for param in model.parameters():
-                            if param.grad is None:
-                                continue
-                            param_norm = param.grad.norm(2)
-                            grad_norm_sq = (
-                                param_norm**2
-                                if grad_norm_sq is None
-                                else grad_norm_sq + param_norm**2
+                        grad_norm = accelerator.clip_grad_norm_(
+                            model.parameters(), float("inf")
+                        )
+                        if grad_norm is not None:
+                            grad_norm_value = float(
+                                grad_norm.item()
+                                if isinstance(grad_norm, torch.Tensor)
+                                else grad_norm
                             )
-                        if grad_norm_sq is not None:
-                            grad_norm_value = float(torch.sqrt(grad_norm_sq).item())
 
                 # Log metrics
                 pbar.update(1)
@@ -1504,7 +1905,13 @@ def trainer(cfg: Config) -> None:
                     metrics["train/local_num_pred"] = int(local_num_pred.item())
                     metrics["train/local_sum_loss"] = float(local_sum_loss.item())
                     metrics["train/local_num_correct"] = int(local_num_correct.item())
-                    metrics.log(accelerator)
+                    metrics.log(
+                        accelerator,
+                        emit_console=(
+                            (not wandb_enabled) and accelerator.is_main_process
+                        ),
+                        console_fn=accelerator.print,
+                    )
                     local_samples.zero_()
                     local_tokens.zero_()
                     local_num_pred.zero_()
@@ -1539,8 +1946,6 @@ def trainer(cfg: Config) -> None:
                             ]:
                                 old_path = checkpoint_dir / str(old_ckpt)
                                 if old_path.exists():
-                                    import shutil
-
                                     shutil.rmtree(old_path)
                                     logger.info(
                                         "Removed old accelerator checkpoint: %s (limit=%s)",
@@ -1548,7 +1953,7 @@ def trainer(cfg: Config) -> None:
                                         limit,
                                     )
 
-                # Save the pytorch model
+                # Save model weights checkpoint
                 if metrics["train/steps"] % cfg.trainer.save_steps == 0:
                     # Model checkpoints are used for inference/export and can be pruned independently.
                     # Save the checkpoint
@@ -1559,8 +1964,6 @@ def trainer(cfg: Config) -> None:
                     # Clean up any stale tmp directory from a previous failed save.
                     # Use exist_ok pattern to avoid TOCTOU race conditions in distributed setting.
                     if accelerator.is_main_process:
-                        import shutil
-
                         if tmp_path.exists():
                             shutil.rmtree(tmp_path)
                         tmp_path.mkdir(parents=True, exist_ok=True)
@@ -1568,14 +1971,15 @@ def trainer(cfg: Config) -> None:
 
                     checkpoint_path = tmp_path
                     if accelerator.distributed_type is DistributedType.DEEPSPEED:
-                        # DeepSpeed checkpoints are not directly portable; use zero_to_fp32 to export.
-                        # DeepSpeed writes into model_checkpoint_dir/tmp_tag, which we later rename
-                        # atomically alongside config/tokenizer for a single cohesive checkpoint.
+                        # DeepSpeed writes into model_checkpoint_dir/<tag>. We save to a
+                        # temporary tag and atomically promote it to the final numeric tag,
+                        # then refresh root/latest so zero_to_fp32 helpers can still resolve
+                        # canonical (root, tag) checkpoint layout.
                         model.save_checkpoint(model_checkpoint_dir, tag=tmp_tag)
                     else:
-                        torch.save(
-                            accelerator.unwrap_model(model).state_dict(),
-                            checkpoint_path / "state_dict.pt",
+                        save_model_safetensors(
+                            accelerator.unwrap_model(model),
+                            checkpoint_path,
                         )
 
                     # Save config and tokenizer info (only from main process)
@@ -1588,6 +1992,8 @@ def trainer(cfg: Config) -> None:
                         tokenizer_info = {
                             "tokenizer_name": cfg.tokenizer.path or cfg.tokenizer.name,
                             "vocab_size": cfg.model.vocab_size,
+                            "base_vocab_size": tokenizer.vocab_size,
+                            "total_vocab_size": len(tokenizer),
                             "pad_token_id": tokenizer.pad_token_id,
                         }
                         tokenizer_info_path = checkpoint_path / "tokenizer_info.json"
@@ -1606,11 +2012,11 @@ def trainer(cfg: Config) -> None:
 
                     if accelerator.is_main_process:
                         final_path = model_checkpoint_dir / step_tag
-                        if final_path.exists():
-                            import shutil
-
-                            shutil.rmtree(final_path)
-                        checkpoint_path.replace(final_path)
+                        _promote_tmp_checkpoint_dir(checkpoint_path, final_path)
+                        if accelerator.distributed_type is DistributedType.DEEPSPEED:
+                            # Keep DeepSpeed root semantics valid even though we
+                            # atomically rename tmp tags to final numeric tags.
+                            _write_deepspeed_latest_file(model_checkpoint_dir, step_tag)
                         checkpoint_path = final_path
                         # Use logger instead of accelerator.print to avoid progress bar interference
                         logger.info(
@@ -1643,8 +2049,6 @@ def trainer(cfg: Config) -> None:
                             for old_ckpt in checkpoints[: len(checkpoints) - limit]:
                                 old_path = model_checkpoint_dir / str(old_ckpt)
                                 if old_path.exists():
-                                    import shutil
-
                                     shutil.rmtree(old_path)
                                     # Use logger instead of accelerator.print to avoid progress bar interference
                                     logger.info(
@@ -1664,6 +2068,7 @@ def trainer(cfg: Config) -> None:
                         accelerator,
                         model_config,
                         max_batches=eval_max_batches,
+                        manual_device_move=manual_device_move,
                     )
                     accelerator.log(
                         format_metrics(eval_metrics), step=metrics["train/steps"]
@@ -1688,6 +2093,7 @@ def trainer(cfg: Config) -> None:
                 accelerator,
                 model_config,
                 max_batches=eval_max_batches,
+                manual_device_move=manual_device_move,
             )
             accelerator.log(format_metrics(eval_metrics), step=metrics["train/steps"])
 

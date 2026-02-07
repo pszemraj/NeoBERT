@@ -1,9 +1,27 @@
 # NeoBERT Test Suite
 
-Automated regression tests for NeoBERT live here-unit, integration, and pipeline coverage.
+Automated regression tests for model, training, config, and evaluation code.
 
-> [!TIP]
-> For setup, CLI options, and authoring guidance, see [docs/testing.md](../docs/testing.md). Tiny smoke-test configs live in `tests/configs/`.
+## Entry Points
 
-- Main entry point: `python tests/run_tests.py` (uses pytest by default; `--no-pytest` forces unittest)
-- Target specific areas with `--test-dir`, or adjust verbosity with `--verbose/--quiet`
+```bash
+# Preferred
+pytest -q
+
+# Helper wrapper
+python tests/run_tests.py
+```
+
+Useful helper flags:
+
+```bash
+python tests/run_tests.py --test-dir training
+python tests/run_tests.py --pattern "test_*attention*.py"
+python tests/run_tests.py --no-pytest
+```
+
+## Notes
+
+- Tiny smoke configs live in `tests/configs/`.
+- For full workflows and test authoring conventions, see
+  [docs/testing.md](../docs/testing.md).

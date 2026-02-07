@@ -1,175 +1,83 @@
 # NeoBERT
 
 > [!IMPORTANT]
-> This is a fork of the [original chandar-lab/NeoBERT](https://github.com/chandar-lab/NeoBERT), refactored to support experimentation. ⚠️ WIP/active development⚠️
-
----
-
-- [NeoBERT](#neobert)
-  - [Description](#description)
-  - [Get started](#get-started)
-    - [Install](#install)
-    - [Verify your setup](#verify-your-setup)
-    - [Quick commands](#quick-commands)
-    - [Next steps](#next-steps)
-  - [How to use](#how-to-use)
-    - [For Text Embeddings](#for-text-embeddings)
-    - [For Masked Language Modeling](#for-masked-language-modeling)
-  - [Documentation](#documentation)
-  - [Features](#features)
-  - [License](#license)
-  - [Citation](#citation)
-  - [Training and Development](#training-and-development)
-    - [Repository Structure](#repository-structure)
-
----
+> This repository is a fork of [chandar-lab/NeoBERT](https://github.com/chandar-lab/NeoBERT) focused on active experimentation and training-system iteration.
 
 ## Description
 
-NeoBERT is a **next-generation encoder** model for English text representation, pre-trained from scratch on the RefinedWeb dataset. NeoBERT integrates state-of-the-art advancements in architecture, modern data, and optimized pre-training methodologies. It is designed for seamless adoption: it serves as a plug-and-play replacement for existing base models, relies on an **optimal depth-to-width ratio**, and leverages an extended context length of **4,096 tokens**. Despite its compact 250M parameter footprint, it is the most efficient model of its kind and achieves **state-of-the-art results** on the massive MTEB benchmark, outperforming BERT large, RoBERTa large, NomicBERT, and ModernBERT under identical fine-tuning conditions.
+NeoBERT is an encoder architecture for masked-language-model pretraining,
+embedding extraction, and downstream evaluation (GLUE/MTEB).
 
-- Paper (_original_): [paper](https://arxiv.org/abs/2502.19587)
-- Model (_original_): [huggingface](https://huggingface.co/chandar-lab/NeoBERT)
-- Documentation (_this repo_): [docs/](docs/README.md)
+This fork adds:
 
-## Get started
+- configurable attention backends (`sdpa`, `flash_attn_varlen` for packed training),
+- optional Liger kernel dispatch (`kernel_backend: auto|liger|torch`),
+- safetensors-first checkpointing,
+- end-to-end training/eval/export scripts with config-driven workflows.
 
-### Install
+Paper (original): <https://arxiv.org/abs/2502.19587>
+
+## Install
 
 ```bash
 git clone https://github.com/pszemraj/NeoBERT.git
 cd NeoBERT
-# activate virtual environment (if not already active)
-pip install -e .[dev]  # drop [dev] if you only need runtime deps
+pip install -e .[dev]
 ```
 
-See [docs/troubleshooting.md](docs/troubleshooting.md) for help with common installation issues.
-
-<!-- > [!TIP]
-> For faster training on supported GPUs, add `flash-attn` (and optionally `xformers`) with `pip install flash-attn --no-build-isolation`. -->
-
-### Verify your setup
+Optional extras:
 
 ```bash
-# 5-minute smoke test (tiny model, CPU-friendly)
-python scripts/pretraining/pretrain.py \
-    tests/configs/pretraining/test_tiny_pretrain.yaml
+pip install -U -q packaging wheel ninja
+# Packed flash-attn training backend
+pip install -e .[flash] --no-build-isolation
+```
 
-# Optional: run the full regression suite
+See [docs/troubleshooting.md](docs/troubleshooting.md) for environment issues.
+
+## Verify Setup
+
+```bash
+# Tiny pretraining smoke test
+python scripts/pretraining/pretrain.py \
+  tests/configs/pretraining/test_tiny_pretrain.yaml
+
+# Full test suite
 python tests/run_tests.py
 ```
 
-### Quick commands
+## Quick Commands
 
-| Task           | Command                                                                                     |
-| -------------- | ------------------------------------------------------------------------------------------- |
-| Pretrain       | `python scripts/pretraining/pretrain.py configs/pretraining/pretrain_neobert.yaml`          |
-| GLUE eval      | `python scripts/evaluation/run_glue.py configs/glue/{task}.yaml`                            |
-| Summarize GLUE | `python scripts/evaluation/glue/summarize_glue.py {results_path}`                           |
-| Run tests      | `python tests/run_tests.py`                                                                 |
-
-### Next steps
-
-- Train or fine-tune: see [docs/training.md](docs/training.md)
-- Evaluate on GLUE or MTEB: see [docs/evaluation.md](docs/evaluation.md)
-- Tune configs and overrides: see [docs/configuration.md](docs/configuration.md)
-- Export checkpoints to Hugging Face: see [docs/export.md](docs/export.md)
-- Troubleshoot common issues: see [docs/troubleshooting.md](docs/troubleshooting.md)
-
-## How to use
-
-Load [the official model](https://huggingface.co/chandar-lab/NeoBERT) using Hugging Face Transformers and use it for text embeddings or fill-mask predictions[^1].
-
-[^1]: Encoder models are usually meant to be [fine-tuned for specific tasks](https://github.com/huggingface/transformers/tree/81b4f9882c8a46c8274084503d297874bb372260/examples/pytorch) rather than used directly after pretraining. This is analogous to instruction-tuning for decoder-only models: the base model is a strong starting point, but fine-tuning is typically needed for practical applications.
-
-<details>
-<summary><b>Click to Expand:</b> MLM & Embedding Examples</summary>
-
-### For Text Embeddings
-
-```python
-from transformers import AutoModel, AutoTokenizer
-
-model_name = "chandar-lab/NeoBERT"
-tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-model = AutoModel.from_pretrained(model_name, trust_remote_code=True)
-
-# Tokenize input text
-text = "NeoBERT is the most efficient model of its kind!"
-inputs = tokenizer(text, return_tensors="pt")
-
-# Generate embeddings
-outputs = model(**inputs)
-embedding = outputs.last_hidden_state[:, 0, :]  # CLS token embedding
-print(embedding.shape)
-```
-
-### For Masked Language Modeling
-
-```python
-from transformers import AutoModelForMaskedLM, AutoTokenizer
-
-model_name = "chandar-lab/NeoBERT"
-tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-model = AutoModelForMaskedLM.from_pretrained(model_name, trust_remote_code=True)
-
-# Fill in masked tokens
-text = "The quick brown [MASK] jumps over the lazy dog."
-inputs = tokenizer(text, return_tensors="pt")
-
-# Get predictions
-outputs = model(**inputs)
-mask_token_index = (inputs["input_ids"] == tokenizer.mask_token_id).nonzero(as_tuple=True)[1]
-predicted_token_id = outputs.logits[0, mask_token_index].argmax(dim=-1).item()
-print(tokenizer.decode(predicted_token_id))
-```
-
-</details>
+| Task      | Command                                                                                                              |
+| --------- | -------------------------------------------------------------------------------------------------------------------- |
+| Pretrain  | `python scripts/pretraining/pretrain.py configs/pretraining/pretrain_neobert.yaml`                                   |
+| GLUE eval | `python scripts/evaluation/run_glue.py configs/glue/cola.yaml`                                                       |
+| MTEB eval | `python scripts/evaluation/run_mteb.py configs/pretraining/pretrain_neobert.yaml --model_name_or_path outputs/<run>` |
+| Export HF | `python scripts/export-hf/export.py outputs/<run>/model_checkpoints/<step>`                                          |
+| Tests     | `python tests/run_tests.py`                                                                                          |
 
 ## Documentation
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/pszemraj/NeoBERT)
+- [docs/README.md](docs/README.md)
+- [Training Guide](docs/training.md)
+- [Configuration Reference](docs/configuration.md)
+- [Evaluation Guide](docs/evaluation.md)
+- [Export Guide](docs/export.md)
+- [Architecture](docs/architecture.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Testing](docs/testing.md)
+- [Dev Notes](docs/dev.md)
 
-For detailed guides and documentation, see the **[Documentation](docs/README.md)**:
+## Repository Layout
 
-- [Training Guide](docs/training.md) - Pretraining, contrastive learning, and monitoring runs
-- [Evaluation Guide](docs/evaluation.md) - GLUE, MTEB, and result analysis
-- [Configuration System](docs/configuration.md) - YAML hierarchy and CLI overrides
-- [Export Guide](docs/export.md) - Convert checkpoints to Hugging Face format
-- [Architecture Details](docs/architecture.md) - Model internals
-- [Testing Guide](docs/testing.md) - Regression suite and coverage
-- [Troubleshooting](docs/troubleshooting.md) - Common failure modes and fixes
-
-## Features
-
-> [!NOTE]
-> The table below reflects the 250M NeoBERT configuration from the original paper.
-> Other sizes live under `configs/pretraining/`.
-
-| **Feature**             | **NeoBERT**    |
-| ----------------------- | -------------- |
-| `Depth-to-width`        | 28 × 768       |
-| `Parameter count`       | 250M           |
-| `Activation`            | SwiGLU         |
-| `Positional embeddings` | RoPE           |
-| `Normalization`         | Pre-RMSNorm    |
-| `Data Source`           | RefinedWeb     |
-| `Data Size`             | 2.8 TB         |
-| `Tokenizer`             | google/bert    |
-| `Context length`        | 4,096          |
-| `MLM Masking Rate`      | 20%            |
-| `Optimizer`             | AdamW          |
-| `Scheduler`             | CosineDecay    |
-| `Training Tokens`       | 2.1 T          |
-| `Efficiency`            | xFormers memory-efficient attention |
-
-## License
-
-Model weights and code repository are licensed under the permissive MIT license.
+- `src/neobert/` - core model/trainer/config/runtime code
+- `configs/` - example configs for pretraining/eval/contrastive
+- `scripts/` - CLI entry points
+- `jobs/` - shell launcher examples
+- `tests/` - regression tests and tiny configs
+- `docs/` - user and developer documentation
 
 ## Citation
-
-If you use this model in your research, please cite:
 
 ```bibtex
 @misc{breton2025neobertnextgenerationbert,
@@ -183,18 +91,6 @@ If you use this model in your research, please cite:
 }
 ```
 
-## Training and Development
+## License
 
-This repository includes the complete training and evaluation codebase for NeoBERT, featuring:
-
-### Repository Structure
-
-- **`configs/`** - YAML configuration files for training, evaluation, and contrastive learning
-- **`scripts/`** - CLI entry points for pretraining, evaluation, contrastive learning, and exporting
-- **`jobs/`** - Example shell launchers for clusters or batch systems
-- **`tests/`** - Automated regression suite and tiny configs
-- **`src/neobert/`** - Core model, trainer, and utilities
-
-Additional guidance lives in the **Documentation** section above (or `docs/README.md` for the full index).
-
----
+MIT License.

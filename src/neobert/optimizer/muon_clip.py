@@ -16,6 +16,14 @@ from torch.utils.hooks import RemovableHandle
 
 logger = logging.getLogger(__name__)
 
+try:
+    _dynamo_disable = torch._dynamo.disable  # pyright: ignore[reportAttributeAccessIssue]
+except Exception:
+
+    def _dynamo_disable(fn: Callable[..., Any]) -> Callable[..., Any]:
+        """Return ``fn`` unchanged when torch Dynamo is unavailable."""
+        return fn
+
 
 # Configuration
 
@@ -208,11 +216,12 @@ class NeoBERTAttentionHooks:
         self.head_dim = model_config.hidden_size // model_config.num_attention_heads
         self.layer_mapping = layer_mapping or {}
 
-        self.layer_inputs: Dict[int, torch.Tensor] = {}
+        self.layer_inputs: Dict[int, Optional[torch.Tensor]] = {}
         self.layer_pad_masks: Dict[int, Optional[torch.Tensor]] = {}
         self.layer_freqs: Dict[int, Optional[torch.Tensor]] = {}
         self.layer_packed_seqlens: Dict[int, Optional[list[list[int]]]] = {}
         self.layers: Dict[int, torch.nn.Module] = {}
+        self._module_to_layer_idx: Dict[int, int] = {}
 
         self.enabled = True
         self.hook_handles: List[RemovableHandle] = []
@@ -266,11 +275,15 @@ class NeoBERTAttentionHooks:
         try:
             for idx, layer in enumerate(layers):
                 self.layers[idx] = layer
+                self.layer_inputs[idx] = None
+                self.layer_pad_masks[idx] = None
+                self.layer_freqs[idx] = None
+                self.layer_packed_seqlens[idx] = None
+                self._module_to_layer_idx[id(layer)] = idx
 
                 if hasattr(layer, "qkv"):
-                    handle = layer.qkv.register_forward_hook(
-                        self._create_qkv_input_hook(idx)
-                    )
+                    self._module_to_layer_idx[id(layer.qkv)] = idx
+                    handle = layer.qkv.register_forward_hook(self._qkv_input_hook)
                     registered_handles.append(handle)
                     num_hooks += 1
                 else:
@@ -285,15 +298,12 @@ class NeoBERTAttentionHooks:
                         raise RuntimeError(
                             f"Encoder block missing projection '{q_proj_name}'"
                         )
-                    handle = q_proj.register_forward_hook(
-                        self._create_qkv_input_hook(idx)
-                    )
+                    self._module_to_layer_idx[id(q_proj)] = idx
+                    handle = q_proj.register_forward_hook(self._qkv_input_hook)
                     registered_handles.append(handle)
                     num_hooks += 1
 
-                block_handle = layer.register_forward_hook(
-                    self._create_block_context_hook(idx)
-                )
+                block_handle = layer.register_forward_hook(self._block_context_hook)
                 registered_handles.append(block_handle)
                 num_hooks += 1
 
@@ -308,6 +318,7 @@ class NeoBERTAttentionHooks:
             # Clean up any hooks registered before the failure to prevent dangling hooks.
             for handle in registered_handles:
                 handle.remove()
+            self._module_to_layer_idx.clear()
             raise RuntimeError(f"Hook registration failed on layer {idx}: {e}") from e
 
     def _resolve_transformer_layers(
@@ -331,89 +342,109 @@ class NeoBERTAttentionHooks:
 
         return None
 
-    def _create_qkv_input_hook(
-        self, layer_idx: int
-    ) -> Callable[[torch.nn.Module, tuple[Any, ...], Any], None]:
-        """Create a hook capturing QKV input activations.
+    @_dynamo_disable
+    def _module_layer_idx(self, module: torch.nn.Module) -> Optional[int]:
+        """Resolve the cached layer index for a hook module.
 
-        :param int layer_idx: Encoder layer index.
-        :return Callable: Hook function for forward pass.
+        :param torch.nn.Module module: Hooked module.
+        :return int | None: Layer index when present.
         """
+        layer_idx = self._module_to_layer_idx.get(id(module), None)
+        if layer_idx is None:
+            return None
+        try:
+            return int(layer_idx)
+        except (TypeError, ValueError):
+            return None
 
-        def hook_fn(
-            module: torch.nn.Module, inputs: tuple[Any, ...], output: Any
-        ) -> None:
-            """Store the QKV input tensor for a layer.
+    @_dynamo_disable
+    def _detach_to_cpu(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Detach ``tensor`` and cache it on CPU with async-friendly semantics.
 
-            :param torch.nn.Module module: Hooked module.
-            :param tuple[Any, ...] inputs: Forward inputs.
-            :param Any output: Forward output (unused).
-            """
-            if not self.enabled or not inputs:
-                return
-            x = inputs[0]
-            if not torch.is_tensor(x):
-                return
-            # During gradient accumulation, we intentionally keep only the latest
-            # microbatch activation to bound memory/compute overhead. This biases
-            # QK clipping stats toward the most recent microbatch by design.
-            # We cache pre-projection inputs (not Q/K) to avoid duplicating large
-            # QKV tensors in CPU memory; projections are recomputed only on clip
-            # steps (interval-gated) to keep the steady-state overhead low.
-            # Move to CPU to avoid retaining GPU activations when clipping is enabled.
-            self.layer_inputs[layer_idx] = x.detach().to("cpu")
+        CUDA tensors are copied into pinned host buffers with ``non_blocking=True``
+        so D2H transfer can overlap with device work. CPU tensors are detached in
+        place without extra copies.
 
-        return hook_fn
-
-    def _create_block_context_hook(
-        self, layer_idx: int
-    ) -> Callable[[torch.nn.Module, tuple[Any, ...], Any], None]:
-        """Create a hook capturing pad mask and rotary embeddings.
-
-        :param int layer_idx: Encoder layer index.
-        :return Callable: Hook function for forward pass.
+        :param torch.Tensor tensor: Tensor to detach/cache.
+        :return torch.Tensor: Detached CPU tensor.
         """
+        detached = tensor.detach()
+        if detached.device.type != "cuda":
+            return detached.to("cpu")
 
-        def hook_fn(
-            module: torch.nn.Module, inputs: tuple[Any, ...], output: Any
-        ) -> None:
-            """Store pad mask and rotary embeddings for a layer.
+        pinned = torch.empty_like(detached, device="cpu", pin_memory=True)
+        pinned.copy_(detached, non_blocking=True)
+        return pinned
 
-            :param torch.nn.Module module: Hooked module.
-            :param tuple[Any, ...] inputs: Forward inputs.
-            :param Any output: Forward output (unused).
-            """
-            if not self.enabled or not inputs:
-                return
+    @_dynamo_disable
+    def _qkv_input_hook(
+        self, module: torch.nn.Module, inputs: tuple[Any, ...], output: Any
+    ) -> None:
+        """Store QKV input activations for the layer owning ``module``.
 
-            pad_mask = inputs[1] if len(inputs) > 1 else None
-            freqs_cis = inputs[2] if len(inputs) > 2 else None
-            packed_seqlens = inputs[3] if len(inputs) > 3 else None
+        :param torch.nn.Module module: Hooked qkv (or q_proj) module.
+        :param tuple[Any, ...] inputs: Forward inputs.
+        :param Any output: Forward output (unused).
+        """
+        del output
+        if not self.enabled or not inputs:
+            return
+        layer_idx = self._module_layer_idx(module)
+        if layer_idx is None:
+            return
+        x = inputs[0]
+        if not torch.is_tensor(x):
+            return
+        # During gradient accumulation, we intentionally keep only the latest
+        # microbatch activation to bound memory/compute overhead. This biases
+        # QK clipping stats toward the most recent microbatch by design.
+        # We cache pre-projection inputs (not Q/K) to avoid duplicating large
+        # QKV tensors in CPU memory; projections are recomputed only on clip
+        # steps because prepare_for_forward() interval-gates hook enablement.
+        # Offload to pinned host memory so CUDA->CPU transfer can be async.
+        self.layer_inputs[layer_idx] = self._detach_to_cpu(x)
 
-            self.layer_pad_masks[layer_idx] = (
-                pad_mask.detach().to("cpu") if torch.is_tensor(pad_mask) else pad_mask
-            )
-            self.layer_freqs[layer_idx] = (
-                freqs_cis.detach().to("cpu")
-                if torch.is_tensor(freqs_cis)
-                else freqs_cis
-            )
-            if packed_seqlens is not None:
-                if torch.is_tensor(packed_seqlens):
-                    if packed_seqlens.numel() == 0:
-                        packed_seqlens = [[] for _ in range(packed_seqlens.shape[0])]
-                    else:
-                        cpu = packed_seqlens.detach().cpu()
-                        packed_seqlens = [
-                            [int(x) for x in row[row > 0].tolist()] for row in cpu
-                        ]
+    @_dynamo_disable
+    def _block_context_hook(
+        self, module: torch.nn.Module, inputs: tuple[Any, ...], output: Any
+    ) -> None:
+        """Store layer-level context tensors for clipping diagnostics.
+
+        :param torch.nn.Module module: Hooked encoder block module.
+        :param tuple[Any, ...] inputs: Forward inputs.
+        :param Any output: Forward output (unused).
+        """
+        del output
+        if not self.enabled or not inputs:
+            return
+        layer_idx = self._module_layer_idx(module)
+        if layer_idx is None:
+            return
+
+        pad_mask = inputs[1] if len(inputs) > 1 else None
+        freqs_cis = inputs[2] if len(inputs) > 2 else None
+        packed_seqlens = inputs[3] if len(inputs) > 3 else None
+
+        self.layer_pad_masks[layer_idx] = (
+            self._detach_to_cpu(pad_mask) if torch.is_tensor(pad_mask) else pad_mask
+        )
+        self.layer_freqs[layer_idx] = (
+            self._detach_to_cpu(freqs_cis) if torch.is_tensor(freqs_cis) else freqs_cis
+        )
+        if packed_seqlens is not None:
+            if torch.is_tensor(packed_seqlens):
+                if packed_seqlens.numel() == 0:
+                    packed_seqlens = [[] for _ in range(packed_seqlens.shape[0])]
                 else:
+                    cpu = packed_seqlens.detach().cpu()
                     packed_seqlens = [
-                        list(map(int, seg_lens)) for seg_lens in packed_seqlens
+                        [int(x) for x in row[row > 0].tolist()] for row in cpu
                     ]
-            self.layer_packed_seqlens[layer_idx] = packed_seqlens
-
-        return hook_fn
+            else:
+                packed_seqlens = [
+                    list(map(int, seg_lens)) for seg_lens in packed_seqlens
+                ]
+        self.layer_packed_seqlens[layer_idx] = packed_seqlens
 
     def get_layer_data(
         self, layer_idx: int
@@ -439,16 +470,28 @@ class NeoBERTAttentionHooks:
 
     def clear(self) -> None:
         """Clear cached tensors from all layers."""
-        self.layer_inputs.clear()
-        self.layer_pad_masks.clear()
-        self.layer_freqs.clear()
-        self.layer_packed_seqlens.clear()
+        for layer_idx in self.layer_inputs:
+            self.layer_inputs[layer_idx] = None
+        for layer_idx in self.layer_pad_masks:
+            self.layer_pad_masks[layer_idx] = None
+        for layer_idx in self.layer_freqs:
+            self.layer_freqs[layer_idx] = None
+        for layer_idx in self.layer_packed_seqlens:
+            self.layer_packed_seqlens[layer_idx] = None
+
+    def has_captured_inputs(self) -> bool:
+        """Return whether any layer currently has captured activations.
+
+        :return bool: True when at least one layer input tensor is cached.
+        """
+        return any(inputs is not None for inputs in self.layer_inputs.values())
 
     def remove_hooks(self) -> None:
         """Remove all registered forward hooks."""
         for handle in self.hook_handles:
             handle.remove()
         self.hook_handles.clear()
+        self._module_to_layer_idx.clear()
 
 
 # Optimizer
@@ -746,7 +789,7 @@ class MuonClipOptimizer(Optimizer):
         if self.config.enable_clipping and self.hook_system:
             should_clip = self.should_clip_update(self._step)
             if should_clip:
-                if not self.hook_system.layer_inputs:
+                if not self.hook_system.has_captured_inputs():
                     logger.warning(
                         "MuonClip scheduled at update_step=%d but no activations were captured. "
                         "Clipping will be skipped. This usually means prepare_for_forward() "
@@ -1263,7 +1306,7 @@ class MuonClipOptimizer(Optimizer):
         :return tuple[torch.Tensor | None, float | None]: Eta per head and max logit.
         """
         if self.model_config.rope and freqs_cis is not None:
-            from ..model.rotary import apply_rotary_emb
+            from neobert.model.rotary import apply_rotary_emb
 
             freqs_cis = freqs_cis.to(device=xq.device)
             xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
@@ -1547,9 +1590,12 @@ class MuonClipOptimizer(Optimizer):
         num_heads = self.model_config.num_attention_heads
         head_dim = hidden_size // num_heads
 
-        if param.numel() != 3 * hidden_size * hidden_size:
+        expected_shape = (3 * hidden_size, hidden_size)
+        if param.shape != expected_shape:
             raise RuntimeError(
-                f"Unexpected QKV parameter shape {tuple(param.shape)} for hidden_size={hidden_size}"
+                "Unexpected fused QKV parameter layout "
+                f"{tuple(param.shape)}; expected {expected_shape} for per-head interleaved "
+                "rows [Q_h, K_h, V_h]."
             )
 
         # Ensure scaling factors are finite and on the right device/dtype
@@ -1560,8 +1606,8 @@ class MuonClipOptimizer(Optimizer):
         eta_q = eta.pow(alpha).view(num_heads, 1, 1)
         eta_k = eta.pow(1 - alpha).view(num_heads, 1, 1)
 
-        # Reshape parameter to [num_heads, 3 * head_dim, hidden_size] to match
-        # the model's per-head interleaved fused-QKV layout.
+        # Reshape to [H, 3*D, hidden] to match EncoderBlock._att_block:
+        # self.qkv(x).view(B,S,H,3*D).chunk(3, dim=-1).
         param_view = param.view(num_heads, 3 * head_dim, hidden_size)
         q_slice = slice(0, head_dim)
         k_slice = slice(head_dim, 2 * head_dim)

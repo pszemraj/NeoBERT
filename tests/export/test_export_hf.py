@@ -2,11 +2,16 @@
 """Tests for HF export helpers."""
 
 import importlib.util
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
+from tokenizers import Tokenizer, models, pre_tokenizers
+from transformers import PreTrainedTokenizerFast
 
 
 def _load_export_module():
@@ -84,6 +89,82 @@ class TestExportHF(unittest.TestCase):
             self.assertTrue((target_dir / "rotary.py").exists())
             self.assertTrue((target_dir / "modeling_utils.py").exists())
             model_text = (target_dir / "model.py").read_text()
+            self.assertIn('["neobert.modeling_utils", "modeling_utils"]', model_text)
             self.assertIn(
-                "from .modeling_utils import swiglu_intermediate_size", model_text
+                '["neobert.huggingface.rotary", "rotary"]',
+                model_text,
             )
+            self.assertNotIn("from ..modeling_utils import", model_text)
+
+    def test_get_torch_dtype_from_state_dict_handles_uncommon_dtypes(self):
+        """Ensure dtype export path uses generic torch dtype string names."""
+        export = self.export
+        state_dict = {"model.encoder.weight": torch.zeros(2, 2, dtype=torch.complex64)}
+        self.assertEqual(
+            export.get_torch_dtype_from_state_dict(state_dict),
+            "complex64",
+        )
+
+    def test_load_state_dict_from_deepspeed_tag_dir_uses_parent_and_tag(self):
+        """Ensure DeepSpeed tag-dir checkpoints call zero_to_fp32 with root+tag."""
+        export = self.export
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_dir = Path(tmpdir) / "100000"
+            checkpoint_dir.mkdir()
+            (checkpoint_dir / "mp_rank_00_model_states.pt").write_text("stub")
+
+            calls: dict[str, object] = {}
+
+            def _fake_zero_to_fp32(path: str, tag: str | None = None):
+                calls["path"] = path
+                calls["tag"] = tag
+                return {"model.encoder.weight": torch.zeros(2, 2)}
+
+            zero_module = types.ModuleType("deepspeed.utils.zero_to_fp32")
+            zero_module.get_fp32_state_dict_from_zero_checkpoint = _fake_zero_to_fp32
+            utils_module = types.ModuleType("deepspeed.utils")
+            deepspeed_module = types.ModuleType("deepspeed")
+
+            with patch.dict(
+                sys.modules,
+                {
+                    "deepspeed": deepspeed_module,
+                    "deepspeed.utils": utils_module,
+                    "deepspeed.utils.zero_to_fp32": zero_module,
+                },
+            ):
+                state_dict = export.load_state_dict_from_checkpoint(checkpoint_dir)
+
+            self.assertIn("model.encoder.weight", state_dict)
+            self.assertEqual(Path(str(calls["path"])), checkpoint_dir.parent)
+            self.assertEqual(calls["tag"], checkpoint_dir.name)
+
+    @staticmethod
+    def _make_tokenizer() -> PreTrainedTokenizerFast:
+        """Build a tiny tokenizer for export helper tests."""
+        vocab = {"[PAD]": 0, "[UNK]": 1, "hello": 2}
+        tokenizer = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
+        tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+        return PreTrainedTokenizerFast(
+            tokenizer_object=tokenizer,
+            pad_token="[PAD]",
+            unk_token="[UNK]",
+        )
+
+    def test_align_tokenizer_vocab_for_export_adds_placeholder_tokens(self):
+        """Ensure export helper pads tokenizer to model vocab size when needed."""
+        export = self.export
+        tokenizer = self._make_tokenizer()
+
+        added = export._align_tokenizer_vocab_for_export(tokenizer, 8)
+
+        self.assertEqual(added, 5)
+        self.assertEqual(len(tokenizer), 8)
+
+    def test_align_tokenizer_vocab_for_export_rejects_oversized_tokenizer(self):
+        """Ensure export helper fails when tokenizer is larger than model vocab."""
+        export = self.export
+        tokenizer = self._make_tokenizer()
+
+        with self.assertRaisesRegex(ValueError, "exceeds model vocab_size"):
+            export._align_tokenizer_vocab_for_export(tokenizer, 2)

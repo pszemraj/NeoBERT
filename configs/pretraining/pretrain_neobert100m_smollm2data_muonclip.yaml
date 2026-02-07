@@ -8,9 +8,10 @@ model:
   dropout_prob: 0.0
   vocab_size: 31999
   max_position_embeddings: 4096
-  xformers_attention: true
+  attn_backend: flash_attn_varlen
+  kernel_backend: auto
   ngpt: false
-  hidden_act: "swiglu" # Requires xformers
+  hidden_act: "swiglu"
   rope: true
   rms_norm: true
 

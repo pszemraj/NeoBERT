@@ -6,6 +6,7 @@
 import logging
 import math
 import warnings
+from copy import deepcopy
 from functools import partial
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
@@ -25,120 +26,57 @@ from transformers.modeling_outputs import SequenceClassifierOutput
 if TYPE_CHECKING:
     pass
 
-from ..modeling_utils import (
-    scaled_dot_product_attention_compat,
-    swiglu_intermediate_size,
+from neobert.kernels.attention import (
+    PackedFlashMetadata,
+    attention_forward,
+    canonicalize_attn_backend,
+    prepare_packed_flash_metadata,
 )
-from .rmsnorm import RMSNorm
-from .rotary import apply_rotary_emb, precompute_freqs_cis
-
-XFORMERS_ERROR: Optional[str] = None
-
-try:
-    from xformers.ops import memory_efficient_attention
-    from xformers.ops.fmha.attn_bias import BlockDiagonalMask
-
-    XFORMERS_AVAILABLE = True
-except (ImportError, RuntimeError) as e:
-    # xformers might be installed but have version conflicts
-    XFORMERS_AVAILABLE = False
-    XFORMERS_ERROR = str(e)
-    memory_efficient_attention = None
-    BlockDiagonalMask = None
+from neobert.kernels.backend import (
+    canonicalize_kernel_backend,
+    get_rmsnorm,
+    swiglu_forward,
+)
+from neobert.model.rotary import apply_rotary_emb, precompute_freqs_cis
+from neobert.modeling_utils import swiglu_intermediate_size
 
 logger = logging.getLogger(__name__)
+PackedSeqLens = torch.Tensor | list[list[int]]
 
 
-def _packed_flash_attention(
-    xq: torch.Tensor,
-    xk: torch.Tensor,
-    xv: torch.Tensor,
-    packed_seqlens: list[list[int]],
-    dropout_p: float,
-    scale: float | None = None,
-) -> torch.Tensor:
-    """Run xFormers attention with a block-diagonal bias from packed segments.
+def _is_torch_compiling() -> bool:
+    """Return whether execution is inside a torch.compile trace.
 
-    :param torch.Tensor xq: Query tensor of shape (batch, seq_len, heads, head_dim).
-    :param torch.Tensor xk: Key tensor of shape (batch, seq_len, heads, head_dim).
-    :param torch.Tensor xv: Value tensor of shape (batch, seq_len, heads, head_dim).
-    :param list[list[int]] packed_seqlens: Per-sample segment lengths.
-    :param float dropout_p: Dropout probability (0.0 for eval).
-    :param float | None scale: Optional softmax scaling factor.
-    :return torch.Tensor: Attention output of shape (batch, seq_len, heads, head_dim).
+    :return bool: True when the current frame is being compiled.
     """
-    if not XFORMERS_AVAILABLE or BlockDiagonalMask is None:
-        raise ImportError(
-            "Packed flash attention requires xformers. Install with: pip install xformers. "
-            f"Import error: {XFORMERS_ERROR}"
-        )
-
-    batch_size, seq_len, _, _ = xq.shape
-    if len(packed_seqlens) != batch_size:
-        raise ValueError(
-            "packed_seqlens length must match batch size "
-            f"({len(packed_seqlens)} != {batch_size})."
-        )
-
-    segments_q: list[torch.Tensor] = []
-    segments_k: list[torch.Tensor] = []
-    segments_v: list[torch.Tensor] = []
-    for batch_idx, seg_lens in enumerate(packed_seqlens):
-        start = 0
-        for seg_len in seg_lens:
-            if seg_len <= 0:
-                continue
-            end = start + seg_len
-            if end > seq_len:
-                raise ValueError(
-                    "packed_seqlens exceeds sequence length "
-                    f"(batch={batch_idx}, end={end}, seq_len={seq_len})."
-                )
-            segments_q.append(xq[batch_idx : batch_idx + 1, start:end])
-            segments_k.append(xk[batch_idx : batch_idx + 1, start:end])
-            segments_v.append(xv[batch_idx : batch_idx + 1, start:end])
-            start = end
-
-    if not segments_q:
-        return torch.zeros_like(xq)
-
-    attn_bias, q_cat = BlockDiagonalMask.from_tensor_list(segments_q)
-    k_cat = torch.cat(segments_k, dim=1)
-    v_cat = torch.cat(segments_v, dim=1)
-
-    attn_cat = memory_efficient_attention(
-        query=q_cat,
-        key=k_cat,
-        value=v_cat,
-        attn_bias=attn_bias,
-        p=dropout_p,
-        scale=scale,
-    )
-
-    segments_out = attn_bias.split(attn_cat)
-    attn = torch.zeros_like(xq)
-    seg_idx = 0
-    for batch_idx, seg_lens in enumerate(packed_seqlens):
-        start = 0
-        for seg_len in seg_lens:
-            if seg_len <= 0:
-                continue
-            end = start + seg_len
-            attn[batch_idx : batch_idx + 1, start:end] = segments_out[seg_idx]
-            seg_idx += 1
-            start = end
-
-    return attn
+    compiler = getattr(torch, "compiler", None)
+    if compiler is not None:
+        is_compiling = getattr(compiler, "is_compiling", None)
+        if callable(is_compiling):
+            return bool(is_compiling())
+    dynamo = getattr(torch, "_dynamo", None)
+    if dynamo is not None:
+        is_compiling = getattr(dynamo, "is_compiling", None)
+        if callable(is_compiling):
+            return bool(is_compiling())
+    return False
 
 
 def _normalize_pad_mask(pad_mask: torch.Tensor) -> torch.Tensor:
     """Normalize additive pad masks to a broadcast-friendly 4D shape.
 
     :param torch.Tensor pad_mask: Additive mask in 2D or 3D form.
-    :param int num_heads: Number of attention heads for validation.
     :return torch.Tensor: Mask shaped (B, 1, 1, S) or (B, 1, S, S).
     """
-    # Training path expects additive float masks (0 for keep, -inf for mask).
+    # Training API intentionally standardizes on additive masks (0 keep / -inf
+    # mask) for the hot path. HF export wrappers normalize 0/1 masks separately.
+    if not pad_mask.is_floating_point():
+        raise TypeError(
+            "pad_mask must be an additive floating mask with 0 for keep and -inf for masked positions."
+        )
+    if pad_mask.dtype != torch.float32:
+        pad_mask = pad_mask.to(torch.float32)
+
     if pad_mask.dim() == 2:
         # Key padding mask; broadcast across query positions + heads.
         return pad_mask[:, None, None, :]
@@ -150,69 +88,26 @@ def _normalize_pad_mask(pad_mask: torch.Tensor) -> torch.Tensor:
     )
 
 
-def _prepare_xformers_bias(
-    pad_mask: Optional[torch.Tensor],
-    num_heads: int,
-    seq_len: int,
-    dtype: torch.dtype,
-    device: torch.device,
-) -> Optional[torch.Tensor]:
-    """Expand an additive pad mask into xFormers' expected bias shape.
-
-    xFormers currently requires a full (B, H, S, S) bias tensor for key padding
-    masks. We expand and materialize the broadcasted mask to avoid shape errors.
-
-    :param torch.Tensor | None pad_mask: Additive pad mask (0/-inf).
-    :param int num_heads: Number of attention heads.
-    :param int seq_len: Sequence length (S).
-    :param torch.dtype dtype: Target dtype for the bias tensor.
-    :param torch.device device: Target device for the bias tensor.
-    :return torch.Tensor | None: Expanded bias tensor or None.
-    """
-    if pad_mask is None or not torch.is_tensor(pad_mask):
-        return pad_mask
-
-    mask = pad_mask
-    if mask.dim() == 2:
-        mask = mask[:, None, None, :]
-    elif mask.dim() == 3:
-        mask = mask[:, None, :, :]
-    elif mask.dim() != 4:
-        raise ValueError(
-            "pad_mask must have shape (batch, seq_len), (batch, seq_len, seq_len), "
-            f"or (batch, 1, 1, seq_len); got {tuple(mask.shape)}"
-        )
-
-    if mask.shape[-1] != seq_len:
-        raise ValueError(
-            f"pad_mask last dim ({mask.shape[-1]}) must equal seq_len ({seq_len})"
-        )
-
-    mask = mask.expand(-1, num_heads, seq_len, seq_len).contiguous()
-    return mask.to(device=device, dtype=dtype)
-
-
 def _infer_single_segment_packed_seqlens_from_pad_mask(
     pad_mask: torch.Tensor, seq_len: int
-) -> Optional[list[list[int]]]:
+) -> Optional[torch.Tensor]:
     """Infer packed lengths from an additive pad mask.
 
-    This only works for prefix padding masks where tokens are unmasked first and
+    This only works for right-padded masks where tokens are unmasked first and
     masked only at the tail. Returns None if the mask is not a simple padding mask.
 
     :param torch.Tensor pad_mask: Additive pad mask (0/-inf).
     :param int seq_len: Sequence length for validation.
-    :return list[list[int]] | None: Packed lengths per batch item.
+    :return torch.Tensor | None: Packed lengths tensor shaped ``[B, 1]``.
     """
     if not torch.is_tensor(pad_mask):
         raise TypeError("pad_mask must be a torch.Tensor")
 
     mask = pad_mask.detach()
     if mask.is_cuda:
-        raise ValueError(
-            "pad_mask is on CUDA; packed_seqlens inference would sync to CPU. "
-            "Provide packed_seqlens from the collator instead."
-        )
+        # Avoid an implicit CPU sync in forward(); gracefully fall back to the
+        # additive-mask path unless packed_seqlens was prepared by the collator.
+        return None
 
     if mask.dim() == 2:
         key_mask = mask
@@ -229,88 +124,76 @@ def _infer_single_segment_packed_seqlens_from_pad_mask(
     if not torch.all(keep_int.cummin(dim=-1).values == keep_int):
         return None
 
-    lengths = keep_int.sum(dim=-1).tolist()
-    return [[int(min(seq_len, length))] for length in lengths]
+    lengths = keep_int.sum(dim=-1).clamp(max=seq_len).to(torch.int32)
+    # Fully padded rows are not valid packed segments; keep additive-mask path.
+    if (lengths <= 0).any():
+        return None
+    return lengths.unsqueeze(1).cpu()
 
 
 def _normalize_packed_seqlens(
     packed_seqlens: Any,
     *,
     seq_len: Optional[int] = None,
-) -> Optional[list[list[int]]]:
-    """Normalize packed sequence lengths to Python lists.
+) -> Optional[torch.Tensor]:
+    """Normalize packed sequence lengths to rank-2 int32 tensors.
 
     :param Any packed_seqlens: Packed segment lengths tensor or list.
     :param int | None seq_len: Optional sequence length for validation.
-    :return list[list[int]] | None: Packed segment lengths as Python lists.
+    :return torch.Tensor | None: Packed segment lengths tensor of shape ``[B, N]``.
     """
     if packed_seqlens is None:
         return None
 
     if torch.is_tensor(packed_seqlens):
-        if packed_seqlens.numel() == 0:
-            return [[] for _ in range(packed_seqlens.shape[0])]
         tensor = packed_seqlens.detach()
-        if tensor.is_cuda:
-            raise RuntimeError(
-                "packed_seqlens must be a CPU tensor. This indicates a collator or "
-                "dataloader device placement bug; keep packed_seqlens on CPU to "
-                "avoid GPU syncs."
-            )
-        tensor = tensor.cpu()
-
         if tensor.ndim == 1:
-            out: list[list[int]] = []
-            for value in tensor.tolist():
-                length = int(value)
-                segs = [length] if length > 0 else []
-                if seq_len is not None and sum(segs) > seq_len:
-                    raise ValueError(
-                        f"packed_seqlens sums to {sum(segs)} > seq_len={seq_len}: {segs}"
-                    )
-                out.append(segs)
-            return out
-
-        if tensor.ndim == 2:
-            out = []
-            for row in tensor.tolist():
-                segs = [int(x) for x in row if int(x) > 0]
-                if seq_len is not None and sum(segs) > seq_len:
-                    raise ValueError(
-                        f"packed_seqlens sums to {sum(segs)} > seq_len={seq_len}: {segs}"
-                    )
-                out.append(segs)
-            return out
-
-        raise ValueError(
-            "packed_seqlens tensor must be rank 1 or 2, got "
-            f"shape={tuple(tensor.shape)}"
-        )
-
-    if isinstance(packed_seqlens, list):
-        out: list[list[int]] = []
+            tensor = tensor.unsqueeze(1)
+        if tensor.ndim != 2:
+            raise ValueError(
+                "packed_seqlens tensor must be rank 1 or 2, got "
+                f"shape={tuple(tensor.shape)}"
+            )
+        tensor = tensor.to(torch.int32)
+    elif isinstance(packed_seqlens, list):
+        normalized_rows: list[list[int]] = []
+        max_segments = 0
         for row in packed_seqlens:
             if row is None:
-                out.append([])
-                continue
-            segs = [int(x) for x in row if int(x) > 0]
-            if seq_len is not None and sum(segs) > seq_len:
-                raise ValueError(
-                    f"packed_seqlens sums to {sum(segs)} > seq_len={seq_len}: {segs}"
-                )
-            out.append(segs)
-        return out
+                segs: list[int] = []
+            else:
+                segs = [int(x) for x in row if int(x) > 0]
+            normalized_rows.append(segs)
+            max_segments = max(max_segments, len(segs))
 
-    raise TypeError(f"Unsupported packed_seqlens type: {type(packed_seqlens).__name__}")
+        tensor = torch.zeros(
+            (len(normalized_rows), max_segments),
+            dtype=torch.int32,
+        )
+        for idx, segs in enumerate(normalized_rows):
+            if not segs:
+                continue
+            tensor[idx, : len(segs)] = torch.tensor(segs, dtype=torch.int32)
+    else:
+        raise TypeError(
+            f"Unsupported packed_seqlens type: {type(packed_seqlens).__name__}"
+        )
+
+    if seq_len is not None:
+        sums = tensor.clamp_min(0).sum(dim=1)
+        bad = sums > seq_len
+        if bad.any():
+            bad_idx = int(torch.where(bad)[0][0].item())
+            raise ValueError(
+                "packed_seqlens sum exceeds seq_len "
+                f"(row={bad_idx}, sum={int(sums[bad_idx].item())}, seq_len={seq_len})."
+            )
+
+    return tensor
 
 
 class SwiGLU(nn.Module):
-    """Native SwiGLU implementation (unpacked w1/w2/w3).
-
-    Note: This layout is intentionally compatible with Liger's SwiGLU modules
-    (gate/up/down projections). A future Liger swap should preserve the reduced
-    2/3 intermediate size and the "swiglu" activation flag used in configs.
-    """
+    """SwiGLU activation with Liger kernel dispatch (unpacked w1/w2/w3)."""
 
     def __init__(
         self,
@@ -318,6 +201,7 @@ class SwiGLU(nn.Module):
         hidden_features: Optional[int] = None,
         out_features: Optional[int] = None,
         bias: bool = True,
+        kernel_backend: str = "torch",
     ) -> None:
         """Initialize the SwiGLU block.
 
@@ -325,8 +209,10 @@ class SwiGLU(nn.Module):
         :param int | None hidden_features: Hidden feature dimension.
         :param int | None out_features: Output feature dimension.
         :param bool bias: Whether to use bias in linear layers.
+        :param str kernel_backend: ``"liger"`` or ``"torch"``.
         """
         super().__init__()
+        self.kernel_backend = kernel_backend
         self.w1 = nn.Linear(in_features, hidden_features, bias=bias)
         self.w2 = nn.Linear(in_features, hidden_features, bias=bias)
         self.w3 = nn.Linear(hidden_features, out_features, bias=bias)
@@ -337,7 +223,7 @@ class SwiGLU(nn.Module):
         :param torch.Tensor x: Input tensor.
         :return torch.Tensor: Output tensor.
         """
-        return self.w3(nn.functional.silu(self.w1(x)) * self.w2(x))
+        return self.w3(swiglu_forward(self.w1(x), self.w2(x), self.kernel_backend))
 
 
 class NeoBERTConfig(PretrainedConfig):
@@ -359,10 +245,11 @@ class NeoBERTConfig(PretrainedConfig):
         rope: bool = True,
         norm_eps: float = 1e-06,
         hidden_act: str = "SwiGLU",
-        vocab_size: int = 32064,
+        vocab_size: int = 30522,  # Keep in sync with ConfigLoader/HF defaults.
         pad_token_id: int = 0,
         max_length: int = 1024,
-        flash_attention: bool = True,
+        attn_backend: str = "sdpa",
+        kernel_backend: str = "auto",
         tie_word_embeddings: bool = True,
         base_scale: float = 1.0 / (960.0**0.5),
         ngpt: bool = False,
@@ -384,12 +271,27 @@ class NeoBERTConfig(PretrainedConfig):
         :param int vocab_size: Vocabulary size.
         :param int pad_token_id: Padding token ID.
         :param int max_length: Maximum sequence length.
-        :param bool flash_attention: Whether to use xFormers memory-efficient attention.
+        :param str attn_backend: Attention backend (``"sdpa"`` or ``"flash_attn_varlen"``).
+        :param str kernel_backend: Kernel backend (``"auto"``, ``"liger"``, or ``"torch"``).
         :param bool tie_word_embeddings: Whether to tie input/output embeddings.
         :param float base_scale: Base scaling factor for NGPT.
         :param bool ngpt: Whether to enable NGPT mode.
         :param Any kwargs: Additional configuration parameters.
         """
+        # Legacy: accept flash_attention bool and map to attn_backend
+        if "flash_attention" in kwargs:
+            fa = kwargs.pop("flash_attention")
+            warnings.warn(
+                "NeoBERTConfig: 'flash_attention' is deprecated; use "
+                '\'attn_backend\' instead ("sdpa" or "flash_attn_varlen").',
+                UserWarning,
+                stacklevel=2,
+            )
+            if isinstance(fa, bool):
+                attn_backend = "flash_attn_varlen" if fa else "sdpa"
+            else:
+                attn_backend = str(fa)
+
         super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
 
         # Core dims
@@ -445,7 +347,8 @@ class NeoBERTConfig(PretrainedConfig):
         # Keep the HF-style attribute for compatibility with downstream tooling.
         self.max_position_embeddings = self.max_length
 
-        self.flash_attention = flash_attention
+        self.attn_backend = canonicalize_attn_backend(attn_backend)
+        self.kernel_backend = canonicalize_kernel_backend(kernel_backend)
         self.base_scale = base_scale
         self.ngpt = ngpt
 
@@ -476,21 +379,19 @@ class EncoderBlock(nn.Module):
         )
         self.resid_dropout = nn.Dropout(config.dropout)
 
+        # Kernel backend for Liger/torch dispatch (resolved at forward time)
+        self._kb = getattr(config, "kernel_backend", "auto")
+
         # Feedforward network
         match config.hidden_act.lower():
             case "swiglu":
-                # Future Liger integration note:
-                # Liger expects config.intermediate_size directly and checks hidden_act in
-                # {"silu","swish"}. We currently use a 2/3 reduction + "swiglu" flag, so
-                # a wrapper/adapter will be needed when swapping implementations.
-                # To keep the number of parameters and the amount of computation constant, we reduce the number of
-                # hidden units by a factor of 2/3 (https://arxiv.org/pdf/2002.05202.pdf) and make it a multiple of 8.
                 intermediate_size = swiglu_intermediate_size(config.intermediate_size)
                 self.ffn = SwiGLU(
                     config.hidden_size,
                     intermediate_size,
                     config.hidden_size,
                     bias=False,
+                    kernel_backend=self._kb,
                 )
             case "gelu":
                 self.ffn = nn.Sequential(
@@ -504,12 +405,12 @@ class EncoderBlock(nn.Module):
                 )
 
         self.attention_norm = (
-            RMSNorm(config.hidden_size, config.norm_eps)
+            get_rmsnorm(config.hidden_size, config.norm_eps, self._kb)
             if config.rms_norm
             else nn.LayerNorm(config.hidden_size, config.norm_eps)
         )
         self.ffn_norm = (
-            RMSNorm(config.hidden_size, config.norm_eps)
+            get_rmsnorm(config.hidden_size, config.norm_eps, self._kb)
             if config.rms_norm
             else nn.LayerNorm(config.hidden_size, config.norm_eps)
         )
@@ -521,7 +422,8 @@ class EncoderBlock(nn.Module):
         x: torch.Tensor,
         pad_mask: torch.Tensor,
         freqs_cis: torch.Tensor,
-        packed_seqlens: Optional[list[list[int]]] = None,
+        packed_seqlens: Optional[PackedSeqLens] = None,
+        packed_flash_meta: Optional[PackedFlashMetadata] = None,
     ) -> torch.Tensor:
         """Run the encoder block forward pass.
 
@@ -529,10 +431,15 @@ class EncoderBlock(nn.Module):
         :param torch.Tensor pad_mask: Additive attention mask.
         :param torch.Tensor freqs_cis: Rotary embedding frequencies.
         :param list[list[int]] | torch.Tensor | None packed_seqlens: Packed segment lengths.
+        :param PackedFlashMetadata | None packed_flash_meta: Cached flash varlen metadata.
         :return torch.Tensor: Updated hidden states.
         """
         x = x + self._att_block(
-            self.attention_norm(x), pad_mask, freqs_cis, packed_seqlens
+            self.attention_norm(x),
+            pad_mask,
+            freqs_cis,
+            packed_seqlens,
+            packed_flash_meta,
         )
         x = x + self._ff_block(self.ffn_norm(x))
         return x
@@ -542,7 +449,8 @@ class EncoderBlock(nn.Module):
         x: torch.Tensor,
         pad_mask: torch.Tensor,
         freqs_cis: torch.Tensor,
-        packed_seqlens: Optional[list[list[int]]] = None,
+        packed_seqlens: Optional[PackedSeqLens] = None,
+        packed_flash_meta: Optional[PackedFlashMetadata] = None,
     ) -> torch.Tensor:
         """Apply the attention sub-layer.
 
@@ -550,6 +458,7 @@ class EncoderBlock(nn.Module):
         :param torch.Tensor pad_mask: Additive attention mask.
         :param torch.Tensor freqs_cis: Rotary embedding frequencies.
         :param list[list[int]] | torch.Tensor | None packed_seqlens: Packed segment lengths.
+        :param PackedFlashMetadata | None packed_flash_meta: Cached flash varlen metadata.
         :return torch.Tensor: Attention output.
         """
         batch_size, seq_len, _ = x.shape
@@ -568,59 +477,17 @@ class EncoderBlock(nn.Module):
         if self.config.rope:
             xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
 
-        if self.config.flash_attention:
-            if not XFORMERS_AVAILABLE:
-                raise ImportError(
-                    "Flash attention requires xformers. Install with: pip install xformers. "
-                    f"Import error: {XFORMERS_ERROR}"
-                )
-            dropout_p = self.config.dropout if self.training else 0.0
-            if packed_seqlens is not None:
-                attn = _packed_flash_attention(
-                    xq, xk, xv, packed_seqlens, dropout_p=dropout_p
-                )
-            else:
-                if pad_mask is not None:
-                    attn_bias = _prepare_xformers_bias(
-                        pad_mask,
-                        self.config.num_attention_heads,
-                        seq_len,
-                        xq.dtype,
-                        xq.device,
-                    )
-                    attn = memory_efficient_attention(
-                        query=xq,
-                        key=xk,
-                        value=xv,
-                        attn_bias=attn_bias,
-                        p=dropout_p,
-                    )
-                else:
-                    attn = memory_efficient_attention(
-                        query=xq,
-                        key=xk,
-                        value=xv,
-                        attn_bias=None,
-                        p=dropout_p,
-                    )
-        else:
-            if packed_seqlens is not None:
-                raise ValueError(
-                    "Packed sequences require flash_attention with xFormers."
-                )
-            # Use explicit scale for consistency with NormEncoderBlock.
-            # Keep additive padding masks here for correctness; for fastest kernels,
-            # prefer flash_attention/xFormers when available.
-            softmax_scale = 1.0 / math.sqrt(self.config.dim_head)
-            # Input and output are of dimension (B, H, M, K)
-            attn = scaled_dot_product_attention_compat(
-                query=xq.transpose(1, 2),
-                key=xk.transpose(1, 2),
-                value=xv.transpose(1, 2),
-                attn_mask=pad_mask,
-                dropout_p=self.config.dropout if self.training else 0,
-                scale=softmax_scale,
-            ).transpose(1, 2)
+        attn = attention_forward(
+            xq,
+            xk,
+            xv,
+            pad_mask=pad_mask,
+            packed_seqlens=packed_seqlens,
+            dropout_p=self.config.dropout if self.training else 0.0,
+            scale=None,
+            attn_backend=self.config.attn_backend,
+            packed_flash_metadata=packed_flash_meta,
+        )
 
         return self.resid_dropout(
             self.wo(
@@ -664,10 +531,12 @@ class NormEncoderBlock(nn.Module):
         )
         self.resid_dropout = nn.Dropout(config.dropout)
 
+        # Kernel backend for Liger/torch dispatch (resolved at forward time)
+        self._kb = getattr(config, "kernel_backend", "auto")
+
         self.c_fc = nn.Linear(
             config.hidden_size, 2 * config.intermediate_size, bias=False
         )
-        self.silu = nn.SiLU()
         self.mlp_c_proj = nn.Linear(
             config.intermediate_size, config.hidden_size, bias=False
         )
@@ -712,17 +581,25 @@ class NormEncoderBlock(nn.Module):
         x: torch.Tensor,
         pad_mask: torch.Tensor,
         freqs_cis: torch.Tensor,
-        packed_seqlens: Optional[list[list[int]]] = None,
+        packed_seqlens: Optional[PackedSeqLens] = None,
+        packed_flash_meta: Optional[PackedFlashMetadata] = None,
     ) -> torch.Tensor:
         """Run the normalized encoder block forward pass.
 
         :param torch.Tensor x: Input tensor.
         :param torch.Tensor pad_mask: Additive attention mask.
         :param torch.Tensor freqs_cis: Rotary embedding frequencies.
-        :param list[list[int]] | None packed_seqlens: Packed segment lengths.
+        :param torch.Tensor | list[list[int]] | None packed_seqlens: Packed segment lengths.
+        :param PackedFlashMetadata | None packed_flash_meta: Cached flash varlen metadata.
         :return torch.Tensor: Updated hidden states.
         """
-        x_attn = self._att_block(x, pad_mask, freqs_cis, packed_seqlens)
+        x_attn = self._att_block(
+            x,
+            pad_mask,
+            freqs_cis,
+            packed_seqlens,
+            packed_flash_meta,
+        )
 
         lr = self.attn_alpha * (
             self.attn_alpha_init_value / self.attn_alpha_init_scaling
@@ -749,14 +626,16 @@ class NormEncoderBlock(nn.Module):
         x: torch.Tensor,
         pad_mask: torch.Tensor,
         freqs_cis: torch.Tensor,
-        packed_seqlens: Optional[list[list[int]]] = None,
+        packed_seqlens: Optional[PackedSeqLens] = None,
+        packed_flash_meta: Optional[PackedFlashMetadata] = None,
     ) -> torch.Tensor:
         """Apply the attention sub-layer.
 
         :param torch.Tensor x: Input tensor.
         :param torch.Tensor pad_mask: Additive attention mask.
         :param torch.Tensor freqs_cis: Rotary embedding frequencies.
-        :param list[list[int]] | None packed_seqlens: Packed segment lengths.
+        :param torch.Tensor | list[list[int]] | None packed_seqlens: Packed segment lengths.
+        :param PackedFlashMetadata | None packed_flash_meta: Cached flash varlen metadata.
         :return torch.Tensor: Attention output.
         """
         batch_size, seq_len, _ = x.shape
@@ -788,62 +667,17 @@ class NormEncoderBlock(nn.Module):
             self.config.hidden_size / self.config.num_attention_heads
         ) ** 0.5
 
-        if self.config.flash_attention:
-            if not XFORMERS_AVAILABLE:
-                raise ImportError(
-                    "Flash attention requires xformers. Install with: pip install xformers. "
-                    f"Import error: {XFORMERS_ERROR}"
-                )
-            dropout_p = self.config.dropout if self.training else 0.0
-            if packed_seqlens is not None:
-                attn = _packed_flash_attention(
-                    xq,
-                    xk,
-                    xv,
-                    packed_seqlens,
-                    dropout_p=dropout_p,
-                    scale=softmax_scale,
-                )
-            else:
-                if pad_mask is not None:
-                    attn_bias = _prepare_xformers_bias(
-                        pad_mask,
-                        self.config.num_attention_heads,
-                        seq_len,
-                        xq.dtype,
-                        xq.device,
-                    )
-                    attn = memory_efficient_attention(
-                        query=xq,
-                        key=xk,
-                        value=xv,
-                        attn_bias=attn_bias,
-                        p=dropout_p,
-                        scale=softmax_scale,
-                    )
-                else:
-                    attn = memory_efficient_attention(
-                        query=xq,
-                        key=xk,
-                        value=xv,
-                        attn_bias=None,
-                        p=dropout_p,
-                        scale=softmax_scale,
-                    )
-        else:
-            if packed_seqlens is not None:
-                raise ValueError(
-                    "Packed sequences require flash_attention with xFormers."
-                )
-            # Input and output are of dimension (B, H, M, K)
-            attn = scaled_dot_product_attention_compat(
-                query=xq.transpose(1, 2),
-                key=xk.transpose(1, 2),
-                value=xv.transpose(1, 2),
-                attn_mask=pad_mask,
-                dropout_p=self.config.dropout if self.training else 0,
-                scale=softmax_scale,
-            ).transpose(1, 2)
+        attn = attention_forward(
+            xq,
+            xk,
+            xv,
+            pad_mask=pad_mask,
+            packed_seqlens=packed_seqlens,
+            dropout_p=self.config.dropout if self.training else 0.0,
+            scale=softmax_scale,
+            attn_backend=self.config.attn_backend,
+            packed_flash_metadata=packed_flash_meta,
+        )
 
         return self.resid_dropout(
             self.wo(attn.reshape(batch_size, seq_len, self.config.hidden_size))
@@ -863,7 +697,8 @@ class NormEncoderBlock(nn.Module):
         uv = suv * uv
 
         u, v = torch.chunk(uv, 2, dim=-1)
-        x = u * self.silu(v)
+        # gate=v, up=u: Liger computes silu(gate) * up
+        x = swiglu_forward(v, u, self._kb)
         x = self.mlp_c_proj(x)
 
         return self.ffn_dropout(x)
@@ -920,8 +755,12 @@ class NeoBERT(NeoBERTPreTrainedModel):
         )
 
         if self.config.rope:
-            # Lazy RoPE cache; populated on first forward for the active device/length.
-            self.register_buffer("freqs_cis", torch.empty(0), persistent=False)
+            # Keep a fixed-size RoPE cache to avoid mutating buffers in forward().
+            self.register_buffer(
+                "freqs_cis",
+                precompute_freqs_cis(config.dim_head, config.max_length),
+                persistent=False,
+            )
         else:
             # Use a fixed padding index (0) for positional embeddings to decouple
             # position IDs from token padding IDs.
@@ -936,8 +775,9 @@ class NeoBERT(NeoBERTPreTrainedModel):
         for _ in range(config.num_hidden_layers):
             self.transformer_encoder.append(EncoderBlock(config))
 
+        _kb = getattr(config, "kernel_backend", "auto")
         self.layer_norm = (
-            RMSNorm(config.hidden_size, config.norm_eps)
+            get_rmsnorm(config.hidden_size, config.norm_eps, _kb)
             if config.rms_norm
             else nn.LayerNorm(config.hidden_size, config.norm_eps)
         )
@@ -950,18 +790,20 @@ class NeoBERT(NeoBERTPreTrainedModel):
         self,
         src: torch.Tensor,
         pad_mask: Optional[torch.Tensor] = None,
-        packed_seqlens: Optional[list[list[int]]] = None,
+        packed_seqlens: Optional[PackedSeqLens] = None,
     ) -> torch.Tensor:
         """Run the NeoBERT encoder forward pass.
 
         :param torch.Tensor src: Input token IDs.
         :param torch.Tensor | None pad_mask: Additive attention mask.
-        :param list[list[int]] | None packed_seqlens: Packed segment lengths.
+        :param torch.Tensor | list[list[int]] | None packed_seqlens: Packed segment lengths.
         :return torch.Tensor: Encoded hidden states.
         """
         seq_len = src.shape[1]
         packed_seqlens = _normalize_packed_seqlens(packed_seqlens, seq_len=seq_len)
-        if self.config.flash_attention:
+
+        use_packed = self.config.attn_backend != "sdpa" or packed_seqlens is not None
+        if use_packed:
             if (
                 packed_seqlens is None
                 and pad_mask is not None
@@ -972,28 +814,27 @@ class NeoBERT(NeoBERTPreTrainedModel):
                 )
                 if packed_seqlens is not None:
                     pad_mask = None
-                else:
-                    raise ValueError(
-                        "flash_attention requires right-padded masks or packed_seqlens. "
-                        "Disable flash_attention or right-pad inputs to avoid dense O(S^2) masks."
-                    )
-            if packed_seqlens is not None:
-                if not XFORMERS_AVAILABLE:
-                    raise ImportError(
-                        "Packed sequences require xformers. Install with: pip install xformers. "
-                        f"Import error: {XFORMERS_ERROR}"
-                    )
-                if pad_mask is not None:
-                    logger.warning(
-                        "packed_seqlens provided; ignoring pad_mask for packed attention."
-                    )
-                    pad_mask = None
-        elif packed_seqlens is not None:
-            raise ValueError("Packed sequences require flash_attention with xFormers.")
+            if packed_seqlens is not None and pad_mask is not None:
+                logger.warning(
+                    "packed_seqlens provided; ignoring pad_mask for packed attention."
+                )
+                pad_mask = None
+
+        packed_flash_meta: Optional[PackedFlashMetadata] = None
+        if (
+            packed_seqlens is not None
+            and self.config.attn_backend == "flash_attn_varlen"
+            and not _is_torch_compiling()
+        ):
+            packed_flash_meta = prepare_packed_flash_metadata(
+                packed_seqlens,
+                batch_size=src.shape[0],
+                seq_len=seq_len,
+                device=src.device,
+            )
 
         # Normalize to broadcast-friendly shapes to avoid O(S^2) materialization.
         if pad_mask is not None and torch.is_tensor(pad_mask):
-            # Expect additive masks (0 for keep, -inf for masked positions).
             pad_mask = _normalize_pad_mask(pad_mask)
 
         # RoPE
@@ -1003,32 +844,23 @@ class NeoBERT(NeoBERTPreTrainedModel):
             if seq_len > self.config.max_length:
                 warnings.warn(
                     f"Sequence length {seq_len} exceeds max_length {self.config.max_length}; "
-                    "RoPE cache will grow to accommodate. Consider truncating inputs.",
+                    "using a transient RoPE cache for this forward. Consider truncating inputs.",
                     stacklevel=2,
                 )
-            target_len = max(self.config.max_length, seq_len)
-            # Reuse cached RoPE frequencies; only grow/reallocate on device/len changes.
-            # Inputs are expected to be on the same device as the model parameters.
-            if (
-                self.freqs_cis.numel() == 0
-                or self.freqs_cis.device != src.device
-                or self.freqs_cis.shape[0] < target_len
-            ):
-                self.freqs_cis = precompute_freqs_cis(
-                    self.config.dim_head, target_len, device=src.device
+                freqs_cis = precompute_freqs_cis(
+                    self.config.dim_head, seq_len, device=src.device
                 )
-            freqs_cis = self.freqs_cis[:seq_len]
+            else:
+                freqs_cis = self.freqs_cis
+                if freqs_cis.device != src.device:
+                    freqs_cis = freqs_cis.to(src.device)
+                freqs_cis = freqs_cis[:seq_len]
 
         # Embedding
         x = self.encoder(src)
 
         # Positional embedding
         if not self.config.rope:
-            # Content-based positions: padding stays at index 0, and left-padding
-            # does not shift token positions (padding-invariant positional IDs).
-            # Keep this in sync with the HF create_position_ids_from_input_ids logic.
-            # This O(B*S) cumsum happens once per forward (not per layer) and is
-            # only used when RoPE is disabled (ablation/testing path).
             mask = src.ne(self.config.pad_token_id).int()
             incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask)) * mask
             x += self.positional_embedding(incremental_indices.long())
@@ -1036,17 +868,23 @@ class NeoBERT(NeoBERTPreTrainedModel):
         # Transformer encoder
         for layer in self.transformer_encoder:
             if self.gradient_checkpointing and self.training:
-                # Capture mask + rotary frequencies in closure so checkpoint only sees Tensor inputs.
+
                 def custom_forward(
                     hidden_states: torch.Tensor, layer: EncoderBlock = layer
                 ) -> torch.Tensor:
-                    """Wrap the encoder layer for checkpointing.
+                    """Run one encoder block for gradient checkpointing.
 
-                    :param torch.Tensor hidden_states: Hidden states to process.
-                    :param EncoderBlock layer: Encoder layer bound for checkpointing.
+                    :param torch.Tensor hidden_states: Input hidden states.
+                    :param EncoderBlock layer: Bound layer instance.
                     :return torch.Tensor: Updated hidden states.
                     """
-                    return layer(hidden_states, pad_mask, freqs_cis, packed_seqlens)
+                    return layer(
+                        hidden_states,
+                        pad_mask,
+                        freqs_cis,
+                        packed_seqlens,
+                        packed_flash_meta,
+                    )
 
                 x = checkpoint(
                     custom_forward,
@@ -1055,12 +893,9 @@ class NeoBERT(NeoBERTPreTrainedModel):
                     use_reentrant=False,
                 )
             else:
-                x = layer(x, pad_mask, freqs_cis, packed_seqlens)
+                x = layer(x, pad_mask, freqs_cis, packed_seqlens, packed_flash_meta)
 
-        # Final normalization layer
         x = self.layer_norm(x)
-
-        # Return the output of the last hidden layer
         return x
 
 
@@ -1083,8 +918,12 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
         )
 
         if self.config.rope:
-            # Lazy RoPE cache; populated on first forward for the active device/length.
-            self.register_buffer("freqs_cis", torch.empty(0), persistent=False)
+            # Keep a fixed-size RoPE cache to avoid mutating buffers in forward().
+            self.register_buffer(
+                "freqs_cis",
+                precompute_freqs_cis(config.dim_head, config.max_length),
+                persistent=False,
+            )
         else:
             # Use a fixed padding index (0) for positional embeddings to decouple
             # position IDs from token padding IDs.
@@ -1107,18 +946,20 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
         self,
         src: torch.Tensor,
         pad_mask: Optional[torch.Tensor] = None,
-        packed_seqlens: Optional[list[list[int]]] = None,
+        packed_seqlens: Optional[PackedSeqLens] = None,
     ) -> torch.Tensor:
         """Run the normalized encoder forward pass.
 
         :param torch.Tensor src: Input token IDs.
         :param torch.Tensor | None pad_mask: Additive attention mask.
-        :param list[list[int]] | None packed_seqlens: Packed segment lengths.
+        :param torch.Tensor | list[list[int]] | None packed_seqlens: Packed segment lengths.
         :return torch.Tensor: Encoded hidden states.
         """
         seq_len = src.shape[1]
         packed_seqlens = _normalize_packed_seqlens(packed_seqlens, seq_len=seq_len)
-        if self.config.flash_attention:
+
+        use_packed = self.config.attn_backend != "sdpa" or packed_seqlens is not None
+        if use_packed:
             if (
                 packed_seqlens is None
                 and pad_mask is not None
@@ -1129,28 +970,27 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
                 )
                 if packed_seqlens is not None:
                     pad_mask = None
-                else:
-                    raise ValueError(
-                        "flash_attention requires right-padded masks or packed_seqlens. "
-                        "Disable flash_attention or right-pad inputs to avoid dense O(S^2) masks."
-                    )
-            if packed_seqlens is not None:
-                if not XFORMERS_AVAILABLE:
-                    raise ImportError(
-                        "Packed sequences require xformers. Install with: pip install xformers. "
-                        f"Import error: {XFORMERS_ERROR}"
-                    )
-                if pad_mask is not None:
-                    logger.warning(
-                        "packed_seqlens provided; ignoring pad_mask for packed attention."
-                    )
-                    pad_mask = None
-        elif packed_seqlens is not None:
-            raise ValueError("Packed sequences require flash_attention with xFormers.")
+            if packed_seqlens is not None and pad_mask is not None:
+                logger.warning(
+                    "packed_seqlens provided; ignoring pad_mask for packed attention."
+                )
+                pad_mask = None
+
+        packed_flash_meta: Optional[PackedFlashMetadata] = None
+        if (
+            packed_seqlens is not None
+            and self.config.attn_backend == "flash_attn_varlen"
+            and not _is_torch_compiling()
+        ):
+            packed_flash_meta = prepare_packed_flash_metadata(
+                packed_seqlens,
+                batch_size=src.shape[0],
+                seq_len=seq_len,
+                device=src.device,
+            )
 
         # Normalize to broadcast-friendly shapes to avoid O(S^2) materialization.
         if pad_mask is not None and torch.is_tensor(pad_mask):
-            # Expect additive masks (0 for keep, -inf for masked positions).
             pad_mask = _normalize_pad_mask(pad_mask)
 
         # RoPE
@@ -1160,28 +1000,23 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
             if seq_len > self.config.max_length:
                 warnings.warn(
                     f"Sequence length {seq_len} exceeds max_length {self.config.max_length}; "
-                    "RoPE cache will grow to accommodate. Consider truncating inputs.",
+                    "using a transient RoPE cache for this forward. Consider truncating inputs.",
                     stacklevel=2,
                 )
-            target_len = max(self.config.max_length, seq_len)
-            if (
-                self.freqs_cis.numel() == 0
-                or self.freqs_cis.device != src.device
-                or self.freqs_cis.shape[0] < target_len
-            ):
-                self.freqs_cis = precompute_freqs_cis(
-                    self.config.dim_head, target_len, device=src.device
+                freqs_cis = precompute_freqs_cis(
+                    self.config.dim_head, seq_len, device=src.device
                 )
-            freqs_cis = self.freqs_cis[:seq_len]
+            else:
+                freqs_cis = self.freqs_cis
+                if freqs_cis.device != src.device:
+                    freqs_cis = freqs_cis.to(src.device)
+                freqs_cis = freqs_cis[:seq_len]
 
         # Embedding
         x = self.encoder(src)
 
         # Positional embedding
         if not self.config.rope:
-            # Content-based positions: padding stays at index 0, and left-padding
-            # does not shift token positions (padding-invariant positional IDs).
-            # Keep this in sync with the HF create_position_ids_from_input_ids logic.
             mask = src.ne(self.config.pad_token_id).int()
             incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask)) * mask
             x += self.positional_embedding(incremental_indices.long())
@@ -1193,13 +1028,19 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
                 def custom_forward(
                     hidden_states: torch.Tensor, layer: NormEncoderBlock = layer
                 ) -> torch.Tensor:
-                    """Wrap the encoder layer for checkpointing.
+                    """Run one normalized encoder block for checkpointing.
 
-                    :param torch.Tensor hidden_states: Hidden states to process.
-                    :param NormEncoderBlock layer: Encoder layer bound for checkpointing.
+                    :param torch.Tensor hidden_states: Input hidden states.
+                    :param NormEncoderBlock layer: Bound layer instance.
                     :return torch.Tensor: Updated hidden states.
                     """
-                    return layer(hidden_states, pad_mask, freqs_cis, packed_seqlens)
+                    return layer(
+                        hidden_states,
+                        pad_mask,
+                        freqs_cis,
+                        packed_seqlens,
+                        packed_flash_meta,
+                    )
 
                 x = checkpoint(
                     custom_forward,
@@ -1208,10 +1049,8 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
                     use_reentrant=False,
                 )
             else:
-                x = layer(x, pad_mask, freqs_cis, packed_seqlens)
+                x = layer(x, pad_mask, freqs_cis, packed_seqlens, packed_flash_meta)
 
-        # NormNeoBERT applies normalization inside each block; no final norm here.
-        # Return the output of the last hidden layer
         return x
 
 
@@ -1232,12 +1071,27 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
         self.model = NormNeoBERT(config) if self.config.ngpt else NeoBERT(config)
         self.decoder = nn.Linear(config.hidden_size, config.vocab_size)
 
+        should_tie = bool(getattr(self.config, "tie_word_embeddings", False))
+        if self.config.ngpt and should_tie:
+            logger.warning(
+                "Disabling tie_word_embeddings for ngpt=True. "
+                "NormNeoBERT emits unit-normalized hidden states, so tying decoder "
+                "weights to raw token embeddings is not a stable parameterization."
+            )
+            self.config.tie_word_embeddings = False
+            should_tie = False
+
+        # ``post_init()`` applies HF-style init; explicit ``tie_weights()`` keeps
+        # decoder/input embedding aliasing deterministic in this training module.
         self.post_init()
-        if getattr(self.config, "tie_word_embeddings", False):
+        if should_tie:
             self.tie_weights()
 
     def get_input_embeddings(self) -> nn.Embedding:
-        """Return input token embeddings for weight tying."""
+        """Return input token embeddings for weight tying.
+
+        :return nn.Embedding: Input embedding module.
+        """
         return self.model.encoder
 
     def set_input_embeddings(self, new_embeddings: nn.Embedding) -> None:
@@ -1245,7 +1099,10 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
         self.model.encoder = new_embeddings
 
     def get_output_embeddings(self) -> nn.Linear:
-        """Return output embeddings for weight tying."""
+        """Return output embeddings for weight tying.
+
+        :return nn.Linear: Output projection module.
+        """
         return self.decoder
 
     def set_output_embeddings(self, new_embeddings: nn.Linear) -> None:
@@ -1256,13 +1113,13 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
         self,
         src: torch.Tensor,
         pad_mask: Optional[torch.Tensor] = None,
-        packed_seqlens: Optional[list[list[int]]] = None,
+        packed_seqlens: Optional[PackedSeqLens] = None,
     ) -> Dict[str, torch.Tensor]:
         """Run the LM head forward pass.
 
         :param torch.Tensor src: Input token IDs.
         :param torch.Tensor | None pad_mask: Additive attention mask.
-        :param list[list[int]] | None packed_seqlens: Packed segment lengths.
+        :param torch.Tensor | list[list[int]] | None packed_seqlens: Packed segment lengths.
         :return dict[str, torch.Tensor]: Hidden states and logits.
         """
         hidden_representation = self.model.forward(src, pad_mask, packed_seqlens)
@@ -1290,21 +1147,26 @@ class NeoBERTForSequenceClassification(NeoBERTPreTrainedModel):
         :param float classifier_init_range: Init range for classifier.
         :param Any kwargs: Unused extra arguments for compatibility.
         """
-        super().__init__(config)
+        # Clone the incoming config so forcing SDPA here does not mutate caller state.
+        local_config = deepcopy(config)
+        if local_config.attn_backend != "sdpa":
+            logger.warning(
+                "NeoBERTForSequenceClassification does not support packed attention; "
+                "forcing attn_backend='sdpa' for this instance."
+            )
+            local_config.attn_backend = "sdpa"
 
-        self.config = config
+        super().__init__(local_config)
+
+        self.config = local_config
 
         self.num_labels = num_labels
         self.classifier_dropout = classifier_dropout
         self.classifier_init_range = classifier_init_range
 
-        self.model = NeoBERT(config)
-        if config.flash_attention:
-            logger.warning(
-                "NeoBERTForSequenceClassification does not support flash_attention; "
-                "disabling for this instance."
-            )
-            self.model.config.flash_attention = False
+        self.model = (
+            NormNeoBERT(local_config) if local_config.ngpt else NeoBERT(local_config)
+        )
 
         self.dense = nn.Linear(self.config.hidden_size, self.config.hidden_size)
         self.dropout = nn.Dropout(self.classifier_dropout)
@@ -1354,21 +1216,28 @@ class NeoBERTHFForSequenceClassification(NeoBERTPreTrainedModel):
 
         :param NeoBERTConfig config: Model configuration.
         """
-        super().__init__(config)
-
-        self.config = config
-
-        self.num_labels = getattr(config, "num_labels", 2)
-        self.classifier_dropout = getattr(config, "classifier_dropout", 0.1)
-        self.classifier_init_range = getattr(config, "classifier_init_range", 0.02)
-
-        self.model = NeoBERT(config)
-        if config.flash_attention:
+        # Clone the incoming config so forcing SDPA here does not mutate caller state.
+        local_config = deepcopy(config)
+        if local_config.attn_backend != "sdpa":
             logger.warning(
-                "NeoBERTHFForSequenceClassification does not support flash_attention; "
-                "disabling for this instance."
+                "NeoBERTHFForSequenceClassification does not support packed attention; "
+                "forcing attn_backend='sdpa' for this instance."
             )
-            self.model.config.flash_attention = False
+            local_config.attn_backend = "sdpa"
+
+        super().__init__(local_config)
+
+        self.config = local_config
+
+        self.num_labels = getattr(local_config, "num_labels", 2)
+        self.classifier_dropout = getattr(local_config, "classifier_dropout", 0.1)
+        self.classifier_init_range = getattr(
+            local_config, "classifier_init_range", 0.02
+        )
+
+        self.model = (
+            NormNeoBERT(local_config) if local_config.ngpt else NeoBERT(local_config)
+        )
 
         self.dense = nn.Linear(self.config.hidden_size, self.config.hidden_size)
         self.dropout = nn.Dropout(self.classifier_dropout)
@@ -1640,20 +1509,20 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
             input_ids = batch["input_ids"].to(device)
             int_mask = batch["attention_mask"]
 
-            if self.config.flash_attention:
-                # Flash path: compute packed_seqlens on CPU to avoid CUDA sync,
-                # then pass pad_mask=None so the model uses block-diagonal attention.
-                seqlens = int_mask.sum(dim=1).tolist()
-                packed_seqlens = [[int(s)] for s in seqlens]
+            if self.config.attn_backend != "sdpa":
+                # Packed path: compute packed_seqlens on CPU to avoid CUDA sync,
+                # then pass pad_mask=None so the model uses packed attention.
+                packed_seqlens = int_mask.sum(dim=1, keepdim=True).to(
+                    device="cpu", dtype=torch.int32
+                )
                 outputs = self.model(input_ids, None, packed_seqlens=packed_seqlens)
-                # Keep a device-side 0/1 mask only for avg pooling.
                 pool_mask = int_mask.to(device=device, dtype=mask_dtype)
             else:
                 pool_mask = int_mask.to(device=device, dtype=mask_dtype)
-                xformers_mask = torch.where(
+                additive_mask = torch.where(
                     pool_mask == 1, float(0.0), float("-inf")
                 ).type(mask_dtype)
-                outputs = self.model(input_ids, xformers_mask)
+                outputs = self.model(input_ids, additive_mask)
 
             if self.pooling == "avg":
                 outputs = outputs * pool_mask.unsqueeze(-1).expand(

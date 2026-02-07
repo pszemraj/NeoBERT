@@ -16,7 +16,8 @@ model:
   num_attention_heads: 8
   intermediate_size: 2048
   hidden_act: "swiglu"
-  xformers_attention: true
+  attn_backend: flash_attn_varlen
+  kernel_backend: auto
   max_position_embeddings: 2048  # SmolLM2 uses longer sequences
 
 tokenizer:

@@ -4,6 +4,7 @@ from typing import Any, Callable, Optional, Tuple
 
 import warnings
 
+import numpy as np
 import torch
 from transformers import (
     DataCollatorForLanguageModeling,
@@ -14,7 +15,11 @@ from transformers import (
 
 # Adapted from https://github.com/huggingface/transformers/blob/125de4164364420854d7fe537a9bd2fdaf7369d4/src/transformers/data/data_collator.py#L828
 class CustomCollatorForMLM(DataCollatorForLanguageModeling):
-    """Language modeling collator that masks all sampled tokens."""
+    """Language modeling collator that masks all sampled tokens.
+
+    This path is opt-in (``mask_all=True``). Default pretraining uses
+    ``DataCollatorForLanguageModeling`` and keeps BERT-style 80/10/10 corruption.
+    """
 
     def torch_mask_tokens(
         self, inputs: Any, special_tokens_mask: Optional[Any] = None
@@ -45,6 +50,38 @@ class CustomCollatorForMLM(DataCollatorForLanguageModeling):
             self.tokenizer.mask_token
         )
 
+        return inputs, labels
+
+    def numpy_mask_tokens(
+        self, inputs: Any, special_tokens_mask: Optional[Any] = None
+    ) -> Tuple[Any, Any]:
+        """Prepare masked tokens/labels for MLM numpy path (100% mask).
+
+        :param Any inputs: Input token IDs.
+        :param Any | None special_tokens_mask: Optional special-token mask.
+        :return tuple[Any, Any]: Masked inputs and labels.
+        """
+        labels = inputs.copy()
+        probability_matrix = np.full(
+            labels.shape, self.mlm_probability, dtype=np.float32
+        )
+        if special_tokens_mask is None:
+            special_tokens_mask = [
+                self.tokenizer.get_special_tokens_mask(
+                    val, already_has_special_tokens=True
+                )
+                for val in labels.tolist()
+            ]
+            special_tokens_mask = np.asarray(special_tokens_mask, dtype=bool)
+        else:
+            special_tokens_mask = special_tokens_mask.astype(bool, copy=False)
+
+        probability_matrix[special_tokens_mask] = 0.0
+        masked_indices = np.random.binomial(1, probability_matrix).astype(bool)
+        labels[~masked_indices] = -100
+        inputs[masked_indices] = self.tokenizer.convert_tokens_to_ids(
+            self.tokenizer.mask_token
+        )
         return inputs, labels
 
 
@@ -91,8 +128,7 @@ class DataCollatorWithPacking(DefaultDataCollator):
         current_sequence: list[int] = []
         current_special_mask: list[int] = []
         current_attention_mask: list[int] = []
-        current_segments: list[int] = []
-        current_segment_id = 0
+        current_segment_lengths: list[int] = []
 
         for feature in features:
             seq = feature["input_ids"]
@@ -141,18 +177,16 @@ class DataCollatorWithPacking(DefaultDataCollator):
                         "special_tokens_mask": current_special_mask,
                     }
                 )
-                packed_segments.append(current_segments)
+                packed_segments.append(current_segment_lengths)
                 current_sequence = []
                 current_special_mask = []
                 current_attention_mask = []
-                current_segments = []
-                current_segment_id = 0
+                current_segment_lengths = []
 
             current_sequence.extend(segment_tokens)
             current_special_mask.extend(segment_special_mask)
             current_attention_mask.extend([1] * len(segment_tokens))
-            current_segments.extend([current_segment_id] * len(segment_tokens))
-            current_segment_id += 1
+            current_segment_lengths.append(len(segment_tokens))
 
             if len(current_sequence) == self.max_length:
                 packed_sequences.append(
@@ -162,12 +196,11 @@ class DataCollatorWithPacking(DefaultDataCollator):
                         "special_tokens_mask": current_special_mask,
                     }
                 )
-                packed_segments.append(current_segments)
+                packed_segments.append(current_segment_lengths)
                 current_sequence = []
                 current_special_mask = []
                 current_attention_mask = []
-                current_segments = []
-                current_segment_id = 0
+                current_segment_lengths = []
 
         if current_sequence:
             packed_sequences.append(
@@ -177,13 +210,19 @@ class DataCollatorWithPacking(DefaultDataCollator):
                     "special_tokens_mask": current_special_mask,
                 }
             )
-            packed_segments.append(current_segments)
+            packed_segments.append(current_segment_lengths)
 
-        pad_token_id = getattr(
-            getattr(self.default_data_collator, "tokenizer", None), "pad_token_id", None
-        )
+        # Resolve pad token explicitly; never guess with a hard-coded ID.
+        pad_token_id = getattr(self.default_data_collator, "pad_token_id", None)
         if pad_token_id is None:
-            pad_token_id = 0
+            tokenizer = getattr(self.default_data_collator, "tokenizer", None)
+            pad_token_id = getattr(tokenizer, "pad_token_id", None)
+        if pad_token_id is None:
+            raise ValueError(
+                "Could not resolve pad_token_id for DataCollatorWithPacking. "
+                "Ensure the default data collator exposes either `pad_token_id` "
+                "or `tokenizer.pad_token_id`."
+            )
 
         for seq in packed_sequences:
             if len(seq["input_ids"]) > self.max_length:
@@ -201,24 +240,9 @@ class DataCollatorWithPacking(DefaultDataCollator):
         if not packed_segments:
             return batch
 
-        packed_seqlens: list[list[int]] = []
-        for seg in packed_segments:
-            if not seg:
-                packed_seqlens.append([])
-                continue
-            lengths: list[int] = []
-            current = seg[0]
-            count = 0
-            for seg_id in seg:
-                if seg_id != current:
-                    lengths.append(count)
-                    current = seg_id
-                    count = 1
-                else:
-                    count += 1
-            if count > 0:
-                lengths.append(count)
-            packed_seqlens.append(lengths)
+        # Segment lengths were tracked directly while packing; avoid an extra
+        # per-token scan over segment IDs.
+        packed_seqlens: list[list[int]] = packed_segments
 
         max_segments = self.max_segments if packed_seqlens else 0
         if max_segments and any(
@@ -343,6 +367,7 @@ def get_collator(
         )
         if mask_all
         else DataCollatorForLanguageModeling(
+            # Keep HF's standard 80/10/10 masking policy when ``mask_all=False``.
             tokenizer=tokenizer,
             return_tensors="pt",
             mlm_probability=mlm_probability,
@@ -369,11 +394,21 @@ def get_collator(
         )
 
         def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
+            """Collate tokenized features with packing enabled.
+
+            :param list[dict[str, Any]] batch: Pre-tokenized examples.
+            :return dict[str, Any]: Packed and collated batch.
+            """
             return collator(batch)
 
     else:
 
         def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
+            """Collate tokenized features for standard MLM pretraining.
+
+            :param list[dict[str, Any]] batch: Pre-tokenized examples.
+            :return dict[str, Any]: Collated MLM batch.
+            """
             batch = mlm_collator(batch)
             attention_mask = _ensure_attention_mask(
                 batch, getattr(tokenizer, "pad_token_id", None)

@@ -3,7 +3,7 @@
 import math
 import time
 from collections import defaultdict
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 
 import torch
 from accelerate import Accelerator
@@ -67,6 +67,7 @@ class Metrics(defaultdict):
             self[key] = 0
         for key in self.LOCAL_FLOAT_KEYS:
             self[key] = 0.0
+        self["train/compute_accuracy"] = 1
         self._last_log_time: float | None = None
         self._last_log_step: int | None = None
 
@@ -87,10 +88,19 @@ class Metrics(defaultdict):
         self._last_log_time = None
         self._last_log_step = None
 
-    def log(self, accelerator: Accelerator) -> None:
+    def log(
+        self,
+        accelerator: Accelerator,
+        *,
+        emit_console: bool = False,
+        console_fn: Callable[[str], None] | None = None,
+    ) -> Dict[str, Any]:
         """Aggregate and log metrics across devices.
 
         :param Accelerator accelerator: Accelerator used for reduction/logging.
+        :param bool emit_console: Whether to print formatted metrics to console.
+        :param Callable[[str], None] | None console_fn: Optional console emit function.
+        :return dict[str, Any]: Formatted metrics logged for this step.
         """
         # Aggregate only the local counters using a fixed key order.
         count_tensor = torch.tensor(
@@ -133,10 +143,11 @@ class Metrics(defaultdict):
                 / metrics_agg["train/local_num_pred"]
             )
             metrics_log["train/perplexity"] = math.exp(metrics_log["train/loss"])
-            metrics_log["train/accuracy"] = (
-                metrics_agg["train/local_num_correct"]
-                / metrics_agg["train/local_num_pred"]
-            )
+            if bool(self.get("train/compute_accuracy", 1)):
+                metrics_log["train/accuracy"] = (
+                    metrics_agg["train/local_num_correct"]
+                    / metrics_agg["train/local_num_pred"]
+                )
 
         # Extract the step value to pass separately to accelerator.log
         current_step = self.get("train/steps", 0)
@@ -149,7 +160,23 @@ class Metrics(defaultdict):
                 )
 
         # Log the metrics with the current step
-        accelerator.log(format_metrics(metrics_log), step=current_step)
+        formatted = format_metrics(metrics_log)
+        accelerator.log(formatted, step=current_step)
+        if emit_console and accelerator.is_main_process:
+            if console_fn is None:
+                console_fn = print
+            keys = (
+                "train/steps",
+                "train/loss",
+                "train/perplexity",
+                "train/accuracy",
+                "train/tokens_per_sec",
+                "train/learning_rate",
+                "train/grad_norm",
+            )
+            fields = [f"{key}={formatted[key]}" for key in keys if key in formatted]
+            if fields:
+                console_fn(" | ".join(fields))
         self._last_log_time = now
         self._last_log_step = current_step
 
@@ -158,3 +185,4 @@ class Metrics(defaultdict):
             self[key] = 0
         for key in self.LOCAL_FLOAT_KEYS:
             self[key] = 0.0
+        return formatted

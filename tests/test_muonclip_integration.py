@@ -24,7 +24,7 @@ def test_training_loop():
         intermediate_size=1024,
         vocab_size=5000,
         max_length=256,
-        flash_attention=False,
+        attn_backend="sdpa",
         hidden_act="gelu",
         rope=False,
     )
@@ -111,7 +111,7 @@ def test_comparison_with_adamw():
         intermediate_size=512,
         vocab_size=1000,
         max_length=128,
-        flash_attention=False,
+        attn_backend="sdpa",
         hidden_act="gelu",
         rope=False,
     )
@@ -172,7 +172,7 @@ def test_distributed_compatibility():
         hidden_size=128,
         num_hidden_layers=2,
         num_attention_heads=4,
-        flash_attention=False,
+        attn_backend="sdpa",
     )
 
     model = NeoBERT(config)

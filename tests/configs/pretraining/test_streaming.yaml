@@ -12,7 +12,8 @@ model:
   rms_norm: true
   hidden_act: "swiglu"
   dropout_prob: 0.0
-  xformers_attention: true
+  attn_backend: flash_attn_varlen
+  kernel_backend: auto
 
 dataset:
   name: "EleutherAI/SmolLM2-1.7B-stage-4-100B"

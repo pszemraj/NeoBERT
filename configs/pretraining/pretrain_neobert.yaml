@@ -8,9 +8,10 @@ model:
   dropout_prob: 0.0
   vocab_size: 30522
   max_position_embeddings: 4096  # Extended context length
-  xformers_attention: true  # Requires xFormers for memory-efficient attention
+  attn_backend: flash_attn_varlen
+  kernel_backend: auto
   ngpt: false
-  hidden_act: "swiglu"  # Default activation (requires xformers)
+  hidden_act: "swiglu"
   rope: true
   rms_norm: true
 

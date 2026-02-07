@@ -42,7 +42,8 @@ class ModelConfig:
     embedding_init_range: float = 0.02
     decoder_init_range: float = 0.02
     classifier_init_range: float = 0.02
-    xformers_attention: bool = True
+    attn_backend: str = "sdpa"  # "sdpa" or "flash_attn_varlen"
+    kernel_backend: str = "auto"  # "auto", "liger", or "torch"
     ngpt: bool = False
     base_scale: float = 1.0 / (960.0**0.5)
     pad_token_id: int = 0
@@ -57,6 +58,9 @@ class DatasetConfig:
     config: Optional[str] = None
     path: str = ""
     num_workers: int = 16
+    pin_memory: bool = False
+    persistent_workers: bool = True
+    prefetch_factor: Optional[int] = None
     streaming: bool = True
     cache_dir: Optional[str] = None
     trust_remote_code: bool = False
@@ -163,12 +167,17 @@ class TrainerConfig:
     eval_steps: int = 10000
     eval_max_batches: Optional[int] = None
     logging_steps: int = 100
+    enforce_full_packed_batches: bool = True
+    log_train_accuracy: bool = False
+    log_grad_norm: bool = False
     output_dir: str = "./output"
     overwrite_output_dir: bool = True
     gradient_checkpointing: bool = False
     gradient_clipping: Optional[float] = None
     mixed_precision: str = "bf16"
     torch_compile: bool = False
+    torch_compile_dynamic: Optional[bool] = None
+    torch_compile_backend: str = "inductor"
     resume_from_checkpoint: Optional[str] = None
 
     # Training control
@@ -572,7 +581,7 @@ class ConfigLoader:
                 "use 'trainer.logging_steps'."
             )
 
-        # model.flash_attention/use_flash_attention -> model.xformers_attention
+        # Legacy attention flags -> model.attn_backend
         model = normalized.get("model", {})
         if isinstance(model, dict):
             if "name_or_path" in model:
@@ -585,30 +594,39 @@ class ConfigLoader:
                 ConfigLoader._warn_legacy(
                     "Config key 'model.name_or_path' is deprecated; use 'model.name'."
                 )
-            legacy_keys = [
-                k for k in ("flash_attention", "use_flash_attention") if k in model
+
+            # Coalesce all legacy boolean attention flags into a single value.
+            legacy_attn_keys = [
+                k
+                for k in (
+                    "flash_attention",
+                    "use_flash_attention",
+                    "xformers_attention",
+                )
+                if k in model
             ]
-            if legacy_keys:
-                legacy_value = model.pop(legacy_keys[0])
-                for key in legacy_keys[1:]:
+            if legacy_attn_keys:
+                legacy_value = model.pop(legacy_attn_keys[0])
+                for key in legacy_attn_keys[1:]:
                     value = model.pop(key)
                     if value != legacy_value:
                         raise ValueError(
                             "Conflicting values for legacy attention flags: "
-                            f"{legacy_keys[0]}={legacy_value} vs {key}={value}."
+                            f"{legacy_attn_keys[0]}={legacy_value} vs {key}={value}."
                         )
+                resolved_backend = "flash_attn_varlen" if legacy_value else "sdpa"
                 if (
-                    "xformers_attention" in model
-                    and model["xformers_attention"] != legacy_value
+                    "attn_backend" in model
+                    and model["attn_backend"] != resolved_backend
                 ):
                     raise ValueError(
-                        "Both legacy flash_attention flags and 'model.xformers_attention' "
+                        "Both legacy attention flags and 'model.attn_backend' "
                         "are set with different values."
                     )
-                model.setdefault("xformers_attention", legacy_value)
+                model.setdefault("attn_backend", resolved_backend)
                 ConfigLoader._warn_legacy(
-                    "Config key 'model.flash_attention' is deprecated; use "
-                    "'model.xformers_attention' to indicate xFormers memory-efficient attention."
+                    f"Config keys {legacy_attn_keys} are deprecated; use "
+                    "'model.attn_backend' ('sdpa' or 'flash_attn_varlen')."
                 )
 
             glue = normalized.get("glue", {})
@@ -837,7 +855,7 @@ class ConfigLoader:
         use_cpu = getattr(config.trainer, "use_cpu", False)
         if not use_cpu and hasattr(config.tokenizer, "name") and config.tokenizer.name:
             # Import tokenizer here to avoid circular imports
-            from .tokenizer import get_tokenizer
+            from neobert.tokenizer import get_tokenizer
 
             # Create tokenizer to determine actual vocab size
             tokenizer_source = config.tokenizer.path or config.tokenizer.name
@@ -980,9 +998,14 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     )
     parser.add_argument("--model.dropout_prob", type=float, help="Dropout probability")
     parser.add_argument(
-        "--model.xformers_attention",
-        type=lambda x: x.lower() == "true",
-        help="Use xFormers memory-efficient attention",
+        "--model.attn_backend",
+        type=str,
+        help="Attention backend: 'sdpa' or 'flash_attn_varlen'",
+    )
+    parser.add_argument(
+        "--model.kernel_backend",
+        type=str,
+        help="Kernel backend: 'auto', 'liger', or 'torch'",
     )
 
     # Dataset arguments
@@ -1044,6 +1067,24 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     )
     parser.add_argument("--trainer.max_steps", type=int, help="Maximum training steps")
     parser.add_argument(
+        "--trainer.enforce_full_packed_batches",
+        type=lambda x: x.lower() == "true",
+        help=(
+            "If true, buffer undersized packed batches to emit full microbatches. "
+            "Improves token throughput stability but lowers step/s."
+        ),
+    )
+    parser.add_argument(
+        "--trainer.log_train_accuracy",
+        type=lambda x: x.lower() == "true",
+        help="Log MLM token accuracy during training (expensive)",
+    )
+    parser.add_argument(
+        "--trainer.log_grad_norm",
+        type=lambda x: x.lower() == "true",
+        help="Log gradient norm during training",
+    )
+    parser.add_argument(
         "--trainer.save_steps", type=int, help="Save checkpoint every N steps"
     )
     parser.add_argument("--trainer.eval_steps", type=int, help="Evaluate every N steps")
@@ -1061,6 +1102,11 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         "--trainer.torch_compile",
         type=lambda x: x.lower() == "true",
         help="Enable torch.compile for model forward",
+    )
+    parser.add_argument(
+        "--trainer.torch_compile_backend",
+        type=str,
+        help="torch.compile backend: 'inductor', 'aot_eager', or 'eager'",
     )
 
     # Data collator arguments

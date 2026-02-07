@@ -79,7 +79,7 @@ class TestAttentionHooks:
             intermediate_size=512,
             vocab_size=1000,
             max_length=128,
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="gelu",
             rope=False,
         )
@@ -94,6 +94,43 @@ class TestAttentionHooks:
         num_hooks = hook_system.register_hooks(model)
         assert num_hooks == 4  # 2 hooks per layer
         assert len(hook_system.hook_handles) == 4
+
+    def test_hook_registration_uses_module_map_without_attrs(self, model):
+        """Ensure hook callbacks avoid per-layer module integer attrs."""
+        from neobert.optimizer.muon_clip import NeoBERTAttentionHooks
+
+        hook_system = NeoBERTAttentionHooks(model.config)
+        hook_system.register_hooks(model)
+
+        for idx, layer in enumerate(model.transformer_encoder):
+            assert hook_system._module_to_layer_idx[id(layer)] == idx
+            assert hook_system._module_to_layer_idx[id(layer.qkv)] == idx
+            assert not hasattr(layer, "_muonclip_layer_idx")
+            assert not hasattr(layer.qkv, "_muonclip_layer_idx")
+            qkv_hook = next(iter(layer.qkv._forward_hooks.values()))
+            if hasattr(qkv_hook, "__func__"):
+                closure = qkv_hook.__func__.__closure__
+            else:
+                closure = qkv_hook.__closure__
+            # Dynamo disable wrappers may introduce closures; ensure they do not
+            # capture per-layer integer state.
+            if closure is not None:
+                assert all(not isinstance(cell.cell_contents, int) for cell in closure)
+
+    def test_hook_callbacks_are_dynamo_disabled(self):
+        """Ensure hook callbacks are excluded from torch.compile tracing."""
+        from neobert.optimizer.muon_clip import NeoBERTAttentionHooks
+
+        if not hasattr(torch, "_dynamo") or not hasattr(torch._dynamo, "disable"):
+            pytest.skip("torch._dynamo.disable is unavailable in this torch build")
+
+        for method_name in (
+            "_module_layer_idx",
+            "_qkv_input_hook",
+            "_block_context_hook",
+        ):
+            method = getattr(NeoBERTAttentionHooks, method_name)
+            assert bool(getattr(method, "_torchdynamo_disable", False))
 
     def test_hook_captures_data(self, model):
         """Test hooks actually capture attention data."""
@@ -118,6 +155,46 @@ class TestAttentionHooks:
             assert freqs is None
             assert packed_seqlens is None
 
+    def test_hook_captures_cuda_inputs_into_pinned_cpu_buffers(self, model):
+        """CUDA hook capture should use pinned CPU buffers for async D2H copies."""
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA is required to validate pinned CPU capture path.")
+
+        from neobert.optimizer.muon_clip import NeoBERTAttentionHooks
+
+        model = model.to("cuda")
+        hook_system = NeoBERTAttentionHooks(model.config)
+        hook_system.register_hooks(model)
+
+        input_ids = torch.randint(0, 1000, (2, 64), device="cuda")
+        model(input_ids)
+
+        for layer_idx in range(2):
+            inputs, _, _, _ = hook_system.get_layer_data(layer_idx)
+            assert inputs is not None
+            assert inputs.device.type == "cpu"
+            assert inputs.is_pinned()
+
+    def test_hook_clear_preserves_layer_slots(self, model):
+        """Ensure clearing hook caches keeps stable dictionary cardinality."""
+        from neobert.optimizer.muon_clip import NeoBERTAttentionHooks
+
+        hook_system = NeoBERTAttentionHooks(model.config)
+        hook_system.register_hooks(model)
+
+        num_layers = len(model.transformer_encoder)
+        assert len(hook_system.layer_inputs) == num_layers
+        assert not hook_system.has_captured_inputs()
+
+        input_ids = torch.randint(0, 1000, (2, 64))
+        model(input_ids)
+        assert hook_system.has_captured_inputs()
+        assert len(hook_system.layer_inputs) == num_layers
+
+        hook_system.clear()
+        assert len(hook_system.layer_inputs) == num_layers
+        assert not hook_system.has_captured_inputs()
+
 
 class TestMuonClipOptimizer:
     """Test optimizer functionality."""
@@ -132,7 +209,7 @@ class TestMuonClipOptimizer:
             intermediate_size=512,
             vocab_size=1000,
             max_length=128,
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="gelu",
             rope=False,
         )
@@ -180,7 +257,7 @@ class TestMuonClipOptimizer:
             intermediate_size=16,
             vocab_size=32,
             max_length=8,
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="gelu",
             rope=False,
         )
@@ -204,6 +281,29 @@ class TestMuonClipOptimizer:
         view[:, : config.dim_head].mul_(eta.view(-1, 1, 1))
         assert torch.allclose(qkv_param, expected)
 
+    def test_qkv_scaling_rejects_non_interleaved_layout(self):
+        """Ensure fused QKV scaling fails fast on incompatible weight layouts."""
+        config = NeoBERTConfig(
+            hidden_size=4,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=16,
+            vocab_size=32,
+            max_length=8,
+            attn_backend="sdpa",
+            hidden_act="gelu",
+            rope=False,
+        )
+        model = NeoBERT(config)
+        optimizer = MuonClipOptimizer(
+            model, config, MuonClipConfig(enable_clipping=False)
+        )
+        bad_layout = torch.nn.Parameter(torch.zeros(4, 12))
+        eta = torch.tensor([0.5, 0.25], dtype=bad_layout.dtype)
+
+        with pytest.raises(RuntimeError, match="Unexpected fused QKV parameter layout"):
+            optimizer._scale_qkv_weights(bad_layout, eta, alpha=1.0)
+
     def test_packed_attention_logit_max_ignores_cross_segment(self):
         """Cross-segment logits must not affect max in packed mode."""
         config = NeoBERTConfig(
@@ -213,7 +313,7 @@ class TestMuonClipOptimizer:
             intermediate_size=16,
             vocab_size=32,
             max_length=8,
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="gelu",
             rope=False,
         )
@@ -243,7 +343,7 @@ class TestMuonClipOptimizer:
             intermediate_size=32,
             vocab_size=64,
             max_length=16,
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="gelu",
             rope=False,
             ngpt=True,
@@ -306,14 +406,15 @@ class TestMuonClipOptimizer:
 
         optimizer.prepare_for_forward(update_step=0, is_last_microbatch=False)
         _ = model_instance(torch.randint(0, 1000, (2, 64)))
-        assert hook_system.layer_inputs == {}
+        assert not hook_system.has_captured_inputs()
+        assert len(hook_system.layer_inputs) == len(model_instance.transformer_encoder)
 
         optimizer.prepare_for_forward(update_step=0, is_last_microbatch=True)
         _ = model_instance(torch.randint(0, 1000, (2, 64)))
-        assert len(hook_system.layer_inputs) > 0
+        assert hook_system.has_captured_inputs()
 
         optimizer.step()
-        assert hook_system.layer_inputs == {}
+        assert not hook_system.has_captured_inputs()
 
     def test_chunked_logit_max_matches_full(self, model):
         """Chunked logit max should match the full matmul result."""
@@ -444,7 +545,7 @@ class TestNewtonSchulz:
             hidden_size=128,
             num_hidden_layers=2,
             num_attention_heads=4,
-            flash_attention=False,
+            attn_backend="sdpa",
         )
         model = NeoBERT(config)
         muon_config = MuonClipConfig()
@@ -469,7 +570,7 @@ class TestMemoryLeaks:
             hidden_size=128,
             num_hidden_layers=2,
             num_attention_heads=4,
-            flash_attention=False,
+            attn_backend="sdpa",
         )
         model = NeoBERT(config)
 
@@ -488,8 +589,9 @@ class TestMemoryLeaks:
             optimizer.step()
             optimizer.zero_grad()
 
-        # Hook stats should be cleared
-        assert len(optimizer.hook_system.layer_inputs) == 0
+        # Hook stats should be cleared while preserving stable layer slots.
+        assert not optimizer.hook_system.has_captured_inputs()
+        assert len(optimizer.hook_system.layer_inputs) == len(model.transformer_encoder)
 
 
 if __name__ == "__main__":

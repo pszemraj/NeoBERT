@@ -1,42 +1,44 @@
 # Configuration Files
 
-Production-ready YAML configurations for NeoBERT training and evaluation live here. Tiny smoke-test variants are under `tests/configs/`.
+Repository configs for training and evaluation workflows.
 
-> [!TIP]
-> For schema details and overrides, read [docs/configuration.md](../docs/configuration.md). End-to-end recipes live in [docs/training.md](../docs/training.md) and [docs/evaluation.md](../docs/evaluation.md).
+- Production/experiment configs live under `configs/`.
+- Tiny smoke-test configs live under `tests/configs/`.
 
-## Directory Layout
+## Layout
 
-```
+```text
 configs/
-├── pretraining/
-├── glue/
-├── contrastive/
-└── README.md
+  pretraining/
+  glue/
+  contrastive/
 ```
 
-## Pretraining (`configs/pretraining/`)
+## Pretraining Configs
 
-- `pretrain_neobert.yaml` – Standard 768×12 recipe
-- `pretrain_streaming.yaml` – Streaming dataset example
-- `pretrain_gpu_small.yaml` – Smaller GPU-friendly config
-- `pretrain_smoke.yaml` – Short smoke-test config (IMDB subset)
-- `pretrain_neobert100m_smollm2data.yaml` – 100M SmolLM2 dataset variant
-- `pretrain_neobert250m_smollm2data.yaml` – 250M SmolLM2 dataset variant
-- `pretrain_neobert100m_smollm2data_muonclip.yaml` – MuonClip variant
-- `train_small_custom_tokenizer.yaml` – Custom tokenizer training example
+- `pretrain_neobert.yaml` - baseline recipe
+- `pretrain_streaming.yaml` - streaming data example
+- `pretrain_gpu_small.yaml` - smaller GPU-friendly run
+- `pretrain_smoke.yaml` - short smoke config
+- `pretrain_neobert100m_smollm2data.yaml` - 100M SmolLM2 variant
+- `pretrain_neobert250m_smollm2data.yaml` - 250M SmolLM2 variant
+- `pretrain_neobert100m_smollm2data_muonclip.yaml` - MuonClip variant
+- `train_small_custom_tokenizer.yaml` - custom tokenizer recipe
 
-## GLUE (`configs/glue/`)
+## GLUE Configs
 
-Task-specific GLUE configs:
+Task configs under `configs/glue/`:
+- `cola.yaml`, `sst2.yaml`, `mrpc.yaml`, `stsb.yaml`, `qqp.yaml`,
+  `mnli.yaml`, `qnli.yaml`, `rte.yaml`, `wnli.yaml`
 
-- `cola.yaml`, `sst2.yaml`, `mrpc.yaml`, `stsb.yaml`, `qqp.yaml`, `mnli.yaml`, `qnli.yaml`, `rte.yaml`, `wnli.yaml`
-- Generated configs land under `configs/glue/generated/`
+Generated sweep-derived configs typically go under `configs/glue/generated/`.
 
-## Contrastive (`configs/contrastive/`)
+## Contrastive Configs
 
-- `contrastive_neobert.yaml` – SimCSE-style contrastive fine-tuning
+- `contrastive/contrastive_neobert.yaml`
 
-## Test Configs
+## Related Docs
 
-Tiny configs meant for smoke tests live in `tests/configs/` (see [tests/configs/README.md](../tests/configs/README.md)).
+- [Configuration reference](../docs/configuration.md)
+- [Training guide](../docs/training.md)
+- [Evaluation guide](../docs/evaluation.md)

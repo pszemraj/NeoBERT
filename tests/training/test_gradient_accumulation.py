@@ -7,7 +7,7 @@ import unittest
 import torch
 import torch.nn.functional as F
 
-from neobert.pretraining.trainer import _scale_gradients
+from neobert.pretraining.trainer import _gradient_token_scale, _scale_gradients
 
 
 class TestGradientAccumulationTokenWeighting(unittest.TestCase):
@@ -73,3 +73,42 @@ class TestGradientAccumulationTokenWeighting(unittest.TestCase):
             self.assertTrue(
                 torch.allclose(param.grad, torch.full_like(param.grad, 0.5))
             )
+
+    def test_gradient_token_scale_clamps_low_token_updates(self):
+        """Ensure tiny masked-token counts cannot amplify gradients."""
+        scale, clamped = _gradient_token_scale(
+            torch.tensor(1, dtype=torch.long),
+            num_processes=8,
+            grad_accumulation_steps=4,
+        )
+
+        self.assertIsNotNone(scale)
+        self.assertTrue(clamped)
+        assert scale is not None
+        self.assertAlmostEqual(float(scale.item()), 1.0, places=6)
+
+    def test_gradient_token_scale_matches_standard_formula_above_floor(self):
+        """Ensure scaling is standard token-mean normalization on normal updates."""
+        scale, clamped = _gradient_token_scale(
+            torch.tensor(64, dtype=torch.long),
+            num_processes=8,
+            grad_accumulation_steps=2,
+        )
+
+        self.assertFalse(clamped)
+        assert scale is not None
+        # standard scale: (num_processes * grad_accumulation_steps) / tokens_global
+        self.assertAlmostEqual(float(scale.item()), 16.0 / 64.0, places=6)
+
+    def test_gradient_token_scale_zero_tokens_clamps_to_safe_scale(self):
+        """Ensure empty masked batches use a safe clamped scale."""
+        scale, clamped = _gradient_token_scale(
+            torch.tensor(0, dtype=torch.long),
+            num_processes=2,
+            grad_accumulation_steps=2,
+        )
+
+        self.assertIsNotNone(scale)
+        self.assertTrue(clamped)
+        assert scale is not None
+        self.assertAlmostEqual(float(scale.item()), 1.0, places=6)

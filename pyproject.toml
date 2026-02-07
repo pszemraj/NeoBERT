@@ -17,12 +17,13 @@ dependencies = [
     "mteb",
     "numpy",
     "pyyaml",
+    "safetensors",
     "scikit-learn",
-    "torch",
+    "torch>=2.6.0",
     "tqdm",
     "transformers",
     "wandb",
-    "xformers",
+    "liger-kernel>=0.6",
 ]
 authors = [
     { name = "Lola Le Breton", email = "lola.lebreton@mila.quebec" },
@@ -38,6 +39,7 @@ keywords = []
 
 [project.optional-dependencies]
 dev = ["ruff", "isort", "pytest", "pytest-cov", "pytest-clarity", "xeger"]
+flash = ["flash-attn>=2.5"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

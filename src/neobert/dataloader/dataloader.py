@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from transformers import PreTrainedTokenizer
 
 # Ours
-from ..collator import get_collator
+from neobert.collator import get_collator
 
 
 def get_dataloader(
@@ -22,6 +22,7 @@ def get_dataloader(
     shuffle: bool = True,
     pin_memory: bool = False,
     persistent_workers: bool = True,
+    prefetch_factor: int | None = None,
     pack_sequences: bool = False,
     max_length: int = 512,
     return_packed_seqlens: bool = False,
@@ -38,6 +39,7 @@ def get_dataloader(
     :param bool shuffle: Whether to shuffle the dataset each epoch.
     :param bool pin_memory: Whether to pin memory in the dataloader.
     :param bool persistent_workers: Keep workers alive across epochs.
+    :param int | None prefetch_factor: Number of prefetched batches per worker.
     :param bool pack_sequences: Whether to pack sequences before collation.
     :param int max_length: Maximum sequence length for packing.
     :param bool return_packed_seqlens: Whether to emit packed_seqlens for non-packed batches
@@ -74,6 +76,8 @@ def get_dataloader(
     # Only add shuffle for non-streaming datasets
     if not is_streaming:
         dataloader_kwargs["shuffle"] = shuffle
+    if num_workers > 0 and prefetch_factor is not None:
+        dataloader_kwargs["prefetch_factor"] = int(prefetch_factor)
 
     dataloader = DataLoader(**dataloader_kwargs)
 

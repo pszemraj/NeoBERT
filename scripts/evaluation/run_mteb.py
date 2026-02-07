@@ -10,6 +10,7 @@ import torch
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
 from mteb import MTEB
 
+from neobert.checkpointing import MODEL_WEIGHTS_NAME, load_model_safetensors
 from neobert.config import ConfigLoader
 from neobert.model import NeoBERTConfig, NeoBERTForMTEB
 from neobert.tokenizer import get_tokenizer
@@ -204,9 +205,13 @@ def evaluate_mteb(cfg: Any) -> None:
             pretrained_checkpoint_dir
             / "model_checkpoints"
             / str(ckpt)
-            / "state_dict.pt"
+            / MODEL_WEIGHTS_NAME
         )
-        model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+        state_dict = load_model_safetensors(
+            checkpoint_path.parent,
+            map_location=device,
+        )
+        model.load_state_dict(state_dict)
 
     model.to(device)
     model.eval()

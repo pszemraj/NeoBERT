@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Test pretraining pipeline functionality."""
 
+import os
 import tempfile
 import unittest
 import warnings
@@ -12,8 +13,14 @@ from datasets import Dataset, DatasetDict
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 
-from neobert.config import ConfigLoader
-from neobert.pretraining.trainer import trainer
+from neobert.config import Config, ConfigLoader
+from neobert.pretraining.trainer import (
+    _ensure_pinned_cpu_batch,
+    _resolve_loader_perf_settings,
+    _sync_tokenizer_derived_config,
+    _write_deepspeed_latest_file,
+    trainer,
+)
 
 
 class TestPretrainPipeline(unittest.TestCase):
@@ -122,9 +129,9 @@ class TestPretrainPipeline(unittest.TestCase):
             dropout=config.model.dropout_prob,
             vocab_size=config.model.vocab_size,
             max_length=config.model.max_position_embeddings,
-            flash_attention=config.model.xformers_attention,
+            attn_backend=config.model.attn_backend,
             ngpt=config.model.ngpt,
-            hidden_act="gelu",  # Use GELU to avoid xformers requirement
+            hidden_act="gelu",  # Use GELU to avoid flash_attn requirement
         )
 
         # Test that model can be created
@@ -238,10 +245,106 @@ class TestPretrainComponents(unittest.TestCase):
         ]
 
         collated = collator(batch)
-
         self.assertIn("input_ids", collated)
         self.assertIn("labels", collated)
         self.assertIn("attention_mask", collated)
+
+    def test_ensure_pinned_cpu_batch_repins_unpinned_tensors(self):
+        """Ensure trainer repins stitched CPU batches before async H2D transfer."""
+        batch = {
+            "input_ids": torch.randint(0, 10, (2, 4), dtype=torch.long),
+            "labels": torch.randint(0, 10, (2, 4), dtype=torch.long),
+            "meta": ["a", "b"],
+        }
+        try:
+            out = _ensure_pinned_cpu_batch(batch)
+        except RuntimeError as exc:
+            self.skipTest(f"pin_memory not supported in this environment: {exc}")
+            return
+
+        self.assertTrue(out["input_ids"].is_pinned())
+        self.assertTrue(out["labels"].is_pinned())
+        self.assertEqual(out["meta"], batch["meta"])
+
+        out_again = _ensure_pinned_cpu_batch(out)
+        self.assertIs(out_again, out)
+
+    def test_ensure_pinned_cpu_batch_handles_nested_structures(self):
+        """Ensure nested tensor containers are repinned recursively."""
+        batch = {
+            "input_ids": torch.randint(0, 10, (2, 4), dtype=torch.long),
+            "nested": {
+                "labels": torch.randint(0, 10, (2, 4), dtype=torch.long),
+                "meta": ("a", torch.randint(0, 10, (1,), dtype=torch.long)),
+            },
+        }
+        try:
+            out = _ensure_pinned_cpu_batch(batch)
+        except RuntimeError as exc:
+            self.skipTest(f"pin_memory not supported in this environment: {exc}")
+            return
+
+        self.assertTrue(out["input_ids"].is_pinned())
+        self.assertTrue(out["nested"]["labels"].is_pinned())
+        self.assertTrue(out["nested"]["meta"][1].is_pinned())
+
+    def test_sync_tokenizer_derived_config_pads_vocab_and_pad_id(self):
+        """Ensure config is synchronized with tokenizer-derived vocab/pad fields."""
+        cfg = Config()
+        cfg.model.vocab_size = 17
+        cfg.tokenizer.vocab_size = 17
+        tokenizer = self._make_tokenizer()
+
+        original, resolved, added = _sync_tokenizer_derived_config(cfg, tokenizer)
+
+        self.assertEqual(original, 8)
+        self.assertEqual(resolved, 128)
+        self.assertEqual(added, 120)
+        self.assertEqual(len(tokenizer), 128)
+        self.assertEqual(cfg.model.vocab_size, 128)
+        self.assertEqual(cfg.tokenizer.vocab_size, 128)
+        self.assertEqual(cfg.model.pad_token_id, tokenizer.pad_token_id)
+
+    def test_write_deepspeed_latest_file(self):
+        """Ensure DeepSpeed root latest indirection is refreshed correctly."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _write_deepspeed_latest_file(root, "12345")
+            latest_path = root / "latest"
+            self.assertTrue(latest_path.exists())
+            self.assertEqual(latest_path.read_text(encoding="utf-8"), "12345\n")
+
+    def test_resolve_loader_perf_settings_cuda_defaults(self):
+        """Ensure CUDA runs get throughput-friendly loader defaults."""
+        cfg = Config()
+        cfg.dataset.num_workers = 4
+        cfg.dataset.pin_memory = False
+        cfg.dataset.persistent_workers = True
+        cfg.dataset.prefetch_factor = None
+
+        pin_memory, persistent_workers, prefetch_factor, notes = (
+            _resolve_loader_perf_settings(cfg, device=torch.device("cuda"))
+        )
+        self.assertTrue(pin_memory)
+        self.assertTrue(persistent_workers)
+        self.assertEqual(prefetch_factor, 4)
+        self.assertGreater(len(notes), 0)
+
+    def test_resolve_loader_perf_settings_cpu_respects_config(self):
+        """Ensure CPU runs keep user-configured loader values."""
+        cfg = Config()
+        cfg.dataset.num_workers = 3
+        cfg.dataset.pin_memory = False
+        cfg.dataset.persistent_workers = True
+        cfg.dataset.prefetch_factor = 2
+
+        pin_memory, persistent_workers, prefetch_factor, notes = (
+            _resolve_loader_perf_settings(cfg, device=torch.device("cpu"))
+        )
+        self.assertFalse(pin_memory)
+        self.assertTrue(persistent_workers)
+        self.assertEqual(prefetch_factor, 2)
+        self.assertEqual(notes, [])
 
     def test_mlm_collator_returns_packed_seqlens_metadata(self):
         """Ensure non-packed collator can emit packed_seqlens metadata."""
@@ -347,6 +450,26 @@ class TestPretrainComponents(unittest.TestCase):
         labels = torch.tensor([[2, -100]])
         self.assertEqual(_count_masked_correct(logits, labels).item(), 1)
 
+    def test_masked_correct_count_all_ignored(self):
+        """Test masked accuracy count returns zero when all labels are ignored."""
+        from neobert.pretraining.trainer import _count_masked_correct
+
+        logits = torch.tensor([[[0.1, 0.2, 0.7], [0.9, 0.1, 0.0]]])
+        labels = torch.full((1, 2), -100, dtype=torch.long)
+        self.assertEqual(_count_masked_correct(logits, labels).item(), 0)
+
+    def test_set_default_worker_env_respects_user_overrides(self):
+        """Ensure worker env defaults only apply when vars are unset."""
+        from neobert.pretraining.trainer import _set_default_worker_env
+
+        with patch.dict(os.environ, {"OMP_NUM_THREADS": "8"}, clear=False):
+            os.environ.pop("TOKENIZERS_PARALLELISM", None)
+            os.environ.pop("MKL_NUM_THREADS", None)
+            _set_default_worker_env(num_workers=4)
+            self.assertEqual(os.environ["OMP_NUM_THREADS"], "8")
+            self.assertEqual(os.environ["TOKENIZERS_PARALLELISM"], "false")
+            self.assertEqual(os.environ["MKL_NUM_THREADS"], "1")
+
     def test_pack_sequences_collator(self):
         """Ensure packed collator builds a block attention mask."""
         from neobert.collator import get_collator
@@ -375,12 +498,20 @@ class TestPretrainComponents(unittest.TestCase):
         self.assertTrue(all(row[row > 0].numel() >= 1 for row in packed))
 
     def test_normalize_packed_seqlens_tensor(self):
-        """Ensure packed_seqlens tensors normalize to list-of-lists."""
+        """Ensure packed_seqlens tensors normalize to CPU int32 tensors."""
         from neobert.model.model import _normalize_packed_seqlens
 
         packed = torch.tensor([[3, 0, 0], [2, 1, 0]], dtype=torch.int32)
         normalized = _normalize_packed_seqlens(packed)
-        self.assertEqual(normalized, [[3], [2, 1]])
+        self.assertTrue(torch.is_tensor(normalized))
+        self.assertEqual(normalized.dtype, torch.int32)
+        self.assertEqual(normalized.device.type, "cpu")
+        self.assertTrue(
+            torch.equal(
+                normalized,
+                torch.tensor([[3, 0, 0], [2, 1, 0]], dtype=torch.int32),
+            )
+        )
 
     def test_to_target_batch_size_handles_empty_buffer(self):
         """Ensure batch packing handles empty buffers without crashing."""
@@ -427,6 +558,80 @@ class TestPretrainComponents(unittest.TestCase):
         self.assertIsNone(out["packed_seqlens"])
         self.assertIsNone(stored["packed_seqlens"])
 
+    def test_to_target_batch_size_handles_tensor_packed_seqlens(self):
+        """Ensure packed_seqlens tensors split and buffer with batch resizing."""
+        from neobert.pretraining.trainer import to_target_batch_size
+
+        batch = {
+            "input_ids": torch.zeros((3, 4), dtype=torch.long),
+            "attention_mask": torch.ones((3, 4), dtype=torch.long),
+            "labels": torch.zeros((3, 4), dtype=torch.long),
+            "packed_seqlens": torch.tensor(
+                [[2, 2, 0], [3, 1, 0], [4, 0, 0]], dtype=torch.int32
+            ),
+        }
+        stored_batch = {
+            "input_ids": None,
+            "attention_mask": None,
+            "labels": None,
+            "packed_seqlens": None,
+        }
+
+        out, stored = to_target_batch_size(batch, stored_batch, target_size=2)
+        self.assertEqual(out["input_ids"].shape[0], 2)
+        self.assertTrue(torch.is_tensor(out["packed_seqlens"]))
+        self.assertEqual(tuple(out["packed_seqlens"].shape), (2, 3))
+        self.assertTrue(
+            torch.equal(
+                out["packed_seqlens"][0], torch.tensor([2, 2, 0], dtype=torch.int32)
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                out["packed_seqlens"][1], torch.tensor([3, 1, 0], dtype=torch.int32)
+            )
+        )
+        self.assertTrue(torch.is_tensor(stored["packed_seqlens"]))
+        self.assertEqual(tuple(stored["packed_seqlens"].shape), (1, 3))
+        self.assertTrue(
+            torch.equal(
+                stored["packed_seqlens"][0], torch.tensor([4, 0, 0], dtype=torch.int32)
+            )
+        )
+
+    def test_clear_stored_batch_drops_mode_transition_fragments(self):
+        """Ensure stale buffered fragments are cleared on packed-mode transitions."""
+        from neobert.pretraining.trainer import _clear_stored_batch
+
+        stored_batch = {
+            "input_ids": torch.zeros((2, 4), dtype=torch.long),
+            "attention_mask": torch.ones((2, 4), dtype=torch.float32),
+            "labels": torch.zeros((2, 4), dtype=torch.long),
+            "packed_seqlens": None,
+        }
+        _clear_stored_batch(stored_batch)
+        self.assertTrue(all(value is None for value in stored_batch.values()))
+
+    def test_promote_tmp_checkpoint_dir_keeps_old_until_swap(self):
+        """Ensure tmp checkpoint promotion does not delete final dir pre-swap."""
+        from neobert.pretraining.trainer import _promote_tmp_checkpoint_dir
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            tmp_ckpt = root / "100.tmp"
+            final_ckpt = root / "100"
+            tmp_ckpt.mkdir()
+            final_ckpt.mkdir()
+            (tmp_ckpt / "model.safetensors").write_text("new")
+            (final_ckpt / "model.safetensors").write_text("old")
+
+            _promote_tmp_checkpoint_dir(tmp_ckpt, final_ckpt)
+
+            self.assertFalse(tmp_ckpt.exists())
+            self.assertTrue(final_ckpt.exists())
+            self.assertEqual((final_ckpt / "model.safetensors").read_text(), "new")
+            self.assertFalse((root / "100.old").exists())
+
     def test_optimizer_creation(self):
         """Test optimizer creation from config."""
         config = ConfigLoader.load(
@@ -445,7 +650,7 @@ class TestPretrainComponents(unittest.TestCase):
             num_hidden_layers=1,
             num_attention_heads=2,
             vocab_size=100,
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="gelu",
             rms_norm=False,
         )
@@ -495,7 +700,7 @@ class TestPretrainComponents(unittest.TestCase):
             num_hidden_layers=1,
             num_attention_heads=2,
             vocab_size=100,
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="gelu",
         )
         model = NeoBERT(model_config)
@@ -543,7 +748,7 @@ class TestPretrainComponents(unittest.TestCase):
             num_hidden_layers=1,
             num_attention_heads=2,
             vocab_size=100,
-            flash_attention=False,
+            attn_backend="sdpa",
             hidden_act="gelu",
         )
         model = NeoBERT(model_config)

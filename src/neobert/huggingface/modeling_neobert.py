@@ -1,10 +1,11 @@
 """NeoBERT model implementation for HuggingFace Transformers.
 
 This is the export/inference variant. The training-time model lives in
-``src/neobert/model/model.py`` and uses xFormers; keep math consistent across
+``src/neobert/model/model.py`` and uses SDPA/flash-attn + Liger kernels; keep math consistent across
 implementations. Packed/varlen sequences are intentionally unsupported here.
 """
 
+from importlib import import_module
 from typing import Any, Optional, Union
 
 import torch
@@ -17,18 +18,66 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutput,
 )
 
-try:
-    from .modeling_utils import scaled_dot_product_attention_compat
-    from .modeling_utils import swiglu_intermediate_size
-except ImportError:  # pragma: no cover - in-package import path.
-    try:
-        from ..modeling_utils import scaled_dot_product_attention_compat
-        from ..modeling_utils import swiglu_intermediate_size
-    except ImportError:  # pragma: no cover - triggered in exported HF repo layout.
-        from modeling_utils import swiglu_intermediate_size
-        from modeling_utils import scaled_dot_product_attention_compat
 
-from .rotary import apply_rotary_emb, precompute_freqs_cis
+def _import_symbol(candidates: tuple[str, ...], symbol: str) -> Any:
+    """Import a symbol from the first importable module in ``candidates``.
+
+    :param tuple[str, ...] candidates: Fully-qualified module names to try.
+    :param str symbol: Attribute name to import from the resolved module.
+    :return Any: Imported symbol.
+    :raises ImportError: If no candidate module can be imported.
+    :raises AttributeError: If a module imports but is missing ``symbol``.
+    """
+    last_exc: ImportError | None = None
+    for module_name in candidates:
+        try:
+            module = import_module(module_name)
+        except ImportError as exc:
+            last_exc = exc
+            continue
+        return getattr(module, symbol)
+
+    if last_exc is None:
+        raise ImportError(
+            f"Unable to import symbol '{symbol}' from any module candidate."
+        )
+    raise last_exc
+
+
+_PACKAGE = __package__ or ""
+_PARENT = _PACKAGE.rsplit(".", maxsplit=1)[0] if "." in _PACKAGE else ""
+
+_modeling_utils_candidates = []
+if _PACKAGE:
+    _modeling_utils_candidates.append(f"{_PACKAGE}.modeling_utils")
+if _PARENT:
+    _modeling_utils_candidates.append(f"{_PARENT}.modeling_utils")
+# HF export copies modeling_utils.py alongside model.py, so keep a bare-module
+# fallback for trust_remote_code loads where ``neobert`` is not installed.
+_modeling_utils_candidates.extend(["neobert.modeling_utils", "modeling_utils"])
+
+scaled_dot_product_attention_compat = _import_symbol(
+    tuple(dict.fromkeys(_modeling_utils_candidates)),
+    "scaled_dot_product_attention_compat",
+)
+swiglu_intermediate_size = _import_symbol(
+    tuple(dict.fromkeys(_modeling_utils_candidates)),
+    "swiglu_intermediate_size",
+)
+
+_rotary_candidates = []
+if _PACKAGE:
+    _rotary_candidates.append(f"{_PACKAGE}.rotary")
+# Same rationale as modeling_utils: exported repos include a local rotary.py.
+_rotary_candidates.extend(["neobert.huggingface.rotary", "rotary"])
+
+apply_rotary_emb = _import_symbol(
+    tuple(dict.fromkeys(_rotary_candidates)), "apply_rotary_emb"
+)
+precompute_freqs_cis = _import_symbol(
+    tuple(dict.fromkeys(_rotary_candidates)),
+    "precompute_freqs_cis",
+)
 
 
 class NeoBERTConfig(PretrainedConfig):
@@ -605,9 +654,8 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
         # Language modeling head (decoder)
         self.decoder = nn.Linear(config.hidden_size, config.vocab_size)
 
+        # ``post_init()`` applies HF init + tie_word_embeddings when configured.
         self.post_init()
-        if getattr(self.config, "tie_word_embeddings", False):
-            self.tie_weights()
 
     def get_input_embeddings(self) -> nn.Embedding:
         """Return input token embeddings for weight tying."""

@@ -9,7 +9,7 @@ dataset:
 
 model:
   dropout_prob: 0.0
-  xformers_attention: false
+  attn_backend: sdpa
 
 tokenizer:
   path: "google-bert/bert-base-uncased"

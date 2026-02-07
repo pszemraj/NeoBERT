@@ -8,7 +8,7 @@ model:
   dropout_prob: 0.1
   vocab_size: 30522
   max_position_embeddings: 128
-  xformers_attention: false
+  attn_backend: sdpa
   ngpt: false
   hidden_act: "gelu"
 

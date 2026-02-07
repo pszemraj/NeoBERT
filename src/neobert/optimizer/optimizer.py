@@ -9,7 +9,7 @@ import torch.nn as nn
 from accelerate.utils import DistributedType
 from torch.optim import Adam, AdamW
 
-from .muon_clip import MuonClipConfig, MuonClipOptimizer
+from neobert.optimizer.muon_clip import MuonClipConfig, MuonClipOptimizer
 
 # from .soap.soap import SOAP  # TODO: Add SOAP optimizer implementation
 

@@ -66,8 +66,29 @@ def _maybe_compile_model(
             "trainer.torch_compile is enabled but DeepSpeed is active; skipping torch.compile."
         )
         return model
-    log.info("Compiling model with torch.compile.")
-    return torch.compile(model)
+    compile_backend = str(
+        getattr(cfg.trainer, "torch_compile_backend", "inductor")
+    ).lower()
+    if compile_backend not in {"inductor", "aot_eager", "eager"}:
+        log.warning(
+            "Unknown trainer.torch_compile_backend='%s'; using 'inductor'.",
+            compile_backend,
+        )
+        compile_backend = "inductor"
+    dynamic_override = getattr(cfg.trainer, "torch_compile_dynamic", None)
+    if dynamic_override is None:
+        # Prefer static-shape compilation by default. In packed mode this avoids
+        # aggressive shape-specialization/recompile churn when occasional short
+        # batches slip through; users can still opt into dynamic mode explicitly.
+        use_dynamic = False
+    else:
+        use_dynamic = bool(dynamic_override)
+    log.info(
+        "Compiling model with torch.compile (backend=%s, dynamic=%s).",
+        compile_backend,
+        use_dynamic,
+    )
+    return torch.compile(model, backend=compile_backend, dynamic=use_dynamic)
 
 
 def _resolve_resume_checkpoint(
