@@ -16,6 +16,9 @@ from neobert.model import (
     NeoBERTLMHead,
     NormNeoBERT,
 )
+from neobert.kernels.attention import (
+    prepare_packed_flash_metadata as _prepare_packed_flash_metadata_real,
+)
 
 
 class TestModelForward(unittest.TestCase):
@@ -121,6 +124,70 @@ class TestModelForward(unittest.TestCase):
         with torch.no_grad():
             out = model(x, pad_mask=None, packed_seqlens=packed)
         self.assertEqual(out.shape, (2, 8, 32))
+
+    def test_flash_metadata_is_reused_across_layers(self):
+        """Ensure flash packed metadata is prepared once and reused in all layers."""
+        import neobert.model.model as model_module
+
+        calls: dict[str, list[int] | int] = {"prepare": 0, "meta_ids": []}
+
+        def _count_prepare(*args, **kwargs):
+            calls["prepare"] = int(calls["prepare"]) + 1
+            return _prepare_packed_flash_metadata_real(*args, **kwargs)
+
+        def _fake_attention_forward(
+            xq: torch.Tensor,
+            xk: torch.Tensor,
+            xv: torch.Tensor,
+            pad_mask: torch.Tensor | None,
+            packed_seqlens: torch.Tensor | list[list[int]] | None,
+            dropout_p: float,
+            scale: float | None,
+            attn_backend: str,
+            packed_flash_metadata=None,
+        ) -> torch.Tensor:
+            assert packed_flash_metadata is not None
+            meta_ids = calls["meta_ids"]
+            assert isinstance(meta_ids, list)
+            meta_ids.append(id(packed_flash_metadata))
+            return torch.zeros_like(xq)
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=2,
+            num_attention_heads=2,
+            intermediate_size=64,
+            dropout=0.0,
+            vocab_size=256,
+            max_length=32,
+            attn_backend="flash_attn_varlen",
+            ngpt=False,
+            hidden_act="gelu",
+        )
+        model = NeoBERT(config)
+        model.eval()
+        x = torch.randint(0, 256, (2, 8))
+        packed = torch.tensor([[8, 0], [6, 0]], dtype=torch.int32)
+
+        with (
+            patch.object(
+                model_module,
+                "prepare_packed_flash_metadata",
+                side_effect=_count_prepare,
+            ),
+            patch.object(
+                model_module, "attention_forward", side_effect=_fake_attention_forward
+            ),
+        ):
+            with torch.no_grad():
+                out = model(x, pad_mask=None, packed_seqlens=packed)
+
+        self.assertEqual(out.shape, (2, 8, 32))
+        self.assertEqual(calls["prepare"], 1)
+        meta_ids = calls["meta_ids"]
+        assert isinstance(meta_ids, list)
+        self.assertEqual(len(meta_ids), config.num_hidden_layers)
+        self.assertEqual(len(set(meta_ids)), 1)
 
     def test_gradient_checkpointing_matches_baseline(self):
         """Ensure checkpointed gradients match non-checkpointed forward."""

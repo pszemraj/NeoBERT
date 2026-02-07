@@ -27,8 +27,10 @@ if TYPE_CHECKING:
     pass
 
 from neobert.kernels.attention import (
+    PackedFlashMetadata,
     attention_forward,
     canonicalize_attn_backend,
+    prepare_packed_flash_metadata,
 )
 from neobert.kernels.backend import (
     canonicalize_kernel_backend,
@@ -403,6 +405,7 @@ class EncoderBlock(nn.Module):
         pad_mask: torch.Tensor,
         freqs_cis: torch.Tensor,
         packed_seqlens: Optional[PackedSeqLens] = None,
+        packed_flash_meta: Optional[PackedFlashMetadata] = None,
     ) -> torch.Tensor:
         """Run the encoder block forward pass.
 
@@ -410,10 +413,15 @@ class EncoderBlock(nn.Module):
         :param torch.Tensor pad_mask: Additive attention mask.
         :param torch.Tensor freqs_cis: Rotary embedding frequencies.
         :param list[list[int]] | torch.Tensor | None packed_seqlens: Packed segment lengths.
+        :param PackedFlashMetadata | None packed_flash_meta: Cached flash varlen metadata.
         :return torch.Tensor: Updated hidden states.
         """
         x = x + self._att_block(
-            self.attention_norm(x), pad_mask, freqs_cis, packed_seqlens
+            self.attention_norm(x),
+            pad_mask,
+            freqs_cis,
+            packed_seqlens,
+            packed_flash_meta,
         )
         x = x + self._ff_block(self.ffn_norm(x))
         return x
@@ -424,6 +432,7 @@ class EncoderBlock(nn.Module):
         pad_mask: torch.Tensor,
         freqs_cis: torch.Tensor,
         packed_seqlens: Optional[PackedSeqLens] = None,
+        packed_flash_meta: Optional[PackedFlashMetadata] = None,
     ) -> torch.Tensor:
         """Apply the attention sub-layer.
 
@@ -431,6 +440,7 @@ class EncoderBlock(nn.Module):
         :param torch.Tensor pad_mask: Additive attention mask.
         :param torch.Tensor freqs_cis: Rotary embedding frequencies.
         :param list[list[int]] | torch.Tensor | None packed_seqlens: Packed segment lengths.
+        :param PackedFlashMetadata | None packed_flash_meta: Cached flash varlen metadata.
         :return torch.Tensor: Attention output.
         """
         batch_size, seq_len, _ = x.shape
@@ -458,6 +468,7 @@ class EncoderBlock(nn.Module):
             dropout_p=self.config.dropout if self.training else 0.0,
             scale=None,
             attn_backend=self.config.attn_backend,
+            packed_flash_metadata=packed_flash_meta,
         )
 
         return self.resid_dropout(
@@ -553,6 +564,7 @@ class NormEncoderBlock(nn.Module):
         pad_mask: torch.Tensor,
         freqs_cis: torch.Tensor,
         packed_seqlens: Optional[PackedSeqLens] = None,
+        packed_flash_meta: Optional[PackedFlashMetadata] = None,
     ) -> torch.Tensor:
         """Run the normalized encoder block forward pass.
 
@@ -560,9 +572,16 @@ class NormEncoderBlock(nn.Module):
         :param torch.Tensor pad_mask: Additive attention mask.
         :param torch.Tensor freqs_cis: Rotary embedding frequencies.
         :param torch.Tensor | list[list[int]] | None packed_seqlens: Packed segment lengths.
+        :param PackedFlashMetadata | None packed_flash_meta: Cached flash varlen metadata.
         :return torch.Tensor: Updated hidden states.
         """
-        x_attn = self._att_block(x, pad_mask, freqs_cis, packed_seqlens)
+        x_attn = self._att_block(
+            x,
+            pad_mask,
+            freqs_cis,
+            packed_seqlens,
+            packed_flash_meta,
+        )
 
         lr = self.attn_alpha * (
             self.attn_alpha_init_value / self.attn_alpha_init_scaling
@@ -590,6 +609,7 @@ class NormEncoderBlock(nn.Module):
         pad_mask: torch.Tensor,
         freqs_cis: torch.Tensor,
         packed_seqlens: Optional[PackedSeqLens] = None,
+        packed_flash_meta: Optional[PackedFlashMetadata] = None,
     ) -> torch.Tensor:
         """Apply the attention sub-layer.
 
@@ -597,6 +617,7 @@ class NormEncoderBlock(nn.Module):
         :param torch.Tensor pad_mask: Additive attention mask.
         :param torch.Tensor freqs_cis: Rotary embedding frequencies.
         :param torch.Tensor | list[list[int]] | None packed_seqlens: Packed segment lengths.
+        :param PackedFlashMetadata | None packed_flash_meta: Cached flash varlen metadata.
         :return torch.Tensor: Attention output.
         """
         batch_size, seq_len, _ = x.shape
@@ -637,6 +658,7 @@ class NormEncoderBlock(nn.Module):
             dropout_p=self.config.dropout if self.training else 0.0,
             scale=softmax_scale,
             attn_backend=self.config.attn_backend,
+            packed_flash_metadata=packed_flash_meta,
         )
 
         return self.resid_dropout(
@@ -780,6 +802,18 @@ class NeoBERT(NeoBERTPreTrainedModel):
                 )
                 pad_mask = None
 
+        packed_flash_meta: Optional[PackedFlashMetadata] = None
+        if (
+            packed_seqlens is not None
+            and self.config.attn_backend == "flash_attn_varlen"
+        ):
+            packed_flash_meta = prepare_packed_flash_metadata(
+                packed_seqlens,
+                batch_size=src.shape[0],
+                seq_len=seq_len,
+                device=src.device,
+            )
+
         # Normalize to broadcast-friendly shapes to avoid O(S^2) materialization.
         if pad_mask is not None and torch.is_tensor(pad_mask):
             pad_mask = _normalize_pad_mask(pad_mask)
@@ -825,7 +859,13 @@ class NeoBERT(NeoBERTPreTrainedModel):
                     :param EncoderBlock layer: Bound layer instance.
                     :return torch.Tensor: Updated hidden states.
                     """
-                    return layer(hidden_states, pad_mask, freqs_cis, packed_seqlens)
+                    return layer(
+                        hidden_states,
+                        pad_mask,
+                        freqs_cis,
+                        packed_seqlens,
+                        packed_flash_meta,
+                    )
 
                 x = checkpoint(
                     custom_forward,
@@ -834,7 +874,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
                     use_reentrant=False,
                 )
             else:
-                x = layer(x, pad_mask, freqs_cis, packed_seqlens)
+                x = layer(x, pad_mask, freqs_cis, packed_seqlens, packed_flash_meta)
 
         x = self.layer_norm(x)
         return x
@@ -917,6 +957,18 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
                 )
                 pad_mask = None
 
+        packed_flash_meta: Optional[PackedFlashMetadata] = None
+        if (
+            packed_seqlens is not None
+            and self.config.attn_backend == "flash_attn_varlen"
+        ):
+            packed_flash_meta = prepare_packed_flash_metadata(
+                packed_seqlens,
+                batch_size=src.shape[0],
+                seq_len=seq_len,
+                device=src.device,
+            )
+
         # Normalize to broadcast-friendly shapes to avoid O(S^2) materialization.
         if pad_mask is not None and torch.is_tensor(pad_mask):
             pad_mask = _normalize_pad_mask(pad_mask)
@@ -962,7 +1014,13 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
                     :param NormEncoderBlock layer: Bound layer instance.
                     :return torch.Tensor: Updated hidden states.
                     """
-                    return layer(hidden_states, pad_mask, freqs_cis, packed_seqlens)
+                    return layer(
+                        hidden_states,
+                        pad_mask,
+                        freqs_cis,
+                        packed_seqlens,
+                        packed_flash_meta,
+                    )
 
                 x = checkpoint(
                     custom_forward,
@@ -971,7 +1029,7 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
                     use_reentrant=False,
                 )
             else:
-                x = layer(x, pad_mask, freqs_cis, packed_seqlens)
+                x = layer(x, pad_mask, freqs_cis, packed_seqlens, packed_flash_meta)
 
         return x
 

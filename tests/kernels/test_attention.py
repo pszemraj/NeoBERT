@@ -9,6 +9,7 @@ from neobert.kernels.attention import (
     attention_forward,
     canonicalize_attn_backend,
     packed_seqlens_to_cu_seqlens,
+    prepare_packed_flash_metadata,
     resolve_attn_backend,
     resolve_runtime_attn_backend,
 )
@@ -176,6 +177,19 @@ class TestAttentionForwardSDPAPacked:
 class TestFlashVarlenAttentionInternals:
     """Tests for flash varlen metadata flattening internals."""
 
+    def test_prepare_packed_flash_metadata(self):
+        """Packed metadata builder should compact sparse segment columns."""
+        packed = torch.tensor([[3, 0, 2], [1, 0, 0]], dtype=torch.int32)
+        meta = prepare_packed_flash_metadata(
+            packed,
+            batch_size=2,
+            seq_len=6,
+            device=torch.device("cpu"),
+        )
+        assert meta.flat_token_indices.tolist() == [0, 1, 2, 3, 4, 6]
+        assert meta.cu_seqlens.tolist() == [0, 3, 5, 6]
+        assert meta.max_seqlen == 3
+
     def test_flash_varlen_compacts_sparse_segment_columns(
         self, monkeypatch: pytest.MonkeyPatch
     ):
@@ -203,6 +217,52 @@ class TestFlashVarlenAttentionInternals:
         assert out.shape == (B, S, H, D)
         assert captured["tokens"] == 6
         assert captured["cu"] == [0, 3, 5, 6]
+
+    def test_flash_varlen_uses_precomputed_metadata(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Flash path should reuse provided metadata instead of recomputing."""
+        B, S, H, D = 2, 6, 2, 8
+        xq = torch.randn(B, S, H, D)
+        xk = torch.randn(B, S, H, D)
+        xv = torch.randn(B, S, H, D)
+        packed = torch.tensor([[3, 0, 2], [1, 0, 0]], dtype=torch.int32)
+
+        meta = prepare_packed_flash_metadata(
+            packed,
+            batch_size=B,
+            seq_len=S,
+            device=xq.device,
+        )
+
+        def _fake_flash(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, **kwargs):
+            return torch.zeros_like(q)
+
+        monkeypatch.setattr(
+            "neobert.kernels.attention._flash_attn_varlen_func",
+            _fake_flash,
+            raising=False,
+        )
+
+        def _fail_prepare(*args, **kwargs):
+            raise AssertionError("prepare_packed_flash_metadata should not be called")
+
+        monkeypatch.setattr(
+            "neobert.kernels.attention.prepare_packed_flash_metadata",
+            _fail_prepare,
+            raising=False,
+        )
+
+        out = _flash_varlen_attention(
+            xq,
+            xk,
+            xv,
+            packed,
+            dropout_p=0.0,
+            scale=None,
+            packed_metadata=meta,
+        )
+        assert out.shape == (B, S, H, D)
 
     def test_flash_varlen_compile_path_avoids_scalar_item(
         self, monkeypatch: pytest.MonkeyPatch

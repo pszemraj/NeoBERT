@@ -1,5 +1,6 @@
 """Attention backend dispatch: PyTorch SDPA + flash_attn_varlen."""
 
+from dataclasses import dataclass
 import logging
 import math
 from typing import Literal, Optional
@@ -10,6 +11,18 @@ from neobert.modeling_utils import scaled_dot_product_attention_compat
 
 logger = logging.getLogger(__name__)
 PackedSeqLens = torch.Tensor | list[list[int]]
+
+
+@dataclass(frozen=True)
+class PackedFlashMetadata:
+    """Reusable flash-attn varlen metadata for one packed batch."""
+
+    flat_token_indices: torch.Tensor
+    cu_seqlens: torch.Tensor
+    max_seqlen: int
+    batch_size: int
+    seq_len: int
+
 
 # ---------------------------------------------------------------------------
 # Import-time flash-attn availability check
@@ -210,6 +223,92 @@ def _normalize_packed_seqlens_tensor(
 
 
 @_dynamo_disable
+def prepare_packed_flash_metadata(
+    packed_seqlens: torch.Tensor,
+    *,
+    batch_size: int,
+    seq_len: int,
+    device: torch.device,
+) -> PackedFlashMetadata:
+    """Build reusable flattening metadata for flash-attn varlen kernels.
+
+    :param torch.Tensor packed_seqlens: Packed lengths ``[B, N]``.
+    :param int batch_size: Batch size of the attention input.
+    :param int seq_len: Padded sequence length of the attention input.
+    :param torch.device device: Device that will run the attention kernel.
+    :return PackedFlashMetadata: Precomputed metadata tensors.
+    """
+    seg_lens_cuda = packed_seqlens.clamp_min(0).to(device=device, dtype=torch.int32)
+    if seg_lens_cuda.ndim != 2:
+        raise ValueError(
+            "packed_seqlens must be rank 2 after normalization, got "
+            f"shape={tuple(seg_lens_cuda.shape)}"
+        )
+    if seg_lens_cuda.shape[0] != batch_size:
+        raise ValueError(
+            "packed_seqlens batch mismatch: "
+            f"{seg_lens_cuda.shape[0]} != batch_size={batch_size}"
+        )
+
+    valid_tokens = seg_lens_cuda.sum(dim=1, dtype=torch.int64)
+    batch_ids = torch.repeat_interleave(
+        torch.arange(batch_size, device=device, dtype=torch.long), valid_tokens
+    )
+    if batch_ids.shape[0] == 0:
+        return PackedFlashMetadata(
+            flat_token_indices=torch.empty(0, dtype=torch.long, device=device),
+            cu_seqlens=torch.zeros(1, dtype=torch.int32, device=device),
+            max_seqlen=0,
+            batch_size=batch_size,
+            seq_len=seq_len,
+        )
+
+    token_offsets = torch.cumsum(valid_tokens, dim=0) - valid_tokens
+    stream_positions = torch.arange(batch_ids.shape[0], device=device, dtype=torch.long)
+    positions_in_batch = stream_positions - token_offsets.index_select(0, batch_ids)
+    flat_token_indices = batch_ids * seq_len + positions_in_batch
+
+    seg_lens_flat = seg_lens_cuda[seg_lens_cuda > 0]
+    if seg_lens_flat.numel() == 0:
+        return PackedFlashMetadata(
+            flat_token_indices=torch.empty(0, dtype=torch.long, device=device),
+            cu_seqlens=torch.zeros(1, dtype=torch.int32, device=device),
+            max_seqlen=0,
+            batch_size=batch_size,
+            seq_len=seq_len,
+        )
+
+    seg_tokens_total = seg_lens_flat.sum(dtype=torch.int64)
+    flattened_tokens = batch_ids.shape[0]
+    seg_tokens_total_int = int(seg_tokens_total.item())
+    flattened_tokens_int = int(flattened_tokens)
+    if seg_tokens_total_int != flattened_tokens_int:
+        raise ValueError(
+            "packed_seqlens metadata is inconsistent: sum of positive segment lengths "
+            f"({seg_tokens_total_int}) does not match flattened token count "
+            f"({flattened_tokens_int})."
+        )
+
+    cu_seqlens = torch.empty(
+        seg_lens_flat.shape[0] + 1, dtype=torch.int32, device=device
+    )
+    cu_seqlens[0] = 0
+    cu_seqlens[1:] = seg_lens_flat.cumsum(dim=0, dtype=torch.int32)
+    if _is_torch_compiling():
+        max_seqlen = seq_len
+    else:
+        max_seqlen = int(seg_lens_flat.max().item())
+
+    return PackedFlashMetadata(
+        flat_token_indices=flat_token_indices,
+        cu_seqlens=cu_seqlens,
+        max_seqlen=max_seqlen,
+        batch_size=batch_size,
+        seq_len=seq_len,
+    )
+
+
+@_dynamo_disable
 def _flash_varlen_attention(
     xq: torch.Tensor,
     xk: torch.Tensor,
@@ -217,6 +316,7 @@ def _flash_varlen_attention(
     packed_seqlens: torch.Tensor,
     dropout_p: float,
     scale: float | None = None,
+    packed_metadata: PackedFlashMetadata | None = None,
 ) -> torch.Tensor:
     """Run flash_attn_varlen_func on packed sequences.
 
@@ -229,25 +329,33 @@ def _flash_varlen_attention(
     :param torch.Tensor packed_seqlens: Packed lengths ``[B, N]``.
     :param float dropout_p: Dropout probability.
     :param float | None scale: Softmax scale.
+    :param PackedFlashMetadata | None packed_metadata: Optional reusable metadata.
     :return torch.Tensor: Output ``(B, S, H, D)``.
     """
     assert _flash_attn_varlen_func is not None
     batch_size, seq_len, num_heads, head_dim = xq.shape
-    seg_lens_cuda = packed_seqlens.clamp_min(0).to(device=xq.device, dtype=torch.int32)
-    valid_tokens = seg_lens_cuda.sum(dim=1, dtype=torch.int64)
+    if packed_metadata is None:
+        packed_metadata = prepare_packed_flash_metadata(
+            packed_seqlens,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            device=xq.device,
+        )
+    elif packed_metadata.batch_size != batch_size or packed_metadata.seq_len != seq_len:
+        raise ValueError(
+            "packed flash metadata shape mismatch: "
+            f"metadata=({packed_metadata.batch_size}, {packed_metadata.seq_len}) "
+            f"input=({batch_size}, {seq_len})"
+        )
 
-    batch_ids = torch.repeat_interleave(
-        torch.arange(batch_size, device=xq.device, dtype=torch.long), valid_tokens
-    )
-    if batch_ids.shape[0] == 0:
+    flat_token_indices = packed_metadata.flat_token_indices
+    if flat_token_indices.numel() == 0:
         return torch.zeros_like(xq)
-
-    token_offsets = torch.cumsum(valid_tokens, dim=0) - valid_tokens
-    stream_positions = torch.arange(
-        batch_ids.shape[0], device=xq.device, dtype=torch.long
-    )
-    positions_in_batch = stream_positions - token_offsets.index_select(0, batch_ids)
-    flat_token_indices = batch_ids * seq_len + positions_in_batch
+    if flat_token_indices.device != xq.device:
+        raise ValueError(
+            "packed flash metadata must be on the same device as attention inputs: "
+            f"metadata={flat_token_indices.device}, input={xq.device}"
+        )
 
     xq_flat = xq.reshape(batch_size * seq_len, num_heads, head_dim)
     xk_flat = xk.reshape(batch_size * seq_len, num_heads, head_dim)
@@ -256,53 +364,16 @@ def _flash_varlen_attention(
     k_flat = xk_flat.index_select(0, flat_token_indices)
     v_flat = xv_flat.index_select(0, flat_token_indices)
 
-    # Keep only positive segment lengths in row-major order.
-    seg_lens_flat = seg_lens_cuda[seg_lens_cuda > 0]
-    if seg_lens_flat.numel() == 0:
-        return torch.zeros_like(xq)
-    seg_tokens_total = seg_lens_flat.sum(dtype=torch.int64)
-    flattened_tokens = batch_ids.shape[0]
-    if _is_torch_compiling():
-        # Keep compile path graph-friendly: avoid scalar .item() extraction.
-        torch._assert(
-            seg_tokens_total.eq(flattened_tokens),
-            "packed_seqlens metadata is inconsistent with flattened token count.",
-        )
-    else:
-        seg_tokens_total_int = int(seg_tokens_total.item())
-        flattened_tokens_int = int(flattened_tokens)
-        if seg_tokens_total_int != flattened_tokens_int:
-            raise ValueError(
-                "packed_seqlens metadata is inconsistent: sum of positive segment lengths "
-                f"({seg_tokens_total_int}) does not match flattened token count "
-                f"({flattened_tokens_int})."
-            )
-
-    cu_seqlens = torch.empty(
-        seg_lens_flat.shape[0] + 1, dtype=torch.int32, device=xq.device
-    )
-    cu_seqlens[0] = 0
-    cu_seqlens[1:] = seg_lens_flat.cumsum(dim=0, dtype=torch.int32)
-    # flash_attn_varlen expects Python ints for max_seqlen values. Scalar extraction
-    # via ``.item()`` causes torch.compile graph breaks, so fall back to padded
-    # ``seq_len`` when compiling.
-    if _is_torch_compiling():
-        max_seqlen = seq_len
-    else:
-        # Use the true max segment length (not padded sequence length) for varlen
-        # kernel sizing in eager mode.
-        max_seqlen = int(seg_lens_flat.max().item())
-
     softmax_scale = scale if scale is not None else (1.0 / math.sqrt(head_dim))
 
     out_flat = _flash_attn_varlen_func(
         q_flat,
         k_flat,
         v_flat,
-        cu_seqlens_q=cu_seqlens,
-        cu_seqlens_k=cu_seqlens,
-        max_seqlen_q=max_seqlen,
-        max_seqlen_k=max_seqlen,
+        cu_seqlens_q=packed_metadata.cu_seqlens,
+        cu_seqlens_k=packed_metadata.cu_seqlens,
+        max_seqlen_q=packed_metadata.max_seqlen,
+        max_seqlen_k=packed_metadata.max_seqlen,
         dropout_p=dropout_p,
         softmax_scale=softmax_scale,
     )
@@ -381,6 +452,7 @@ def attention_forward(
     dropout_p: float,
     scale: float | None,
     attn_backend: str,
+    packed_flash_metadata: PackedFlashMetadata | None = None,
 ) -> torch.Tensor:
     """Unified attention dispatch for SDPA and flash_attn_varlen.
 
@@ -392,15 +464,34 @@ def attention_forward(
     :param float dropout_p: Dropout probability.
     :param float | None scale: Softmax scale factor.
     :param str attn_backend: ``"sdpa"`` or ``"flash_attn_varlen"``.
+    :param PackedFlashMetadata | None packed_flash_metadata: Reusable flash varlen metadata.
     :return torch.Tensor: Attention output ``(B, S, H, D)``.
     """
     attn_backend = canonicalize_attn_backend(attn_backend)
     if packed_seqlens is not None:
-        packed_tensor = _normalize_packed_seqlens_tensor(
-            packed_seqlens,
-            batch_size=xq.shape[0],
-            seq_len=xq.shape[1],
-        )
+        if packed_flash_metadata is not None and torch.is_tensor(packed_seqlens):
+            # Reuse already-normalized tensor path when metadata is precomputed
+            # once in the model forward; avoid per-layer revalidation overhead.
+            packed_tensor = packed_seqlens.detach()
+            if packed_tensor.ndim == 1:
+                packed_tensor = packed_tensor.unsqueeze(1)
+            if packed_tensor.ndim != 2:
+                raise ValueError(
+                    "packed_seqlens tensor must be rank 1 or 2, got "
+                    f"shape={tuple(packed_tensor.shape)}"
+                )
+            if packed_tensor.shape[0] != xq.shape[0]:
+                raise ValueError(
+                    "packed_seqlens batch mismatch: "
+                    f"{packed_tensor.shape[0]} != batch_size={xq.shape[0]}"
+                )
+            packed_tensor = packed_tensor.to(device=xq.device, dtype=torch.int32)
+        else:
+            packed_tensor = _normalize_packed_seqlens_tensor(
+                packed_seqlens,
+                batch_size=xq.shape[0],
+                seq_len=xq.shape[1],
+            )
         # Packed sequences
         if attn_backend == "flash_attn_varlen":
             if not xq.is_cuda:
@@ -413,7 +504,15 @@ def attention_forward(
                     "attn_backend='flash_attn_varlen' requested but flash-attn is not "
                     f"available: {FLASH_ATTN_ERROR}"
                 )
-            return _flash_varlen_attention(xq, xk, xv, packed_tensor, dropout_p, scale)
+            return _flash_varlen_attention(
+                xq,
+                xk,
+                xv,
+                packed_tensor,
+                dropout_p,
+                scale,
+                packed_metadata=packed_flash_metadata,
+            )
         # SDPA per-segment fallback (works on CPU + GPU)
         return _sdpa_packed_fallback(xq, xk, xv, packed_tensor, dropout_p, scale)
 
