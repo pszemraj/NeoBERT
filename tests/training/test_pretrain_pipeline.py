@@ -14,7 +14,11 @@ from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 
 from neobert.config import Config, ConfigLoader
-from neobert.pretraining.trainer import _resolve_loader_perf_settings, trainer
+from neobert.pretraining.trainer import (
+    _ensure_pinned_cpu_batch,
+    _resolve_loader_perf_settings,
+    trainer,
+)
 
 
 class TestPretrainPipeline(unittest.TestCase):
@@ -242,6 +246,26 @@ class TestPretrainComponents(unittest.TestCase):
         self.assertIn("input_ids", collated)
         self.assertIn("labels", collated)
         self.assertIn("attention_mask", collated)
+
+    def test_ensure_pinned_cpu_batch_repins_unpinned_tensors(self):
+        """Ensure trainer repins stitched CPU batches before async H2D transfer."""
+        batch = {
+            "input_ids": torch.randint(0, 10, (2, 4), dtype=torch.long),
+            "labels": torch.randint(0, 10, (2, 4), dtype=torch.long),
+            "meta": ["a", "b"],
+        }
+        try:
+            out = _ensure_pinned_cpu_batch(batch)
+        except RuntimeError as exc:
+            self.skipTest(f"pin_memory not supported in this environment: {exc}")
+            return
+
+        self.assertTrue(out["input_ids"].is_pinned())
+        self.assertTrue(out["labels"].is_pinned())
+        self.assertEqual(out["meta"], batch["meta"])
+
+        out_again = _ensure_pinned_cpu_batch(out)
+        self.assertIs(out_again, out)
 
     def test_resolve_loader_perf_settings_cuda_defaults(self):
         """Ensure CUDA runs get throughput-friendly loader defaults."""

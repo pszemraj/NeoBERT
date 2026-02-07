@@ -73,6 +73,32 @@ def _move_batch_to_device(batch: BatchEncoding, device: torch.device) -> BatchEn
     return send_to_device(batch, device, non_blocking=True)
 
 
+def _ensure_pinned_cpu_batch(batch: BatchEncoding) -> BatchEncoding:
+    """Pin CPU tensor values in a batch for async host->device transfer.
+
+    ``torch.cat``/``torch.split`` on pinned tensors produce non-pinned outputs.
+    Packed-batch stitching can therefore drop pinned memory guarantees unless we
+    re-pin the final CPU tensors before ``send_to_device(..., non_blocking=True)``.
+
+    :param BatchEncoding batch: Batch mapping of tensors/lists/scalars.
+    :return BatchEncoding: Batch with CPU tensors pinned when needed.
+    """
+    repinned = False
+    pinned_batch: BatchEncoding = dict(batch)
+    for key, value in batch.items():
+        if not torch.is_tensor(value):
+            continue
+        if value.device.type != "cpu":
+            continue
+        if value.is_pinned():
+            continue
+        pinned_batch[key] = value.pin_memory()
+        repinned = True
+    if not repinned:
+        return batch
+    return pinned_batch
+
+
 def _promote_tmp_checkpoint_dir(tmp_path: Path, final_path: Path) -> None:
     """Promote ``tmp_path`` to ``final_path`` with crash-safe replacement.
 
@@ -1605,6 +1631,8 @@ def trainer(cfg: Config) -> None:
                 continue
 
             if manual_device_move:
+                if pin_memory and accelerator.device.type == "cuda":
+                    batch = _ensure_pinned_cpu_batch(batch)
                 batch = _move_batch_to_device(batch, accelerator.device)
 
             # Update number of batches only when we will execute a backward pass.
