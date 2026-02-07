@@ -2,12 +2,14 @@
 """Tests for streaming dataset tokenization helpers."""
 
 import unittest
+from unittest.mock import patch
 
 from datasets import Dataset
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 
 from neobert.tokenizer import tokenize
+from neobert.tokenizer.tokenizer import get_tokenizer
 
 
 class TestStreamingTokenize(unittest.TestCase):
@@ -64,3 +66,26 @@ class TestStreamingTokenize(unittest.TestCase):
         self.assertIn("special_tokens_mask_text_b", first)
         self.assertLessEqual(len(first["input_ids_text_a"]), 4)
         self.assertLessEqual(len(first["input_ids_text_b"]), 4)
+
+    def test_get_tokenizer_pair_template_uses_single_bos(self):
+        """Ensure fallback pair template does not inject BOS before sentence B."""
+        base = self._make_tokenizer()
+        # Trigger the fallback special-token branch.
+        base.mask_token = None
+
+        with patch(
+            "neobert.tokenizer.tokenizer.AutoTokenizer.from_pretrained",
+            return_value=base,
+        ):
+            tokenizer = get_tokenizer("dummy-tokenizer", max_length=32)
+
+        pair_ids = tokenizer("hello", "world", add_special_tokens=True)["input_ids"]
+        bos = tokenizer.bos_token_id
+        sep = tokenizer.sep_token_id
+        eos = tokenizer.eos_token_id
+
+        self.assertEqual(pair_ids[0], bos)
+        self.assertEqual(pair_ids[-1], eos)
+        self.assertEqual(sum(token_id == bos for token_id in pair_ids), 1)
+        first_sep_idx = pair_ids.index(sep)
+        self.assertNotEqual(pair_ids[first_sep_idx + 1], bos)

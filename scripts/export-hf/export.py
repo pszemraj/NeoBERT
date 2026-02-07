@@ -23,7 +23,7 @@ import torch
 import transformers
 import yaml
 from safetensors.torch import load_file, save_file
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 
 def load_config(config_path: Path) -> Dict[str, Any]:
@@ -70,6 +70,58 @@ def load_tokenizer_info(tokenizer_info_path: Path) -> Optional[Dict[str, Any]]:
         return json.load(f)
 
 
+def _is_deepspeed_tag_dir(path: Path) -> bool:
+    """Return True when ``path`` looks like a DeepSpeed ZeRO tag directory.
+
+    :param Path path: Candidate checkpoint directory.
+    :return bool: True when DeepSpeed shard files are present.
+    """
+    if not path.is_dir():
+        return False
+    patterns = (
+        "mp_rank_*_model_states.pt",
+        "zero_pp_rank_*_mp_rank_*_optim_states.pt",
+        "bf16_zero_pp_rank_*_mp_rank_*_optim_states.pt",
+    )
+    return any(any(path.glob(pattern)) for pattern in patterns)
+
+
+def _align_tokenizer_vocab_for_export(
+    tokenizer: PreTrainedTokenizerBase,
+    target_vocab_size: int,
+) -> int:
+    """Align tokenizer length with model vocab size for exported artifacts.
+
+    :param PreTrainedTokenizerBase tokenizer: Tokenizer loaded from checkpoint.
+    :param int target_vocab_size: Expected model vocabulary size.
+    :return int: Number of added placeholder tokens.
+    :raises ValueError: If tokenizer length exceeds model vocab size.
+    """
+    current_size = len(tokenizer)
+    if current_size == target_vocab_size:
+        return 0
+    if current_size > target_vocab_size:
+        raise ValueError(
+            "Tokenizer length exceeds model vocab_size in checkpoint: "
+            f"len(tokenizer)={current_size} > vocab_size={target_vocab_size}."
+        )
+
+    needed = target_vocab_size - current_size
+    extra_tokens = [
+        f"<|neobert_extra_token_{idx}|>"
+        for idx in range(current_size, current_size + needed)
+    ]
+    added = tokenizer.add_tokens(extra_tokens, special_tokens=False)
+    final_size = len(tokenizer)
+    if added != needed or final_size != target_vocab_size:
+        raise ValueError(
+            "Failed to align tokenizer vocabulary for export: "
+            f"needed={needed}, added={added}, final_size={final_size}, "
+            f"target={target_vocab_size}."
+        )
+    return added
+
+
 def load_state_dict_from_checkpoint(checkpoint_path: Path) -> Dict[str, torch.Tensor]:
     """Load a training state dict from a checkpoint directory.
 
@@ -98,7 +150,15 @@ def load_state_dict_from_checkpoint(checkpoint_path: Path) -> Dict[str, torch.Te
         ) from exc
 
     try:
-        state_dict = get_fp32_state_dict_from_zero_checkpoint(str(checkpoint_path))
+        if _is_deepspeed_tag_dir(checkpoint_path):
+            # Trainer checkpoints are step-tag directories (e.g. ".../100000").
+            # zero_to_fp32 expects (root, tag) in this layout.
+            state_dict = get_fp32_state_dict_from_zero_checkpoint(
+                str(checkpoint_path.parent),
+                tag=checkpoint_path.name,
+            )
+        else:
+            state_dict = get_fp32_state_dict_from_zero_checkpoint(str(checkpoint_path))
     except Exception as exc:
         raise FileNotFoundError(
             "model.safetensors not found in "
@@ -560,6 +620,16 @@ def export_checkpoint(checkpoint_path: Path, output_dir: Path | None = None) -> 
 
         # Load the tokenizer
         tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_dir))
+        added_tokens = _align_tokenizer_vocab_for_export(
+            tokenizer,
+            int(model_config["vocab_size"]),
+        )
+        if added_tokens > 0:
+            print(
+                "  Added "
+                f"{added_tokens} tokenizer placeholder tokens to match model vocab_size="
+                f"{model_config['vocab_size']}"
+            )
 
         # Get max_position_embeddings from model config
         max_pos = model_config["max_position_embeddings"]

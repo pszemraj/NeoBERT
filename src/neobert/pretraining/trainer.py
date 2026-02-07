@@ -159,6 +159,78 @@ def _promote_tmp_checkpoint_dir(tmp_path: Path, final_path: Path) -> None:
         shutil.rmtree(backup_path)
 
 
+def _write_deepspeed_latest_file(checkpoint_root: Path, tag: str) -> None:
+    """Write DeepSpeed ``latest`` indirection for a checkpoint root.
+
+    DeepSpeed's fp32 conversion helper resolves ``tag=None`` via this file, so
+    we keep it updated after tmp->final tag promotion.
+
+    :param Path checkpoint_root: DeepSpeed checkpoint root directory.
+    :param str tag: Active checkpoint tag directory name.
+    """
+    latest_path = checkpoint_root / "latest"
+    latest_path.write_text(f"{tag}\n", encoding="utf-8")
+
+
+def _pad_tokenizer_to_multiple(
+    tokenizer: PreTrainedTokenizerBase,
+    *,
+    multiple: int = 128,
+) -> tuple[int, int, int]:
+    """Pad tokenizer length to ``multiple`` by adding inert extra tokens.
+
+    The model uses rounded embedding sizes for tensor-core efficiency. Adding
+    explicit placeholder tokens keeps tokenizer/model vocab contracts aligned.
+
+    :param PreTrainedTokenizerBase tokenizer: Tokenizer to mutate.
+    :param int multiple: Target rounding multiple.
+    :return tuple[int, int, int]: ``(original_size, padded_size, added_count)``.
+    """
+    original_size = len(tokenizer)
+    padded_size = round_up_to_multiple(original_size, multiple)
+    if padded_size == original_size:
+        return original_size, padded_size, 0
+
+    needed = padded_size - original_size
+    extra_tokens = [
+        f"<|neobert_extra_token_{idx}|>"
+        for idx in range(original_size, original_size + needed)
+    ]
+    added = tokenizer.add_tokens(extra_tokens, special_tokens=False)
+    final_size = len(tokenizer)
+    if added != needed or final_size != padded_size:
+        raise RuntimeError(
+            "Failed to pad tokenizer vocabulary to requested multiple: "
+            f"needed={needed}, added={added}, final_size={final_size}, "
+            f"target={padded_size}."
+        )
+    return original_size, final_size, added
+
+
+def _sync_tokenizer_derived_config(
+    cfg: Config,
+    tokenizer: PreTrainedTokenizerBase,
+) -> tuple[int, int, int]:
+    """Synchronize tokenizer-derived model config fields.
+
+    :param Config cfg: Runtime configuration to mutate.
+    :param PreTrainedTokenizerBase tokenizer: Active tokenizer instance.
+    :return tuple[int, int, int]: ``(original_vocab_size, resolved_vocab_size, added)``.
+    """
+    original_vocab_size, resolved_vocab_size, added_tokens = _pad_tokenizer_to_multiple(
+        tokenizer,
+        multiple=128,
+    )
+
+    cfg.model.vocab_size = resolved_vocab_size
+    cfg.tokenizer.vocab_size = resolved_vocab_size
+    if tokenizer.pad_token_id is None:
+        raise ValueError("Tokenizer must define pad_token_id for pretraining.")
+    cfg.model.pad_token_id = int(tokenizer.pad_token_id)
+
+    return original_vocab_size, resolved_vocab_size, added_tokens
+
+
 def _parse_split_slice(split: str) -> Tuple[str, Optional[str], Optional[str]]:
     """Parse a split string with optional slice notation.
 
@@ -1044,21 +1116,30 @@ def trainer(cfg: Config) -> None:
             max_length=cfg.tokenizer.max_length,
         )
 
-    actual_vocab_size = len(tokenizer)
-    rounded_vocab_size = round_up_to_multiple(actual_vocab_size, 128)
-    if (
-        cfg.model.vocab_size != rounded_vocab_size
-        or cfg.tokenizer.vocab_size != rounded_vocab_size
+    prior_model_vocab_size = int(cfg.model.vocab_size)
+    prior_tokenizer_vocab_size = int(cfg.tokenizer.vocab_size)
+    original_vocab_size, resolved_vocab_size, added_tokens = (
+        _sync_tokenizer_derived_config(
+            cfg,
+            tokenizer,
+        )
+    )
+    if accelerator.is_main_process and (
+        prior_model_vocab_size != resolved_vocab_size
+        or prior_tokenizer_vocab_size != resolved_vocab_size
     ):
-        if accelerator.is_main_process:
-            logger.warning(
-                "Config vocab_size updated: tokenizer=%s rounded to %s (was model=%s).",
-                actual_vocab_size,
-                rounded_vocab_size,
-                cfg.model.vocab_size,
-            )
-    cfg.model.vocab_size = rounded_vocab_size
-    cfg.tokenizer.vocab_size = rounded_vocab_size
+        logger.warning(
+            "Config vocab_size updated: tokenizer len=%s -> %s (was model=%s).",
+            original_vocab_size,
+            resolved_vocab_size,
+            prior_model_vocab_size,
+        )
+    if accelerator.is_main_process and added_tokens > 0:
+        logger.info(
+            "Added %s inert tokenizer tokens to align tokenizer/model vocab_size=%s.",
+            added_tokens,
+            resolved_vocab_size,
+        )
 
     # Tokenization strategy for packed sequences: strip special tokens and reinsert
     # boundaries in the collator to avoid duplicate BOS/EOS/SEP tokens.
@@ -1359,8 +1440,8 @@ def trainer(cfg: Config) -> None:
     # Debug print
     if cfg.debug:
         print(f"Config model.vocab_size: {cfg.model.vocab_size}")
-        print(f"Tokenizer vocab_size: {tokenizer.vocab_size}")
-        print(f"Tokenizer len(): {len(tokenizer)}")
+        print(f"Tokenizer base vocab_size: {tokenizer.vocab_size}")
+        print(f"Tokenizer total len(): {len(tokenizer)}")
         print(f"Tokenizer pad_token_id: {tokenizer.pad_token_id}")
 
     # Keep this mapping in sync with ModelConfig fields to avoid config drift.
@@ -1379,7 +1460,7 @@ def trainer(cfg: Config) -> None:
         embedding_init_range=cfg.model.embedding_init_range,
         decoder_init_range=cfg.model.decoder_init_range,
         classifier_init_range=cfg.model.classifier_init_range,
-        pad_token_id=tokenizer.pad_token_id,
+        pad_token_id=cfg.model.pad_token_id,
         attn_backend=cfg.model.attn_backend,
         kernel_backend=cfg.model.kernel_backend,
         ngpt=cfg.model.ngpt,
@@ -1890,9 +1971,10 @@ def trainer(cfg: Config) -> None:
 
                     checkpoint_path = tmp_path
                     if accelerator.distributed_type is DistributedType.DEEPSPEED:
-                        # DeepSpeed checkpoints are not directly portable; use zero_to_fp32 to export.
-                        # DeepSpeed writes into model_checkpoint_dir/tmp_tag, which we later rename
-                        # atomically alongside config/tokenizer for a single cohesive checkpoint.
+                        # DeepSpeed writes into model_checkpoint_dir/<tag>. We save to a
+                        # temporary tag and atomically promote it to the final numeric tag,
+                        # then refresh root/latest so zero_to_fp32 helpers can still resolve
+                        # canonical (root, tag) checkpoint layout.
                         model.save_checkpoint(model_checkpoint_dir, tag=tmp_tag)
                     else:
                         save_model_safetensors(
@@ -1910,6 +1992,8 @@ def trainer(cfg: Config) -> None:
                         tokenizer_info = {
                             "tokenizer_name": cfg.tokenizer.path or cfg.tokenizer.name,
                             "vocab_size": cfg.model.vocab_size,
+                            "base_vocab_size": tokenizer.vocab_size,
+                            "total_vocab_size": len(tokenizer),
                             "pad_token_id": tokenizer.pad_token_id,
                         }
                         tokenizer_info_path = checkpoint_path / "tokenizer_info.json"
@@ -1929,6 +2013,10 @@ def trainer(cfg: Config) -> None:
                     if accelerator.is_main_process:
                         final_path = model_checkpoint_dir / step_tag
                         _promote_tmp_checkpoint_dir(checkpoint_path, final_path)
+                        if accelerator.distributed_type is DistributedType.DEEPSPEED:
+                            # Keep DeepSpeed root semantics valid even though we
+                            # atomically rename tmp tags to final numeric tags.
+                            _write_deepspeed_latest_file(model_checkpoint_dir, step_tag)
                         checkpoint_path = final_path
                         # Use logger instead of accelerator.print to avoid progress bar interference
                         logger.info(

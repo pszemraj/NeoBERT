@@ -100,13 +100,13 @@ def get_tokenizer(
                 "Overriding existing tokenizer post_processor to enforce MLM-style "
                 "special tokens; custom post-processing will be replaced."
             )
+        # Pair template intentionally uses a single BOS/CLS token:
+        # "<s> A </s> B </s>". Do not insert an extra BOS before $B.
         tokenizer._tokenizer.post_processor = TemplateProcessing(
             single=tokenizer.bos_token + " $A " + tokenizer.eos_token,
             pair=tokenizer.bos_token
             + " $A "
             + tokenizer.sep_token
-            + " "
-            + tokenizer.bos_token
             + " $B "
             + tokenizer.eos_token,
             special_tokens=[

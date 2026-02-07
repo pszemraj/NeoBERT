@@ -17,6 +17,8 @@ from neobert.config import Config, ConfigLoader
 from neobert.pretraining.trainer import (
     _ensure_pinned_cpu_batch,
     _resolve_loader_perf_settings,
+    _sync_tokenizer_derived_config,
+    _write_deepspeed_latest_file,
     trainer,
 )
 
@@ -285,6 +287,32 @@ class TestPretrainComponents(unittest.TestCase):
         self.assertTrue(out["input_ids"].is_pinned())
         self.assertTrue(out["nested"]["labels"].is_pinned())
         self.assertTrue(out["nested"]["meta"][1].is_pinned())
+
+    def test_sync_tokenizer_derived_config_pads_vocab_and_pad_id(self):
+        """Ensure config is synchronized with tokenizer-derived vocab/pad fields."""
+        cfg = Config()
+        cfg.model.vocab_size = 17
+        cfg.tokenizer.vocab_size = 17
+        tokenizer = self._make_tokenizer()
+
+        original, resolved, added = _sync_tokenizer_derived_config(cfg, tokenizer)
+
+        self.assertEqual(original, 8)
+        self.assertEqual(resolved, 128)
+        self.assertEqual(added, 120)
+        self.assertEqual(len(tokenizer), 128)
+        self.assertEqual(cfg.model.vocab_size, 128)
+        self.assertEqual(cfg.tokenizer.vocab_size, 128)
+        self.assertEqual(cfg.model.pad_token_id, tokenizer.pad_token_id)
+
+    def test_write_deepspeed_latest_file(self):
+        """Ensure DeepSpeed root latest indirection is refreshed correctly."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _write_deepspeed_latest_file(root, "12345")
+            latest_path = root / "latest"
+            self.assertTrue(latest_path.exists())
+            self.assertEqual(latest_path.read_text(encoding="utf-8"), "12345\n")
 
     def test_resolve_loader_perf_settings_cuda_defaults(self):
         """Ensure CUDA runs get throughput-friendly loader defaults."""
