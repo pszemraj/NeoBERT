@@ -1762,7 +1762,13 @@ def trainer(cfg: Config) -> None:
                     metrics["train/local_num_pred"] = int(local_num_pred.item())
                     metrics["train/local_sum_loss"] = float(local_sum_loss.item())
                     metrics["train/local_num_correct"] = int(local_num_correct.item())
-                    metrics.log(accelerator)
+                    metrics.log(
+                        accelerator,
+                        emit_console=(
+                            (not wandb_enabled) and accelerator.is_main_process
+                        ),
+                        console_fn=accelerator.print,
+                    )
                     local_samples.zero_()
                     local_tokens.zero_()
                     local_num_pred.zero_()

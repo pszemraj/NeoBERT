@@ -44,6 +44,24 @@ logger = logging.getLogger(__name__)
 PackedSeqLens = torch.Tensor | list[list[int]]
 
 
+def _is_torch_compiling() -> bool:
+    """Return whether execution is inside a torch.compile trace.
+
+    :return bool: True when the current frame is being compiled.
+    """
+    compiler = getattr(torch, "compiler", None)
+    if compiler is not None:
+        is_compiling = getattr(compiler, "is_compiling", None)
+        if callable(is_compiling):
+            return bool(is_compiling())
+    dynamo = getattr(torch, "_dynamo", None)
+    if dynamo is not None:
+        is_compiling = getattr(dynamo, "is_compiling", None)
+        if callable(is_compiling):
+            return bool(is_compiling())
+    return False
+
+
 def _normalize_pad_mask(pad_mask: torch.Tensor) -> torch.Tensor:
     """Normalize additive pad masks to a broadcast-friendly 4D shape.
 
@@ -806,6 +824,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
         if (
             packed_seqlens is not None
             and self.config.attn_backend == "flash_attn_varlen"
+            and not _is_torch_compiling()
         ):
             packed_flash_meta = prepare_packed_flash_metadata(
                 packed_seqlens,
@@ -961,6 +980,7 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
         if (
             packed_seqlens is not None
             and self.config.attn_backend == "flash_attn_varlen"
+            and not _is_torch_compiling()
         ):
             packed_flash_meta = prepare_packed_flash_metadata(
                 packed_seqlens,
