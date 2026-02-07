@@ -49,12 +49,15 @@ python tests/run_tests.py --no-pytest
 ## Common Failures
 
 1. Import errors
+
 - install editable package (`pip install -e .[dev]`).
 
-2. Device mismatches
+1. Device mismatches
+
 - ensure tensors and models are on the same device in assertions.
 
-3. Slow tests
+1. Slow tests
+
 - lower steps/batch sizes and use tiny configs.
 
 ## Related Docs

@@ -1,5 +1,28 @@
 # Configuration Reference
 
+---
+
+- [Overview](#overview)
+- [Important Behavior](#important-behavior)
+- [Top-Level (`Config`)](#top-level-config)
+- [Model (`model`)](#model-model)
+- [Dataset (`dataset`)](#dataset-dataset)
+- [Tokenizer (`tokenizer`)](#tokenizer-tokenizer)
+- [Data Collator (`datacollator`)](#data-collator-datacollator)
+- [Trainer (`trainer`)](#trainer-trainer)
+- [Optimizer (`optimizer`)](#optimizer-optimizer)
+  - [Muon config (`optimizer.muon_config`)](#muon-config-optimizermuon_config)
+- [Scheduler (`scheduler`)](#scheduler-scheduler)
+- [W\&B (`wandb`)](#wb-wandb)
+- [GLUE (`glue`)](#glue-glue)
+- [Contrastive (`contrastive`)](#contrastive-contrastive)
+- [CLI Notes](#cli-notes)
+- [Related Docs](#related-docs)
+
+---
+
+## Overview
+
 NeoBERT configs are YAML files mapped to dataclasses in `src/neobert/config.py`.
 CLI overrides use dot notation, for example:
 
@@ -114,6 +137,7 @@ datacollator.max_length: int | None = None
 ```
 
 Notes:
+
 - `mask_all: false` uses standard 80/10/10 MLM corruption.
 - `mask_all: true` uses 100% `[MASK]` replacement for selected tokens.
 - `pack_sequences: true` is fastest with `model.attn_backend: flash_attn_varlen`
@@ -167,6 +191,7 @@ trainer.eval_batch_size: int | None = None
 ```
 
 Notes:
+
 - `enforce_full_packed_batches` is useful for stable packed throughput; measure
   `tokens/sec` instead of `steps/sec` when comparing settings.
 - `log_train_accuracy` and `log_grad_norm` are optional and can add overhead.
@@ -216,6 +241,7 @@ scheduler.decay_percent: float | None = None
 ```
 
 Precedence:
+
 - `warmup_percent` overrides `warmup_steps`
 - `decay_percent` overrides `decay_steps`
 
@@ -234,6 +260,7 @@ wandb.dir: str = "logs/wandb"
 ```
 
 Compatibility behavior:
+
 - if a config includes `wandb:` but omits `wandb.enabled`, logging is auto-enabled.
 
 ## GLUE (`glue`)

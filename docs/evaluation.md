@@ -59,17 +59,21 @@ python scripts/evaluation/run_mteb.py \
 ## Common Evaluation Pitfalls
 
 1. Wrong checkpoint path
+
 - verify `glue.pretrained_checkpoint_dir`, `glue.pretrained_checkpoint`, and
   `glue.pretrained_model_path` in GLUE configs.
 
-2. Flat/random GLUE metrics
+1. Flat/random GLUE metrics
+
 - confirm pretrained weights were actually loaded (or intentionally set
   `allow_random_weights: true`).
 
-3. OOM during eval
+1. OOM during eval
+
 - reduce eval batch size and/or sequence length.
 
-4. Attention backend confusion
+1. Attention backend confusion
+
 - GLUE path is SDPA-oriented; packed flash varlen is a training optimization.
 
 ## Related Docs

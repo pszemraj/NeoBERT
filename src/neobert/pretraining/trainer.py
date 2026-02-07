@@ -1647,7 +1647,7 @@ def trainer(cfg: Config) -> None:
                     log_freq=getattr(cfg.wandb, "log_interval", 100),
                 )
 
-    # Loss function — use Liger CE when available, else standard PyTorch
+    # Loss function - use Liger CE when available, else standard PyTorch
     resolved_kb = resolve_kernel_backend(cfg.model.kernel_backend)
     train_loss_fn = get_cross_entropy_loss(
         reduction="sum",

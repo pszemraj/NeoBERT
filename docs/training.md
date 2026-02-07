@@ -5,14 +5,14 @@ is in [configuration.md](configuration.md).
 
 ## Entry Points
 
-| Script | Purpose |
-| --- | --- |
-| `scripts/pretraining/pretrain.py` | MLM pretraining |
-| `scripts/pretraining/preprocess.py` | tokenize and save dataset to disk |
-| `scripts/pretraining/tokenize_dataset.py` | standalone tokenization helper |
-| `scripts/pretraining/longer_seq.py` | continue run at longer context |
-| `scripts/contrastive/finetune.py` | contrastive fine-tuning |
-| `scripts/contrastive/preprocess.py` | contrastive dataset preprocessing |
+| Script                                    | Purpose                           |
+| ----------------------------------------- | --------------------------------- |
+| `scripts/pretraining/pretrain.py`         | MLM pretraining                   |
+| `scripts/pretraining/preprocess.py`       | tokenize and save dataset to disk |
+| `scripts/pretraining/tokenize_dataset.py` | standalone tokenization helper    |
+| `scripts/pretraining/longer_seq.py`       | continue run at longer context    |
+| `scripts/contrastive/finetune.py`         | contrastive fine-tuning           |
+| `scripts/contrastive/preprocess.py`       | contrastive dataset preprocessing |
 
 ## Pretraining
 
@@ -38,13 +38,16 @@ python scripts/pretraining/pretrain.py \
 Enable packing via `datacollator.pack_sequences: true`.
 
 Recommended for throughput:
+
 - `model.attn_backend: flash_attn_varlen`
 - install flash-attn (`pip install -e .[flash]`)
 
 Supported but slower:
+
 - `pack_sequences: true` with `attn_backend: sdpa` uses segmented fallback.
 
 Useful control:
+
 - `trainer.enforce_full_packed_batches: true` keeps full microbatches by
   buffering undersized packed outputs (better token throughput stability,
   typically lower step/s).
@@ -52,6 +55,7 @@ Useful control:
 ## Dataloader Throughput Knobs
 
 Primary knobs are in `dataset.*`:
+
 - `num_workers`
 - `pin_memory`
 - `persistent_workers`
@@ -95,6 +99,7 @@ python scripts/pretraining/pretrain.py \
 ```
 
 Notes:
+
 - resume operates from `<output_dir>/checkpoints/`.
 - for streaming datasets, exact data position is not preserved, so resume is not
   fully reproducible for data order.
@@ -110,7 +115,7 @@ python scripts/pretraining/preprocess.py \
   configs/pretraining/pretrain_neobert.yaml
 ```
 
-2. Standalone tokenizer helper:
+1. Standalone tokenizer helper:
 
 ```bash
 python scripts/pretraining/tokenize_dataset.py \

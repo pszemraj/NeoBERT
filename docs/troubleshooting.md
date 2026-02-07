@@ -12,10 +12,12 @@ Common runtime and performance issues when training/evaluating NeoBERT.
 ### Packed training is slow
 
 Symptoms:
+
 - lower-than-expected `tokens/sec`
 - high CPU usage, GPU bubbles
 
 Checklist:
+
 1. use `attn_backend: flash_attn_varlen` for packed runs,
 2. ensure flash-attn is installed,
 3. tune dataloader knobs (`dataset.num_workers`, `pin_memory`,
@@ -26,10 +28,12 @@ Checklist:
 ### `torch.compile` warnings/recompiles
 
 Typical warnings:
+
 - symbolic shape guard churn,
 - recompile-limit messages.
 
 Actions:
+
 - keep compile static unless needed (`trainer.torch_compile_dynamic: false` or unset),
 - reduce dynamic control flow and per-step Python-side variability,
 - use `TORCH_LOGS="recompiles"` to inspect root causes.

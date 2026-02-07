@@ -5,6 +5,7 @@ Export NeoBERT training checkpoints to a Hugging Face-compatible folder.
 ## Supported Inputs
 
 Point export to a checkpoint directory containing:
+
 - `config.yaml`
 - either `model.safetensors` (native) or DeepSpeed ZeRO checkpoint state
 - `tokenizer/` directory (required)
@@ -28,6 +29,7 @@ python scripts/export-hf/export.py \
 ## Export Output
 
 Generated folder contains:
+
 - `config.json`
 - `model.safetensors`
 - `pytorch_model.bin`

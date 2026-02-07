@@ -9,12 +9,13 @@ NeoBERT is an encoder architecture for masked-language-model pretraining,
 embedding extraction, and downstream evaluation (GLUE/MTEB).
 
 This fork adds:
+
 - configurable attention backends (`sdpa`, `flash_attn_varlen` for packed training),
 - optional Liger kernel dispatch (`kernel_backend: auto|liger|torch`),
 - safetensors-first checkpointing,
 - end-to-end training/eval/export scripts with config-driven workflows.
 
-Paper (original): https://arxiv.org/abs/2502.19587
+Paper (original): <https://arxiv.org/abs/2502.19587>
 
 ## Install
 
@@ -27,8 +28,9 @@ pip install -e .[dev]
 Optional extras:
 
 ```bash
+pip install -U -q packaging wheel ninja
 # Packed flash-attn training backend
-pip install -e .[flash]
+pip install -e .[flash] --no-build-isolation
 ```
 
 See [docs/troubleshooting.md](docs/troubleshooting.md) for environment issues.
@@ -46,13 +48,13 @@ python tests/run_tests.py
 
 ## Quick Commands
 
-| Task | Command |
-| --- | --- |
-| Pretrain | `python scripts/pretraining/pretrain.py configs/pretraining/pretrain_neobert.yaml` |
-| GLUE eval | `python scripts/evaluation/run_glue.py configs/glue/cola.yaml` |
+| Task      | Command                                                                                                              |
+| --------- | -------------------------------------------------------------------------------------------------------------------- |
+| Pretrain  | `python scripts/pretraining/pretrain.py configs/pretraining/pretrain_neobert.yaml`                                   |
+| GLUE eval | `python scripts/evaluation/run_glue.py configs/glue/cola.yaml`                                                       |
 | MTEB eval | `python scripts/evaluation/run_mteb.py configs/pretraining/pretrain_neobert.yaml --model_name_or_path outputs/<run>` |
-| Export HF | `python scripts/export-hf/export.py outputs/<run>/model_checkpoints/<step>` |
-| Tests | `python tests/run_tests.py` |
+| Export HF | `python scripts/export-hf/export.py outputs/<run>/model_checkpoints/<step>`                                          |
+| Tests     | `python tests/run_tests.py`                                                                                          |
 
 ## Documentation
 

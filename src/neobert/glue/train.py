@@ -801,7 +801,7 @@ def trainer(cfg: Config) -> None:
         output_dir.mkdir(parents=True, exist_ok=True)
     accelerator.wait_for_everyone()
 
-    # Force SDPA for GLUE — variable-length batches are incompatible with packed attention
+    # Force SDPA for GLUE - variable-length batches are incompatible with packed attention
     if hasattr(cfg.model, "attn_backend") and cfg.model.attn_backend != "sdpa":
         logger.warning(
             "Packed attention is not supported for GLUE evaluation due to "

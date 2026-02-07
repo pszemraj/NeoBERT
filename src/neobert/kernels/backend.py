@@ -167,7 +167,7 @@ class _AdaptiveRMSNorm(nn.Module):
 
     A single ``weight`` parameter is shared across both code-paths so the
     module can be constructed on CPU, moved to GPU, and seamlessly use the
-    faster Triton kernel — with no checkpoint-compatibility issues.
+    faster Triton kernel - with no checkpoint-compatibility issues.
     """
 
     def __init__(self, dim: int, eps: float = 1e-6) -> None:

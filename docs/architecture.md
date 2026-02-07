@@ -6,6 +6,7 @@ Source of truth remains the code under `src/neobert/`.
 ## Overview
 
 NeoBERT is a transformer encoder with:
+
 - fused QKV projection,
 - optional RoPE position encoding,
 - RMSNorm or LayerNorm,
@@ -62,6 +63,7 @@ NeoBERT is a transformer encoder with:
 ## nGPT Mode
 
 When `ngpt: true`, `NormNeoBERT` is used:
+
 - normalized residual interpolation,
 - learned scaling parameters for attention/MLP branches,
 - custom normalization dynamics relative to standard encoder blocks.
