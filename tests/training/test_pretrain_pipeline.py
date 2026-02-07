@@ -267,6 +267,25 @@ class TestPretrainComponents(unittest.TestCase):
         out_again = _ensure_pinned_cpu_batch(out)
         self.assertIs(out_again, out)
 
+    def test_ensure_pinned_cpu_batch_handles_nested_structures(self):
+        """Ensure nested tensor containers are repinned recursively."""
+        batch = {
+            "input_ids": torch.randint(0, 10, (2, 4), dtype=torch.long),
+            "nested": {
+                "labels": torch.randint(0, 10, (2, 4), dtype=torch.long),
+                "meta": ("a", torch.randint(0, 10, (1,), dtype=torch.long)),
+            },
+        }
+        try:
+            out = _ensure_pinned_cpu_batch(batch)
+        except RuntimeError as exc:
+            self.skipTest(f"pin_memory not supported in this environment: {exc}")
+            return
+
+        self.assertTrue(out["input_ids"].is_pinned())
+        self.assertTrue(out["nested"]["labels"].is_pinned())
+        self.assertTrue(out["nested"]["meta"][1].is_pinned())
+
     def test_resolve_loader_perf_settings_cuda_defaults(self):
         """Ensure CUDA runs get throughput-friendly loader defaults."""
         cfg = Config()

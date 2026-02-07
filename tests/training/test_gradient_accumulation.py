@@ -87,6 +87,19 @@ class TestGradientAccumulationTokenWeighting(unittest.TestCase):
         assert scale is not None
         self.assertAlmostEqual(float(scale.item()), 1.0, places=6)
 
+    def test_gradient_token_scale_matches_standard_formula_above_floor(self):
+        """Ensure scaling is standard token-mean normalization on normal updates."""
+        scale, clamped = _gradient_token_scale(
+            torch.tensor(64, dtype=torch.long),
+            num_processes=8,
+            grad_accumulation_steps=2,
+        )
+
+        self.assertFalse(clamped)
+        assert scale is not None
+        # standard scale: (num_processes * grad_accumulation_steps) / tokens_global
+        self.assertAlmostEqual(float(scale.item()), 16.0 / 64.0, places=6)
+
     def test_gradient_token_scale_zero_tokens_clamps_to_safe_scale(self):
         """Ensure empty masked batches use a safe clamped scale."""
         scale, clamped = _gradient_token_scale(

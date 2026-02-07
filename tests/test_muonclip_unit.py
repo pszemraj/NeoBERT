@@ -155,6 +155,26 @@ class TestAttentionHooks:
             assert freqs is None
             assert packed_seqlens is None
 
+    def test_hook_captures_cuda_inputs_into_pinned_cpu_buffers(self, model):
+        """CUDA hook capture should use pinned CPU buffers for async D2H copies."""
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA is required to validate pinned CPU capture path.")
+
+        from neobert.optimizer.muon_clip import NeoBERTAttentionHooks
+
+        model = model.to("cuda")
+        hook_system = NeoBERTAttentionHooks(model.config)
+        hook_system.register_hooks(model)
+
+        input_ids = torch.randint(0, 1000, (2, 64), device="cuda")
+        model(input_ids)
+
+        for layer_idx in range(2):
+            inputs, _, _, _ = hook_system.get_layer_data(layer_idx)
+            assert inputs is not None
+            assert inputs.device.type == "cpu"
+            assert inputs.is_pinned()
+
     def test_hook_clear_preserves_layer_slots(self, model):
         """Ensure clearing hook caches keeps stable dictionary cardinality."""
         from neobert.optimizer.muon_clip import NeoBERTAttentionHooks

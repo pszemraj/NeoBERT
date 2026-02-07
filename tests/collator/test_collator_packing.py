@@ -184,6 +184,29 @@ class TestCollatorPacking(unittest.TestCase):
         self.assertEqual(labels[0, 1], 4)
         self.assertEqual(labels[0, 2], -100)
 
+    def test_mask_all_false_keeps_hf_801010_corruption(self):
+        """Ensure default collator path does not force 100% [MASK] replacement."""
+        tokenizer = self._make_tokenizer()
+        collator = get_collator(
+            tokenizer=tokenizer,
+            mlm_probability=1.0,
+            mask_all=False,
+        )
+        features = [{"input_ids": [3] * 128}, {"input_ids": [4] * 128}]
+
+        with torch.random.fork_rng():
+            torch.manual_seed(0)
+            batch = collator(features)
+
+        labels = batch["labels"]
+        masked_positions = labels.ne(-100)
+        self.assertTrue(masked_positions.any())
+        replaced_ids = batch["input_ids"][masked_positions]
+        self.assertTrue(
+            (replaced_ids != tokenizer.mask_token_id).any(),
+            "Expected some masked positions to be random/original tokens under 80/10/10.",
+        )
+
     def test_packing_raises_when_pad_token_id_is_unresolved(self):
         """Ensure packing fails loudly when no pad token can be resolved."""
 

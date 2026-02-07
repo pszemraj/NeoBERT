@@ -358,6 +358,25 @@ class NeoBERTAttentionHooks:
             return None
 
     @_dynamo_disable
+    def _detach_to_cpu(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Detach ``tensor`` and cache it on CPU with async-friendly semantics.
+
+        CUDA tensors are copied into pinned host buffers with ``non_blocking=True``
+        so D2H transfer can overlap with device work. CPU tensors are detached in
+        place without extra copies.
+
+        :param torch.Tensor tensor: Tensor to detach/cache.
+        :return torch.Tensor: Detached CPU tensor.
+        """
+        detached = tensor.detach()
+        if detached.device.type != "cuda":
+            return detached.to("cpu")
+
+        pinned = torch.empty_like(detached, device="cpu", pin_memory=True)
+        pinned.copy_(detached, non_blocking=True)
+        return pinned
+
+    @_dynamo_disable
     def _qkv_input_hook(
         self, module: torch.nn.Module, inputs: tuple[Any, ...], output: Any
     ) -> None:
@@ -381,9 +400,9 @@ class NeoBERTAttentionHooks:
         # QK clipping stats toward the most recent microbatch by design.
         # We cache pre-projection inputs (not Q/K) to avoid duplicating large
         # QKV tensors in CPU memory; projections are recomputed only on clip
-        # steps (interval-gated) to keep the steady-state overhead low.
-        # Move to CPU to avoid retaining GPU activations when clipping is enabled.
-        self.layer_inputs[layer_idx] = x.detach().to("cpu")
+        # steps because prepare_for_forward() interval-gates hook enablement.
+        # Offload to pinned host memory so CUDA->CPU transfer can be async.
+        self.layer_inputs[layer_idx] = self._detach_to_cpu(x)
 
     @_dynamo_disable
     def _block_context_hook(
@@ -407,10 +426,10 @@ class NeoBERTAttentionHooks:
         packed_seqlens = inputs[3] if len(inputs) > 3 else None
 
         self.layer_pad_masks[layer_idx] = (
-            pad_mask.detach().to("cpu") if torch.is_tensor(pad_mask) else pad_mask
+            self._detach_to_cpu(pad_mask) if torch.is_tensor(pad_mask) else pad_mask
         )
         self.layer_freqs[layer_idx] = (
-            freqs_cis.detach().to("cpu") if torch.is_tensor(freqs_cis) else freqs_cis
+            self._detach_to_cpu(freqs_cis) if torch.is_tensor(freqs_cis) else freqs_cis
         )
         if packed_seqlens is not None:
             if torch.is_tensor(packed_seqlens):

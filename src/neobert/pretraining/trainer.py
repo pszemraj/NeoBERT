@@ -83,17 +83,49 @@ def _ensure_pinned_cpu_batch(batch: BatchEncoding) -> BatchEncoding:
     :param BatchEncoding batch: Batch mapping of tensors/lists/scalars.
     :return BatchEncoding: Batch with CPU tensors pinned when needed.
     """
-    repinned = False
-    pinned_batch: BatchEncoding = dict(batch)
-    for key, value in batch.items():
-        if not torch.is_tensor(value):
-            continue
-        if value.device.type != "cpu":
-            continue
-        if value.is_pinned():
-            continue
-        pinned_batch[key] = value.pin_memory()
-        repinned = True
+
+    def _pin_value(value: Any) -> tuple[Any, bool]:
+        if torch.is_tensor(value):
+            if value.device.type != "cpu" or value.is_pinned():
+                return value, False
+            return value.pin_memory(), True
+
+        if isinstance(value, dict):
+            updated: dict[Any, Any] = {}
+            changed = False
+            for key, inner in value.items():
+                pinned_inner, inner_changed = _pin_value(inner)
+                updated[key] = pinned_inner
+                changed = changed or inner_changed
+            if not changed:
+                return value, False
+            return updated, True
+
+        if isinstance(value, list):
+            updated_list: list[Any] = []
+            changed = False
+            for inner in value:
+                pinned_inner, inner_changed = _pin_value(inner)
+                updated_list.append(pinned_inner)
+                changed = changed or inner_changed
+            if not changed:
+                return value, False
+            return updated_list, True
+
+        if isinstance(value, tuple):
+            updated_items: list[Any] = []
+            changed = False
+            for inner in value:
+                pinned_inner, inner_changed = _pin_value(inner)
+                updated_items.append(pinned_inner)
+                changed = changed or inner_changed
+            if not changed:
+                return value, False
+            return tuple(updated_items), True
+
+        return value, False
+
+    pinned_batch, repinned = _pin_value(dict(batch))
     if not repinned:
         return batch
     return pinned_batch
@@ -488,20 +520,22 @@ def _gradient_token_scale(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute safe post-accumulation gradient scale.
 
-    We target per-token mean gradients for summed MLM losses, but clamp the
-    denominator to at least one masked token per rank per accumulation step to
-    avoid pathological gradient amplification on near-empty masked batches.
+    For normal updates, this matches standard token-mean scaling exactly:
+    ``scale = (num_processes * grad_accumulation_steps) / tokens_global``.
+    We only clamp the denominator to a small floor (one masked token per rank
+    per accumulation step) to avoid pathological amplification on near-empty
+    masked batches.
 
     :param torch.Tensor tokens_global: Global masked-token count for the update.
     :param int num_processes: Number of distributed processes.
     :param int grad_accumulation_steps: Gradient accumulation steps.
     :return tuple[torch.Tensor, torch.Tensor]: ``(scale, clamped)``.
     """
-    min_tokens = max(1, int(num_processes) * int(grad_accumulation_steps))
-    min_tokens_f = float(min_tokens)
-    clamped_tokens = torch.clamp(tokens_global.float(), min=min_tokens_f)
-    scale = (min_tokens_f / clamped_tokens).to(tokens_global.device)
-    clamped = tokens_global < min_tokens
+    token_floor = max(1, int(num_processes) * int(grad_accumulation_steps))
+    token_floor_f = float(token_floor)
+    clamped_tokens = torch.clamp(tokens_global.float(), min=token_floor_f)
+    scale = (token_floor_f / clamped_tokens).to(tokens_global.device)
+    clamped = tokens_global < token_floor
     return scale, clamped
 
 

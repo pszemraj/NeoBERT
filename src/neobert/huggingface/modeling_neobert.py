@@ -52,6 +52,8 @@ if _PACKAGE:
     _modeling_utils_candidates.append(f"{_PACKAGE}.modeling_utils")
 if _PARENT:
     _modeling_utils_candidates.append(f"{_PARENT}.modeling_utils")
+# HF export copies modeling_utils.py alongside model.py, so keep a bare-module
+# fallback for trust_remote_code loads where ``neobert`` is not installed.
 _modeling_utils_candidates.extend(["neobert.modeling_utils", "modeling_utils"])
 
 scaled_dot_product_attention_compat = _import_symbol(
@@ -66,6 +68,7 @@ swiglu_intermediate_size = _import_symbol(
 _rotary_candidates = []
 if _PACKAGE:
     _rotary_candidates.append(f"{_PACKAGE}.rotary")
+# Same rationale as modeling_utils: exported repos include a local rotary.py.
 _rotary_candidates.extend(["neobert.huggingface.rotary", "rotary"])
 
 apply_rotary_emb = _import_symbol(

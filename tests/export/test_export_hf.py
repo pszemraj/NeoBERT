@@ -90,3 +90,12 @@ class TestExportHF(unittest.TestCase):
                 model_text,
             )
             self.assertNotIn("from ..modeling_utils import", model_text)
+
+    def test_get_torch_dtype_from_state_dict_handles_uncommon_dtypes(self):
+        """Ensure dtype export path uses generic torch dtype string names."""
+        export = self.export
+        state_dict = {"model.encoder.weight": torch.zeros(2, 2, dtype=torch.complex64)}
+        self.assertEqual(
+            export.get_torch_dtype_from_state_dict(state_dict),
+            "complex64",
+        )

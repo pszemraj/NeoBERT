@@ -15,7 +15,11 @@ from transformers import (
 
 # Adapted from https://github.com/huggingface/transformers/blob/125de4164364420854d7fe537a9bd2fdaf7369d4/src/transformers/data/data_collator.py#L828
 class CustomCollatorForMLM(DataCollatorForLanguageModeling):
-    """Language modeling collator that masks all sampled tokens."""
+    """Language modeling collator that masks all sampled tokens.
+
+    This path is opt-in (``mask_all=True``). Default pretraining uses
+    ``DataCollatorForLanguageModeling`` and keeps BERT-style 80/10/10 corruption.
+    """
 
     def torch_mask_tokens(
         self, inputs: Any, special_tokens_mask: Optional[Any] = None
@@ -363,6 +367,7 @@ def get_collator(
         )
         if mask_all
         else DataCollatorForLanguageModeling(
+            # Keep HF's standard 80/10/10 masking policy when ``mask_all=False``.
             tokenizer=tokenizer,
             return_tensors="pt",
             mlm_probability=mlm_probability,

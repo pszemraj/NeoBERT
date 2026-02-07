@@ -1081,6 +1081,8 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
             self.config.tie_word_embeddings = False
             should_tie = False
 
+        # ``post_init()`` applies HF-style init; explicit ``tie_weights()`` keeps
+        # decoder/input embedding aliasing deterministic in this training module.
         self.post_init()
         if should_tie:
             self.tie_weights()

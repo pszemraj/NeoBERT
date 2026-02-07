@@ -52,19 +52,10 @@ def get_torch_dtype_from_state_dict(state_dict: Dict[str, torch.Tensor]) -> str:
         raise ValueError(f"Expected torch.Tensor, got {type(first_weight)}")
 
     dtype = first_weight.dtype
-    if dtype == torch.float32:
-        return "float32"
-    elif dtype == torch.float16:
-        return "float16"
-    elif dtype == torch.bfloat16:
-        return "bfloat16"
-    elif dtype == torch.float64:
-        return "float64"
-    else:
-        # For any other dtype, fall back to the string representation
-        dtype_str = str(dtype).replace("torch.", "")
+    dtype_str = str(dtype).split(".")[-1]
+    if dtype_str not in {"float16", "bfloat16", "float32", "float64"}:
         print(f"Warning: Found unexpected dtype {dtype}, using '{dtype_str}'")
-        return dtype_str
+    return dtype_str
 
 
 def load_tokenizer_info(tokenizer_info_path: Path) -> Optional[Dict[str, Any]]:
