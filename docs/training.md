@@ -71,8 +71,7 @@ if these are unset/suboptimal.
 - `trainer.torch_compile_backend`: `inductor | aot_eager | eager`
 - `trainer.torch_compile_dynamic`: optional override for dynamic-shape compile;
   default behavior prefers static-shape compile for stability.
-- `trainer.masked_only_objective`: enable masked-only MLM loss path
-- `trainer.masked_only_allow_original_fallback_train`: keep legacy full-logits fallback
+- `trainer.mlm_loss_mode`: `masked_only | original`
 
 ## Checkpointing and Resume
 

@@ -1688,44 +1688,28 @@ def trainer(cfg: Config) -> None:
                     log_freq=getattr(cfg.wandb, "log_interval", 100),
                 )
 
-    use_masked_only_objective = bool(
-        getattr(cfg.trainer, "masked_only_objective", True)
-    )
-    masked_only_strict_fused_train = bool(
-        getattr(cfg.trainer, "masked_only_strict_fused_train", False)
-    )
-    masked_only_allow_checkpoint_fallback_train = bool(
-        getattr(cfg.trainer, "masked_only_allow_checkpoint_fallback_train", False)
-    )
-    masked_only_allow_original_fallback_train = bool(
-        getattr(cfg.trainer, "masked_only_allow_original_fallback_train", True)
-    )
+    mlm_loss_mode = str(getattr(cfg.trainer, "mlm_loss_mode", "masked_only")).lower()
+    if mlm_loss_mode not in {"masked_only", "original"}:
+        raise ValueError(
+            "trainer.mlm_loss_mode must be 'masked_only' or 'original', got "
+            f"{cfg.trainer.mlm_loss_mode!r}."
+        )
 
     train_loss_fn: Optional[torch.nn.Module] = None
     masked_objective: Optional[MaskedPositionsOnlyMLMObjective] = None
-    if use_masked_only_objective:
+    if mlm_loss_mode == "masked_only":
         masked_objective = MaskedPositionsOnlyMLMObjective(
             ignore_index=-100,
-            strict_fused_when_training=masked_only_strict_fused_train,
-            allow_checkpoint_fallback_train=masked_only_allow_checkpoint_fallback_train,
-            allow_original_full_logits_fallback_train=masked_only_allow_original_fallback_train,
         )
-        logger.info(
-            "Using masked-only MLM objective (strict_fused=%s, "
-            "checkpoint_fallback=%s, original_fallback=%s).",
-            masked_only_strict_fused_train,
-            masked_only_allow_checkpoint_fallback_train,
-            masked_only_allow_original_fallback_train,
-        )
+        logger.info("Using masked-only MLM objective.")
     else:
-        # Legacy full-logits path for compatibility/debugging.
         resolved_kb = resolve_kernel_backend(cfg.model.kernel_backend)
         train_loss_fn = get_cross_entropy_loss(
             reduction="sum",
             ignore_index=-100,
             backend=resolved_kb,
         )
-        logger.info("Using legacy full-logits MLM loss path.")
+        logger.info("Using original full-logits MLM loss path.")
     eval_max_batches = getattr(cfg.trainer, "eval_max_batches", None)
     if isinstance(eval_max_batches, int) and eval_max_batches <= 0:
         eval_max_batches = None

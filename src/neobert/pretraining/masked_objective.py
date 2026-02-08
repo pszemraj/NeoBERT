@@ -218,10 +218,6 @@ class MaskedPositionsOnlyMLMObjective(nn.Module):
     """Masked-token-only MLM objective with fused-first dispatch.
 
     :param int ignore_index: Ignore label value, defaults to ``-100``.
-    :param bool strict_fused_when_training: Raise when FLCE is unavailable in train mode.
-    :param bool allow_checkpoint_fallback_train: Enable checkpointed masked-logits CE.
-    :param bool allow_original_full_logits_fallback_train:
-        Enable full ``(B,S,V)`` CE fallback in train mode.
     :param int token_chunk_train: Token chunk size for checkpoint fallback.
     :param str eval_loss_mode: ``auto``, ``masked_logits``, or ``streaming``.
     :param int max_masked_logits_bytes_eval: Max bytes to allow masked logits in eval.
@@ -232,9 +228,6 @@ class MaskedPositionsOnlyMLMObjective(nn.Module):
     def __init__(
         self,
         ignore_index: int = -100,
-        strict_fused_when_training: bool = True,
-        allow_checkpoint_fallback_train: bool = False,
-        allow_original_full_logits_fallback_train: bool = True,
         token_chunk_train: int = 2048,
         eval_loss_mode: Literal["auto", "masked_logits", "streaming"] = "auto",
         max_masked_logits_bytes_eval: int = 512 * 1024 * 1024,
@@ -244,10 +237,6 @@ class MaskedPositionsOnlyMLMObjective(nn.Module):
         """Initialize masked-only objective settings and fallback policy.
 
         :param int ignore_index: Ignore label value, defaults to ``-100``.
-        :param bool strict_fused_when_training: Raise when FLCE is unavailable in train mode.
-        :param bool allow_checkpoint_fallback_train: Enable checkpointed masked-logits CE.
-        :param bool allow_original_full_logits_fallback_train:
-            Enable original full-logits CE fallback.
         :param int token_chunk_train: Token chunk size for checkpointed fallback.
         :param str eval_loss_mode: ``auto``, ``masked_logits``, or ``streaming``.
         :param int max_masked_logits_bytes_eval: Max masked-logits bytes in eval.
@@ -256,11 +245,6 @@ class MaskedPositionsOnlyMLMObjective(nn.Module):
         """
         super().__init__()
         self.ignore_index = int(ignore_index)
-        self.strict_fused_when_training = bool(strict_fused_when_training)
-        self.allow_checkpoint_fallback_train = bool(allow_checkpoint_fallback_train)
-        self.allow_original_full_logits_fallback_train = bool(
-            allow_original_full_logits_fallback_train
-        )
         self.token_chunk_train = int(token_chunk_train)
         self.eval_loss_mode = eval_loss_mode
         self.max_masked_logits_bytes_eval = int(max_masked_logits_bytes_eval)
@@ -339,28 +323,6 @@ class MaskedPositionsOnlyMLMObjective(nn.Module):
             )
         return total
 
-    def _original_full_logits_ce_sum(
-        self,
-        hidden_states: torch.Tensor,
-        labels: torch.Tensor,
-        lm_weight: torch.Tensor,
-    ) -> torch.Tensor:
-        """Compute legacy full-logits CE sum (original NeoBERT style).
-
-        :param torch.Tensor hidden_states: Hidden states ``(B,S,H)``.
-        :param torch.Tensor labels: Labels ``(B,S)``.
-        :param torch.Tensor lm_weight: Decoder weight ``(V,H)``.
-        :return torch.Tensor: Float32 CE sum.
-        """
-        logits = F.linear(hidden_states, lm_weight)
-        vocab_size = int(lm_weight.shape[0])
-        return F.cross_entropy(
-            logits.reshape(-1, vocab_size).float(),
-            labels.reshape(-1).to(device=logits.device, dtype=torch.long),
-            reduction="sum",
-            ignore_index=self.ignore_index,
-        )
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -433,58 +395,28 @@ class MaskedPositionsOnlyMLMObjective(nn.Module):
                     used_path="liger_flce",
                     num_correct_local=num_correct_local,
                 )
-            except (RuntimeError, ValueError) as exc:
-                if grad_enabled and self.strict_fused_when_training:
-                    raise RuntimeError(
-                        "FLCE failed in training and strict fused mode is enabled. "
-                        "Set trainer.masked_only_strict_fused_train=false to allow "
-                        "fallback paths."
-                    ) from exc
+            except (RuntimeError, ValueError):
+                # Fall through to masked-only checkpoint fallback.
+                pass
 
         if grad_enabled:
-            if self.allow_checkpoint_fallback_train:
-                loss_sum_local = self._checkpointed_masked_ce_sum(
+            loss_sum_local = self._checkpointed_masked_ce_sum(
+                masked_hidden,
+                masked_targets,
+                lm_weight,
+            )
+            num_correct_local = None
+            if compute_accuracy:
+                num_correct_local = self._masked_num_correct(
                     masked_hidden,
                     masked_targets,
                     lm_weight,
                 )
-                num_correct_local = None
-                if compute_accuracy:
-                    num_correct_local = self._masked_num_correct(
-                        masked_hidden,
-                        masked_targets,
-                        lm_weight,
-                    )
-                return MaskedObjectiveOut(
-                    loss_sum_local=loss_sum_local,
-                    num_masked_local=num_masked_local,
-                    used_path="train_checkpointed_masked_ce",
-                    num_correct_local=num_correct_local,
-                )
-
-            if self.allow_original_full_logits_fallback_train:
-                loss_sum_local = self._original_full_logits_ce_sum(
-                    hidden_states,
-                    labels,
-                    lm_weight,
-                )
-                num_correct_local = None
-                if compute_accuracy:
-                    num_correct_local = self._masked_num_correct(
-                        masked_hidden,
-                        masked_targets,
-                        lm_weight,
-                    )
-                return MaskedObjectiveOut(
-                    loss_sum_local=loss_sum_local,
-                    num_masked_local=num_masked_local,
-                    used_path="train_original_full_logits_ce",
-                    num_correct_local=num_correct_local,
-                )
-
-            raise RuntimeError(
-                "Masked-only objective could not run: FLCE unavailable/failed and all "
-                "training fallbacks are disabled."
+            return MaskedObjectiveOut(
+                loss_sum_local=loss_sum_local,
+                num_masked_local=num_masked_local,
+                used_path="train_checkpointed_masked_ce",
+                num_correct_local=num_correct_local,
             )
 
         vocab_size = int(lm_weight.size(0))

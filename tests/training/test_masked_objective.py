@@ -37,8 +37,8 @@ class TestMaskedObjective(unittest.TestCase):
             torch.equal(masked_hidden, torch.tensor([[1.0, 2.0], [5.0, 6.0]]))
         )
 
-    def test_train_original_fallback_matches_reference_ce(self):
-        """Ensure original full-logits fallback matches PyTorch CE sum."""
+    def test_train_checkpointed_fallback_matches_reference_ce(self):
+        """Ensure masked-only train fallback matches PyTorch CE sum."""
         torch.manual_seed(0)
         hidden = torch.randn(2, 4, 6, requires_grad=True)
         lm_weight = torch.randn(13, 6, requires_grad=True)
@@ -47,14 +47,10 @@ class TestMaskedObjective(unittest.TestCase):
             dtype=torch.long,
         )
 
-        objective = MaskedPositionsOnlyMLMObjective(
-            strict_fused_when_training=False,
-            allow_checkpoint_fallback_train=False,
-            allow_original_full_logits_fallback_train=True,
-        )
+        objective = MaskedPositionsOnlyMLMObjective()
         out = objective(hidden, labels, lm_weight, compute_accuracy=True)
 
-        ref_logits = F.linear(hidden, lm_weight)
+        ref_logits = F.linear(hidden, lm_weight)  # full-logits reference
         ref_loss = F.cross_entropy(
             ref_logits.reshape(-1, lm_weight.size(0)).float(),
             labels.reshape(-1),
@@ -62,7 +58,7 @@ class TestMaskedObjective(unittest.TestCase):
             ignore_index=-100,
         )
 
-        self.assertEqual(out.used_path, "train_original_full_logits_ce")
+        self.assertEqual(out.used_path, "train_checkpointed_masked_ce")
         self.assertEqual(
             out.num_masked_local.item(), int((labels != -100).sum().item())
         )
@@ -75,32 +71,13 @@ class TestMaskedObjective(unittest.TestCase):
         self.assertIsNotNone(hidden.grad)
         self.assertIsNotNone(lm_weight.grad)
 
-    def test_train_raises_when_all_fallbacks_disabled(self):
-        """Ensure train path fails loudly without fused kernel and fallbacks."""
-        hidden = torch.randn(1, 3, 4)
-        lm_weight = torch.randn(7, 4)
-        labels = torch.tensor([[1, -100, 2]], dtype=torch.long)
-
-        objective = MaskedPositionsOnlyMLMObjective(
-            strict_fused_when_training=True,
-            allow_checkpoint_fallback_train=False,
-            allow_original_full_logits_fallback_train=False,
-        )
-
-        with self.assertRaises(RuntimeError):
-            objective(hidden, labels, lm_weight)
-
     def test_zero_masked_path_keeps_gradients_connected(self):
         """Ensure zero-masked path returns zero loss with valid autograd graph."""
         hidden = torch.randn(2, 3, 5, requires_grad=True)
         lm_weight = torch.randn(11, 5, requires_grad=True)
         labels = torch.full((2, 3), -100, dtype=torch.long)
 
-        objective = MaskedPositionsOnlyMLMObjective(
-            strict_fused_when_training=False,
-            allow_checkpoint_fallback_train=False,
-            allow_original_full_logits_fallback_train=True,
-        )
+        objective = MaskedPositionsOnlyMLMObjective()
         out = objective(hidden, labels, lm_weight)
         out.loss_sum_local.backward()
 
@@ -131,15 +108,9 @@ class TestMaskedObjective(unittest.TestCase):
         )
 
         objective_masked_logits = MaskedPositionsOnlyMLMObjective(
-            strict_fused_when_training=False,
-            allow_checkpoint_fallback_train=False,
-            allow_original_full_logits_fallback_train=True,
             eval_loss_mode="masked_logits",
         )
         objective_streaming = MaskedPositionsOnlyMLMObjective(
-            strict_fused_when_training=False,
-            allow_checkpoint_fallback_train=False,
-            allow_original_full_logits_fallback_train=True,
             eval_loss_mode="streaming",
             token_chunk_eval=2,
             vocab_chunk_eval=4,
