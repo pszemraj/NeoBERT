@@ -159,7 +159,15 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `dataset.text_column`      | `str \| None`   | `null`         | Text field override for tokenization.                   |
 | `dataset.train_split`      | `str \| None`   | `null`         | Train split (supports slice syntax).                    |
 | `dataset.eval_split`       | `str \| None`   | `null`         | Eval split override.                                    |
+| `dataset.eval_samples`     | `int \| None`   | `null`         | Eval sample cap. If no eval split is configured, trainer can reserve the first `eval_samples` from train for eval. |
 | `dataset.validation_split` | `float \| None` | `null`         | Fraction for random eval split (non-streaming only).    |
+
+> [!NOTE]
+> Streaming pretraining defaults to `dataset.eval_split: null`. When unset, trainer
+> attempts to auto-detect a validation-style split (`validation`, `eval`, `test`, `dev`).
+> If none exists and `dataset.eval_samples` is set, it builds eval from the first
+> `eval_samples` training examples and skips those from the training stream to avoid
+> leakage.
 
 ### Performance and Preprocessing
 

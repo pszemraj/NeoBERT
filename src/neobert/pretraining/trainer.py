@@ -86,6 +86,31 @@ def _resolve_masked_logits_only_loss(value: Any) -> bool:
     )
 
 
+def _resolve_eval_samples(value: Any) -> Optional[int]:
+    """Resolve and validate ``dataset.eval_samples``.
+
+    :param Any value: Config value to normalize.
+    :raises ValueError: If value is not integer-like or is boolean.
+    :return int | None: Positive sample count or ``None`` when unset/disabled.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(
+            f"dataset.eval_samples must be an integer sample count, got bool {value!r}."
+        )
+    try:
+        resolved = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "dataset.eval_samples must be an integer sample count, "
+            f"got {value!r} ({type(value).__name__})."
+        ) from exc
+    if resolved <= 0:
+        return None
+    return resolved
+
+
 def _resolve_fsdp_version(accelerator: Accelerator) -> int:
     """Resolve FSDP version from Accelerate state.
 
@@ -584,6 +609,90 @@ def _load_streaming_split(
         dataset = dataset.take(take_n)
 
     return dataset
+
+
+def _infer_eval_split_name(
+    dataset_name: str,
+    dataset_kwargs: dict[str, object],
+    *,
+    train_split: Optional[str],
+) -> Optional[str]:
+    """Infer a reasonable eval split name from dataset metadata.
+
+    :param str dataset_name: Dataset identifier.
+    :param dict[str, object] dataset_kwargs: Additional kwargs for HF datasets.
+    :param str | None train_split: Train split selector (possibly sliced).
+    :return str | None: Preferred eval split name or ``None``.
+    """
+    train_base = _parse_split_slice(train_split or "train")[0].lower()
+    try:
+        builder = load_dataset_builder(dataset_name, **dataset_kwargs)
+        split_names = list(getattr(builder.info, "splits", {}).keys())
+    except Exception as exc:
+        logger.warning(
+            "Unable to infer eval split for %s from dataset metadata: %s",
+            dataset_name,
+            exc,
+        )
+        return None
+
+    if not split_names:
+        return None
+
+    preferred = ("validation", "eval", "test", "dev")
+    by_lower = {name.lower(): name for name in split_names}
+    for candidate in preferred:
+        resolved = by_lower.get(candidate)
+        if resolved is not None and candidate != train_base:
+            return resolved
+    return None
+
+
+def _split_train_dataset_for_eval_samples(
+    train_dataset: Dataset,
+    eval_samples: int,
+    *,
+    is_streaming: bool,
+) -> tuple[Dataset, Dataset]:
+    """Create eval data from training data and avoid train/eval overlap.
+
+    :param Dataset train_dataset: Training dataset.
+    :param int eval_samples: Number of eval samples to reserve.
+    :param bool is_streaming: Whether the dataset is streaming.
+    :raises ValueError: If eval_samples is invalid or non-streaming data is too small.
+    :return tuple[Dataset, Dataset]: ``(remaining_train, eval_dataset)``.
+    """
+    if eval_samples <= 0:
+        raise ValueError(f"eval_samples must be > 0, got {eval_samples}.")
+
+    can_stream_split = (
+        is_streaming
+        and hasattr(train_dataset, "take")
+        and hasattr(train_dataset, "skip")
+    )
+    if can_stream_split:
+        eval_dataset = train_dataset.take(eval_samples)
+        remaining_train = train_dataset.skip(eval_samples)
+        return remaining_train, eval_dataset
+
+    total_samples = len(train_dataset)
+    if total_samples <= 1:
+        raise ValueError(
+            "dataset.eval_samples requires at least 2 non-streaming samples to keep "
+            "both train and eval non-empty."
+        )
+    eval_count = min(eval_samples, total_samples - 1)
+    if eval_count < eval_samples:
+        logger.warning(
+            "Requested dataset.eval_samples=%s but dataset has %s rows; "
+            "using eval_samples=%s to keep at least one training sample.",
+            eval_samples,
+            total_samples,
+            eval_count,
+        )
+    eval_dataset = train_dataset.select(range(eval_count))
+    remaining_train = train_dataset.select(range(eval_count, total_samples))
+    return remaining_train, eval_dataset
 
 
 def _count_masked_correct(
@@ -1245,6 +1354,7 @@ def trainer(cfg: Config) -> None:
     masked_logits_only_loss = _resolve_masked_logits_only_loss(
         getattr(cfg.trainer, "masked_logits_only_loss", True)
     )
+    eval_samples = _resolve_eval_samples(getattr(cfg.dataset, "eval_samples", None))
 
     # Get the last checkpoint id
     output_dir = Path(cfg.trainer.output_dir)
@@ -1605,29 +1715,50 @@ def trainer(cfg: Config) -> None:
                 f"Tokenization complete. Dataset size: {len(train_dataset)}"
             )
 
+    eval_split = cfg.dataset.eval_split
+    if isinstance(eval_split, str):
+        eval_split = eval_split.strip() or None
+    if (
+        eval_split is None
+        and cfg.dataset.streaming
+        and not (cfg.dataset.path and Path(cfg.dataset.path).exists())
+    ):
+        inferred_eval_split = _infer_eval_split_name(
+            cfg.dataset.name,
+            dataset_kwargs,
+            train_split=cfg.dataset.train_split,
+        )
+        if inferred_eval_split is not None:
+            eval_split = inferred_eval_split
+            logger.info(
+                "Auto-detected streaming eval split '%s'. "
+                "Override with dataset.eval_split when needed.",
+                eval_split,
+            )
+
     eval_dataset = None
-    if cfg.dataset.eval_split:
+    if eval_split:
         if cfg.dataset.path and Path(cfg.dataset.path).exists():
             eval_source = load_from_disk(cfg.dataset.path)
             if isinstance(eval_source, DatasetDict):
-                eval_dataset = eval_source[cfg.dataset.eval_split]
+                eval_dataset = eval_source[eval_split]
             else:
                 logger.warning(
                     "eval_split=%s requested but dataset path is not a DatasetDict; "
                     "skipping evaluation.",
-                    cfg.dataset.eval_split,
+                    eval_split,
                 )
         else:
             if cfg.dataset.streaming:
                 eval_dataset = _load_streaming_split(
                     cfg.dataset.name,
-                    cfg.dataset.eval_split,
+                    eval_split,
                     dataset_kwargs,
                 )
             else:
                 eval_dataset = load_dataset(
                     cfg.dataset.name,
-                    split=cfg.dataset.eval_split,
+                    split=eval_split,
                     streaming=False,
                     **dataset_kwargs,
                 )
@@ -1644,8 +1775,36 @@ def trainer(cfg: Config) -> None:
             train_dataset = split["train"]
             eval_dataset = split["test"]
 
+    if eval_dataset is None and eval_samples is not None:
+        train_dataset, eval_dataset = _split_train_dataset_for_eval_samples(
+            train_dataset,
+            eval_samples,
+            is_streaming=is_streaming,
+        )
+        logger.info(
+            "dataset.eval_samples=%s with no eval split configured; reserving "
+            "head samples for eval and excluding them from training.",
+            eval_samples,
+        )
+
+    if eval_dataset is not None and eval_samples is not None:
+        eval_dataset_is_streaming = (
+            cfg.dataset.streaming
+            and hasattr(eval_dataset, "take")
+            and hasattr(eval_dataset, "skip")
+        )
+        if eval_dataset_is_streaming:
+            eval_dataset = eval_dataset.take(eval_samples)
+        else:
+            eval_size = len(eval_dataset)
+            eval_dataset = eval_dataset.select(range(min(eval_samples, eval_size)))
+
     if eval_dataset is not None:
-        eval_is_streaming = cfg.dataset.streaming
+        eval_is_streaming = (
+            cfg.dataset.streaming
+            and hasattr(eval_dataset, "take")
+            and hasattr(eval_dataset, "skip")
+        )
         eval_needs_tokenization = False
         if eval_is_streaming:
             first_example = next(iter(eval_dataset))
@@ -1971,13 +2130,33 @@ def trainer(cfg: Config) -> None:
     eval_max_batches = getattr(cfg.trainer, "eval_max_batches", None)
     if isinstance(eval_max_batches, int) and eval_max_batches <= 0:
         eval_max_batches = None
-    if eval_max_batches is None and eval_dataset is not None and cfg.dataset.streaming:
-        eval_max_batches = 100
-        logger.info(
-            "Streaming eval detected; defaulting eval_max_batches to %s. "
-            "Set trainer.eval_max_batches to override.",
-            eval_max_batches,
-        )
+    eval_dataset_is_streaming = (
+        eval_dataset is not None
+        and cfg.dataset.streaming
+        and hasattr(eval_dataset, "take")
+        and hasattr(eval_dataset, "skip")
+    )
+    if eval_max_batches is None and eval_dataset_is_streaming:
+        if eval_samples is not None:
+            per_device_eval_batch_size = max(1, cfg.trainer.per_device_eval_batch_size)
+            eval_max_batches = max(
+                1,
+                math.ceil(eval_samples / per_device_eval_batch_size),
+            )
+            logger.info(
+                "Streaming eval detected with dataset.eval_samples=%s; "
+                "defaulting eval_max_batches to %s. "
+                "Set trainer.eval_max_batches to override.",
+                eval_samples,
+                eval_max_batches,
+            )
+        else:
+            eval_max_batches = 100
+            logger.info(
+                "Streaming eval detected; defaulting eval_max_batches to %s. "
+                "Set trainer.eval_max_batches to override.",
+                eval_max_batches,
+            )
 
     # Resume from the latest checkpoint
     skipped_train_dataloader = None

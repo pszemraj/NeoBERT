@@ -64,6 +64,23 @@ Primary knobs are in `dataset.*`:
 When running on CUDA, trainer may warn and apply throughput-friendly defaults
 if these are unset/suboptimal.
 
+## Streaming Eval Strategy
+
+For streaming datasets, prefer:
+
+- `dataset.eval_split: null`
+- `dataset.eval_samples: <small integer>`
+
+Runtime behavior:
+
+- if `dataset.eval_split` is unset, trainer tries to auto-detect a validation-style
+  split (`validation`, `eval`, `test`, `dev`);
+- if none exists and `dataset.eval_samples` is set, trainer reserves the first
+  `eval_samples` from train for eval and skips them from training to avoid
+  leakage;
+- when `trainer.eval_max_batches` is unset, trainer derives a practical default
+  for streaming eval and still allows explicit override.
+
 ## Mixed Precision and Compile
 
 - `trainer.mixed_precision`: `no | fp32 | bf16` (`fp16` unsupported in pretraining)

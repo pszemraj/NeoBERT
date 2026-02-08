@@ -86,6 +86,7 @@ class DatasetConfig:
     validation_split: Optional[float] = None
     train_split: Optional[str] = None
     eval_split: Optional[str] = None
+    eval_samples: Optional[int] = None
     num_proc: int = 4  # Number of processes for tokenization
     shuffle_buffer_size: int = 10000  # Buffer size for streaming dataset shuffling
     pre_tokenize: bool = False  # Whether to pre-tokenize non-streaming datasets
@@ -1043,6 +1044,15 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     )
     parser.add_argument(
         "--dataset.text_column", type=str, help="Dataset text column name"
+    )
+    parser.add_argument(
+        "--dataset.eval_samples",
+        type=int,
+        help=(
+            "Optional evaluation sample cap. For streaming datasets without "
+            "dataset.eval_split, trainer will create eval from the first "
+            "dataset.eval_samples training samples and skip them from training."
+        ),
     )
     parser.add_argument(
         "--dataset.load_all_from_disk", action="store_true", help="Load all from disk"

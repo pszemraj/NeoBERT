@@ -20,8 +20,11 @@ from neobert.pretraining.masked_objective import MaskedObjectiveOut
 from neobert.pretraining.trainer import (
     _ensure_pinned_cpu_batch,
     _gather_decoder_weight_for_masked_objective,
+    _infer_eval_split_name,
     _resolve_loader_perf_settings,
+    _resolve_eval_samples,
     _run_masked_objective_step,
+    _split_train_dataset_for_eval_samples,
     _should_backward_inside_gathered_decoder_weight,
     _sync_tokenizer_derived_config,
     _write_deepspeed_latest_file,
@@ -900,6 +903,78 @@ class TestPretrainComponents(unittest.TestCase):
         self.assertEqual(_resolve_eval_max_batches(10, num_processes=1), 10)
         self.assertEqual(_resolve_eval_max_batches(10, num_processes=2), 5)
         self.assertEqual(_resolve_eval_max_batches(11, num_processes=2), 6)
+
+    def test_resolve_eval_samples_normalization(self):
+        """Ensure eval_samples resolves to positive integer or None."""
+        self.assertEqual(_resolve_eval_samples(128), 128)
+        self.assertEqual(_resolve_eval_samples("256"), 256)
+        self.assertIsNone(_resolve_eval_samples(None))
+        self.assertIsNone(_resolve_eval_samples(0))
+        self.assertIsNone(_resolve_eval_samples(-5))
+        with self.assertRaises(ValueError):
+            _resolve_eval_samples(True)
+        with self.assertRaises(ValueError):
+            _resolve_eval_samples("not_an_int")
+
+    def test_infer_eval_split_name_prefers_validation(self):
+        """Ensure eval split inference chooses validation-style splits."""
+
+        class _BuilderInfo:
+            splits = {"train": object(), "validation": object(), "test": object()}
+
+        class _Builder:
+            info = _BuilderInfo()
+
+        with patch(
+            "neobert.pretraining.trainer.load_dataset_builder",
+            return_value=_Builder(),
+        ):
+            inferred = _infer_eval_split_name(
+                "dummy_dataset",
+                {},
+                train_split="train",
+            )
+
+        self.assertEqual(inferred, "validation")
+
+    def test_split_train_dataset_for_eval_samples_non_streaming(self):
+        """Ensure eval samples are carved out from non-streaming train dataset."""
+        train_dataset = Dataset.from_dict({"text": ["a", "b", "c", "d", "e"]})
+
+        remaining_train, eval_dataset = _split_train_dataset_for_eval_samples(
+            train_dataset,
+            eval_samples=2,
+            is_streaming=False,
+        )
+
+        self.assertEqual(len(eval_dataset), 2)
+        self.assertEqual(len(remaining_train), 3)
+        self.assertEqual(eval_dataset["text"], ["a", "b"])
+        self.assertEqual(remaining_train["text"], ["c", "d", "e"])
+
+    def test_split_train_dataset_for_eval_samples_streaming(self):
+        """Ensure streaming split helper uses take/skip without materialization."""
+
+        class _StreamingStub:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, int]] = []
+
+            def take(self, n: int):
+                self.calls.append(("take", n))
+                return ("eval", n)
+
+            def skip(self, n: int):
+                self.calls.append(("skip", n))
+                return ("train", n)
+
+        train_dataset = _StreamingStub()
+        remaining_train, eval_dataset = _split_train_dataset_for_eval_samples(
+            train_dataset, eval_samples=321, is_streaming=True
+        )
+
+        self.assertEqual(eval_dataset, ("eval", 321))
+        self.assertEqual(remaining_train, ("train", 321))
+        self.assertEqual(train_dataset.calls, [("take", 321), ("skip", 321)])
 
     def test_select_train_split_from_datasetdict(self):
         """Ensure DatasetDict splits resolve to a Dataset."""
