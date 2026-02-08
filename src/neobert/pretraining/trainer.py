@@ -1028,6 +1028,34 @@ def _gradient_token_scale(
     return scale, clamped
 
 
+def _compute_weight_norm_for_logging(
+    model: torch.nn.Module,
+    accelerator: Accelerator,
+) -> Optional[float]:
+    """Compute model weight norm for logging across distributed backends.
+
+    DeepSpeed helper ``safe_get_full_fp32_param`` can return ``None`` (for
+    example on params without ZeRO/FP32 mappings), so we skip those tensors
+    rather than failing during logging.
+
+    :param torch.nn.Module model: Training model (possibly wrapped).
+    :param Accelerator accelerator: Active accelerator runtime.
+    :return float | None: L2 weight norm or ``None`` when unavailable.
+    """
+    if accelerator.distributed_type is DistributedType.DEEPSPEED:
+        squared_norms: list[torch.Tensor] = []
+        for param in model.parameters():
+            full_param = safe_get_full_fp32_param(param)
+            if full_param is None:
+                continue
+            squared_norms.append(full_param.norm(2) ** 2)
+        if not squared_norms:
+            return None
+        return (sum(squared_norms) ** 0.5).item()
+
+    return (sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5).item()
+
+
 def _clear_stored_batch(stored_batch: BatchEncoding) -> None:
     """Drop buffered batch fragments in-place.
 
@@ -2456,20 +2484,13 @@ def trainer(cfg: Config) -> None:
                         metrics["train/grad_norm"] = grad_norm_value
 
                     if cfg.trainer.log_weight_norms and accelerator.is_main_process:
-                        if accelerator.distributed_type is DistributedType.DEEPSPEED:
-                            metrics["train/weight_norm"] = (
-                                sum(
-                                    [
-                                        safe_get_full_fp32_param(p).norm(2) ** 2
-                                        for p in model.parameters()
-                                    ]
-                                )
-                                ** 0.5
-                            ).item()
+                        weight_norm_value = _compute_weight_norm_for_logging(
+                            model, accelerator
+                        )
+                        if weight_norm_value is not None:
+                            metrics["train/weight_norm"] = weight_norm_value
                         else:
-                            metrics["train/weight_norm"] = (
-                                sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5
-                            ).item()
+                            metrics.pop("train/weight_norm", None)
 
                     # Add MuonClip metrics if available
                     if hasattr(optimizer, "get_metrics"):

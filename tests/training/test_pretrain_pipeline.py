@@ -18,6 +18,7 @@ from transformers import PreTrainedTokenizerFast
 from neobert.config import Config, ConfigLoader
 from neobert.pretraining.masked_objective import MaskedObjectiveOut
 from neobert.pretraining.trainer import (
+    _compute_weight_norm_for_logging,
     _ensure_pinned_cpu_batch,
     _gather_decoder_weight_for_masked_objective,
     _infer_eval_split_name,
@@ -846,6 +847,47 @@ class TestPretrainComponents(unittest.TestCase):
         )
         self.assertFalse(backward_done)
         self.assertEqual(accelerator.backward_calls, 0)
+
+    def test_compute_weight_norm_for_logging_deepspeed_skips_missing_full_params(self):
+        """Ensure DeepSpeed weight-norm logging ignores params without full mappings."""
+        model = torch.nn.Linear(3, 2, bias=True)
+
+        class _AcceleratorStub:
+            distributed_type = DistributedType.DEEPSPEED
+
+        params = list(model.parameters())
+        weight_full = torch.full_like(params[0], 2.0)
+
+        def _fake_safe_get_full_fp32_param(param: torch.nn.Parameter):
+            if param is params[0]:
+                return weight_full
+            return None
+
+        with patch(
+            "neobert.pretraining.trainer.safe_get_full_fp32_param",
+            side_effect=_fake_safe_get_full_fp32_param,
+        ):
+            norm = _compute_weight_norm_for_logging(model, _AcceleratorStub())
+
+        self.assertIsNotNone(norm)
+        self.assertAlmostEqual(norm, weight_full.norm(2).item(), places=6)
+
+    def test_compute_weight_norm_for_logging_deepspeed_returns_none_when_unavailable(
+        self,
+    ):
+        """Ensure DeepSpeed weight-norm logging returns None without mapped params."""
+        model = torch.nn.Linear(3, 2, bias=False)
+
+        class _AcceleratorStub:
+            distributed_type = DistributedType.DEEPSPEED
+
+        with patch(
+            "neobert.pretraining.trainer.safe_get_full_fp32_param",
+            return_value=None,
+        ):
+            norm = _compute_weight_norm_for_logging(model, _AcceleratorStub())
+
+        self.assertIsNone(norm)
 
     def test_resolve_loader_perf_settings_cuda_defaults(self):
         """Ensure CUDA runs get throughput-friendly loader defaults."""
