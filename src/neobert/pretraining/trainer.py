@@ -91,18 +91,44 @@ def _gather_decoder_weight_for_masked_objective(
     model: torch.nn.Module,
     accelerator: Accelerator,
 ) -> Iterator[torch.Tensor]:
-    """Yield decoder weights, gathering ZeRO-sharded parameters when required.
+    """Yield decoder weights, gathering sharded parameters when required.
 
     Masked-only loss computes logits from ``decoder.weight`` outside the decoder
-    module forward. Under DeepSpeed ZeRO-3, this parameter is partitioned, so we
-    must materialize the full tensor for the objective path.
+    module forward. Under FSDP and DeepSpeed ZeRO-3 this parameter can be
+    partitioned, so we must materialize the full tensor for the objective path.
 
     :param torch.nn.Module model: Prepared training model (possibly wrapped).
     :param Accelerator accelerator: Active accelerator runtime.
     :yield torch.Tensor: Decoder projection weight tensor.
     :return Iterator[torch.Tensor]: Context manager yielding decoder weight.
     """
-    lm_weight = model.decoder.weight
+
+    def _resolve_decoder_weight() -> torch.Tensor:
+        """Resolve decoder projection weight from wrapped or unwrapped model."""
+        decoder = getattr(model, "decoder", None)
+        if decoder is not None and hasattr(decoder, "weight"):
+            return decoder.weight
+        unwrap_model = getattr(accelerator, "unwrap_model", None)
+        if callable(unwrap_model):
+            unwrapped = unwrap_model(model)
+            decoder = getattr(unwrapped, "decoder", None)
+            if decoder is not None and hasattr(decoder, "weight"):
+                return decoder.weight
+        raise AttributeError("Could not resolve decoder.weight for masked objective.")
+
+    if accelerator.distributed_type is DistributedType.FSDP:
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+
+        with FSDP.summon_full_params(
+            model,
+            recurse=True,
+            writeback=False,
+        ):
+            lm_weight = _resolve_decoder_weight()
+            yield lm_weight
+        return
+
+    lm_weight = _resolve_decoder_weight()
     if accelerator.distributed_type is not DistributedType.DEEPSPEED:
         yield lm_weight
         return
@@ -132,14 +158,16 @@ def _should_backward_inside_gathered_decoder_weight(
 ) -> bool:
     """Return whether backward must run while decoder weight is gathered.
 
-    In DeepSpeed ZeRO-3, masked-objective fallback paths can touch decoder
-    weights during backward recomputation. Keep backward under the gather
-    context so ``decoder.weight`` remains materialized.
+    In FSDP and DeepSpeed ZeRO-3, masked-objective fallback paths can touch
+    decoder weights during backward recomputation. Keep backward under the
+    gather context so ``decoder.weight`` remains materialized.
 
     :param Accelerator accelerator: Active accelerator runtime.
     :param torch.Tensor lm_weight: Decoder projection weight.
     :return bool: ``True`` when backward should run inside gather context.
     """
+    if accelerator.distributed_type is DistributedType.FSDP:
+        return True
     if accelerator.distributed_type is not DistributedType.DEEPSPEED:
         return False
     return getattr(lm_weight, "ds_id", None) is not None
