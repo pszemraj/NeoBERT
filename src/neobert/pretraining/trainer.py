@@ -147,7 +147,11 @@ def _gather_decoder_weight_for_masked_objective(
     """
 
     def _resolve_decoder_weight() -> torch.Tensor:
-        """Resolve decoder projection weight from wrapped or unwrapped model."""
+        """Resolve decoder projection weight from wrapped or unwrapped model.
+
+        :return torch.Tensor: Decoder projection weight parameter.
+        :raises AttributeError: If ``decoder.weight`` cannot be resolved.
+        """
         decoder = getattr(model, "decoder", None)
         if decoder is not None and hasattr(decoder, "weight"):
             return decoder.weight
@@ -180,6 +184,11 @@ def _gather_decoder_weight_for_masked_objective(
             decoder_weight = decoder_module.weight
 
             def _is_fsdp2_module(module: torch.nn.Module) -> bool:
+                """Check whether a module exposes FSDP2 unshard/reshard hooks.
+
+                :param torch.nn.Module module: Module to inspect.
+                :return bool: ``True`` when the module looks FSDP2-wrapped.
+                """
                 return hasattr(module, "unshard") and hasattr(module, "reshard")
 
             fsdp_owner: Optional[torch.nn.Module] = None
