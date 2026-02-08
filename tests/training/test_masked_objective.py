@@ -143,6 +143,19 @@ class TestMaskedObjective(unittest.TestCase):
             ref_out.num_correct_local.item(), streaming_out.num_correct_local.item()
         )
 
+    def test_eval_streaming_rejects_out_of_vocab_targets(self):
+        """Ensure streaming eval raises on labels outside vocabulary range."""
+        hidden = torch.randn(1, 2, 4)
+        lm_weight = torch.randn(5, 4)
+        labels = torch.tensor([[1, 7]], dtype=torch.long)
+        objective_streaming = MaskedPositionsOnlyMLMObjective(
+            eval_loss_mode="streaming"
+        )
+
+        with torch.no_grad():
+            with self.assertRaisesRegex(IndexError, "out of bounds"):
+                objective_streaming(hidden, labels, lm_weight, compute_accuracy=False)
+
 
 if __name__ == "__main__":
     unittest.main()

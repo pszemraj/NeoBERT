@@ -171,6 +171,13 @@ def streaming_ce_sum(
         )
 
     target = target.to(device=hidden.device, dtype=torch.long)
+    invalid_target = (target < 0) | (target >= vocab_size)
+    if invalid_target.any():
+        first_invalid = int(target[invalid_target][0].item())
+        raise IndexError(
+            "Target index is out of bounds for masked-objective streaming CE: "
+            f"target={first_invalid}, valid range=[0, {vocab_size - 1}]"
+        )
     total = torch.zeros((), device=hidden.device, dtype=accum_dtype)
 
     for tok_start in range(0, n_tokens, token_chunk):
