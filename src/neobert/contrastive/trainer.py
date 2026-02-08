@@ -587,6 +587,61 @@ def trainer(cfg: Config) -> None:
 
         if not is_last_microbatch:
             with accelerator.no_sync(model):
+                with accelerator.autocast():
+                    # Forward pass
+                    queries = model(
+                        batch["input_ids_queries"],
+                        pad_mask_queries,
+                        packed_seqlens=packed_queries,
+                    )
+                    corpus = model(
+                        batch["input_ids_corpus"],
+                        pad_mask_corpus,
+                        packed_seqlens=packed_corpus,
+                    )
+                    if "input_ids_negative" in batch.keys():
+                        negatives = model(
+                            batch["input_ids_negative"],
+                            pad_mask_negatives,
+                            packed_seqlens=packed_negatives,
+                        )
+
+                    # Pool representations
+                    pooled_queries = (
+                        queries * batch["attention_mask_queries"].unsqueeze(-1)
+                    ).sum(dim=1) / batch["attention_mask_queries"].sum(
+                        dim=1, keepdim=True
+                    )
+                    pooled_corpus = (
+                        corpus * batch["attention_mask_corpus"].unsqueeze(-1)
+                    ).sum(dim=1) / batch["attention_mask_corpus"].sum(
+                        dim=1, keepdim=True
+                    )
+
+                    # Pool each negative's representation
+                    if "input_ids_negative" in batch.keys():
+                        pooled_negatives = (
+                            negatives * batch["attention_mask_negative"].unsqueeze(-1)
+                        ).sum(dim=1) / batch["attention_mask_negative"].sum(
+                            dim=1, keepdim=True
+                        )
+                    else:
+                        pooled_negatives = None
+
+                    # Loss
+                    train_loss = train_loss_fn(
+                        pooled_queries, pooled_corpus, pooled_negatives
+                    )
+
+                # Compute gradient
+                accelerator.backward(train_loss)
+
+                # Log metrics
+                metrics["train/local_samples"] += batch["input_ids_queries"].shape[0]
+                metrics["train/local_sum_loss"] += train_loss.item()
+
+        else:
+            with accelerator.autocast():
                 # Forward pass
                 queries = model(
                     batch["input_ids_queries"],
@@ -627,51 +682,6 @@ def trainer(cfg: Config) -> None:
                 train_loss = train_loss_fn(
                     pooled_queries, pooled_corpus, pooled_negatives
                 )
-
-                # Compute gradient
-                accelerator.backward(train_loss)
-
-                # Log metrics
-                metrics["train/local_samples"] += batch["input_ids_queries"].shape[0]
-                metrics["train/local_sum_loss"] += train_loss.item()
-
-        else:
-            # Forward pass
-            queries = model(
-                batch["input_ids_queries"],
-                pad_mask_queries,
-                packed_seqlens=packed_queries,
-            )
-            corpus = model(
-                batch["input_ids_corpus"],
-                pad_mask_corpus,
-                packed_seqlens=packed_corpus,
-            )
-            if "input_ids_negative" in batch.keys():
-                negatives = model(
-                    batch["input_ids_negative"],
-                    pad_mask_negatives,
-                    packed_seqlens=packed_negatives,
-                )
-
-            # Pool representations
-            pooled_queries = (
-                queries * batch["attention_mask_queries"].unsqueeze(-1)
-            ).sum(dim=1) / batch["attention_mask_queries"].sum(dim=1, keepdim=True)
-            pooled_corpus = (corpus * batch["attention_mask_corpus"].unsqueeze(-1)).sum(
-                dim=1
-            ) / batch["attention_mask_corpus"].sum(dim=1, keepdim=True)
-
-            # Pool each negative's representation
-            if "input_ids_negative" in batch.keys():
-                pooled_negatives = (
-                    negatives * batch["attention_mask_negative"].unsqueeze(-1)
-                ).sum(dim=1) / batch["attention_mask_negative"].sum(dim=1, keepdim=True)
-            else:
-                pooled_negatives = None
-
-            # Loss
-            train_loss = train_loss_fn(pooled_queries, pooled_corpus, pooled_negatives)
 
             # Compute gradient and apply clipping
             accelerator.backward(train_loss)

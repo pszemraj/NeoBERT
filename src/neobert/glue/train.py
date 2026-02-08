@@ -1426,43 +1426,46 @@ def trainer(cfg: Config) -> None:
                     is_last_microbatch=is_last_microbatch,
                 )
 
-                logits = _forward_classifier_logits(
-                    model,
-                    input_ids=batch["input_ids"],
-                    attention_mask=batch["attention_mask"],
-                    use_hf_signature=from_hub,
-                )
-
-                # Debug logging for first few steps
-                if completed_steps < 3 and is_last_microbatch:
-                    logger.info(
-                        f"Step {completed_steps}: logits shape: {logits.shape}, logits mean: {logits.mean().item():.6f}, std: {logits.std().item():.6f}"
-                    )
-                    logger.info(
-                        f"Step {completed_steps}: logits sample: {logits[0].detach().cpu()}"
-                    )
-                    logger.info(
-                        f"Step {completed_steps}: labels: {batch['labels'][:5]}"
+                with accelerator.autocast():
+                    logits = _forward_classifier_logits(
+                        model,
+                        input_ids=batch["input_ids"],
+                        attention_mask=batch["attention_mask"],
+                        use_hf_signature=from_hub,
                     )
 
-                if not is_regression:
-                    loss = loss_fct(
-                        logits.view(-1, num_labels), batch["labels"].view(-1)
-                    )
-                else:
-                    if num_labels == 1:
-                        loss = loss_fct(logits.squeeze(), batch["labels"].squeeze())
+                    # Debug logging for first few steps
+                    if completed_steps < 3 and is_last_microbatch:
+                        logger.info(
+                            f"Step {completed_steps}: logits shape: {logits.shape}, logits mean: {logits.mean().item():.6f}, std: {logits.std().item():.6f}"
+                        )
+                        logger.info(
+                            f"Step {completed_steps}: logits sample: {logits[0].detach().cpu()}"
+                        )
+                        logger.info(
+                            f"Step {completed_steps}: labels: {batch['labels'][:5]}"
+                        )
+
+                    if not is_regression:
+                        loss = loss_fct(
+                            logits.view(-1, num_labels), batch["labels"].view(-1)
+                        )
                     else:
-                        loss = loss_fct(logits, batch["labels"])
+                        if num_labels == 1:
+                            loss = loss_fct(logits.squeeze(), batch["labels"].squeeze())
+                        else:
+                            loss = loss_fct(logits, batch["labels"])
 
-                # Compute train accuracy
-                predictions = (
-                    logits.argmax(dim=-1)
-                    if not is_regression
-                    else (
-                        logits.squeeze() if logits.size() != torch.Size([1]) else logits
+                    # Compute train accuracy
+                    predictions = (
+                        logits.argmax(dim=-1)
+                        if not is_regression
+                        else (
+                            logits.squeeze()
+                            if logits.size() != torch.Size([1])
+                            else logits
+                        )
                     )
-                )
                 predictions, references = accelerator.gather(
                     (predictions, batch["labels"])
                 )

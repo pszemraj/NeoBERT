@@ -1850,53 +1850,54 @@ def trainer(cfg: Config) -> None:
                     update_step=metrics["train/steps"],
                     is_last_microbatch=sync_gradients,
                 )
-                if masked_objective is not None:
-                    hidden = model(
-                        src=batch["input_ids"],
-                        pad_mask=pad_mask,
-                        packed_seqlens=packed_seqlens,
-                        return_logits=False,
-                    )["hidden_representation"]
-                    objective_out = masked_objective(
-                        hidden_states=hidden,
-                        labels=batch["labels"],
-                        lm_weight=model.decoder.weight,
-                        compute_accuracy=log_train_accuracy,
-                    )
-                    loss_sum = objective_out.loss_sum_local
-                    num_pred = objective_out.num_masked_local
-                    if objective_out.used_path == "liger_flce":
-                        local_loss_path_liger_flce += 1
-                    elif objective_out.used_path == "train_checkpointed_masked_ce":
-                        local_loss_path_checkpointed += 1
-                    elif objective_out.used_path == "zero_masked":
-                        local_loss_path_zero_masked += 1
+                with accelerator.autocast():
+                    if masked_objective is not None:
+                        hidden = model(
+                            src=batch["input_ids"],
+                            pad_mask=pad_mask,
+                            packed_seqlens=packed_seqlens,
+                            return_logits=False,
+                        )["hidden_representation"]
+                        objective_out = masked_objective(
+                            hidden_states=hidden,
+                            labels=batch["labels"],
+                            lm_weight=model.decoder.weight,
+                            compute_accuracy=log_train_accuracy,
+                        )
+                        loss_sum = objective_out.loss_sum_local
+                        num_pred = objective_out.num_masked_local
+                        if objective_out.used_path == "liger_flce":
+                            local_loss_path_liger_flce += 1
+                        elif objective_out.used_path == "train_checkpointed_masked_ce":
+                            local_loss_path_checkpointed += 1
+                        elif objective_out.used_path == "zero_masked":
+                            local_loss_path_zero_masked += 1
+                        else:
+                            local_loss_path_other += 1
+                        if (
+                            not logged_masked_loss_path
+                            and accelerator.is_main_process
+                            and objective_out.used_path != "zero_masked"
+                        ):
+                            logger.info(
+                                "Masked-logits loss path active (first non-empty microbatch): %s",
+                                objective_out.used_path,
+                            )
+                            logged_masked_loss_path = True
                     else:
-                        local_loss_path_other += 1
-                    if (
-                        not logged_masked_loss_path
-                        and accelerator.is_main_process
-                        and objective_out.used_path != "zero_masked"
-                    ):
-                        logger.info(
-                            "Masked-logits loss path active (first non-empty microbatch): %s",
-                            objective_out.used_path,
+                        if train_loss_fn is None:
+                            raise RuntimeError(
+                                "Legacy loss path selected but train_loss_fn is undefined."
+                            )
+                        logits = model(
+                            src=batch["input_ids"],
+                            pad_mask=pad_mask,
+                            packed_seqlens=packed_seqlens,
+                        )["logits"]
+                        loss_sum = train_loss_fn(
+                            logits.view(-1, model_config.vocab_size),
+                            batch["labels"].view(-1),
                         )
-                        logged_masked_loss_path = True
-                else:
-                    if train_loss_fn is None:
-                        raise RuntimeError(
-                            "Legacy loss path selected but train_loss_fn is undefined."
-                        )
-                    logits = model(
-                        src=batch["input_ids"],
-                        pad_mask=pad_mask,
-                        packed_seqlens=packed_seqlens,
-                    )["logits"]
-                    loss_sum = train_loss_fn(
-                        logits.view(-1, model_config.vocab_size),
-                        batch["labels"].view(-1),
-                    )
 
                 # Compute gradient
                 accelerator.backward(loss_sum)
