@@ -86,6 +86,23 @@ def _resolve_masked_logits_only_loss(value: Any) -> bool:
     )
 
 
+def _resolve_fsdp_version(accelerator: Accelerator) -> int:
+    """Resolve FSDP version from Accelerate state.
+
+    Defaults to ``1`` when plugin metadata is unavailable.
+
+    :param Accelerator accelerator: Active accelerator runtime.
+    :return int: FSDP plugin version.
+    """
+    state = getattr(accelerator, "state", None)
+    fsdp_plugin = getattr(state, "fsdp_plugin", None) if state is not None else None
+    raw_version = getattr(fsdp_plugin, "fsdp_version", None)
+    try:
+        return int(raw_version) if raw_version is not None else 1
+    except (TypeError, ValueError):
+        return 1
+
+
 @contextmanager
 def _gather_decoder_weight_for_masked_objective(
     model: torch.nn.Module,
@@ -117,15 +134,88 @@ def _gather_decoder_weight_for_masked_objective(
         raise AttributeError("Could not resolve decoder.weight for masked objective.")
 
     if accelerator.distributed_type is DistributedType.FSDP:
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+        fsdp_version = _resolve_fsdp_version(accelerator)
+        if fsdp_version >= 2:
+            base_model = model
+            unwrap_model = getattr(accelerator, "unwrap_model", None)
+            if callable(unwrap_model):
+                try:
+                    base_model = unwrap_model(model)
+                except Exception:
+                    base_model = model
 
-        with FSDP.summon_full_params(
-            model,
-            recurse=True,
-            writeback=False,
-        ):
-            lm_weight = _resolve_decoder_weight()
-            yield lm_weight
+            decoder_module = getattr(base_model, "decoder", None)
+            if decoder_module is None:
+                decoder_module = getattr(model, "decoder", None)
+            if decoder_module is None or not hasattr(decoder_module, "weight"):
+                raise AttributeError(
+                    "Could not resolve decoder module for FSDP2 masked objective."
+                )
+            decoder_weight = decoder_module.weight
+
+            def _is_fsdp2_module(module: torch.nn.Module) -> bool:
+                return hasattr(module, "unshard") and hasattr(module, "reshard")
+
+            fsdp_owner: Optional[torch.nn.Module] = None
+            for module in base_model.modules():
+                if not _is_fsdp2_module(module):
+                    continue
+                for param in module.parameters(recurse=False):
+                    if param is decoder_weight:
+                        fsdp_owner = module
+                        break
+                if fsdp_owner is not None:
+                    break
+
+            if fsdp_owner is None:
+                named_modules = dict(base_model.named_modules())
+                decoder_path = next(
+                    (
+                        path
+                        for path, module in named_modules.items()
+                        if module is decoder_module
+                    ),
+                    None,
+                )
+                if decoder_path is not None:
+                    path_parts = decoder_path.split(".")
+                    for depth in range(len(path_parts), -1, -1):
+                        ancestor_path = ".".join(path_parts[:depth])
+                        ancestor = (
+                            base_model
+                            if ancestor_path == ""
+                            else named_modules.get(ancestor_path)
+                        )
+                        if ancestor is not None and _is_fsdp2_module(ancestor):
+                            fsdp_owner = ancestor
+                            break
+
+            if fsdp_owner is None and _is_fsdp2_module(base_model):
+                fsdp_owner = base_model
+
+            if fsdp_owner is None:
+                raise RuntimeError(
+                    "FSDP2 is active but no unshard-capable module owns decoder.weight."
+                )
+
+            handle = fsdp_owner.unshard(async_op=True)
+            if handle is not None:
+                handle.wait()
+            try:
+                lm_weight = _resolve_decoder_weight()
+                yield lm_weight
+            finally:
+                fsdp_owner.reshard()
+        else:
+            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+
+            with FSDP.summon_full_params(
+                model,
+                recurse=True,
+                writeback=False,
+            ):
+                lm_weight = _resolve_decoder_weight()
+                yield lm_weight
         return
 
     lm_weight = _resolve_decoder_weight()

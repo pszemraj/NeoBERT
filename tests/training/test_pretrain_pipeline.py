@@ -386,12 +386,19 @@ class TestPretrainComponents(unittest.TestCase):
         self.assertIs(gathered.call_args.kwargs["fwd_module"], model)
 
     def test_gather_decoder_weight_uses_fsdp_summon_full_params(self):
-        """Ensure FSDP runs gather full decoder weights for masked objective."""
+        """Ensure FSDP1 runs gather full decoder weights for masked objective."""
         model = torch.nn.Module()
         model.decoder = torch.nn.Linear(4, 6, bias=False)
 
+        class _FSDPPluginStub:
+            fsdp_version = 1
+
+        class _StateStub:
+            fsdp_plugin = _FSDPPluginStub()
+
         class _AcceleratorStub:
             distributed_type = DistributedType.FSDP
+            state = _StateStub()
 
             @staticmethod
             def unwrap_model(module: torch.nn.Module) -> torch.nn.Module:
@@ -410,6 +417,64 @@ class TestPretrainComponents(unittest.TestCase):
         self.assertIs(summon_full_params.call_args.args[0], model)
         self.assertTrue(summon_full_params.call_args.kwargs["recurse"])
         self.assertFalse(summon_full_params.call_args.kwargs["writeback"])
+
+    def test_gather_decoder_weight_uses_fsdp2_unshard_reshard(self):
+        """Ensure FSDP2 unshards and reshards around decoder-weight access."""
+
+        class _WaitHandle:
+            def __init__(self, calls: list[tuple[str, bool | None]]) -> None:
+                self._calls = calls
+
+            def wait(self) -> None:
+                self._calls.append(("wait", None))
+
+        class _FSDP2ModelStub(torch.nn.Module):
+            def __init__(self, calls: list[tuple[str, bool | None]]) -> None:
+                super().__init__()
+                self.decoder = torch.nn.Linear(4, 6, bias=False)
+                self._calls = calls
+
+            def unshard(self, async_op: bool = False) -> _WaitHandle:
+                self._calls.append(("unshard", async_op))
+                return _WaitHandle(self._calls)
+
+            def reshard(self) -> None:
+                self._calls.append(("reshard", None))
+
+        calls: list[tuple[str, bool | None]] = []
+        model = _FSDP2ModelStub(calls)
+
+        class _FSDPPluginStub:
+            fsdp_version = 2
+
+        class _StateStub:
+            fsdp_plugin = _FSDPPluginStub()
+
+        class _AcceleratorStub:
+            distributed_type = DistributedType.FSDP
+            state = _StateStub()
+
+            @staticmethod
+            def unwrap_model(module: torch.nn.Module) -> torch.nn.Module:
+                return module
+
+        with patch(
+            "torch.distributed.fsdp.FullyShardedDataParallel.summon_full_params"
+        ) as summon_full_params:
+            with _gather_decoder_weight_for_masked_objective(
+                model, _AcceleratorStub()
+            ) as lm_weight:
+                self.assertIs(lm_weight, model.decoder.weight)
+        summon_full_params.assert_not_called()
+
+        self.assertEqual(
+            calls,
+            [
+                ("unshard", True),
+                ("wait", None),
+                ("reshard", None),
+            ],
+        )
 
     def test_run_masked_objective_step_backprops_inside_gather_on_zero3(self):
         """Ensure ZeRO-3 objective step runs backward before gather context exits."""
