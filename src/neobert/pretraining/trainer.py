@@ -61,6 +61,27 @@ from neobert.pretraining.metrics import Metrics, format_metrics
 logger = logging.getLogger(__name__)
 
 
+def _resolve_masked_logits_only_loss(value: Any) -> bool:
+    """Resolve and validate ``trainer.masked_logits_only_loss``.
+
+    :param Any value: Config value to normalize.
+    :raises ValueError: If value is not boolean-like.
+    :return bool: Normalized boolean selector.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    raise ValueError(
+        "trainer.masked_logits_only_loss must be a bool or boolean-like string, "
+        f"got {value!r} ({type(value).__name__})."
+    )
+
+
 def _move_batch_to_device(batch: BatchEncoding, device: torch.device) -> BatchEncoding:
     """Move batch tensors to device with async H2D copies when possible.
 
@@ -993,6 +1014,10 @@ def trainer(cfg: Config) -> None:
 
     :param Config cfg: Training configuration.
     """
+    masked_logits_only_loss = _resolve_masked_logits_only_loss(
+        getattr(cfg.trainer, "masked_logits_only_loss", True)
+    )
+
     # Get the last checkpoint id
     output_dir = Path(cfg.trainer.output_dir)
     checkpoint_dir = output_dir / "checkpoints"
@@ -1687,26 +1712,6 @@ def trainer(cfg: Config) -> None:
                     log=watch_mode,
                     log_freq=getattr(cfg.wandb, "log_interval", 100),
                 )
-
-    masked_logits_only_cfg = getattr(cfg.trainer, "masked_logits_only_loss", True)
-    if isinstance(masked_logits_only_cfg, bool):
-        masked_logits_only_loss = masked_logits_only_cfg
-    elif isinstance(masked_logits_only_cfg, str):
-        normalized = masked_logits_only_cfg.strip().lower()
-        if normalized in {"true", "1", "yes", "on"}:
-            masked_logits_only_loss = True
-        elif normalized in {"false", "0", "no", "off"}:
-            masked_logits_only_loss = False
-        else:
-            raise ValueError(
-                "trainer.masked_logits_only_loss must be a boolean-like value, got "
-                f"{cfg.trainer.masked_logits_only_loss!r}."
-            )
-    else:
-        raise ValueError(
-            "trainer.masked_logits_only_loss must be a bool, got "
-            f"{type(masked_logits_only_cfg).__name__}."
-        )
 
     train_loss_fn: Optional[torch.nn.Module] = None
     masked_objective: Optional[MaskedPositionsOnlyMLMObjective] = None

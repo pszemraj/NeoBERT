@@ -124,13 +124,15 @@ class TestPretrainPipeline(unittest.TestCase):
             trainer(config)
 
     def test_pretraining_rejects_invalid_masked_logits_only_loss(self):
-        """Ensure pretraining trainer validates masked_logits_only_loss value."""
+        """Ensure invalid loss-path config fails before tokenizer/network setup."""
         config = ConfigLoader.load(str(self.test_config_path))
         config.trainer.output_dir = self.temp_dir
         config.trainer.masked_logits_only_loss = "something_else"
 
-        with self.assertRaisesRegex(ValueError, "masked_logits_only_loss"):
-            trainer(config)
+        with patch("neobert.pretraining.trainer.get_tokenizer") as mocked_tokenizer:
+            with self.assertRaisesRegex(ValueError, "masked_logits_only_loss"):
+                trainer(config)
+            mocked_tokenizer.assert_not_called()
 
     def test_model_config_compatibility(self):
         """Test that model config is compatible with pretraining."""

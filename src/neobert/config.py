@@ -20,6 +20,23 @@ def round_up_to_multiple(x: int, N: int = 128) -> int:
     return ((x + N - 1) // N) * N
 
 
+def _parse_cli_bool(value: str) -> bool:
+    """Parse strict boolean CLI override values.
+
+    :param str value: Raw CLI token.
+    :raises argparse.ArgumentTypeError: If the token is not boolean-like.
+    :return bool: Parsed boolean value.
+    """
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(
+        "Expected a boolean value (true/false, 1/0, yes/no, on/off)."
+    )
+
+
 # Note: mutable defaults in dataclasses below use default_factory to avoid shared state.
 
 
@@ -1101,7 +1118,7 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     parser.add_argument("--trainer.mixed_precision", type=str, help="Mixed precision")
     parser.add_argument(
         "--trainer.masked_logits_only_loss",
-        type=lambda x: x.lower() == "true",
+        type=_parse_cli_bool,
         help=(
             "Use masked-logits-only MLM loss path (true, default/recommended) "
             "or original full-logits loss (false, legacy ablation/debug)"
