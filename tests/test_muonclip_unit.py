@@ -53,10 +53,14 @@ class TestMuonClipConfig:
 
     def test_algorithm_aliases(self):
         """Test algorithm selection helpers."""
-        cfg = MuonClipConfig(algorithm="newton_schulz")
+        with pytest.warns(UserWarning, match="MuonClipConfig.algorithm is deprecated"):
+            cfg = MuonClipConfig(algorithm="newton_schulz")
         assert cfg.orthogonalization == "newton_schulz"
 
-        cfg = MuonClipConfig(polar_express=False)
+        with pytest.warns(
+            UserWarning, match="MuonClipConfig.polar_express is deprecated"
+        ):
+            cfg = MuonClipConfig(polar_express=False)
         assert cfg.orthogonalization == "newton_schulz"
 
         cfg = MuonClipConfig(orthogonalization="polar_express")
