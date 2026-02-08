@@ -78,13 +78,17 @@ if these are unset/suboptimal.
 Use exactly one pretraining loss path per run:
 
 - `trainer.masked_logits_only_loss: true`
-  Uses masked-logits-only MLM loss (default). This avoids full `(B,S,V)` logits
-  materialization in the hot pretraining path.
+  Uses masked-logits-only MLM loss (default and recommended). This avoids full
+  `(B,S,V)` logits materialization in the hot pretraining path.
 - `trainer.masked_logits_only_loss: false`
-  Uses the original NeoBERT full-logits CE path.
+  Uses the original NeoBERT full-logits CE path (legacy ablation/debug path).
 
 There is no mixed/cross objective mode in trainer config; this flag picks one
 path for the run.
+
+Current project default is `true`; new pretraining runs should keep
+`masked_logits_only_loss: true` unless you are intentionally running an
+ablation against the legacy baseline.
 
 ## Checkpointing and Resume
 

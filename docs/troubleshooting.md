@@ -34,7 +34,7 @@ Symptoms:
 
 Checklist:
 
-1. ensure `trainer.masked_logits_only_loss: true` for masked-logits-only loss,
+1. keep `trainer.masked_logits_only_loss: true` (project default),
 2. keep `trainer.mixed_precision: bf16` (or `no` if bf16 unsupported),
 3. use `gradient_checkpointing: true` for additional memory headroom.
 

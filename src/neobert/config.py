@@ -1102,7 +1102,10 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     parser.add_argument(
         "--trainer.masked_logits_only_loss",
         type=lambda x: x.lower() == "true",
-        help="Use masked-logits-only MLM loss path (true) or original full-logits loss (false)",
+        help=(
+            "Use masked-logits-only MLM loss path (true, default/recommended) "
+            "or original full-logits loss (false, legacy ablation/debug)"
+        ),
     )
     parser.add_argument(
         "--trainer.torch_compile",

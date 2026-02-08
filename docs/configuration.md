@@ -218,11 +218,13 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `trainer.log_grad_norm`               | `bool`          | `false`      | Log grad norm each logging interval.                     |
 | `trainer.log_weight_norms`            | `bool`          | `false`      | Log parameter norms (main-process overhead).             |
 | `trainer.tf32`                        | `bool`          | `true`       | Enable TF32 on supported CUDA GPUs.                      |
-| `trainer.masked_logits_only_loss`     | `bool`          | `true`       | Pretraining MLM loss path selector: `true` = masked-logits-only path, `false` = original full-logits CE path. |
+| `trainer.masked_logits_only_loss`     | `bool`          | `true`       | Pretraining MLM loss path selector: `true` = masked-logits-only path (default/recommended), `false` = original full-logits CE path (legacy ablation/debug). |
 
 > [!IMPORTANT]
 > `trainer.masked_logits_only_loss` is a run-level path selector, not a
 > multi-objective mixing interface. Choose one path for the run.
+> The project default is `true`; use `false` only when intentionally running a
+> legacy full-logits baseline.
 
 ### Control and Legacy Compatibility
 

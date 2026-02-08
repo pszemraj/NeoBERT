@@ -16,8 +16,10 @@ This fork adds:
 - end-to-end training/eval/export scripts with config-driven workflows.
 
 Pretraining loss path is selected with one explicit flag:
-`trainer.masked_logits_only_loss` (`true` = masked-logits-only path,
-`false` = original full-logits CE path).
+`trainer.masked_logits_only_loss`.
+
+- `true` (default, recommended): masked-logits-only path.
+- `false` (legacy/debug): original full-logits CE path.
 
 Paper (original): <https://arxiv.org/abs/2502.19587>
 

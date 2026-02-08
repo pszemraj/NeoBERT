@@ -48,7 +48,7 @@ trainer:
   dataloader_num_workers: 4
   report_to: ["wandb"]  # Remove if you don't want logging
   mixed_precision: "bf16"  # Use bf16 on modern GPUs
-  masked_logits_only_loss: true  # true=new masked-logits path, false=original full-logits CE
+  masked_logits_only_loss: true  # default/recommended; false=legacy full-logits ablation path
   gradient_checkpointing: false
   resume_from_checkpoint: false
 
