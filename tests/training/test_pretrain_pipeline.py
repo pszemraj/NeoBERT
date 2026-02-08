@@ -5,10 +5,12 @@ import os
 import tempfile
 import unittest
 import warnings
+from contextlib import nullcontext
 from unittest.mock import patch
 from pathlib import Path
 
 import torch
+from accelerate.utils import DistributedType
 from datasets import Dataset, DatasetDict
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
@@ -16,6 +18,7 @@ from transformers import PreTrainedTokenizerFast
 from neobert.config import Config, ConfigLoader
 from neobert.pretraining.trainer import (
     _ensure_pinned_cpu_batch,
+    _gather_decoder_weight_for_masked_objective,
     _resolve_loader_perf_settings,
     _sync_tokenizer_derived_config,
     _write_deepspeed_latest_file,
@@ -333,6 +336,52 @@ class TestPretrainComponents(unittest.TestCase):
             latest_path = root / "latest"
             self.assertTrue(latest_path.exists())
             self.assertEqual(latest_path.read_text(encoding="utf-8"), "12345\n")
+
+    def test_gather_decoder_weight_passthrough_outside_deepspeed(self):
+        """Ensure decoder weight passthrough when not running DeepSpeed."""
+        model = torch.nn.Module()
+        model.decoder = torch.nn.Linear(4, 6, bias=False)
+
+        class _AcceleratorStub:
+            distributed_type = DistributedType.NO
+
+            @staticmethod
+            def unwrap_model(module: torch.nn.Module) -> torch.nn.Module:
+                return module
+
+        with patch("deepspeed.zero.GatheredParameters") as gathered:
+            with _gather_decoder_weight_for_masked_objective(
+                model, _AcceleratorStub()
+            ) as lm_weight:
+                self.assertIs(lm_weight, model.decoder.weight)
+            gathered.assert_not_called()
+
+    def test_gather_decoder_weight_uses_deepspeed_gather_for_zero3_param(self):
+        """Ensure ZeRO-sharded decoder weights are gathered for masked objective."""
+        model = torch.nn.Module()
+        model.decoder = torch.nn.Linear(4, 6, bias=False)
+        setattr(model.decoder.weight, "ds_id", 123)
+
+        class _AcceleratorStub:
+            distributed_type = DistributedType.DEEPSPEED
+
+            @staticmethod
+            def unwrap_model(module: torch.nn.Module) -> torch.nn.Module:
+                return module
+
+        with patch(
+            "deepspeed.zero.GatheredParameters",
+            side_effect=lambda *_args, **_kwargs: nullcontext(),
+        ) as gathered:
+            with _gather_decoder_weight_for_masked_objective(
+                model, _AcceleratorStub()
+            ) as lm_weight:
+                self.assertIs(lm_weight, model.decoder.weight)
+
+        gathered.assert_called_once()
+        self.assertEqual(gathered.call_args.args[0], [model.decoder.weight])
+        self.assertIsNone(gathered.call_args.kwargs["modifier_rank"])
+        self.assertIs(gathered.call_args.kwargs["fwd_module"], model)
 
     def test_resolve_loader_perf_settings_cuda_defaults(self):
         """Ensure CUDA runs get throughput-friendly loader defaults."""

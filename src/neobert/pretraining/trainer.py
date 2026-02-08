@@ -7,8 +7,9 @@ import math
 import os
 import re
 import shutil
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Iterator, Optional, Tuple
 
 # PyTorch
 import torch
@@ -80,6 +81,45 @@ def _resolve_masked_logits_only_loss(value: Any) -> bool:
         "trainer.masked_logits_only_loss must be a bool or boolean-like string, "
         f"got {value!r} ({type(value).__name__})."
     )
+
+
+@contextmanager
+def _gather_decoder_weight_for_masked_objective(
+    model: torch.nn.Module,
+    accelerator: Accelerator,
+) -> Iterator[torch.Tensor]:
+    """Yield decoder weights, gathering ZeRO-sharded parameters when required.
+
+    Masked-only loss computes logits from ``decoder.weight`` outside the decoder
+    module forward. Under DeepSpeed ZeRO-3, this parameter is partitioned, so we
+    must materialize the full tensor for the objective path.
+
+    :param torch.nn.Module model: Prepared training model (possibly wrapped).
+    :param Accelerator accelerator: Active accelerator runtime.
+    :yield torch.Tensor: Decoder projection weight tensor.
+    """
+    lm_weight = model.decoder.weight
+    if accelerator.distributed_type is not DistributedType.DEEPSPEED:
+        yield lm_weight
+        return
+    if getattr(lm_weight, "ds_id", None) is None:
+        yield lm_weight
+        return
+
+    import deepspeed
+
+    fwd_module = None
+    unwrap_model = getattr(accelerator, "unwrap_model", None)
+    if callable(unwrap_model):
+        try:
+            fwd_module = unwrap_model(model)
+        except Exception:
+            fwd_module = None
+
+    with deepspeed.zero.GatheredParameters(
+        [lm_weight], modifier_rank=None, fwd_module=fwd_module
+    ):
+        yield lm_weight
 
 
 def _move_batch_to_device(batch: BatchEncoding, device: torch.device) -> BatchEncoding:
@@ -476,12 +516,15 @@ def _run_eval(
                         packed_seqlens=packed_seqlens,
                         return_logits=False,
                     )["hidden_representation"]
-                    objective_out = masked_objective(
-                        hidden_states=hidden,
-                        labels=batch["labels"],
-                        lm_weight=model.decoder.weight,
-                        compute_accuracy=True,
-                    )
+                    with _gather_decoder_weight_for_masked_objective(
+                        model, accelerator
+                    ) as lm_weight:
+                        objective_out = masked_objective(
+                            hidden_states=hidden,
+                            labels=batch["labels"],
+                            lm_weight=lm_weight,
+                            compute_accuracy=True,
+                        )
                     eval_loss_sum += objective_out.loss_sum_local
                     eval_num_pred += objective_out.num_masked_local
                     if objective_out.num_correct_local is not None:
@@ -1867,12 +1910,15 @@ def trainer(cfg: Config) -> None:
                             packed_seqlens=packed_seqlens,
                             return_logits=False,
                         )["hidden_representation"]
-                        objective_out = masked_objective(
-                            hidden_states=hidden,
-                            labels=batch["labels"],
-                            lm_weight=model.decoder.weight,
-                            compute_accuracy=log_train_accuracy,
-                        )
+                        with _gather_decoder_weight_for_masked_objective(
+                            model, accelerator
+                        ) as lm_weight:
+                            objective_out = masked_objective(
+                                hidden_states=hidden,
+                                labels=batch["labels"],
+                                lm_weight=lm_weight,
+                                compute_accuracy=log_train_accuracy,
+                            )
                         loss_sum = objective_out.loss_sum_local
                         num_pred = objective_out.num_masked_local
                         if objective_out.used_path == "liger_flce":
