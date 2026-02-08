@@ -71,17 +71,25 @@ def gather_masked_index_select(
 def _estimate_masked_logits_bytes(
     num_tokens: int,
     vocab_size: int,
-    dtype: torch.dtype,
+    logits_dtype: torch.dtype,
+    ce_input_dtype: torch.dtype = torch.float32,
 ) -> int:
-    """Estimate bytes for a masked ``(N_masked, vocab)`` logits tensor.
+    """Estimate bytes for masked-logits eval working set.
 
     :param int num_tokens: Number of masked tokens.
     :param int vocab_size: Vocabulary size.
-    :param torch.dtype dtype: Logits dtype.
-    :return int: Estimated bytes.
+    :param torch.dtype logits_dtype: Materialized logits dtype.
+    :param torch.dtype ce_input_dtype: CE input dtype after any explicit cast.
+    :return int: Estimated bytes for logits (+ cast buffer when dtype differs).
     """
-    bytes_per_elem = 2 if dtype == torch.bfloat16 else 4
-    return int(num_tokens) * int(vocab_size) * int(bytes_per_elem)
+    num_elems = int(num_tokens) * int(vocab_size)
+    logits_bytes = num_elems * torch.empty((), dtype=logits_dtype).element_size()
+    ce_bytes = num_elems * torch.empty((), dtype=ce_input_dtype).element_size()
+    # ``masked_logits.float()`` in eval CE can allocate an additional fp32 buffer.
+    # Treat that as part of the working set to avoid optimistic ``auto`` selection.
+    if logits_dtype != ce_input_dtype:
+        return logits_bytes + ce_bytes
+    return logits_bytes
 
 
 @torch.no_grad()
@@ -435,10 +443,12 @@ class MaskedPositionsOnlyMLMObjective(nn.Module):
             )
 
         vocab_size = int(lm_weight.size(0))
+        logits_dtype = torch.promote_types(masked_hidden.dtype, lm_weight.dtype)
         estimated_bytes = _estimate_masked_logits_bytes(
             num_tokens=num_masked,
             vocab_size=vocab_size,
-            dtype=masked_hidden.dtype,
+            logits_dtype=logits_dtype,
+            ce_input_dtype=torch.float32,
         )
 
         if self.eval_loss_mode == "masked_logits":

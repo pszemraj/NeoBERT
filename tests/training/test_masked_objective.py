@@ -156,6 +156,25 @@ class TestMaskedObjective(unittest.TestCase):
             with self.assertRaisesRegex(IndexError, "out of bounds"):
                 objective_streaming(hidden, labels, lm_weight, compute_accuracy=False)
 
+    def test_eval_auto_accounts_for_fp32_ce_cast_working_set(self):
+        """Ensure auto-mode estimate includes explicit fp32 CE cast buffer."""
+        hidden = torch.randn(1, 2, 4, dtype=torch.bfloat16)
+        lm_weight = torch.randn(5, 4, dtype=torch.bfloat16)
+        labels = torch.tensor([[1, 2]], dtype=torch.long)
+        objective_auto = MaskedPositionsOnlyMLMObjective(
+            eval_loss_mode="auto",
+            # N_masked=2, vocab=5 -> bf16 logits=20B, fp32 CE cast=40B, total=60B.
+            # Threshold 59 should force streaming path with the corrected heuristic.
+            max_masked_logits_bytes_eval=59,
+            token_chunk_eval=2,
+            vocab_chunk_eval=4,
+        )
+
+        with torch.no_grad():
+            out = objective_auto(hidden, labels, lm_weight, compute_accuracy=False)
+
+        self.assertEqual(out.used_path, "eval_streaming_ce")
+
 
 if __name__ == "__main__":
     unittest.main()
