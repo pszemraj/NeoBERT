@@ -45,7 +45,10 @@ from neobert.kernels.attention import resolve_runtime_attn_backend
 from neobert.kernels.backend import get_cross_entropy_loss, resolve_kernel_backend
 from neobert.model import NeoBERTConfig, NeoBERTLMHead
 from neobert.optimizer import get_optimizer
-from neobert.pretraining.masked_objective import MaskedPositionsOnlyMLMObjective
+from neobert.pretraining.masked_objective import (
+    MaskedObjectiveOut,
+    MaskedPositionsOnlyMLMObjective,
+)
 from neobert.scheduler import get_scheduler, resolve_scheduler_steps
 from neobert.tokenizer import get_tokenizer, resolve_text_column
 from neobert.training_utils import (
@@ -120,6 +123,68 @@ def _gather_decoder_weight_for_masked_objective(
         [lm_weight], modifier_rank=None, fwd_module=fwd_module
     ):
         yield lm_weight
+
+
+def _should_backward_inside_gathered_decoder_weight(
+    accelerator: Accelerator,
+    lm_weight: torch.Tensor,
+) -> bool:
+    """Return whether backward must run while decoder weight is gathered.
+
+    In DeepSpeed ZeRO-3, masked-objective fallback paths can touch decoder
+    weights during backward recomputation. Keep backward under the gather
+    context so ``decoder.weight`` remains materialized.
+
+    :param Accelerator accelerator: Active accelerator runtime.
+    :param torch.Tensor lm_weight: Decoder projection weight.
+    :return bool: ``True`` when backward should run inside gather context.
+    """
+    if accelerator.distributed_type is not DistributedType.DEEPSPEED:
+        return False
+    return getattr(lm_weight, "ds_id", None) is not None
+
+
+def _run_masked_objective_step(
+    model: torch.nn.Module,
+    batch: BatchEncoding,
+    pad_mask: Optional[torch.Tensor],
+    packed_seqlens: Optional[torch.Tensor],
+    masked_objective: MaskedPositionsOnlyMLMObjective,
+    accelerator: Accelerator,
+    *,
+    log_train_accuracy: bool,
+) -> tuple[MaskedObjectiveOut, torch.Tensor, bool]:
+    """Compute masked-objective loss and optionally backprop inside gather.
+
+    :param torch.nn.Module model: Training model.
+    :param BatchEncoding batch: Prepared input batch.
+    :param torch.Tensor | None pad_mask: Additive attention mask.
+    :param torch.Tensor | None packed_seqlens: Packed sequence lengths metadata.
+    :param MaskedPositionsOnlyMLMObjective masked_objective: Objective module.
+    :param Accelerator accelerator: Active accelerator runtime.
+    :param bool log_train_accuracy: Whether to compute masked accuracy.
+    :return tuple[MaskedObjectiveOut, torch.Tensor, bool]:
+        Objective output, local loss sum, and whether backward already ran.
+    """
+    hidden = model(
+        src=batch["input_ids"],
+        pad_mask=pad_mask,
+        packed_seqlens=packed_seqlens,
+        return_logits=False,
+    )["hidden_representation"]
+    with _gather_decoder_weight_for_masked_objective(model, accelerator) as lm_weight:
+        objective_out = masked_objective(
+            hidden_states=hidden,
+            labels=batch["labels"],
+            lm_weight=lm_weight,
+            compute_accuracy=log_train_accuracy,
+        )
+        loss_sum = objective_out.loss_sum_local
+        backward_done = False
+        if _should_backward_inside_gathered_decoder_weight(accelerator, lm_weight):
+            accelerator.backward(loss_sum)
+            backward_done = True
+    return objective_out, loss_sum, backward_done
 
 
 def _move_batch_to_device(batch: BatchEncoding, device: torch.device) -> BatchEncoding:
@@ -1902,24 +1967,20 @@ def trainer(cfg: Config) -> None:
                     update_step=metrics["train/steps"],
                     is_last_microbatch=sync_gradients,
                 )
+                backward_called = False
                 with accelerator.autocast():
                     if masked_objective is not None:
-                        hidden = model(
-                            src=batch["input_ids"],
-                            pad_mask=pad_mask,
-                            packed_seqlens=packed_seqlens,
-                            return_logits=False,
-                        )["hidden_representation"]
-                        with _gather_decoder_weight_for_masked_objective(
-                            model, accelerator
-                        ) as lm_weight:
-                            objective_out = masked_objective(
-                                hidden_states=hidden,
-                                labels=batch["labels"],
-                                lm_weight=lm_weight,
-                                compute_accuracy=log_train_accuracy,
+                        objective_out, loss_sum, backward_called = (
+                            _run_masked_objective_step(
+                                model,
+                                batch,
+                                pad_mask,
+                                packed_seqlens,
+                                masked_objective,
+                                accelerator,
+                                log_train_accuracy=log_train_accuracy,
                             )
-                        loss_sum = objective_out.loss_sum_local
+                        )
                         num_pred = objective_out.num_masked_local
                         if objective_out.used_path == "liger_flce":
                             local_loss_path_liger_flce += 1
@@ -1959,7 +2020,8 @@ def trainer(cfg: Config) -> None:
                         )
 
                 # Compute gradient
-                accelerator.backward(loss_sum)
+                if not backward_called:
+                    accelerator.backward(loss_sum)
                 accum_tokens += num_pred.to(accum_tokens.dtype)
 
                 # Accumulate metrics on device to avoid per-batch syncs.

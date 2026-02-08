@@ -16,10 +16,12 @@ from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 
 from neobert.config import Config, ConfigLoader
+from neobert.pretraining.masked_objective import MaskedObjectiveOut
 from neobert.pretraining.trainer import (
     _ensure_pinned_cpu_batch,
     _gather_decoder_weight_for_masked_objective,
     _resolve_loader_perf_settings,
+    _run_masked_objective_step,
     _sync_tokenizer_derived_config,
     _write_deepspeed_latest_file,
     trainer,
@@ -382,6 +384,169 @@ class TestPretrainComponents(unittest.TestCase):
         self.assertEqual(gathered.call_args.args[0], [model.decoder.weight])
         self.assertIsNone(gathered.call_args.kwargs["modifier_rank"])
         self.assertIs(gathered.call_args.kwargs["fwd_module"], model)
+
+    def test_run_masked_objective_step_backprops_inside_gather_on_zero3(self):
+        """Ensure ZeRO-3 objective step runs backward before gather context exits."""
+
+        class _ModelStub(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.decoder = torch.nn.Linear(2, 3, bias=False)
+
+            def forward(
+                self,
+                src: torch.Tensor,
+                pad_mask: torch.Tensor | None = None,
+                packed_seqlens: torch.Tensor | None = None,
+                *,
+                return_logits: bool = True,
+            ) -> dict[str, torch.Tensor]:
+                _ = pad_mask, packed_seqlens, return_logits
+                hidden = torch.ones(
+                    src.shape[0],
+                    src.shape[1],
+                    2,
+                    dtype=torch.float32,
+                    requires_grad=True,
+                )
+                return {"hidden_representation": hidden}
+
+        class _ObjectiveStub:
+            def __call__(
+                self,
+                hidden_states: torch.Tensor,
+                labels: torch.Tensor,
+                lm_weight: torch.Tensor,
+                *,
+                compute_accuracy: bool = False,
+            ) -> MaskedObjectiveOut:
+                _ = labels, compute_accuracy
+                loss = hidden_states.sum() * 0.0 + lm_weight.sum() * 0.0
+                return MaskedObjectiveOut(
+                    loss_sum_local=loss.float(),
+                    num_masked_local=torch.tensor(0, dtype=torch.long),
+                    used_path="train_checkpointed_masked_ce",
+                    num_correct_local=torch.tensor(0, dtype=torch.long),
+                )
+
+        class _AcceleratorStub:
+            distributed_type = DistributedType.DEEPSPEED
+
+            def __init__(self, marker: dict[str, bool]) -> None:
+                self._marker = marker
+                self.backward_calls = 0
+
+            def backward(self, _loss: torch.Tensor) -> None:
+                self.backward_calls += 1
+                if not self._marker["active"]:
+                    raise AssertionError(
+                        "backward must run while gather context is still active"
+                    )
+
+        class _GatherMarkerContext:
+            def __init__(self, state: dict[str, bool], value: torch.Tensor) -> None:
+                self._state = state
+                self._value = value
+
+            def __enter__(self) -> torch.Tensor:
+                self._state["active"] = True
+                return self._value
+
+            def __exit__(self, exc_type, exc, tb) -> bool:
+                self._state["active"] = False
+                return False
+
+        model = _ModelStub()
+        setattr(model.decoder.weight, "ds_id", 7)
+        marker = {"active": False}
+        accelerator = _AcceleratorStub(marker)
+        batch = {
+            "input_ids": torch.ones((1, 2), dtype=torch.long),
+            "labels": torch.full((1, 2), -100, dtype=torch.long),
+        }
+
+        with patch(
+            "neobert.pretraining.trainer._gather_decoder_weight_for_masked_objective",
+            side_effect=lambda *_args, **_kwargs: _GatherMarkerContext(
+                marker, model.decoder.weight
+            ),
+        ):
+            _objective_out, _loss_sum, backward_done = _run_masked_objective_step(
+                model=model,
+                batch=batch,
+                pad_mask=None,
+                packed_seqlens=None,
+                masked_objective=_ObjectiveStub(),
+                accelerator=accelerator,
+                log_train_accuracy=False,
+            )
+
+        self.assertTrue(backward_done)
+        self.assertEqual(accelerator.backward_calls, 1)
+
+    def test_run_masked_objective_step_defers_backward_when_not_zero3(self):
+        """Ensure non-ZeRO paths defer backward to the outer training loop."""
+
+        class _ModelStub(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.decoder = torch.nn.Linear(2, 3, bias=False)
+
+            def forward(
+                self,
+                src: torch.Tensor,
+                pad_mask: torch.Tensor | None = None,
+                packed_seqlens: torch.Tensor | None = None,
+                *,
+                return_logits: bool = True,
+            ) -> dict[str, torch.Tensor]:
+                _ = src, pad_mask, packed_seqlens, return_logits
+                hidden = torch.ones((1, 2, 2), dtype=torch.float32, requires_grad=True)
+                return {"hidden_representation": hidden}
+
+        class _ObjectiveStub:
+            def __call__(
+                self,
+                hidden_states: torch.Tensor,
+                labels: torch.Tensor,
+                lm_weight: torch.Tensor,
+                *,
+                compute_accuracy: bool = False,
+            ) -> MaskedObjectiveOut:
+                _ = labels, compute_accuracy
+                return MaskedObjectiveOut(
+                    loss_sum_local=(hidden_states.sum() * 0.0 + lm_weight.sum() * 0.0),
+                    num_masked_local=torch.tensor(0, dtype=torch.long),
+                    used_path="train_checkpointed_masked_ce",
+                )
+
+        class _AcceleratorStub:
+            distributed_type = DistributedType.NO
+
+            def __init__(self) -> None:
+                self.backward_calls = 0
+
+            def backward(self, _loss: torch.Tensor) -> None:
+                self.backward_calls += 1
+
+        model = _ModelStub()
+        accelerator = _AcceleratorStub()
+        batch = {
+            "input_ids": torch.ones((1, 2), dtype=torch.long),
+            "labels": torch.full((1, 2), -100, dtype=torch.long),
+        }
+
+        _objective_out, _loss_sum, backward_done = _run_masked_objective_step(
+            model=model,
+            batch=batch,
+            pad_mask=None,
+            packed_seqlens=None,
+            masked_objective=_ObjectiveStub(),
+            accelerator=accelerator,
+            log_train_accuracy=False,
+        )
+        self.assertFalse(backward_done)
+        self.assertEqual(accelerator.backward_calls, 0)
 
     def test_resolve_loader_perf_settings_cuda_defaults(self):
         """Ensure CUDA runs get throughput-friendly loader defaults."""
