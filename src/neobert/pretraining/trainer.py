@@ -1879,6 +1879,10 @@ def trainer(cfg: Config) -> None:
                             and accelerator.is_main_process
                             and objective_out.used_path != "zero_masked"
                         ):
+                            accelerator.print(
+                                "Masked-logits loss path active (first non-empty microbatch): "
+                                f"{objective_out.used_path}"
+                            )
                             logger.info(
                                 "Masked-logits loss path active (first non-empty microbatch): %s",
                                 objective_out.used_path,
