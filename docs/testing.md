@@ -1,6 +1,7 @@
 # Testing Guide
 
 This guide covers running and extending the NeoBERT regression suite.
+It is the canonical reference for test process and authoring conventions.
 
 ## Run Tests
 

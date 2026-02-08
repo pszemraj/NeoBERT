@@ -16,9 +16,9 @@ python scripts/export-hf/validate.py outputs/<run>/hf/<export_name>
 
 ## Notes
 
-- Input checkpoint can be native safetensors or DeepSpeed ZeRO state.
-- Export writes both `model.safetensors` and `pytorch_model.bin`.
-- Exported model is standard/unpacked HF path (no packed metadata inputs).
+- Detailed export constraints and compatibility notes live in
+  [docs/export.md](../../docs/export.md).
+- Keep this README focused on script entry points.
 
 ## Related Docs
 

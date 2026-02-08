@@ -51,11 +51,11 @@ Actions:
 - reduce dynamic control flow and per-step Python-side variability,
 - use `TORCH_LOGS="recompiles"` to inspect root causes.
 
-### Streaming resume caveat
+### Streaming resume rejected for pretraining
 
-- Accelerator checkpoint resume works, but exact data position/order is not
-  preserved for streaming datasets.
-- For reproducible resume, prefer pre-tokenized non-streaming datasets.
+- Pretraining trainer raises if `trainer.resume_from_checkpoint` is set while
+  `dataset.streaming: true`.
+- Workaround: pre-tokenize data to disk and run with `dataset.streaming: false`.
 
 ## Evaluation Issues
 

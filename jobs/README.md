@@ -10,6 +10,8 @@ jobs/
 
 These are convenience wrappers around scripts in `scripts/` and configs in
 `configs/`.
+Behavior semantics remain documented in `docs/training.md` and
+`docs/evaluation.md`.
 
 ## Environment
 

@@ -64,7 +64,7 @@ python tests/run_tests.py
 
 ## Documentation
 
-- [docs/README.md](docs/README.md)
+- [docs/README.md](docs/README.md) (index + source-of-truth map)
 - [Training Guide](docs/training.md)
 - [Configuration Reference](docs/configuration.md)
 - [Evaluation Guide](docs/evaluation.md)

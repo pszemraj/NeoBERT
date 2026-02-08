@@ -1,6 +1,8 @@
 # Hugging Face Export Guide
 
 Export NeoBERT training checkpoints to a Hugging Face-compatible folder.
+This is the canonical reference for export behavior and constraints.
+`scripts/export-hf/README.md` is intentionally command/script oriented.
 
 ## Supported Inputs
 

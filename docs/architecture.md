@@ -2,6 +2,7 @@
 
 This document summarizes the implemented architecture and runtime behavior.
 Source of truth remains the code under `src/neobert/`.
+Config defaults live in [configuration.md](configuration.md).
 
 ## Overview
 

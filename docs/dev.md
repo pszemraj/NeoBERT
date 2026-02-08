@@ -67,7 +67,7 @@ Status: **standardized**.
 
 ## Recently Landed
 
-Key landed changes on `feat/liger` include:
+Key landed changes from recent engineering cycles include:
 
 - Packed varlen path hardening and backend resolution fixes.
 - Packed metadata tensor-first normalization and compile-path fixes.

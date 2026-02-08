@@ -1,7 +1,8 @@
 # Training Guide
 
-This guide covers pretraining and contrastive workflows. Full field-level schema
-is in [configuration.md](configuration.md).
+This guide covers pretraining and contrastive workflows.
+It is the canonical source for training runtime behavior. Full field-level
+schema/defaults are in [configuration.md](configuration.md).
 
 ## Entry Points
 
@@ -80,6 +81,7 @@ Runtime behavior:
   leakage;
 - when `trainer.eval_max_batches` is unset, trainer derives a practical default
   for streaming eval and still allows explicit override.
+- if no eval dataset can be resolved, eval is skipped.
 
 ## Mixed Precision and Compile
 
@@ -136,8 +138,8 @@ python scripts/pretraining/pretrain.py \
 Notes:
 
 - resume operates from `<output_dir>/checkpoints/`.
-- for streaming datasets, exact data position is not preserved, so resume is not
-  fully reproducible for data order.
+- pretraining resume with `dataset.streaming: true` is rejected by trainer.
+  Use a pre-tokenized non-streaming dataset for resumable runs.
 
 ## Pre-tokenized Datasets
 

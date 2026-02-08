@@ -1,6 +1,8 @@
 # Configuration Files
 
 Repository configs for training and evaluation workflows.
+Field definitions/defaults are documented in
+[docs/configuration.md](../docs/configuration.md).
 
 - Production/experiment configs live under `configs/`.
 - Tiny smoke-test configs live under `tests/configs/`.
