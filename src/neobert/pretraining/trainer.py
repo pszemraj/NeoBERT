@@ -100,6 +100,7 @@ def _gather_decoder_weight_for_masked_objective(
     :param torch.nn.Module model: Prepared training model (possibly wrapped).
     :param Accelerator accelerator: Active accelerator runtime.
     :yield torch.Tensor: Decoder projection weight tensor.
+    :return Iterator[torch.Tensor]: Context manager yielding decoder weight.
     """
     lm_weight = model.decoder.weight
     if accelerator.distributed_type is not DistributedType.DEEPSPEED:
@@ -212,6 +213,11 @@ def _ensure_pinned_cpu_batch(batch: BatchEncoding) -> BatchEncoding:
     """
 
     def _pin_value(value: Any) -> tuple[Any, bool]:
+        """Pin tensors in nested structures and report whether anything changed.
+
+        :param Any value: Candidate tensor/container/scalar value.
+        :return tuple[Any, bool]: Possibly pinned value and change flag.
+        """
         if torch.is_tensor(value):
             if value.device.type != "cpu" or value.is_pinned():
                 return value, False
