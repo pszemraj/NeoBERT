@@ -22,6 +22,7 @@ from neobert.pretraining.trainer import (
     _gather_decoder_weight_for_masked_objective,
     _resolve_loader_perf_settings,
     _run_masked_objective_step,
+    _should_backward_inside_gathered_decoder_weight,
     _sync_tokenizer_derived_config,
     _write_deepspeed_latest_file,
     trainer,
@@ -138,6 +139,30 @@ class TestPretrainPipeline(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "masked_logits_only_loss"):
                 trainer(config)
             mocked_tokenizer.assert_not_called()
+
+    def test_pretraining_rejects_fsdp1_before_tokenizer_setup(self):
+        """Ensure FSDP1 fails fast before tokenizer/dataset initialization."""
+        config = ConfigLoader.load(str(self.test_config_path))
+        config.trainer.output_dir = self.temp_dir
+
+        class _FSDPPluginStub:
+            fsdp_version = 1
+
+        class _StateStub:
+            fsdp_plugin = _FSDPPluginStub()
+
+        class _AcceleratorStub:
+            distributed_type = DistributedType.FSDP
+            state = _StateStub()
+
+        with patch(
+            "neobert.pretraining.trainer.Accelerator",
+            return_value=_AcceleratorStub(),
+        ):
+            with patch("neobert.pretraining.trainer.get_tokenizer") as mocked_tokenizer:
+                with self.assertRaisesRegex(RuntimeError, "FSDP2-first"):
+                    trainer(config)
+                mocked_tokenizer.assert_not_called()
 
     def test_model_config_compatibility(self):
         """Test that model config is compatible with pretraining."""
@@ -385,8 +410,8 @@ class TestPretrainComponents(unittest.TestCase):
         self.assertIsNone(gathered.call_args.kwargs["modifier_rank"])
         self.assertIs(gathered.call_args.kwargs["fwd_module"], model)
 
-    def test_gather_decoder_weight_uses_fsdp_summon_full_params(self):
-        """Ensure FSDP1 runs gather full decoder weights for masked objective."""
+    def test_gather_decoder_weight_rejects_fsdp1(self):
+        """Ensure FSDP1 is rejected for masked-objective decoder-weight access."""
         model = torch.nn.Module()
         model.decoder = torch.nn.Linear(4, 6, bias=False)
 
@@ -404,19 +429,9 @@ class TestPretrainComponents(unittest.TestCase):
             def unwrap_model(module: torch.nn.Module) -> torch.nn.Module:
                 return module
 
-        with patch(
-            "torch.distributed.fsdp.FullyShardedDataParallel.summon_full_params",
-            side_effect=lambda *_args, **_kwargs: nullcontext(),
-        ) as summon_full_params:
-            with _gather_decoder_weight_for_masked_objective(
-                model, _AcceleratorStub()
-            ) as lm_weight:
-                self.assertIs(lm_weight, model.decoder.weight)
-
-        summon_full_params.assert_called_once()
-        self.assertIs(summon_full_params.call_args.args[0], model)
-        self.assertTrue(summon_full_params.call_args.kwargs["recurse"])
-        self.assertFalse(summon_full_params.call_args.kwargs["writeback"])
+        with self.assertRaisesRegex(RuntimeError, "FSDP v1"):
+            with _gather_decoder_weight_for_masked_objective(model, _AcceleratorStub()):
+                pass
 
     def test_gather_decoder_weight_uses_fsdp2_unshard_reshard(self):
         """Ensure FSDP2 unshards and reshards around decoder-weight access."""
@@ -576,7 +591,7 @@ class TestPretrainComponents(unittest.TestCase):
         self.assertEqual(accelerator.backward_calls, 1)
 
     def test_run_masked_objective_step_backprops_inside_gather_on_fsdp(self):
-        """Ensure FSDP objective step runs backward before gather context exits."""
+        """Ensure FSDP2 objective step runs backward before gather exits."""
 
         class _ModelStub(torch.nn.Module):
             def __init__(self) -> None:
@@ -621,6 +636,11 @@ class TestPretrainComponents(unittest.TestCase):
 
         class _AcceleratorStub:
             distributed_type = DistributedType.FSDP
+            state = type(
+                "_StateStub",
+                (),
+                {"fsdp_plugin": type("_FSDPPluginStub", (), {"fsdp_version": 2})()},
+            )()
 
             def __init__(self, marker: dict[str, bool]) -> None:
                 self._marker = marker
@@ -672,6 +692,33 @@ class TestPretrainComponents(unittest.TestCase):
 
         self.assertTrue(backward_done)
         self.assertEqual(accelerator.backward_calls, 1)
+
+    def test_should_backward_inside_gather_fsdp_depends_on_version(self):
+        """Ensure gather-scoped backward policy only applies to FSDP2+."""
+
+        class _FSDP1Accel:
+            distributed_type = DistributedType.FSDP
+            state = type(
+                "_StateStub",
+                (),
+                {"fsdp_plugin": type("_FSDPPluginStub", (), {"fsdp_version": 1})()},
+            )()
+
+        class _FSDP2Accel:
+            distributed_type = DistributedType.FSDP
+            state = type(
+                "_StateStub",
+                (),
+                {"fsdp_plugin": type("_FSDPPluginStub", (), {"fsdp_version": 2})()},
+            )()
+
+        lm_weight = torch.nn.Linear(2, 3, bias=False).weight
+        self.assertFalse(
+            _should_backward_inside_gathered_decoder_weight(_FSDP1Accel(), lm_weight)
+        )
+        self.assertTrue(
+            _should_backward_inside_gathered_decoder_weight(_FSDP2Accel(), lm_weight)
+        )
 
     def test_run_masked_objective_step_defers_backward_when_not_zero3(self):
         """Ensure non-ZeRO paths defer backward to the outer training loop."""

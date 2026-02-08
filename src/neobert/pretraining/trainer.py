@@ -111,11 +111,12 @@ def _gather_decoder_weight_for_masked_objective(
     """Yield decoder weights, gathering sharded parameters when required.
 
     Masked-only loss computes logits from ``decoder.weight`` outside the decoder
-    module forward. Under FSDP and DeepSpeed ZeRO-3 this parameter can be
+    module forward. Under FSDP2 and DeepSpeed ZeRO-3 this parameter can be
     partitioned, so we must materialize the full tensor for the objective path.
 
     :param torch.nn.Module model: Prepared training model (possibly wrapped).
     :param Accelerator accelerator: Active accelerator runtime.
+    :raises RuntimeError: If FSDP v1 is active (unsupported policy).
     :yield torch.Tensor: Decoder projection weight tensor.
     :return Iterator[torch.Tensor]: Context manager yielding decoder weight.
     """
@@ -207,15 +208,10 @@ def _gather_decoder_weight_for_masked_objective(
             finally:
                 fsdp_owner.reshard()
         else:
-            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-
-            with FSDP.summon_full_params(
-                model,
-                recurse=True,
-                writeback=False,
-            ):
-                lm_weight = _resolve_decoder_weight()
-                yield lm_weight
+            raise RuntimeError(
+                "FSDP v1 is not supported for NeoBERT pretraining. "
+                "Use FSDP2 (Accelerate fsdp_version=2)."
+            )
         return
 
     lm_weight = _resolve_decoder_weight()
@@ -248,16 +244,16 @@ def _should_backward_inside_gathered_decoder_weight(
 ) -> bool:
     """Return whether backward must run while decoder weight is gathered.
 
-    In FSDP and DeepSpeed ZeRO-3, masked-objective fallback paths can touch
-    decoder weights during backward recomputation. Keep backward under the
-    gather context so ``decoder.weight`` remains materialized.
+    In FSDP2 and DeepSpeed ZeRO-3, masked-objective fallback paths can touch
+    decoder weights during backward recomputation. Keep backward under gather
+    when ``decoder.weight`` may otherwise be partitioned.
 
     :param Accelerator accelerator: Active accelerator runtime.
     :param torch.Tensor lm_weight: Decoder projection weight.
     :return bool: ``True`` when backward should run inside gather context.
     """
     if accelerator.distributed_type is DistributedType.FSDP:
-        return True
+        return _resolve_fsdp_version(accelerator) >= 2
     if accelerator.distributed_type is not DistributedType.DEEPSPEED:
         return False
     return getattr(lm_weight, "ds_id", None) is not None
@@ -1309,6 +1305,14 @@ def trainer(cfg: Config) -> None:
             "Megatron-LM backend is not supported by this training loop. "
             "Use DDP or DeepSpeed instead."
         )
+    if accelerator.distributed_type is DistributedType.FSDP:
+        fsdp_version = _resolve_fsdp_version(accelerator)
+        if fsdp_version < 2:
+            raise RuntimeError(
+                "NeoBERT pretraining is FSDP2-first. "
+                "FSDP v1 is unsupported; set Accelerate fsdp_version=2."
+            )
+        logger.info("FSDP2 runtime detected (fsdp_version=%s).", fsdp_version)
     if accelerator.distributed_type is DistributedType.DEEPSPEED:
         is_muon = cfg.optimizer.name.lower() in {"muonclip", "muon-clip", "muon_clip"}
         if is_muon:
