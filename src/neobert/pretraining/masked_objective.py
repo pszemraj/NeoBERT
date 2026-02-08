@@ -380,7 +380,24 @@ class MaskedPositionsOnlyMLMObjective(nn.Module):
 
         if can_try_flce:
             try:
-                flce_loss = self._flce(lm_weight, masked_hidden, masked_targets)
+                flce_weight = lm_weight
+                if flce_weight.dtype != masked_hidden.dtype:
+                    # FLCE requires matching dtypes and is notably faster when
+                    # bf16 activations run against bf16 weights under autocast.
+                    # Keep the cast local to this call so optimizer state can
+                    # remain fp32.
+                    flce_weight = flce_weight.to(dtype=masked_hidden.dtype)
+                flce_hidden = (
+                    masked_hidden
+                    if masked_hidden.is_contiguous()
+                    else masked_hidden.contiguous()
+                )
+                flce_weight = (
+                    flce_weight
+                    if flce_weight.is_contiguous()
+                    else flce_weight.contiguous()
+                )
+                flce_loss = self._flce(flce_weight, flce_hidden, masked_targets)
                 loss_sum_local = flce_loss.float()
                 num_correct_local = None
                 if compute_accuracy:
