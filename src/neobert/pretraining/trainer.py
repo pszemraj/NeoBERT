@@ -1688,20 +1688,33 @@ def trainer(cfg: Config) -> None:
                     log_freq=getattr(cfg.wandb, "log_interval", 100),
                 )
 
-    mlm_loss_mode = str(getattr(cfg.trainer, "mlm_loss_mode", "masked_only")).lower()
-    if mlm_loss_mode not in {"masked_only", "original"}:
+    masked_logits_only_cfg = getattr(cfg.trainer, "masked_logits_only_loss", True)
+    if isinstance(masked_logits_only_cfg, bool):
+        masked_logits_only_loss = masked_logits_only_cfg
+    elif isinstance(masked_logits_only_cfg, str):
+        normalized = masked_logits_only_cfg.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            masked_logits_only_loss = True
+        elif normalized in {"false", "0", "no", "off"}:
+            masked_logits_only_loss = False
+        else:
+            raise ValueError(
+                "trainer.masked_logits_only_loss must be a boolean-like value, got "
+                f"{cfg.trainer.masked_logits_only_loss!r}."
+            )
+    else:
         raise ValueError(
-            "trainer.mlm_loss_mode must be 'masked_only' or 'original', got "
-            f"{cfg.trainer.mlm_loss_mode!r}."
+            "trainer.masked_logits_only_loss must be a bool, got "
+            f"{type(masked_logits_only_cfg).__name__}."
         )
 
     train_loss_fn: Optional[torch.nn.Module] = None
     masked_objective: Optional[MaskedPositionsOnlyMLMObjective] = None
-    if mlm_loss_mode == "masked_only":
+    if masked_logits_only_loss:
         masked_objective = MaskedPositionsOnlyMLMObjective(
             ignore_index=-100,
         )
-        logger.info("Using masked-only MLM objective.")
+        logger.info("Using masked-logits-only MLM objective.")
     else:
         resolved_kb = resolve_kernel_backend(cfg.model.kernel_backend)
         train_loss_fn = get_cross_entropy_loss(

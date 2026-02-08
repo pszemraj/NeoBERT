@@ -175,7 +175,7 @@ class TrainerConfig:
     gradient_checkpointing: bool = False
     gradient_clipping: Optional[float] = None
     mixed_precision: str = "bf16"
-    mlm_loss_mode: str = "masked_only"  # "masked_only" or "original"
+    masked_logits_only_loss: bool = True
     torch_compile: bool = False
     torch_compile_dynamic: Optional[bool] = None
     torch_compile_backend: str = "inductor"
@@ -1100,9 +1100,9 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     )
     parser.add_argument("--trainer.mixed_precision", type=str, help="Mixed precision")
     parser.add_argument(
-        "--trainer.mlm_loss_mode",
-        type=str,
-        help="MLM loss mode: 'masked_only' or 'original'",
+        "--trainer.masked_logits_only_loss",
+        type=lambda x: x.lower() == "true",
+        help="Use masked-logits-only MLM loss path (true) or original full-logits loss (false)",
     )
     parser.add_argument(
         "--trainer.torch_compile",

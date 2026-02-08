@@ -123,13 +123,13 @@ class TestPretrainPipeline(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "fp16"):
             trainer(config)
 
-    def test_pretraining_rejects_invalid_mlm_loss_mode(self):
-        """Ensure pretraining trainer validates MLM loss mode."""
+    def test_pretraining_rejects_invalid_masked_logits_only_loss(self):
+        """Ensure pretraining trainer validates masked_logits_only_loss value."""
         config = ConfigLoader.load(str(self.test_config_path))
         config.trainer.output_dir = self.temp_dir
-        config.trainer.mlm_loss_mode = "something_else"
+        config.trainer.masked_logits_only_loss = "something_else"
 
-        with self.assertRaisesRegex(ValueError, "mlm_loss_mode"):
+        with self.assertRaisesRegex(ValueError, "masked_logits_only_loss"):
             trainer(config)
 
     def test_model_config_compatibility(self):

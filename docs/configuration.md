@@ -218,7 +218,7 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `trainer.log_grad_norm`               | `bool`          | `false`      | Log grad norm each logging interval.                     |
 | `trainer.log_weight_norms`            | `bool`          | `false`      | Log parameter norms (main-process overhead).             |
 | `trainer.tf32`                        | `bool`          | `true`       | Enable TF32 on supported CUDA GPUs.                      |
-| `trainer.mlm_loss_mode`               | `str`           | `"masked_only"` | MLM objective mode: `"masked_only"` (new architecture style) or `"original"` (legacy full-logits CE). |
+| `trainer.masked_logits_only_loss`     | `bool`          | `true`       | `true` uses masked-logits-only MLM loss (new architecture style); `false` uses original full-logits CE. |
 
 ### Control and Legacy Compatibility
 

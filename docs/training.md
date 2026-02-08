@@ -71,7 +71,7 @@ if these are unset/suboptimal.
 - `trainer.torch_compile_backend`: `inductor | aot_eager | eager`
 - `trainer.torch_compile_dynamic`: optional override for dynamic-shape compile;
   default behavior prefers static-shape compile for stability.
-- `trainer.mlm_loss_mode`: `masked_only | original`
+- `trainer.masked_logits_only_loss`: `true | false`
 
 ## Checkpointing and Resume
 
