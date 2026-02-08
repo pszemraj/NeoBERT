@@ -8,6 +8,7 @@ training performance and stability work.
 - [Current Status](#current-status)
   - [Pretraining packed path](#pretraining-packed-path)
   - [Compile and runtime behavior](#compile-and-runtime-behavior)
+  - [Distributed runtime policy (FSDP2-first)](#distributed-runtime-policy-fsdp2-first)
   - [Checkpointing and serialization](#checkpointing-and-serialization)
 - [Recently Landed](#recently-landed)
 - [Lessons Learned](#lessons-learned)
@@ -42,6 +43,19 @@ Status: **stabilized for current training configs**.
   attention calls (keeps compiled behavior closer to baseline).
 - W&B-disabled runs now print key training metrics (including
   `train/tokens_per_sec`) directly to console for local validation.
+
+### Distributed runtime policy (FSDP2-first)
+
+Status: **enforced for pretraining**.
+
+- NeoBERT pretraining is now explicitly **FSDP2-first**.
+- FSDP v1 is rejected at runtime with a clear error.
+- Reason: masked-logits-only objective needs decoder-weight unshard/reshard
+  semantics that are safe with FSDP2. FSDP1 `summon_full_params` does not allow
+  initiating forward/backward inside that context.
+- For Accelerate launches, set FSDP config to `fsdp_version: 2`.
+- Keep passing model + optimizer together to `accelerate.prepare(...)` in FSDP2
+  paths (Accelerate requirement).
 
 ### Checkpointing and serialization
 
