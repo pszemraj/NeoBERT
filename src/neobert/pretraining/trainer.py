@@ -1722,7 +1722,11 @@ def trainer(cfg: Config) -> None:
             ignore_index=-100,
             backend=resolved_kb,
         )
-        logger.info("Using original full-logits MLM loss path.")
+        logger.warning(
+            "Using legacy original full-logits MLM loss path "
+            "(trainer.masked_logits_only_loss=false). This path is intended for "
+            "ablation/debug and has higher memory use."
+        )
     eval_max_batches = getattr(cfg.trainer, "eval_max_batches", None)
     if isinstance(eval_max_batches, int) and eval_max_batches <= 0:
         eval_max_batches = None
