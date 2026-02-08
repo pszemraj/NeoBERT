@@ -223,8 +223,8 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `trainer.enforce_full_packed_batches` | `bool`          | `true`       | Buffer packed fragments to emit full-sized microbatches. |
 | `trainer.eval_max_batches`            | `int \| None`   | `null`       | Optional eval cap (useful for streaming eval).           |
 | `trainer.log_train_accuracy`          | `bool`          | `false`      | Log MLM token accuracy (extra compute).                  |
-| `trainer.log_grad_norm`               | `bool`          | `false`      | Log grad norm each logging interval.                     |
-| `trainer.log_weight_norms`            | `bool`          | `false`      | Log parameter norms (main-process overhead).             |
+| `trainer.log_grad_norm`               | `bool`          | `true`       | Log grad norm each logging interval.                     |
+| `trainer.log_weight_norms`            | `bool`          | `true`       | Log parameter norms (main-process overhead).             |
 | `trainer.tf32`                        | `bool`          | `true`       | Enable TF32 on supported CUDA GPUs.                      |
 | `trainer.masked_logits_only_loss`     | `bool`          | `true`       | Pretraining MLM loss path selector: `true` = masked-logits-only path (default/recommended), `false` = original full-logits CE path (legacy ablation/debug). |
 

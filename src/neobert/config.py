@@ -187,7 +187,7 @@ class TrainerConfig:
     logging_steps: int = 100
     enforce_full_packed_batches: bool = True
     log_train_accuracy: bool = False
-    log_grad_norm: bool = False
+    log_grad_norm: bool = True
     output_dir: str = "./output"
     overwrite_output_dir: bool = True
     gradient_checkpointing: bool = False
@@ -221,7 +221,7 @@ class TrainerConfig:
     report_to: List[str] = field(default_factory=list)
     tf32: bool = True
     max_ckpt: int = 3
-    log_weight_norms: bool = False
+    log_weight_norms: bool = True
     # Legacy batch size fields (use per_device versions instead)
     train_batch_size: Optional[int] = None
     eval_batch_size: Optional[int] = None

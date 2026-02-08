@@ -2302,11 +2302,7 @@ def trainer(cfg: Config) -> None:
                             and accelerator.is_main_process
                             and objective_out.used_path != "zero_masked"
                         ):
-                            accelerator.print(
-                                "Masked-logits loss path active (first non-empty microbatch): "
-                                f"{objective_out.used_path}"
-                            )
-                            logger.info(
+                            logger.debug(
                                 "Masked-logits loss path active (first non-empty microbatch): %s",
                                 objective_out.used_path,
                             )
@@ -2454,7 +2450,12 @@ def trainer(cfg: Config) -> None:
                     metrics["train/local_tokens"] = int(local_tokens.item())
                     metrics["train/local_num_pred"] = int(local_num_pred.item())
                     metrics["train/local_sum_loss"] = float(local_sum_loss.item())
-                    metrics["train/local_num_correct"] = int(local_num_correct.item())
+                    if log_train_accuracy:
+                        metrics["train/local_num_correct"] = int(
+                            local_num_correct.item()
+                        )
+                    else:
+                        metrics.pop("train/local_num_correct", None)
                     if masked_objective is not None:
                         loss_path_counts = torch.stack(
                             [
@@ -2468,33 +2469,29 @@ def trainer(cfg: Config) -> None:
                             loss_path_counts, reduction="sum"
                         )
                         path_total = int(loss_path_counts.sum().item())
-                        metrics["train/loss_path_steps_liger_flce"] = int(
-                            loss_path_counts[0].item()
-                        )
-                        metrics["train/loss_path_steps_checkpointed"] = int(
-                            loss_path_counts[1].item()
-                        )
-                        metrics["train/loss_path_steps_zero_masked"] = int(
-                            loss_path_counts[2].item()
-                        )
-                        metrics["train/loss_path_steps_other"] = int(
-                            loss_path_counts[3].item()
-                        )
-                        if path_total > 0:
-                            metrics["train/loss_path_ratio_liger_flce"] = (
-                                metrics["train/loss_path_steps_liger_flce"] / path_total
-                            )
-                            metrics["train/loss_path_ratio_checkpointed"] = (
-                                metrics["train/loss_path_steps_checkpointed"]
-                                / path_total
-                            )
-                            metrics["train/loss_path_ratio_zero_masked"] = (
-                                metrics["train/loss_path_steps_zero_masked"]
-                                / path_total
-                            )
-                            metrics["train/loss_path_ratio_other"] = (
-                                metrics["train/loss_path_steps_other"] / path_total
-                            )
+                        if accelerator.is_main_process:
+                            steps_liger = int(loss_path_counts[0].item())
+                            steps_checkpointed = int(loss_path_counts[1].item())
+                            steps_zero = int(loss_path_counts[2].item())
+                            steps_other = int(loss_path_counts[3].item())
+                            if path_total > 0:
+                                logger.debug(
+                                    "Masked-loss path window: "
+                                    "liger_flce=%s (%.3f), checkpointed=%s (%.3f), "
+                                    "zero_masked=%s (%.3f), other=%s (%.3f)",
+                                    steps_liger,
+                                    steps_liger / path_total,
+                                    steps_checkpointed,
+                                    steps_checkpointed / path_total,
+                                    steps_zero,
+                                    steps_zero / path_total,
+                                    steps_other,
+                                    steps_other / path_total,
+                                )
+                            else:
+                                logger.debug(
+                                    "Masked-loss path window: no non-empty microbatches."
+                                )
                     metrics.log(
                         accelerator,
                         emit_console=(
