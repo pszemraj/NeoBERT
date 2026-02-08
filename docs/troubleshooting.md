@@ -25,6 +25,19 @@ Checklist:
 4. compare `tokens/sec` (not only `steps/sec`) when
    `enforce_full_packed_batches=true`.
 
+### Pretraining OOM from logits memory
+
+Symptoms:
+
+- high VRAM usage during MLM loss
+- OOM when sequence length / batch size increases
+
+Checklist:
+
+1. ensure `trainer.masked_logits_only_loss: true` for masked-logits-only loss,
+2. keep `trainer.mixed_precision: bf16` (or `no` if bf16 unsupported),
+3. use `gradient_checkpointing: true` for additional memory headroom.
+
 ### `torch.compile` warnings/recompiles
 
 Typical warnings:

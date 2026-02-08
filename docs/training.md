@@ -73,6 +73,19 @@ if these are unset/suboptimal.
   default behavior prefers static-shape compile for stability.
 - `trainer.masked_logits_only_loss`: `true | false`
 
+## MLM Loss Path Selection
+
+Use exactly one pretraining loss path per run:
+
+- `trainer.masked_logits_only_loss: true`
+  Uses masked-logits-only MLM loss (default). This avoids full `(B,S,V)` logits
+  materialization in the hot pretraining path.
+- `trainer.masked_logits_only_loss: false`
+  Uses the original NeoBERT full-logits CE path.
+
+There is no mixed/cross objective mode in trainer config; this flag picks one
+path for the run.
+
 ## Checkpointing and Resume
 
 Model checkpoints (export/inference assets):
