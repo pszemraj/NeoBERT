@@ -44,6 +44,7 @@ from neobert.kernels.attention import resolve_runtime_attn_backend
 from neobert.kernels.backend import get_cross_entropy_loss, resolve_kernel_backend
 from neobert.model import NeoBERTConfig, NeoBERTLMHead
 from neobert.optimizer import get_optimizer
+from neobert.pretraining.masked_objective import MaskedPositionsOnlyMLMObjective
 from neobert.scheduler import get_scheduler, resolve_scheduler_steps
 from neobert.tokenizer import get_tokenizer, resolve_text_column
 from neobert.training_utils import (
@@ -400,21 +401,24 @@ def _resolve_eval_max_batches(
 def _run_eval(
     model: torch.nn.Module,
     eval_dataloader: torch.utils.data.DataLoader,
-    loss_fn: torch.nn.Module,
+    loss_fn: Optional[torch.nn.Module],
     accelerator: Accelerator,
     model_config: NeoBERTConfig,
     max_batches: Optional[int] = None,
     manual_device_move: bool = True,
+    masked_objective: Optional[MaskedPositionsOnlyMLMObjective] = None,
 ) -> dict[str, float]:
     """Run a lightweight evaluation loop for masked LM perplexity.
 
     :param torch.nn.Module model: Model to evaluate.
     :param torch.utils.data.DataLoader eval_dataloader: Evaluation dataloader.
-    :param torch.nn.Module loss_fn: Loss function (sum reduction).
+    :param torch.nn.Module | None loss_fn: Loss function (sum reduction) for legacy path.
     :param Accelerator accelerator: Accelerator for distributed reductions.
     :param NeoBERTConfig model_config: Model config with vocab size.
     :param int | None max_batches: Optional cap on eval batches.
     :param bool manual_device_move: Whether to manually move each batch to device.
+    :param MaskedPositionsOnlyMLMObjective | None masked_objective:
+        Optional masked-only objective path.
     :return dict[str, float]: Evaluation metrics for logging.
     """
     was_training = model.training
@@ -444,18 +448,41 @@ def _run_eval(
                     if packed_seqlens is not None
                     else batch.get("attention_mask", None)
                 )
-                logits = model(
-                    src=batch["input_ids"],
-                    pad_mask=pad_mask,
-                    packed_seqlens=packed_seqlens,
-                )["logits"]
-                loss_sum = loss_fn(
-                    logits.view(-1, model_config.vocab_size), batch["labels"].view(-1)
-                )
-                num_pred = (batch["labels"] != -100).sum()
-                eval_loss_sum += loss_sum
-                eval_num_pred += num_pred
-                eval_num_correct += _count_masked_correct(logits, batch["labels"])
+                if masked_objective is not None:
+                    hidden = model(
+                        src=batch["input_ids"],
+                        pad_mask=pad_mask,
+                        packed_seqlens=packed_seqlens,
+                        return_logits=False,
+                    )["hidden_representation"]
+                    objective_out = masked_objective(
+                        hidden_states=hidden,
+                        labels=batch["labels"],
+                        lm_weight=model.decoder.weight,
+                        compute_accuracy=True,
+                    )
+                    eval_loss_sum += objective_out.loss_sum_local
+                    eval_num_pred += objective_out.num_masked_local
+                    if objective_out.num_correct_local is not None:
+                        eval_num_correct += objective_out.num_correct_local
+                else:
+                    if loss_fn is None:
+                        raise ValueError(
+                            "loss_fn is required when masked_objective is not provided."
+                        )
+                    logits = model(
+                        src=batch["input_ids"],
+                        pad_mask=pad_mask,
+                        packed_seqlens=packed_seqlens,
+                    )["logits"]
+                    loss_sum = loss_fn(
+                        logits.view(-1, model_config.vocab_size),
+                        batch["labels"].view(-1),
+                    )
+                    num_pred = (batch["labels"] != -100).sum()
+                    eval_loss_sum += loss_sum
+                    eval_num_pred += num_pred
+                    eval_num_correct += _count_masked_correct(logits, batch["labels"])
                 eval_batches += 1
 
         total_loss = accelerator.reduce(eval_loss_sum, reduction="sum")
@@ -997,9 +1024,23 @@ def trainer(cfg: Config) -> None:
     if disable_dispatch:
         dataloader_config = DataLoaderConfiguration(dispatch_batches=False)
         logger.info("Disabling Accelerate dispatch_batches for packed-sequence mode.")
+
+    mixed_precision = cfg.trainer.mixed_precision
+    if isinstance(mixed_precision, bool):
+        mixed_precision = "bf16" if mixed_precision else "no"
+    else:
+        mixed_precision = str(mixed_precision).strip().lower()
+    if mixed_precision == "fp32":
+        mixed_precision = "no"
+    if mixed_precision == "fp16":
+        raise ValueError(
+            "trainer.mixed_precision='fp16' is not supported for pretraining. "
+            "Use 'bf16' or 'no'/'fp32'."
+        )
+
     accelerator = Accelerator(
         step_scheduler_with_optimizer=False,  # enable manual control of the scheduler
-        mixed_precision=cfg.trainer.mixed_precision,
+        mixed_precision=mixed_precision,
         gradient_accumulation_steps=cfg.trainer.gradient_accumulation_steps,
         log_with="wandb" if wandb_enabled else None,
         project_config=project_config,
@@ -1647,13 +1688,44 @@ def trainer(cfg: Config) -> None:
                     log_freq=getattr(cfg.wandb, "log_interval", 100),
                 )
 
-    # Loss function - use Liger CE when available, else standard PyTorch
-    resolved_kb = resolve_kernel_backend(cfg.model.kernel_backend)
-    train_loss_fn = get_cross_entropy_loss(
-        reduction="sum",
-        ignore_index=-100,
-        backend=resolved_kb,
+    use_masked_only_objective = bool(
+        getattr(cfg.trainer, "masked_only_objective", True)
     )
+    masked_only_strict_fused_train = bool(
+        getattr(cfg.trainer, "masked_only_strict_fused_train", False)
+    )
+    masked_only_allow_checkpoint_fallback_train = bool(
+        getattr(cfg.trainer, "masked_only_allow_checkpoint_fallback_train", False)
+    )
+    masked_only_allow_original_fallback_train = bool(
+        getattr(cfg.trainer, "masked_only_allow_original_fallback_train", True)
+    )
+
+    train_loss_fn: Optional[torch.nn.Module] = None
+    masked_objective: Optional[MaskedPositionsOnlyMLMObjective] = None
+    if use_masked_only_objective:
+        masked_objective = MaskedPositionsOnlyMLMObjective(
+            ignore_index=-100,
+            strict_fused_when_training=masked_only_strict_fused_train,
+            allow_checkpoint_fallback_train=masked_only_allow_checkpoint_fallback_train,
+            allow_original_full_logits_fallback_train=masked_only_allow_original_fallback_train,
+        )
+        logger.info(
+            "Using masked-only MLM objective (strict_fused=%s, "
+            "checkpoint_fallback=%s, original_fallback=%s).",
+            masked_only_strict_fused_train,
+            masked_only_allow_checkpoint_fallback_train,
+            masked_only_allow_original_fallback_train,
+        )
+    else:
+        # Legacy full-logits path for compatibility/debugging.
+        resolved_kb = resolve_kernel_backend(cfg.model.kernel_backend)
+        train_loss_fn = get_cross_entropy_loss(
+            reduction="sum",
+            ignore_index=-100,
+            backend=resolved_kb,
+        )
+        logger.info("Using legacy full-logits MLM loss path.")
     eval_max_batches = getattr(cfg.trainer, "eval_max_batches", None)
     if isinstance(eval_max_batches, int) and eval_max_batches <= 0:
         eval_max_batches = None
@@ -1770,18 +1842,35 @@ def trainer(cfg: Config) -> None:
                     update_step=metrics["train/steps"],
                     is_last_microbatch=sync_gradients,
                 )
-                # Forward pass
-                logits = model(
-                    src=batch["input_ids"],
-                    pad_mask=pad_mask,
-                    packed_seqlens=packed_seqlens,
-                )["logits"]
-                # NOTE: this path still materializes full logits (B,S,V). At the
-                # current default packed lengths this is acceptable; for very long
-                # contexts a chunked decoder+CE path would be the next optimization.
-                loss_sum = train_loss_fn(
-                    logits.view(-1, model_config.vocab_size), batch["labels"].view(-1)
-                )
+                if masked_objective is not None:
+                    hidden = model(
+                        src=batch["input_ids"],
+                        pad_mask=pad_mask,
+                        packed_seqlens=packed_seqlens,
+                        return_logits=False,
+                    )["hidden_representation"]
+                    objective_out = masked_objective(
+                        hidden_states=hidden,
+                        labels=batch["labels"],
+                        lm_weight=model.decoder.weight,
+                        compute_accuracy=log_train_accuracy,
+                    )
+                    loss_sum = objective_out.loss_sum_local
+                    num_pred = objective_out.num_masked_local
+                else:
+                    if train_loss_fn is None:
+                        raise RuntimeError(
+                            "Legacy loss path selected but train_loss_fn is undefined."
+                        )
+                    logits = model(
+                        src=batch["input_ids"],
+                        pad_mask=pad_mask,
+                        packed_seqlens=packed_seqlens,
+                    )["logits"]
+                    loss_sum = train_loss_fn(
+                        logits.view(-1, model_config.vocab_size),
+                        batch["labels"].view(-1),
+                    )
 
                 # Compute gradient
                 accelerator.backward(loss_sum)
@@ -1793,7 +1882,13 @@ def trainer(cfg: Config) -> None:
                 local_num_pred += num_pred
                 local_sum_loss += loss_sum.detach().float()
                 if log_train_accuracy:
-                    local_num_correct += _count_masked_correct(logits, batch["labels"])
+                    if masked_objective is not None:
+                        if objective_out.num_correct_local is not None:
+                            local_num_correct += objective_out.num_correct_local
+                    else:
+                        local_num_correct += _count_masked_correct(
+                            logits, batch["labels"]
+                        )
 
             if sync_gradients:
                 should_log = (metrics["train/steps"] + 1) % log_interval == 0
@@ -2069,6 +2164,7 @@ def trainer(cfg: Config) -> None:
                         model_config,
                         max_batches=eval_max_batches,
                         manual_device_move=manual_device_move,
+                        masked_objective=masked_objective,
                     )
                     accelerator.log(
                         format_metrics(eval_metrics), step=metrics["train/steps"]
@@ -2094,6 +2190,7 @@ def trainer(cfg: Config) -> None:
                 model_config,
                 max_batches=eval_max_batches,
                 manual_device_move=manual_device_move,
+                masked_objective=masked_objective,
             )
             accelerator.log(format_metrics(eval_metrics), step=metrics["train/steps"])
 

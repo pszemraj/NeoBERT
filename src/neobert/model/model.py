@@ -1069,7 +1069,7 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
         self.config = config
 
         self.model = NormNeoBERT(config) if self.config.ngpt else NeoBERT(config)
-        self.decoder = nn.Linear(config.hidden_size, config.vocab_size)
+        self.decoder = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         should_tie = bool(getattr(self.config, "tie_word_embeddings", False))
         if self.config.ngpt and should_tie:
@@ -1114,18 +1114,24 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
         src: torch.Tensor,
         pad_mask: Optional[torch.Tensor] = None,
         packed_seqlens: Optional[PackedSeqLens] = None,
+        *,
+        return_logits: bool = True,
     ) -> Dict[str, torch.Tensor]:
         """Run the LM head forward pass.
 
         :param torch.Tensor src: Input token IDs.
         :param torch.Tensor | None pad_mask: Additive attention mask.
         :param torch.Tensor | list[list[int]] | None packed_seqlens: Packed segment lengths.
-        :return dict[str, torch.Tensor]: Hidden states and logits.
+        :param bool return_logits: Whether to materialize logits.
+        :return dict[str, torch.Tensor]: Hidden states and optional logits.
         """
         hidden_representation = self.model.forward(src, pad_mask, packed_seqlens)
-        logits = self.decoder(hidden_representation)
-
-        return {"hidden_representation": hidden_representation, "logits": logits}
+        output: Dict[str, torch.Tensor] = {
+            "hidden_representation": hidden_representation
+        }
+        if return_logits:
+            output["logits"] = self.decoder(hidden_representation)
+        return output
 
 
 class NeoBERTForSequenceClassification(NeoBERTPreTrainedModel):

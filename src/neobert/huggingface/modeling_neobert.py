@@ -652,7 +652,7 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
         # Base NeoBERT model
         self.model = NeoBERT(config)
         # Language modeling head (decoder)
-        self.decoder = nn.Linear(config.hidden_size, config.vocab_size)
+        self.decoder = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         # ``post_init()`` applies HF init + tie_word_embeddings when configured.
         self.post_init()

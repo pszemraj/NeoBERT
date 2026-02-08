@@ -175,6 +175,10 @@ class TrainerConfig:
     gradient_checkpointing: bool = False
     gradient_clipping: Optional[float] = None
     mixed_precision: str = "bf16"
+    masked_only_objective: bool = True
+    masked_only_strict_fused_train: bool = False
+    masked_only_allow_checkpoint_fallback_train: bool = False
+    masked_only_allow_original_fallback_train: bool = True
     torch_compile: bool = False
     torch_compile_dynamic: Optional[bool] = None
     torch_compile_backend: str = "inductor"
@@ -1098,6 +1102,26 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         "--trainer.gradient_clipping", type=float, help="Gradient clipping"
     )
     parser.add_argument("--trainer.mixed_precision", type=str, help="Mixed precision")
+    parser.add_argument(
+        "--trainer.masked_only_objective",
+        type=lambda x: x.lower() == "true",
+        help="Use masked-only MLM objective (default true)",
+    )
+    parser.add_argument(
+        "--trainer.masked_only_strict_fused_train",
+        type=lambda x: x.lower() == "true",
+        help="Fail training when FLCE is unavailable (default true)",
+    )
+    parser.add_argument(
+        "--trainer.masked_only_allow_checkpoint_fallback_train",
+        type=lambda x: x.lower() == "true",
+        help="Allow checkpointed masked-logits CE fallback in train mode",
+    )
+    parser.add_argument(
+        "--trainer.masked_only_allow_original_fallback_train",
+        type=lambda x: x.lower() == "true",
+        help="Allow original full-logits CE fallback in train mode",
+    )
     parser.add_argument(
         "--trainer.torch_compile",
         type=lambda x: x.lower() == "true",

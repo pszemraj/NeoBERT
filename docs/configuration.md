@@ -201,7 +201,7 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `trainer.eval_steps`                  | `int` | `10000`      | Eval interval in steps.                    |
 | `trainer.logging_steps`               | `int` | `100`        | Logging interval in steps.                 |
 | `trainer.output_dir`                  | `str` | `"./output"` | Output root for checkpoints and artifacts. |
-| `trainer.mixed_precision`             | `str` | `"bf16"`     | `no`, `fp16`, or `bf16`.                   |
+| `trainer.mixed_precision`             | `str` | `"bf16"`     | `no`, `fp32`, or `bf16` (`fp16` unsupported in pretraining). |
 
 ### Stability and Performance
 
@@ -218,6 +218,10 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `trainer.log_grad_norm`               | `bool`          | `false`      | Log grad norm each logging interval.                     |
 | `trainer.log_weight_norms`            | `bool`          | `false`      | Log parameter norms (main-process overhead).             |
 | `trainer.tf32`                        | `bool`          | `true`       | Enable TF32 on supported CUDA GPUs.                      |
+| `trainer.masked_only_objective`       | `bool`          | `true`       | Use masked-only MLM loss path (no full `(B,S,V)` logits by default). |
+| `trainer.masked_only_strict_fused_train` | `bool`       | `false`      | Fail when fused linear-CE is unavailable in training.    |
+| `trainer.masked_only_allow_checkpoint_fallback_train` | `bool` | `false` | Allow checkpointed masked-logits CE fallback in training. |
+| `trainer.masked_only_allow_original_fallback_train` | `bool` | `true` | Allow original full-logits CE fallback in training.      |
 
 ### Control and Legacy Compatibility
 

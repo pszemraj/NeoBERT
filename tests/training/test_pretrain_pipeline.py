@@ -114,6 +114,15 @@ class TestPretrainPipeline(unittest.TestCase):
                     # If it's not an expected dataset/network error, re-raise
                     raise e
 
+    def test_pretraining_rejects_fp16(self):
+        """Ensure pretraining trainer rejects fp16 mixed precision."""
+        config = ConfigLoader.load(str(self.test_config_path))
+        config.trainer.output_dir = self.temp_dir
+        config.trainer.mixed_precision = "fp16"
+
+        with self.assertRaisesRegex(ValueError, "fp16"):
+            trainer(config)
+
     def test_model_config_compatibility(self):
         """Test that model config is compatible with pretraining."""
         config = ConfigLoader.load(str(self.test_config_path))

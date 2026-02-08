@@ -296,16 +296,25 @@ class TestModelForward(unittest.TestCase):
 
         with torch.no_grad():
             outputs = model(self.input_ids, self.pad_mask)
+            hidden_only_outputs = model(
+                self.input_ids, self.pad_mask, return_logits=False
+            )
 
         # Check that we get both hidden states and logits
         self.assertIn("hidden_representation", outputs)
         self.assertIn("logits", outputs)
+        self.assertIn("hidden_representation", hidden_only_outputs)
+        self.assertNotIn("logits", hidden_only_outputs)
 
         hidden_shape = (self.batch_size, self.seq_length, self.tiny_config.hidden_size)
         logits_shape = (self.batch_size, self.seq_length, self.tiny_config.vocab_size)
 
         self.assertEqual(outputs["hidden_representation"].shape, hidden_shape)
         self.assertEqual(outputs["logits"].shape, logits_shape)
+        self.assertEqual(
+            hidden_only_outputs["hidden_representation"].shape, hidden_shape
+        )
+        self.assertIsNone(model.decoder.bias)
 
     def test_neobert_sequence_classification(self):
         """Test NeoBERT for sequence classification."""
@@ -947,8 +956,8 @@ class TestModelForward(unittest.TestCase):
         self.assertTrue(any(".ffn.w3.weight" in key for key in state))
         self.assertFalse(any(".ffn.w12.weight" in key for key in state))
 
-    def test_hf_init_zeros_linear_biases(self):
-        """Ensure HF init matches training bias initialization."""
+    def test_hf_lm_head_is_biasless(self):
+        """Ensure HF LM head decoder uses a biasless projection."""
         from neobert.huggingface.modeling_neobert import NeoBERTConfig, NeoBERTLMHead
 
         hf_config = NeoBERTConfig(
@@ -962,7 +971,7 @@ class TestModelForward(unittest.TestCase):
             flash_attention=False,
         )
         model = NeoBERTLMHead(hf_config)
-        self.assertTrue(torch.all(model.decoder.bias == 0))
+        self.assertIsNone(model.decoder.bias)
 
     def test_invalid_activation_raises(self):
         """Ensure unsupported activations fail fast."""

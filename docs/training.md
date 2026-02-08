@@ -66,11 +66,13 @@ if these are unset/suboptimal.
 
 ## Mixed Precision and Compile
 
-- `trainer.mixed_precision`: `no | fp16 | bf16`
+- `trainer.mixed_precision`: `no | fp32 | bf16` (`fp16` unsupported in pretraining)
 - `trainer.torch_compile`: enable `torch.compile`
 - `trainer.torch_compile_backend`: `inductor | aot_eager | eager`
 - `trainer.torch_compile_dynamic`: optional override for dynamic-shape compile;
   default behavior prefers static-shape compile for stability.
+- `trainer.masked_only_objective`: enable masked-only MLM loss path
+- `trainer.masked_only_allow_original_fallback_train`: keep legacy full-logits fallback
 
 ## Checkpointing and Resume
 

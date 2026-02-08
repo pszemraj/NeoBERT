@@ -421,6 +421,9 @@ def map_weights(
     mapped = {}
 
     for key, value in state_dict.items():
+        if key in {"model.decoder.bias", "decoder.bias"}:
+            # Export target uses a biasless LM decoder projection.
+            continue
         if key.startswith("model.decoder."):
             # Decoder weights go to top level
             new_key = key.replace("model.", "")
