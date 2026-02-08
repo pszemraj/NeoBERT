@@ -20,6 +20,23 @@ def round_up_to_multiple(x: int, N: int = 128) -> int:
     return ((x + N - 1) // N) * N
 
 
+def _parse_cli_bool(value: str) -> bool:
+    """Parse strict boolean CLI override values.
+
+    :param str value: Raw CLI token.
+    :raises argparse.ArgumentTypeError: If the token is not boolean-like.
+    :return bool: Parsed boolean value.
+    """
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(
+        "Expected a boolean value (true/false, 1/0, yes/no, on/off)."
+    )
+
+
 # Note: mutable defaults in dataclasses below use default_factory to avoid shared state.
 
 
@@ -69,6 +86,7 @@ class DatasetConfig:
     validation_split: Optional[float] = None
     train_split: Optional[str] = None
     eval_split: Optional[str] = None
+    eval_samples: Optional[int] = None
     num_proc: int = 4  # Number of processes for tokenization
     shuffle_buffer_size: int = 10000  # Buffer size for streaming dataset shuffling
     pre_tokenize: bool = False  # Whether to pre-tokenize non-streaming datasets
@@ -169,12 +187,13 @@ class TrainerConfig:
     logging_steps: int = 100
     enforce_full_packed_batches: bool = True
     log_train_accuracy: bool = False
-    log_grad_norm: bool = False
+    log_grad_norm: bool = True
     output_dir: str = "./output"
     overwrite_output_dir: bool = True
     gradient_checkpointing: bool = False
     gradient_clipping: Optional[float] = None
     mixed_precision: str = "bf16"
+    masked_logits_only_loss: bool = True
     torch_compile: bool = False
     torch_compile_dynamic: Optional[bool] = None
     torch_compile_backend: str = "inductor"
@@ -202,7 +221,7 @@ class TrainerConfig:
     report_to: List[str] = field(default_factory=list)
     tf32: bool = True
     max_ckpt: int = 3
-    log_weight_norms: bool = False
+    log_weight_norms: bool = True
     # Legacy batch size fields (use per_device versions instead)
     train_batch_size: Optional[int] = None
     eval_batch_size: Optional[int] = None
@@ -1027,6 +1046,15 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         "--dataset.text_column", type=str, help="Dataset text column name"
     )
     parser.add_argument(
+        "--dataset.eval_samples",
+        type=int,
+        help=(
+            "Optional evaluation sample cap. For streaming datasets without "
+            "dataset.eval_split, trainer will create eval from the first "
+            "dataset.eval_samples training samples and skip them from training."
+        ),
+    )
+    parser.add_argument(
         "--dataset.load_all_from_disk", action="store_true", help="Load all from disk"
     )
     parser.add_argument(
@@ -1098,6 +1126,14 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         "--trainer.gradient_clipping", type=float, help="Gradient clipping"
     )
     parser.add_argument("--trainer.mixed_precision", type=str, help="Mixed precision")
+    parser.add_argument(
+        "--trainer.masked_logits_only_loss",
+        type=_parse_cli_bool,
+        help=(
+            "Use masked-logits-only MLM loss path (true, default/recommended) "
+            "or original full-logits loss (false, legacy ablation/debug)"
+        ),
+    )
     parser.add_argument(
         "--trainer.torch_compile",
         type=lambda x: x.lower() == "true",

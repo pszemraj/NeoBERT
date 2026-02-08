@@ -117,6 +117,63 @@ class TestConfigSystem(unittest.TestCase):
         finally:
             sys.argv = original_argv
 
+    def test_cli_masked_logits_only_loss_strict_bool(self):
+        """Ensure CLI parsing accepts explicit boolean tokens for loss path."""
+        config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"
+
+        test_args = [
+            "script.py",
+            str(config_path),
+            "--trainer.masked_logits_only_loss",
+            "off",
+        ]
+
+        original_argv = sys.argv
+        sys.argv = test_args
+        try:
+            config = load_config_from_args()
+            self.assertFalse(config.trainer.masked_logits_only_loss)
+        finally:
+            sys.argv = original_argv
+
+    def test_cli_masked_logits_only_loss_rejects_typos(self):
+        """Ensure invalid CLI boolean tokens fail fast for loss-path selection."""
+        config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"
+
+        test_args = [
+            "script.py",
+            str(config_path),
+            "--trainer.masked_logits_only_loss",
+            "ture",
+        ]
+
+        original_argv = sys.argv
+        sys.argv = test_args
+        try:
+            with self.assertRaises(SystemExit):
+                load_config_from_args()
+        finally:
+            sys.argv = original_argv
+
+    def test_cli_dataset_eval_samples_override(self):
+        """Ensure CLI parsing accepts dataset.eval_samples integer override."""
+        config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"
+
+        test_args = [
+            "script.py",
+            str(config_path),
+            "--dataset.eval_samples",
+            "2048",
+        ]
+
+        original_argv = sys.argv
+        sys.argv = test_args
+        try:
+            config = load_config_from_args()
+            self.assertEqual(config.dataset.eval_samples, 2048)
+        finally:
+            sys.argv = original_argv
+
     def test_nested_config_override(self):
         """Test deeply nested configuration overrides."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:

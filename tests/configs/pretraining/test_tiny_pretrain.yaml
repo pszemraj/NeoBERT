@@ -42,6 +42,7 @@ trainer:
   dataloader_num_workers: 0
   report_to: []
   use_cpu: true
+  masked_logits_only_loss: true
 
 optimizer:
   name: "adamw"

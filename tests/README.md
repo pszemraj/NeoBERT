@@ -1,6 +1,8 @@
 # NeoBERT Test Suite
 
 Automated regression tests for model, training, config, and evaluation code.
+This README is intentionally lightweight; canonical testing guidance is in
+[docs/testing.md](../docs/testing.md).
 
 ## Entry Points
 

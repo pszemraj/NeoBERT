@@ -21,7 +21,11 @@ try:
 except Exception:
 
     def _dynamo_disable(fn: Callable[..., Any]) -> Callable[..., Any]:
-        """Return ``fn`` unchanged when torch Dynamo is unavailable."""
+        """Return ``fn`` unchanged when torch Dynamo is unavailable.
+
+        :param Callable[..., Any] fn: Function to wrap.
+        :return Callable[..., Any]: The original function ``fn``.
+        """
         return fn
 
 

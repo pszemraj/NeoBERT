@@ -7,8 +7,9 @@ import math
 import os
 import re
 import shutil
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Iterator, Optional, Tuple
 
 # PyTorch
 import torch
@@ -44,6 +45,10 @@ from neobert.kernels.attention import resolve_runtime_attn_backend
 from neobert.kernels.backend import get_cross_entropy_loss, resolve_kernel_backend
 from neobert.model import NeoBERTConfig, NeoBERTLMHead
 from neobert.optimizer import get_optimizer
+from neobert.pretraining.masked_objective import (
+    MaskedObjectiveOut,
+    MaskedPositionsOnlyMLMObjective,
+)
 from neobert.scheduler import get_scheduler, resolve_scheduler_steps
 from neobert.tokenizer import get_tokenizer, resolve_text_column
 from neobert.training_utils import (
@@ -58,6 +63,300 @@ from neobert.pretraining.metrics import Metrics, format_metrics
 
 # Set up logger
 logger = logging.getLogger(__name__)
+
+
+def _resolve_masked_logits_only_loss(value: Any) -> bool:
+    """Resolve and validate ``trainer.masked_logits_only_loss``.
+
+    :param Any value: Config value to normalize.
+    :raises ValueError: If value is not boolean-like.
+    :return bool: Normalized boolean selector.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    raise ValueError(
+        "trainer.masked_logits_only_loss must be a bool or boolean-like string, "
+        f"got {value!r} ({type(value).__name__})."
+    )
+
+
+def _resolve_eval_samples(value: Any) -> Optional[int]:
+    """Resolve and validate ``dataset.eval_samples``.
+
+    :param Any value: Config value to normalize.
+    :raises ValueError: If value is not integer-like or is boolean.
+    :return int | None: Positive sample count or ``None`` when unset/disabled.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(
+            f"dataset.eval_samples must be an integer sample count, got bool {value!r}."
+        )
+    try:
+        resolved = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "dataset.eval_samples must be an integer sample count, "
+            f"got {value!r} ({type(value).__name__})."
+        ) from exc
+    if resolved <= 0:
+        return None
+    return resolved
+
+
+def _resolve_fsdp_version(accelerator: Accelerator) -> int:
+    """Resolve FSDP version from Accelerate state.
+
+    Defaults to ``1`` when plugin metadata is unavailable.
+
+    :param Accelerator accelerator: Active accelerator runtime.
+    :return int: FSDP plugin version.
+    """
+    state = getattr(accelerator, "state", None)
+    fsdp_plugin = getattr(state, "fsdp_plugin", None) if state is not None else None
+    raw_version = getattr(fsdp_plugin, "fsdp_version", None)
+    try:
+        return int(raw_version) if raw_version is not None else 1
+    except (TypeError, ValueError):
+        return 1
+
+
+@contextmanager
+def _gather_decoder_weight_for_masked_objective(
+    model: torch.nn.Module,
+    accelerator: Accelerator,
+) -> Iterator[torch.Tensor]:
+    """Yield decoder weights, gathering sharded parameters when required.
+
+    Masked-only loss computes logits from ``decoder.weight`` outside the decoder
+    module forward. Under FSDP2 and DeepSpeed ZeRO-3 this parameter can be
+    partitioned, so we must materialize the full tensor for the objective path.
+
+    :param torch.nn.Module model: Prepared training model (possibly wrapped).
+    :param Accelerator accelerator: Active accelerator runtime.
+    :raises RuntimeError: If FSDP v1 is active (unsupported policy).
+    :yield torch.Tensor: Decoder projection weight tensor.
+    :return Iterator[torch.Tensor]: Context manager yielding decoder weight.
+    """
+
+    def _resolve_decoder_weight() -> torch.Tensor:
+        """Resolve decoder projection weight from wrapped or unwrapped model.
+
+        :return torch.Tensor: Decoder projection weight parameter.
+        :raises AttributeError: If ``decoder.weight`` cannot be resolved.
+        """
+        decoder = getattr(model, "decoder", None)
+        if decoder is not None and hasattr(decoder, "weight"):
+            return decoder.weight
+        unwrap_model = getattr(accelerator, "unwrap_model", None)
+        if callable(unwrap_model):
+            unwrapped = unwrap_model(model)
+            decoder = getattr(unwrapped, "decoder", None)
+            if decoder is not None and hasattr(decoder, "weight"):
+                return decoder.weight
+        raise AttributeError("Could not resolve decoder.weight for masked objective.")
+
+    if accelerator.distributed_type is DistributedType.FSDP:
+        fsdp_version = _resolve_fsdp_version(accelerator)
+        if fsdp_version >= 2:
+            base_model = model
+            unwrapped_model: Optional[torch.nn.Module] = None
+            unwrap_model = getattr(accelerator, "unwrap_model", None)
+            if callable(unwrap_model):
+                try:
+                    unwrapped_model = unwrap_model(model)
+                except Exception:
+                    unwrapped_model = None
+            if unwrapped_model is not None:
+                base_model = unwrapped_model
+
+            decoder_module = getattr(base_model, "decoder", None)
+            if decoder_module is None:
+                decoder_module = getattr(model, "decoder", None)
+            if decoder_module is None or not hasattr(decoder_module, "weight"):
+                raise AttributeError(
+                    "Could not resolve decoder module for FSDP2 masked objective."
+                )
+            decoder_weight = decoder_module.weight
+
+            def _is_fsdp2_module(module: torch.nn.Module) -> bool:
+                """Check whether a module exposes FSDP2 unshard/reshard hooks.
+
+                :param torch.nn.Module module: Module to inspect.
+                :return bool: ``True`` when the module looks FSDP2-wrapped.
+                """
+                return hasattr(module, "unshard") and hasattr(module, "reshard")
+
+            def _find_fsdp_owner(
+                search_root: torch.nn.Module,
+            ) -> Optional[torch.nn.Module]:
+                """Find FSDP2 module that should unshard ``decoder.weight``.
+
+                :param torch.nn.Module search_root: Candidate module tree root.
+                :return torch.nn.Module | None: Owning FSDP2 module or ``None``.
+                """
+                owner: Optional[torch.nn.Module] = None
+                for module in search_root.modules():
+                    if not _is_fsdp2_module(module):
+                        continue
+                    for param in module.parameters(recurse=False):
+                        if param is decoder_weight:
+                            owner = module
+                            break
+                    if owner is not None:
+                        break
+                if owner is not None:
+                    return owner
+
+                named_modules = dict(search_root.named_modules())
+                decoder_path = next(
+                    (
+                        path
+                        for path, module in named_modules.items()
+                        if (
+                            module is decoder_module
+                            or (
+                                hasattr(module, "weight")
+                                and getattr(module, "weight", None) is decoder_weight
+                            )
+                        )
+                    ),
+                    None,
+                )
+                if decoder_path is not None:
+                    path_parts = decoder_path.split(".")
+                    for depth in range(len(path_parts), -1, -1):
+                        ancestor_path = ".".join(path_parts[:depth])
+                        ancestor = (
+                            search_root
+                            if ancestor_path == ""
+                            else named_modules.get(ancestor_path)
+                        )
+                        if ancestor is not None and _is_fsdp2_module(ancestor):
+                            return ancestor
+
+                if _is_fsdp2_module(search_root):
+                    return search_root
+                return None
+
+            # Search wrapped model first; unwrapped views can hide FSDP2 hooks.
+            fsdp_owner: Optional[torch.nn.Module] = _find_fsdp_owner(model)
+            if fsdp_owner is None and base_model is not model:
+                fsdp_owner = _find_fsdp_owner(base_model)
+
+            if fsdp_owner is None:
+                raise RuntimeError(
+                    "FSDP2 is active but no unshard-capable module owns decoder.weight."
+                )
+
+            handle = fsdp_owner.unshard(async_op=True)
+            if handle is not None:
+                handle.wait()
+            try:
+                lm_weight = _resolve_decoder_weight()
+                yield lm_weight
+            finally:
+                fsdp_owner.reshard()
+        else:
+            raise RuntimeError(
+                "FSDP v1 is not supported for NeoBERT pretraining. "
+                "Use FSDP2 (Accelerate fsdp_version=2)."
+            )
+        return
+
+    lm_weight = _resolve_decoder_weight()
+    if accelerator.distributed_type is not DistributedType.DEEPSPEED:
+        yield lm_weight
+        return
+    if getattr(lm_weight, "ds_id", None) is None:
+        yield lm_weight
+        return
+
+    import deepspeed
+
+    fwd_module = None
+    unwrap_model = getattr(accelerator, "unwrap_model", None)
+    if callable(unwrap_model):
+        try:
+            fwd_module = unwrap_model(model)
+        except Exception:
+            fwd_module = None
+
+    with deepspeed.zero.GatheredParameters(
+        [lm_weight], modifier_rank=None, fwd_module=fwd_module
+    ):
+        yield lm_weight
+
+
+def _should_backward_inside_gathered_decoder_weight(
+    accelerator: Accelerator,
+    lm_weight: torch.Tensor,
+) -> bool:
+    """Return whether backward must run while decoder weight is gathered.
+
+    In FSDP2 and DeepSpeed ZeRO-3, masked-objective fallback paths can touch
+    decoder weights during backward recomputation. Keep backward under gather
+    when ``decoder.weight`` may otherwise be partitioned.
+
+    :param Accelerator accelerator: Active accelerator runtime.
+    :param torch.Tensor lm_weight: Decoder projection weight.
+    :return bool: ``True`` when backward should run inside gather context.
+    """
+    if accelerator.distributed_type is DistributedType.FSDP:
+        return _resolve_fsdp_version(accelerator) >= 2
+    if accelerator.distributed_type is not DistributedType.DEEPSPEED:
+        return False
+    return getattr(lm_weight, "ds_id", None) is not None
+
+
+def _run_masked_objective_step(
+    model: torch.nn.Module,
+    batch: BatchEncoding,
+    pad_mask: Optional[torch.Tensor],
+    packed_seqlens: Optional[torch.Tensor],
+    masked_objective: MaskedPositionsOnlyMLMObjective,
+    accelerator: Accelerator,
+    *,
+    log_train_accuracy: bool,
+) -> tuple[MaskedObjectiveOut, torch.Tensor, bool]:
+    """Compute masked-objective loss and optionally backprop inside gather.
+
+    :param torch.nn.Module model: Training model.
+    :param BatchEncoding batch: Prepared input batch.
+    :param torch.Tensor | None pad_mask: Additive attention mask.
+    :param torch.Tensor | None packed_seqlens: Packed sequence lengths metadata.
+    :param MaskedPositionsOnlyMLMObjective masked_objective: Objective module.
+    :param Accelerator accelerator: Active accelerator runtime.
+    :param bool log_train_accuracy: Whether to compute masked accuracy.
+    :return tuple[MaskedObjectiveOut, torch.Tensor, bool]:
+        Objective output, local loss sum, and whether backward already ran.
+    """
+    hidden = model(
+        src=batch["input_ids"],
+        pad_mask=pad_mask,
+        packed_seqlens=packed_seqlens,
+        return_logits=False,
+    )["hidden_representation"]
+    with _gather_decoder_weight_for_masked_objective(model, accelerator) as lm_weight:
+        objective_out = masked_objective(
+            hidden_states=hidden,
+            labels=batch["labels"],
+            lm_weight=lm_weight,
+            compute_accuracy=log_train_accuracy,
+        )
+        loss_sum = objective_out.loss_sum_local
+        backward_done = False
+        if _should_backward_inside_gathered_decoder_weight(accelerator, lm_weight):
+            accelerator.backward(loss_sum)
+            backward_done = True
+    return objective_out, loss_sum, backward_done
 
 
 def _move_batch_to_device(batch: BatchEncoding, device: torch.device) -> BatchEncoding:
@@ -85,6 +384,11 @@ def _ensure_pinned_cpu_batch(batch: BatchEncoding) -> BatchEncoding:
     """
 
     def _pin_value(value: Any) -> tuple[Any, bool]:
+        """Pin tensors in nested structures and report whether anything changed.
+
+        :param Any value: Candidate tensor/container/scalar value.
+        :return tuple[Any, bool]: Possibly pinned value and change flag.
+        """
         if torch.is_tensor(value):
             if value.device.type != "cpu" or value.is_pinned():
                 return value, False
@@ -339,6 +643,90 @@ def _load_streaming_split(
     return dataset
 
 
+def _infer_eval_split_name(
+    dataset_name: str,
+    dataset_kwargs: dict[str, object],
+    *,
+    train_split: Optional[str],
+) -> Optional[str]:
+    """Infer a reasonable eval split name from dataset metadata.
+
+    :param str dataset_name: Dataset identifier.
+    :param dict[str, object] dataset_kwargs: Additional kwargs for HF datasets.
+    :param str | None train_split: Train split selector (possibly sliced).
+    :return str | None: Preferred eval split name or ``None``.
+    """
+    train_base = _parse_split_slice(train_split or "train")[0].lower()
+    try:
+        builder = load_dataset_builder(dataset_name, **dataset_kwargs)
+        split_names = list(getattr(builder.info, "splits", {}).keys())
+    except Exception as exc:
+        logger.warning(
+            "Unable to infer eval split for %s from dataset metadata: %s",
+            dataset_name,
+            exc,
+        )
+        return None
+
+    if not split_names:
+        return None
+
+    preferred = ("validation", "eval", "test", "dev")
+    by_lower = {name.lower(): name for name in split_names}
+    for candidate in preferred:
+        resolved = by_lower.get(candidate)
+        if resolved is not None and candidate != train_base:
+            return resolved
+    return None
+
+
+def _split_train_dataset_for_eval_samples(
+    train_dataset: Dataset,
+    eval_samples: int,
+    *,
+    is_streaming: bool,
+) -> tuple[Dataset, Dataset]:
+    """Create eval data from training data and avoid train/eval overlap.
+
+    :param Dataset train_dataset: Training dataset.
+    :param int eval_samples: Number of eval samples to reserve.
+    :param bool is_streaming: Whether the dataset is streaming.
+    :raises ValueError: If eval_samples is invalid or non-streaming data is too small.
+    :return tuple[Dataset, Dataset]: ``(remaining_train, eval_dataset)``.
+    """
+    if eval_samples <= 0:
+        raise ValueError(f"eval_samples must be > 0, got {eval_samples}.")
+
+    can_stream_split = (
+        is_streaming
+        and hasattr(train_dataset, "take")
+        and hasattr(train_dataset, "skip")
+    )
+    if can_stream_split:
+        eval_dataset = train_dataset.take(eval_samples)
+        remaining_train = train_dataset.skip(eval_samples)
+        return remaining_train, eval_dataset
+
+    total_samples = len(train_dataset)
+    if total_samples <= 1:
+        raise ValueError(
+            "dataset.eval_samples requires at least 2 non-streaming samples to keep "
+            "both train and eval non-empty."
+        )
+    eval_count = min(eval_samples, total_samples - 1)
+    if eval_count < eval_samples:
+        logger.warning(
+            "Requested dataset.eval_samples=%s but dataset has %s rows; "
+            "using eval_samples=%s to keep at least one training sample.",
+            eval_samples,
+            total_samples,
+            eval_count,
+        )
+    eval_dataset = train_dataset.select(range(eval_count))
+    remaining_train = train_dataset.select(range(eval_count, total_samples))
+    return remaining_train, eval_dataset
+
+
 def _count_masked_correct(
     logits: torch.Tensor, labels: torch.Tensor, ignore_index: int = -100
 ) -> torch.Tensor:
@@ -400,21 +788,24 @@ def _resolve_eval_max_batches(
 def _run_eval(
     model: torch.nn.Module,
     eval_dataloader: torch.utils.data.DataLoader,
-    loss_fn: torch.nn.Module,
+    loss_fn: Optional[torch.nn.Module],
     accelerator: Accelerator,
     model_config: NeoBERTConfig,
     max_batches: Optional[int] = None,
     manual_device_move: bool = True,
+    masked_objective: Optional[MaskedPositionsOnlyMLMObjective] = None,
 ) -> dict[str, float]:
     """Run a lightweight evaluation loop for masked LM perplexity.
 
     :param torch.nn.Module model: Model to evaluate.
     :param torch.utils.data.DataLoader eval_dataloader: Evaluation dataloader.
-    :param torch.nn.Module loss_fn: Loss function (sum reduction).
+    :param torch.nn.Module | None loss_fn: Loss function (sum reduction) for legacy path.
     :param Accelerator accelerator: Accelerator for distributed reductions.
     :param NeoBERTConfig model_config: Model config with vocab size.
     :param int | None max_batches: Optional cap on eval batches.
     :param bool manual_device_move: Whether to manually move each batch to device.
+    :param MaskedPositionsOnlyMLMObjective | None masked_objective:
+        Optional masked-only objective path.
     :return dict[str, float]: Evaluation metrics for logging.
     """
     was_training = model.training
@@ -444,18 +835,44 @@ def _run_eval(
                     if packed_seqlens is not None
                     else batch.get("attention_mask", None)
                 )
-                logits = model(
-                    src=batch["input_ids"],
-                    pad_mask=pad_mask,
-                    packed_seqlens=packed_seqlens,
-                )["logits"]
-                loss_sum = loss_fn(
-                    logits.view(-1, model_config.vocab_size), batch["labels"].view(-1)
-                )
-                num_pred = (batch["labels"] != -100).sum()
-                eval_loss_sum += loss_sum
-                eval_num_pred += num_pred
-                eval_num_correct += _count_masked_correct(logits, batch["labels"])
+                if masked_objective is not None:
+                    hidden = model(
+                        src=batch["input_ids"],
+                        pad_mask=pad_mask,
+                        packed_seqlens=packed_seqlens,
+                        return_logits=False,
+                    )["hidden_representation"]
+                    with _gather_decoder_weight_for_masked_objective(
+                        model, accelerator
+                    ) as lm_weight:
+                        objective_out = masked_objective(
+                            hidden_states=hidden,
+                            labels=batch["labels"],
+                            lm_weight=lm_weight,
+                            compute_accuracy=True,
+                        )
+                    eval_loss_sum += objective_out.loss_sum_local
+                    eval_num_pred += objective_out.num_masked_local
+                    if objective_out.num_correct_local is not None:
+                        eval_num_correct += objective_out.num_correct_local
+                else:
+                    if loss_fn is None:
+                        raise ValueError(
+                            "loss_fn is required when masked_objective is not provided."
+                        )
+                    logits = model(
+                        src=batch["input_ids"],
+                        pad_mask=pad_mask,
+                        packed_seqlens=packed_seqlens,
+                    )["logits"]
+                    loss_sum = loss_fn(
+                        logits.view(-1, model_config.vocab_size),
+                        batch["labels"].view(-1),
+                    )
+                    num_pred = (batch["labels"] != -100).sum()
+                    eval_loss_sum += loss_sum
+                    eval_num_pred += num_pred
+                    eval_num_correct += _count_masked_correct(logits, batch["labels"])
                 eval_batches += 1
 
         total_loss = accelerator.reduce(eval_loss_sum, reduction="sum")
@@ -609,6 +1026,34 @@ def _gradient_token_scale(
     scale = (token_floor_f / clamped_tokens).to(tokens_global.device)
     clamped = tokens_global < token_floor
     return scale, clamped
+
+
+def _compute_weight_norm_for_logging(
+    model: torch.nn.Module,
+    accelerator: Accelerator,
+) -> Optional[float]:
+    """Compute model weight norm for logging across distributed backends.
+
+    DeepSpeed helper ``safe_get_full_fp32_param`` can return ``None`` (for
+    example on params without ZeRO/FP32 mappings), so we skip those tensors
+    rather than failing during logging.
+
+    :param torch.nn.Module model: Training model (possibly wrapped).
+    :param Accelerator accelerator: Active accelerator runtime.
+    :return float | None: L2 weight norm or ``None`` when unavailable.
+    """
+    if accelerator.distributed_type is DistributedType.DEEPSPEED:
+        squared_norms: list[torch.Tensor] = []
+        for param in model.parameters():
+            full_param = safe_get_full_fp32_param(param)
+            if full_param is None:
+                continue
+            squared_norms.append(full_param.norm(2) ** 2)
+        if not squared_norms:
+            return None
+        return (sum(squared_norms) ** 0.5).item()
+
+    return (sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5).item()
 
 
 def _clear_stored_batch(stored_batch: BatchEncoding) -> None:
@@ -966,6 +1411,11 @@ def trainer(cfg: Config) -> None:
 
     :param Config cfg: Training configuration.
     """
+    masked_logits_only_loss = _resolve_masked_logits_only_loss(
+        getattr(cfg.trainer, "masked_logits_only_loss", True)
+    )
+    eval_samples = _resolve_eval_samples(getattr(cfg.dataset, "eval_samples", None))
+
     # Get the last checkpoint id
     output_dir = Path(cfg.trainer.output_dir)
     checkpoint_dir = output_dir / "checkpoints"
@@ -997,9 +1447,23 @@ def trainer(cfg: Config) -> None:
     if disable_dispatch:
         dataloader_config = DataLoaderConfiguration(dispatch_batches=False)
         logger.info("Disabling Accelerate dispatch_batches for packed-sequence mode.")
+
+    mixed_precision = cfg.trainer.mixed_precision
+    if isinstance(mixed_precision, bool):
+        mixed_precision = "bf16" if mixed_precision else "no"
+    else:
+        mixed_precision = str(mixed_precision).strip().lower()
+    if mixed_precision == "fp32":
+        mixed_precision = "no"
+    if mixed_precision == "fp16":
+        raise ValueError(
+            "trainer.mixed_precision='fp16' is not supported for pretraining. "
+            "Use 'bf16' or 'no'/'fp32'."
+        )
+
     accelerator = Accelerator(
         step_scheduler_with_optimizer=False,  # enable manual control of the scheduler
-        mixed_precision=cfg.trainer.mixed_precision,
+        mixed_precision=mixed_precision,
         gradient_accumulation_steps=cfg.trainer.gradient_accumulation_steps,
         log_with="wandb" if wandb_enabled else None,
         project_config=project_config,
@@ -1011,6 +1475,14 @@ def trainer(cfg: Config) -> None:
             "Megatron-LM backend is not supported by this training loop. "
             "Use DDP or DeepSpeed instead."
         )
+    if accelerator.distributed_type is DistributedType.FSDP:
+        fsdp_version = _resolve_fsdp_version(accelerator)
+        if fsdp_version < 2:
+            raise RuntimeError(
+                "NeoBERT pretraining is FSDP2-first. "
+                "FSDP v1 is unsupported; set Accelerate fsdp_version=2."
+            )
+        logger.info("FSDP2 runtime detected (fsdp_version=%s).", fsdp_version)
     if accelerator.distributed_type is DistributedType.DEEPSPEED:
         is_muon = cfg.optimizer.name.lower() in {"muonclip", "muon-clip", "muon_clip"}
         if is_muon:
@@ -1303,29 +1775,50 @@ def trainer(cfg: Config) -> None:
                 f"Tokenization complete. Dataset size: {len(train_dataset)}"
             )
 
+    eval_split = cfg.dataset.eval_split
+    if isinstance(eval_split, str):
+        eval_split = eval_split.strip() or None
+    if (
+        eval_split is None
+        and cfg.dataset.streaming
+        and not (cfg.dataset.path and Path(cfg.dataset.path).exists())
+    ):
+        inferred_eval_split = _infer_eval_split_name(
+            cfg.dataset.name,
+            dataset_kwargs,
+            train_split=cfg.dataset.train_split,
+        )
+        if inferred_eval_split is not None:
+            eval_split = inferred_eval_split
+            logger.info(
+                "Auto-detected streaming eval split '%s'. "
+                "Override with dataset.eval_split when needed.",
+                eval_split,
+            )
+
     eval_dataset = None
-    if cfg.dataset.eval_split:
+    if eval_split:
         if cfg.dataset.path and Path(cfg.dataset.path).exists():
             eval_source = load_from_disk(cfg.dataset.path)
             if isinstance(eval_source, DatasetDict):
-                eval_dataset = eval_source[cfg.dataset.eval_split]
+                eval_dataset = eval_source[eval_split]
             else:
                 logger.warning(
                     "eval_split=%s requested but dataset path is not a DatasetDict; "
                     "skipping evaluation.",
-                    cfg.dataset.eval_split,
+                    eval_split,
                 )
         else:
             if cfg.dataset.streaming:
                 eval_dataset = _load_streaming_split(
                     cfg.dataset.name,
-                    cfg.dataset.eval_split,
+                    eval_split,
                     dataset_kwargs,
                 )
             else:
                 eval_dataset = load_dataset(
                     cfg.dataset.name,
-                    split=cfg.dataset.eval_split,
+                    split=eval_split,
                     streaming=False,
                     **dataset_kwargs,
                 )
@@ -1342,8 +1835,36 @@ def trainer(cfg: Config) -> None:
             train_dataset = split["train"]
             eval_dataset = split["test"]
 
+    if eval_dataset is None and eval_samples is not None:
+        train_dataset, eval_dataset = _split_train_dataset_for_eval_samples(
+            train_dataset,
+            eval_samples,
+            is_streaming=is_streaming,
+        )
+        logger.info(
+            "dataset.eval_samples=%s with no eval split configured; reserving "
+            "head samples for eval and excluding them from training.",
+            eval_samples,
+        )
+
+    if eval_dataset is not None and eval_samples is not None:
+        eval_dataset_is_streaming = (
+            cfg.dataset.streaming
+            and hasattr(eval_dataset, "take")
+            and hasattr(eval_dataset, "skip")
+        )
+        if eval_dataset_is_streaming:
+            eval_dataset = eval_dataset.take(eval_samples)
+        else:
+            eval_size = len(eval_dataset)
+            eval_dataset = eval_dataset.select(range(min(eval_samples, eval_size)))
+
     if eval_dataset is not None:
-        eval_is_streaming = cfg.dataset.streaming
+        eval_is_streaming = (
+            cfg.dataset.streaming
+            and hasattr(eval_dataset, "take")
+            and hasattr(eval_dataset, "skip")
+        )
         eval_needs_tokenization = False
         if eval_is_streaming:
             first_example = next(iter(eval_dataset))
@@ -1647,23 +2168,55 @@ def trainer(cfg: Config) -> None:
                     log_freq=getattr(cfg.wandb, "log_interval", 100),
                 )
 
-    # Loss function - use Liger CE when available, else standard PyTorch
-    resolved_kb = resolve_kernel_backend(cfg.model.kernel_backend)
-    train_loss_fn = get_cross_entropy_loss(
-        reduction="sum",
-        ignore_index=-100,
-        backend=resolved_kb,
-    )
+    train_loss_fn: Optional[torch.nn.Module] = None
+    masked_objective: Optional[MaskedPositionsOnlyMLMObjective] = None
+    if masked_logits_only_loss:
+        masked_objective = MaskedPositionsOnlyMLMObjective(
+            ignore_index=-100,
+        )
+        logger.info("Using masked-logits-only MLM objective.")
+    else:
+        resolved_kb = resolve_kernel_backend(cfg.model.kernel_backend)
+        train_loss_fn = get_cross_entropy_loss(
+            reduction="sum",
+            ignore_index=-100,
+            backend=resolved_kb,
+        )
+        logger.warning(
+            "Using legacy original full-logits MLM loss path "
+            "(trainer.masked_logits_only_loss=false). This path is intended for "
+            "ablation/debug and has higher memory use."
+        )
     eval_max_batches = getattr(cfg.trainer, "eval_max_batches", None)
     if isinstance(eval_max_batches, int) and eval_max_batches <= 0:
         eval_max_batches = None
-    if eval_max_batches is None and eval_dataset is not None and cfg.dataset.streaming:
-        eval_max_batches = 100
-        logger.info(
-            "Streaming eval detected; defaulting eval_max_batches to %s. "
-            "Set trainer.eval_max_batches to override.",
-            eval_max_batches,
-        )
+    eval_dataset_is_streaming = (
+        eval_dataset is not None
+        and cfg.dataset.streaming
+        and hasattr(eval_dataset, "take")
+        and hasattr(eval_dataset, "skip")
+    )
+    if eval_max_batches is None and eval_dataset_is_streaming:
+        if eval_samples is not None:
+            per_device_eval_batch_size = max(1, cfg.trainer.per_device_eval_batch_size)
+            eval_max_batches = max(
+                1,
+                math.ceil(eval_samples / per_device_eval_batch_size),
+            )
+            logger.info(
+                "Streaming eval detected with dataset.eval_samples=%s; "
+                "defaulting eval_max_batches to %s. "
+                "Set trainer.eval_max_batches to override.",
+                eval_samples,
+                eval_max_batches,
+            )
+        else:
+            eval_max_batches = 100
+            logger.info(
+                "Streaming eval detected; defaulting eval_max_batches to %s. "
+                "Set trainer.eval_max_batches to override.",
+                eval_max_batches,
+            )
 
     # Resume from the latest checkpoint
     skipped_train_dataloader = None
@@ -1698,6 +2251,17 @@ def trainer(cfg: Config) -> None:
     local_num_pred = torch.zeros((), device=accelerator.device, dtype=torch.long)
     local_sum_loss = torch.zeros((), device=accelerator.device, dtype=torch.float32)
     local_num_correct = torch.zeros((), device=accelerator.device, dtype=torch.long)
+    local_loss_path_liger_flce = torch.zeros(
+        (), device=accelerator.device, dtype=torch.long
+    )
+    local_loss_path_checkpointed = torch.zeros(
+        (), device=accelerator.device, dtype=torch.long
+    )
+    local_loss_path_zero_masked = torch.zeros(
+        (), device=accelerator.device, dtype=torch.long
+    )
+    local_loss_path_other = torch.zeros((), device=accelerator.device, dtype=torch.long)
+    logged_masked_loss_path = False
     stored_batch = {
         "input_ids": None,
         "attention_mask": None,
@@ -1770,21 +2334,57 @@ def trainer(cfg: Config) -> None:
                     update_step=metrics["train/steps"],
                     is_last_microbatch=sync_gradients,
                 )
-                # Forward pass
-                logits = model(
-                    src=batch["input_ids"],
-                    pad_mask=pad_mask,
-                    packed_seqlens=packed_seqlens,
-                )["logits"]
-                # NOTE: this path still materializes full logits (B,S,V). At the
-                # current default packed lengths this is acceptable; for very long
-                # contexts a chunked decoder+CE path would be the next optimization.
-                loss_sum = train_loss_fn(
-                    logits.view(-1, model_config.vocab_size), batch["labels"].view(-1)
-                )
+                backward_called = False
+                with accelerator.autocast():
+                    if masked_objective is not None:
+                        objective_out, loss_sum, backward_called = (
+                            _run_masked_objective_step(
+                                model,
+                                batch,
+                                pad_mask,
+                                packed_seqlens,
+                                masked_objective,
+                                accelerator,
+                                log_train_accuracy=log_train_accuracy,
+                            )
+                        )
+                        num_pred = objective_out.num_masked_local
+                        if objective_out.used_path == "liger_flce":
+                            local_loss_path_liger_flce += 1
+                        elif objective_out.used_path == "train_checkpointed_masked_ce":
+                            local_loss_path_checkpointed += 1
+                        elif objective_out.used_path == "zero_masked":
+                            local_loss_path_zero_masked += 1
+                        else:
+                            local_loss_path_other += 1
+                        if (
+                            not logged_masked_loss_path
+                            and accelerator.is_main_process
+                            and objective_out.used_path != "zero_masked"
+                        ):
+                            logger.debug(
+                                "Masked-logits loss path active (first non-empty microbatch): %s",
+                                objective_out.used_path,
+                            )
+                            logged_masked_loss_path = True
+                    else:
+                        if train_loss_fn is None:
+                            raise RuntimeError(
+                                "Legacy loss path selected but train_loss_fn is undefined."
+                            )
+                        logits = model(
+                            src=batch["input_ids"],
+                            pad_mask=pad_mask,
+                            packed_seqlens=packed_seqlens,
+                        )["logits"]
+                        loss_sum = train_loss_fn(
+                            logits.view(-1, model_config.vocab_size),
+                            batch["labels"].view(-1),
+                        )
 
                 # Compute gradient
-                accelerator.backward(loss_sum)
+                if not backward_called:
+                    accelerator.backward(loss_sum)
                 accum_tokens += num_pred.to(accum_tokens.dtype)
 
                 # Accumulate metrics on device to avoid per-batch syncs.
@@ -1793,7 +2393,13 @@ def trainer(cfg: Config) -> None:
                 local_num_pred += num_pred
                 local_sum_loss += loss_sum.detach().float()
                 if log_train_accuracy:
-                    local_num_correct += _count_masked_correct(logits, batch["labels"])
+                    if masked_objective is not None:
+                        if objective_out.num_correct_local is not None:
+                            local_num_correct += objective_out.num_correct_local
+                    else:
+                        local_num_correct += _count_masked_correct(
+                            logits, batch["labels"]
+                        )
 
             if sync_gradients:
                 should_log = (metrics["train/steps"] + 1) % log_interval == 0
@@ -1878,20 +2484,13 @@ def trainer(cfg: Config) -> None:
                         metrics["train/grad_norm"] = grad_norm_value
 
                     if cfg.trainer.log_weight_norms and accelerator.is_main_process:
-                        if accelerator.distributed_type is DistributedType.DEEPSPEED:
-                            metrics["train/weight_norm"] = (
-                                sum(
-                                    [
-                                        safe_get_full_fp32_param(p).norm(2) ** 2
-                                        for p in model.parameters()
-                                    ]
-                                )
-                                ** 0.5
-                            ).item()
+                        weight_norm_value = _compute_weight_norm_for_logging(
+                            model, accelerator
+                        )
+                        if weight_norm_value is not None:
+                            metrics["train/weight_norm"] = weight_norm_value
                         else:
-                            metrics["train/weight_norm"] = (
-                                sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5
-                            ).item()
+                            metrics.pop("train/weight_norm", None)
 
                     # Add MuonClip metrics if available
                     if hasattr(optimizer, "get_metrics"):
@@ -1904,11 +2503,56 @@ def trainer(cfg: Config) -> None:
                     metrics["train/local_tokens"] = int(local_tokens.item())
                     metrics["train/local_num_pred"] = int(local_num_pred.item())
                     metrics["train/local_sum_loss"] = float(local_sum_loss.item())
-                    metrics["train/local_num_correct"] = int(local_num_correct.item())
+                    if log_train_accuracy:
+                        metrics["train/local_num_correct"] = int(
+                            local_num_correct.item()
+                        )
+                    else:
+                        metrics.pop("train/local_num_correct", None)
+                    if masked_objective is not None:
+                        loss_path_counts = torch.stack(
+                            [
+                                local_loss_path_liger_flce,
+                                local_loss_path_checkpointed,
+                                local_loss_path_zero_masked,
+                                local_loss_path_other,
+                            ]
+                        )
+                        loss_path_counts = accelerator.reduce(
+                            loss_path_counts, reduction="sum"
+                        )
+                        path_total = int(loss_path_counts.sum().item())
+                        if accelerator.is_main_process:
+                            steps_liger = int(loss_path_counts[0].item())
+                            steps_checkpointed = int(loss_path_counts[1].item())
+                            steps_zero = int(loss_path_counts[2].item())
+                            steps_other = int(loss_path_counts[3].item())
+                            if path_total > 0:
+                                logger.debug(
+                                    "Masked-loss path window: "
+                                    "liger_flce=%s (%.3f), checkpointed=%s (%.3f), "
+                                    "zero_masked=%s (%.3f), other=%s (%.3f)",
+                                    steps_liger,
+                                    steps_liger / path_total,
+                                    steps_checkpointed,
+                                    steps_checkpointed / path_total,
+                                    steps_zero,
+                                    steps_zero / path_total,
+                                    steps_other,
+                                    steps_other / path_total,
+                                )
+                            else:
+                                logger.debug(
+                                    "Masked-loss path window: no non-empty microbatches."
+                                )
                     metrics.log(
                         accelerator,
                         emit_console=(
-                            (not wandb_enabled) and accelerator.is_main_process
+                            (
+                                (not wandb_enabled)
+                                or str(cfg.wandb.mode).lower() == "offline"
+                            )
+                            and accelerator.is_main_process
                         ),
                         console_fn=accelerator.print,
                     )
@@ -1917,6 +2561,10 @@ def trainer(cfg: Config) -> None:
                     local_num_pred.zero_()
                     local_sum_loss.zero_()
                     local_num_correct.zero_()
+                    local_loss_path_liger_flce.zero_()
+                    local_loss_path_checkpointed.zero_()
+                    local_loss_path_zero_masked.zero_()
+                    local_loss_path_other.zero_()
 
                 # Save accelerator state for resumable training
                 if metrics["train/steps"] % cfg.trainer.save_steps == 0:
@@ -2069,6 +2717,7 @@ def trainer(cfg: Config) -> None:
                         model_config,
                         max_batches=eval_max_batches,
                         manual_device_move=manual_device_move,
+                        masked_objective=masked_objective,
                     )
                     accelerator.log(
                         format_metrics(eval_metrics), step=metrics["train/steps"]
@@ -2094,6 +2743,7 @@ def trainer(cfg: Config) -> None:
                 model_config,
                 max_batches=eval_max_batches,
                 manual_device_move=manual_device_move,
+                masked_objective=masked_objective,
             )
             accelerator.log(format_metrics(eval_metrics), step=metrics["train/steps"])
 

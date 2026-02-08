@@ -49,7 +49,10 @@ except (AttributeError, RuntimeError):
 
 
 def _is_torch_compiling() -> bool:
-    """Return whether execution is inside a torch.compile trace."""
+    """Return whether execution is inside a ``torch.compile`` trace.
+
+    :return bool: ``True`` when tracing/compiling is active, else ``False``.
+    """
     compiler = getattr(torch, "compiler", None)
     if compiler is not None:
         is_compiling = getattr(compiler, "is_compiling", None)

@@ -25,7 +25,8 @@ dataset:
   num_workers: 4
   max_seq_length: 512
   train_split: "train[:1%]"  # Use small subset for testing
-  eval_split: "train[99%:]"
+  eval_split: null  # Auto-detect validation/test split when available
+  eval_samples: 2048  # Otherwise reserve first train samples for eval and skip from train
 
 tokenizer:
   name: "bert-base-uncased"
@@ -48,6 +49,7 @@ trainer:
   dataloader_num_workers: 4
   report_to: ["wandb"]  # Remove if you don't want logging
   mixed_precision: "bf16"  # Use bf16 on modern GPUs
+  masked_logits_only_loss: true  # default/recommended; false=legacy full-logits ablation path
   gradient_checkpointing: false
   resume_from_checkpoint: false
 

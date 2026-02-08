@@ -25,6 +25,19 @@ Checklist:
 4. compare `tokens/sec` (not only `steps/sec`) when
    `enforce_full_packed_batches=true`.
 
+### Pretraining OOM from logits memory
+
+Symptoms:
+
+- high VRAM usage during MLM loss
+- OOM when sequence length / batch size increases
+
+Checklist:
+
+1. keep `trainer.masked_logits_only_loss: true` (project default),
+2. keep `trainer.mixed_precision: bf16` (or `no` if bf16 unsupported),
+3. use `gradient_checkpointing: true` for additional memory headroom.
+
 ### `torch.compile` warnings/recompiles
 
 Typical warnings:
@@ -38,11 +51,11 @@ Actions:
 - reduce dynamic control flow and per-step Python-side variability,
 - use `TORCH_LOGS="recompiles"` to inspect root causes.
 
-### Streaming resume caveat
+### Streaming resume rejected for pretraining
 
-- Accelerator checkpoint resume works, but exact data position/order is not
-  preserved for streaming datasets.
-- For reproducible resume, prefer pre-tokenized non-streaming datasets.
+- Pretraining trainer raises if `trainer.resume_from_checkpoint` is set while
+  `dataset.streaming: true`.
+- Workaround: pre-tokenize data to disk and run with `dataset.streaming: false`.
 
 ## Evaluation Issues
 

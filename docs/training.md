@@ -1,7 +1,8 @@
 # Training Guide
 
-This guide covers pretraining and contrastive workflows. Full field-level schema
-is in [configuration.md](configuration.md).
+This guide covers pretraining and contrastive workflows.
+It is the canonical source for training runtime behavior. Full field-level
+schema/defaults are in [configuration.md](configuration.md).
 
 ## Entry Points
 
@@ -64,13 +65,49 @@ Primary knobs are in `dataset.*`:
 When running on CUDA, trainer may warn and apply throughput-friendly defaults
 if these are unset/suboptimal.
 
+## Streaming Eval Strategy
+
+For streaming datasets, prefer:
+
+- `dataset.eval_split: null`
+- `dataset.eval_samples: <small integer>`
+
+Runtime behavior:
+
+- if `dataset.eval_split` is unset, trainer tries to auto-detect a validation-style
+  split (`validation`, `eval`, `test`, `dev`);
+- if none exists and `dataset.eval_samples` is set, trainer reserves the first
+  `eval_samples` from train for eval and skips them from training to avoid
+  leakage;
+- when `trainer.eval_max_batches` is unset, trainer derives a practical default
+  for streaming eval and still allows explicit override.
+- if no eval dataset can be resolved, eval is skipped.
+
 ## Mixed Precision and Compile
 
-- `trainer.mixed_precision`: `no | fp16 | bf16`
+- `trainer.mixed_precision`: `no | fp32 | bf16` (`fp16` unsupported in pretraining)
 - `trainer.torch_compile`: enable `torch.compile`
 - `trainer.torch_compile_backend`: `inductor | aot_eager | eager`
 - `trainer.torch_compile_dynamic`: optional override for dynamic-shape compile;
   default behavior prefers static-shape compile for stability.
+- `trainer.masked_logits_only_loss`: `true | false`
+
+## MLM Loss Path Selection
+
+Use exactly one pretraining loss path per run:
+
+- `trainer.masked_logits_only_loss: true`
+  Uses masked-logits-only MLM loss (default and recommended). This avoids full
+  `(B,S,V)` logits materialization in the hot pretraining path.
+- `trainer.masked_logits_only_loss: false`
+  Uses the original NeoBERT full-logits CE path (legacy ablation/debug path).
+
+There is no mixed/cross objective mode in trainer config; this flag picks one
+path for the run.
+
+Current project default is `true`; new pretraining runs should keep
+`masked_logits_only_loss: true` unless you are intentionally running an
+ablation against the legacy baseline.
 
 ## Checkpointing and Resume
 
@@ -101,8 +138,8 @@ python scripts/pretraining/pretrain.py \
 Notes:
 
 - resume operates from `<output_dir>/checkpoints/`.
-- for streaming datasets, exact data position is not preserved, so resume is not
-  fully reproducible for data order.
+- pretraining resume with `dataset.streaming: true` is rejected by trainer.
+  Use a pre-tokenized non-streaming dataset for resumable runs.
 
 ## Pre-tokenized Datasets
 

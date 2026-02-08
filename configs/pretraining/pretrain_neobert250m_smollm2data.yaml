@@ -22,7 +22,8 @@ dataset:
   num_workers: 4
   max_seq_length: 1024
   train_split: "train"
-  eval_split: "train[:1%]" # Use small subset for eval
+  eval_split: null # Auto-detect validation/test split when available
+  eval_samples: 4096 # Otherwise reserve first train samples for eval and skip from train
 
 tokenizer:
   name: "BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp"

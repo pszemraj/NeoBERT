@@ -1,6 +1,8 @@
 # GLUE Evaluation Helpers
 
 Automation helpers for generating, running, and summarizing GLUE configs.
+Behavior semantics for GLUE evaluation are documented in
+[docs/evaluation.md](../../../docs/evaluation.md).
 
 ## Scripts
 

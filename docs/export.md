@@ -1,6 +1,8 @@
 # Hugging Face Export Guide
 
 Export NeoBERT training checkpoints to a Hugging Face-compatible folder.
+This is the canonical reference for export behavior and constraints.
+`scripts/export-hf/README.md` is intentionally command/script oriented.
 
 ## Supported Inputs
 
@@ -24,6 +26,14 @@ Optional output override:
 python scripts/export-hf/export.py \
   outputs/<run>/model_checkpoints/<step> \
   --output outputs/<run>/hf/my_export
+```
+
+Legacy checkpoints with a decoder bias must opt in to dropping that bias:
+
+```bash
+python scripts/export-hf/export.py \
+  outputs/<run>/model_checkpoints/<step> \
+  --allow-decoder-bias-drop
 ```
 
 ## Export Output
@@ -53,6 +63,8 @@ basic output sanity.
 - Export supports `hidden_act: swiglu|gelu`.
 - `ngpt: true` checkpoints are not supported by HF export path.
 - Export expects unpacked SwiGLU weights (`w1/w2/w3`).
+- Export target LM head is biasless. If a checkpoint includes `decoder.bias`,
+  export fails by default unless `--allow-decoder-bias-drop` is set.
 - `attn_backend` is converted to HF `flash_attention` flag for config parity,
   but exported HF model remains standard/unpacked.
 

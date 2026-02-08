@@ -20,10 +20,9 @@ python scripts/evaluation/run_mteb.py configs/pretraining/pretrain_neobert.yaml 
 
 ## Important Notes
 
-- GLUE path uses SDPA-oriented classifier wrappers.
-- MTEB runner reads `mteb_task_type` from config; `--task_types` is currently
-  parsed but not wired into task selection.
-- MTEB output path is derived from run dir + checkpoint + tokenizer max length.
+- Evaluation behavior/caveats are documented in
+  [docs/evaluation.md](../../docs/evaluation.md).
+- Keep this README focused on script entry points and helpers.
 
 ## GLUE Helpers
 

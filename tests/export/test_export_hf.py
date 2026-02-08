@@ -168,3 +168,35 @@ class TestExportHF(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "exceeds model vocab_size"):
             export._align_tokenizer_vocab_for_export(tokenizer, 2)
+
+    def test_map_weights_rejects_legacy_decoder_bias_without_opt_in(self):
+        """Fail fast when exporting legacy decoder bias without explicit opt-in."""
+        export = self.export
+        state_dict = {
+            "model.decoder.weight": torch.zeros(8, 4),
+            "model.decoder.bias": torch.zeros(8),
+            "model.encoder.weight": torch.zeros(8, 4),
+        }
+
+        with self.assertRaisesRegex(ValueError, "allow-decoder-bias-drop"):
+            export.map_weights(state_dict, model_config={})
+
+    def test_map_weights_allows_legacy_decoder_bias_drop_with_opt_in(self):
+        """Allow explicit legacy decoder bias dropping with a warning."""
+        export = self.export
+        state_dict = {
+            "decoder.weight": torch.zeros(8, 4),
+            "decoder.bias": torch.zeros(8),
+            "model.encoder.weight": torch.zeros(8, 4),
+        }
+
+        with self.assertWarnsRegex(UserWarning, "dropping this bias changes logits"):
+            mapped = export.map_weights(
+                state_dict,
+                model_config={},
+                allow_decoder_bias_drop=True,
+            )
+
+        self.assertIn("decoder.weight", mapped)
+        self.assertIn("model.encoder.weight", mapped)
+        self.assertNotIn("decoder.bias", mapped)

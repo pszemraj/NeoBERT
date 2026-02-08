@@ -159,7 +159,15 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `dataset.text_column`      | `str \| None`   | `null`         | Text field override for tokenization.                   |
 | `dataset.train_split`      | `str \| None`   | `null`         | Train split (supports slice syntax).                    |
 | `dataset.eval_split`       | `str \| None`   | `null`         | Eval split override.                                    |
+| `dataset.eval_samples`     | `int \| None`   | `null`         | Eval sample cap. If no eval split is configured, trainer can reserve the first `eval_samples` from train for eval. |
 | `dataset.validation_split` | `float \| None` | `null`         | Fraction for random eval split (non-streaming only).    |
+
+> [!NOTE]
+> Streaming pretraining defaults to `dataset.eval_split: null`. When unset, trainer
+> attempts to auto-detect a validation-style split (`validation`, `eval`, `test`, `dev`).
+> If none exists and `dataset.eval_samples` is set, it builds eval from the first
+> `eval_samples` training examples and skips those from the training stream to avoid
+> leakage.
 
 ### Performance and Preprocessing
 
@@ -201,7 +209,7 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `trainer.eval_steps`                  | `int` | `10000`      | Eval interval in steps.                    |
 | `trainer.logging_steps`               | `int` | `100`        | Logging interval in steps.                 |
 | `trainer.output_dir`                  | `str` | `"./output"` | Output root for checkpoints and artifacts. |
-| `trainer.mixed_precision`             | `str` | `"bf16"`     | `no`, `fp16`, or `bf16`.                   |
+| `trainer.mixed_precision`             | `str` | `"bf16"`     | `no`, `fp32`, or `bf16` (`fp16` unsupported in pretraining). |
 
 ### Stability and Performance
 
@@ -215,9 +223,16 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `trainer.enforce_full_packed_batches` | `bool`          | `true`       | Buffer packed fragments to emit full-sized microbatches. |
 | `trainer.eval_max_batches`            | `int \| None`   | `null`       | Optional eval cap (useful for streaming eval).           |
 | `trainer.log_train_accuracy`          | `bool`          | `false`      | Log MLM token accuracy (extra compute).                  |
-| `trainer.log_grad_norm`               | `bool`          | `false`      | Log grad norm each logging interval.                     |
-| `trainer.log_weight_norms`            | `bool`          | `false`      | Log parameter norms (main-process overhead).             |
+| `trainer.log_grad_norm`               | `bool`          | `true`       | Log grad norm each logging interval.                     |
+| `trainer.log_weight_norms`            | `bool`          | `true`       | Log parameter norms (main-process overhead).             |
 | `trainer.tf32`                        | `bool`          | `true`       | Enable TF32 on supported CUDA GPUs.                      |
+| `trainer.masked_logits_only_loss`     | `bool`          | `true`       | Pretraining MLM loss path selector: `true` = masked-logits-only path (default/recommended), `false` = original full-logits CE path (legacy ablation/debug). |
+
+> [!IMPORTANT]
+> `trainer.masked_logits_only_loss` is a run-level path selector, not a
+> multi-objective mixing interface. Choose one path for the run.
+> The project default is `true`; use `false` only when intentionally running a
+> legacy full-logits baseline.
 
 ### Control and Legacy Compatibility
 
@@ -461,6 +476,7 @@ trainer:
   save_steps: 10000
   eval_steps: 10000
   mixed_precision: bf16
+  masked_logits_only_loss: true
 
 optimizer:
   name: adamw
@@ -494,6 +510,7 @@ trainer:
   gradient_accumulation_steps: 8
   gradient_checkpointing: true
   mixed_precision: bf16
+  masked_logits_only_loss: true
   torch_compile: false
   max_steps: 300000
 

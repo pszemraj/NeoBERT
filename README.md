@@ -15,6 +15,12 @@ This fork adds:
 - safetensors-first checkpointing,
 - end-to-end training/eval/export scripts with config-driven workflows.
 
+Pretraining loss path is selected with one explicit flag:
+`trainer.masked_logits_only_loss`.
+
+- `true` (default, recommended): masked-logits-only path.
+- `false` (legacy/debug): original full-logits CE path.
+
 Paper (original): <https://arxiv.org/abs/2502.19587>
 
 ## Install
@@ -58,7 +64,7 @@ python tests/run_tests.py
 
 ## Documentation
 
-- [docs/README.md](docs/README.md)
+- [docs/README.md](docs/README.md) (index + source-of-truth map)
 - [Training Guide](docs/training.md)
 - [Configuration Reference](docs/configuration.md)
 - [Evaluation Guide](docs/evaluation.md)

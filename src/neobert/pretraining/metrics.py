@@ -137,13 +137,17 @@ class Metrics(defaultdict):
         for key, value in metrics_agg.items():
             metrics_log[key] = value
 
+        compute_accuracy = bool(self.get("train/compute_accuracy", 1))
+        if not compute_accuracy:
+            metrics_log.pop("train/local_num_correct", None)
+
         if metrics_agg["train/local_num_pred"] > 0:
             metrics_log["train/loss"] = (
                 metrics_agg["train/local_sum_loss"]
                 / metrics_agg["train/local_num_pred"]
             )
             metrics_log["train/perplexity"] = math.exp(metrics_log["train/loss"])
-            if bool(self.get("train/compute_accuracy", 1)):
+            if compute_accuracy:
                 metrics_log["train/accuracy"] = (
                     metrics_agg["train/local_num_correct"]
                     / metrics_agg["train/local_num_pred"]
@@ -159,9 +163,18 @@ class Metrics(defaultdict):
                     metrics_agg["train/local_tokens"] / elapsed
                 )
 
-        # Log the metrics with the current step
+        # Log metrics with the current step while keeping some runtime/internal
+        # fields out of external trackers.
         formatted = format_metrics(metrics_log)
-        accelerator.log(formatted, step=current_step)
+        tracker_payload = dict(formatted)
+        tracker_payload.pop("train/steps", None)
+        tracker_payload.pop("train/compute_accuracy", None)
+        for key in list(tracker_payload):
+            if key.startswith("train/loss_path_"):
+                tracker_payload.pop(key, None)
+        if not compute_accuracy:
+            tracker_payload.pop("train/local_num_correct", None)
+        accelerator.log(tracker_payload, step=current_step)
         if emit_console and accelerator.is_main_process:
             if console_fn is None:
                 console_fn = print
