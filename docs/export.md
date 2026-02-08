@@ -28,6 +28,14 @@ python scripts/export-hf/export.py \
   --output outputs/<run>/hf/my_export
 ```
 
+Legacy checkpoints with a decoder bias must opt in to dropping that bias:
+
+```bash
+python scripts/export-hf/export.py \
+  outputs/<run>/model_checkpoints/<step> \
+  --allow-decoder-bias-drop
+```
+
 ## Export Output
 
 Generated folder contains:
@@ -55,6 +63,8 @@ basic output sanity.
 - Export supports `hidden_act: swiglu|gelu`.
 - `ngpt: true` checkpoints are not supported by HF export path.
 - Export expects unpacked SwiGLU weights (`w1/w2/w3`).
+- Export target LM head is biasless. If a checkpoint includes `decoder.bias`,
+  export fails by default unless `--allow-decoder-bias-drop` is set.
 - `attn_backend` is converted to HF `flash_attention` flag for config parity,
   but exported HF model remains standard/unpacked.
 

@@ -16,6 +16,7 @@ import json
 import re
 import shutil
 import textwrap
+import warnings
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -404,7 +405,10 @@ def create_hf_config(
 
 
 def map_weights(
-    state_dict: Dict[str, torch.Tensor], model_config: Dict[str, Any]
+    state_dict: Dict[str, torch.Tensor],
+    model_config: Dict[str, Any],
+    *,
+    allow_decoder_bias_drop: bool = False,
 ) -> Dict[str, torch.Tensor]:
     """Map weights from our training format to HF model format.
 
@@ -416,9 +420,35 @@ def map_weights(
     - Decoder weights at top level for LM head
     :param dict[str, torch.Tensor] state_dict: Training state dict.
     :param dict[str, Any] model_config: Model config mapping.
+    :param bool allow_decoder_bias_drop: Whether to allow dropping legacy decoder
+        bias when exporting to the current biasless HF LM head.
     :return dict[str, torch.Tensor]: Remapped state dict.
+    :raises ValueError: If legacy decoder bias is present and dropping is not allowed.
     """
+    _ = model_config
     mapped = {}
+    legacy_bias_keys = [
+        key for key in ("model.decoder.bias", "decoder.bias") if key in state_dict
+    ]
+    if legacy_bias_keys:
+        message = (
+            "Detected legacy decoder bias weights in checkpoint "
+            f"({legacy_bias_keys}). Export target uses a biasless LM decoder "
+            "(NeoBERTLMHead.decoder.bias=None), so dropping this bias changes logits. "
+        )
+        if not allow_decoder_bias_drop:
+            raise ValueError(
+                message
+                + "Re-run with --allow-decoder-bias-drop if this behavior change is "
+                "intentional."
+            )
+        warnings.warn(
+            message
+            + "Proceeding because allow_decoder_bias_drop=True; decoder bias will be "
+            "excluded from exported weights.",
+            UserWarning,
+            stacklevel=2,
+        )
 
     for key, value in state_dict.items():
         if key in {"model.decoder.bias", "decoder.bias"}:
@@ -513,11 +543,18 @@ def copy_hf_modeling_files(target_dir: Path) -> None:
         _rewrite_export_model_imports(model_path)
 
 
-def export_checkpoint(checkpoint_path: Path, output_dir: Path | None = None) -> Path:
+def export_checkpoint(
+    checkpoint_path: Path,
+    output_dir: Path | None = None,
+    *,
+    allow_decoder_bias_drop: bool = False,
+) -> Path:
     """Export a NeoBERT checkpoint to HuggingFace format.
 
     :param Path checkpoint_path: Checkpoint directory with model.safetensors and config.yaml.
     :param Path | None output_dir: Optional output directory.
+    :param bool allow_decoder_bias_drop: Whether to allow dropping a legacy decoder
+        bias term during export to the current biasless HF LM head.
     :return Path: Output directory containing exported files.
     """
     checkpoint_path = Path(checkpoint_path).resolve()
@@ -591,7 +628,11 @@ def export_checkpoint(checkpoint_path: Path, output_dir: Path | None = None) -> 
 
     # 3. Map weights
     print("Converting and mapping model weights...")
-    mapped_state_dict = map_weights(state_dict, model_config)
+    mapped_state_dict = map_weights(
+        state_dict,
+        model_config,
+        allow_decoder_bias_drop=allow_decoder_bias_drop,
+    )
 
     # 3a. Sanity-check that the HF model loads and runs.
     print("Running HF forward pass sanity check...")
@@ -877,6 +918,14 @@ def main() -> None:
         default=None,
         help="Output directory for HF model (default: creates hf/{model_name} in parent dir)",
     )
+    parser.add_argument(
+        "--allow-decoder-bias-drop",
+        action="store_true",
+        help=(
+            "Allow exporting legacy checkpoints with decoder bias by dropping bias "
+            "weights. This changes logits compared with the original checkpoint."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -884,6 +933,7 @@ def main() -> None:
         export_checkpoint(
             checkpoint_path=Path(args.checkpoint_path),
             output_dir=Path(args.output) if args.output else None,
+            allow_decoder_bias_drop=args.allow_decoder_bias_drop,
         )
     except Exception as e:
         print(f"❌ Export failed: {e}")

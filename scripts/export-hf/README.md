@@ -18,6 +18,8 @@ python scripts/export-hf/validate.py outputs/<run>/hf/<export_name>
 
 - Detailed export constraints and compatibility notes live in
   [docs/export.md](../../docs/export.md).
+- Legacy checkpoints that still contain a decoder bias require explicit opt-in:
+  use `--allow-decoder-bias-drop` with `export.py`.
 - Keep this README focused on script entry points.
 
 ## Related Docs
