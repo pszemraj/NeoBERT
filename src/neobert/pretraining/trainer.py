@@ -1767,6 +1767,17 @@ def trainer(cfg: Config) -> None:
     local_num_pred = torch.zeros((), device=accelerator.device, dtype=torch.long)
     local_sum_loss = torch.zeros((), device=accelerator.device, dtype=torch.float32)
     local_num_correct = torch.zeros((), device=accelerator.device, dtype=torch.long)
+    local_loss_path_liger_flce = torch.zeros(
+        (), device=accelerator.device, dtype=torch.long
+    )
+    local_loss_path_checkpointed = torch.zeros(
+        (), device=accelerator.device, dtype=torch.long
+    )
+    local_loss_path_zero_masked = torch.zeros(
+        (), device=accelerator.device, dtype=torch.long
+    )
+    local_loss_path_other = torch.zeros((), device=accelerator.device, dtype=torch.long)
+    logged_masked_loss_path = False
     stored_batch = {
         "input_ids": None,
         "attention_mask": None,
@@ -1854,6 +1865,24 @@ def trainer(cfg: Config) -> None:
                     )
                     loss_sum = objective_out.loss_sum_local
                     num_pred = objective_out.num_masked_local
+                    if objective_out.used_path == "liger_flce":
+                        local_loss_path_liger_flce += 1
+                    elif objective_out.used_path == "train_checkpointed_masked_ce":
+                        local_loss_path_checkpointed += 1
+                    elif objective_out.used_path == "zero_masked":
+                        local_loss_path_zero_masked += 1
+                    else:
+                        local_loss_path_other += 1
+                    if (
+                        not logged_masked_loss_path
+                        and accelerator.is_main_process
+                        and objective_out.used_path != "zero_masked"
+                    ):
+                        logger.info(
+                            "Masked-logits loss path active (first non-empty microbatch): %s",
+                            objective_out.used_path,
+                        )
+                        logged_masked_loss_path = True
                 else:
                     if train_loss_fn is None:
                         raise RuntimeError(
@@ -1997,10 +2026,54 @@ def trainer(cfg: Config) -> None:
                     metrics["train/local_num_pred"] = int(local_num_pred.item())
                     metrics["train/local_sum_loss"] = float(local_sum_loss.item())
                     metrics["train/local_num_correct"] = int(local_num_correct.item())
+                    if masked_objective is not None:
+                        loss_path_counts = torch.stack(
+                            [
+                                local_loss_path_liger_flce,
+                                local_loss_path_checkpointed,
+                                local_loss_path_zero_masked,
+                                local_loss_path_other,
+                            ]
+                        )
+                        loss_path_counts = accelerator.reduce(
+                            loss_path_counts, reduction="sum"
+                        )
+                        path_total = int(loss_path_counts.sum().item())
+                        metrics["train/loss_path_steps_liger_flce"] = int(
+                            loss_path_counts[0].item()
+                        )
+                        metrics["train/loss_path_steps_checkpointed"] = int(
+                            loss_path_counts[1].item()
+                        )
+                        metrics["train/loss_path_steps_zero_masked"] = int(
+                            loss_path_counts[2].item()
+                        )
+                        metrics["train/loss_path_steps_other"] = int(
+                            loss_path_counts[3].item()
+                        )
+                        if path_total > 0:
+                            metrics["train/loss_path_ratio_liger_flce"] = (
+                                metrics["train/loss_path_steps_liger_flce"] / path_total
+                            )
+                            metrics["train/loss_path_ratio_checkpointed"] = (
+                                metrics["train/loss_path_steps_checkpointed"]
+                                / path_total
+                            )
+                            metrics["train/loss_path_ratio_zero_masked"] = (
+                                metrics["train/loss_path_steps_zero_masked"]
+                                / path_total
+                            )
+                            metrics["train/loss_path_ratio_other"] = (
+                                metrics["train/loss_path_steps_other"] / path_total
+                            )
                     metrics.log(
                         accelerator,
                         emit_console=(
-                            (not wandb_enabled) and accelerator.is_main_process
+                            (
+                                (not wandb_enabled)
+                                or str(cfg.wandb.mode).lower() == "offline"
+                            )
+                            and accelerator.is_main_process
                         ),
                         console_fn=accelerator.print,
                     )
@@ -2009,6 +2082,10 @@ def trainer(cfg: Config) -> None:
                     local_num_pred.zero_()
                     local_sum_loss.zero_()
                     local_num_correct.zero_()
+                    local_loss_path_liger_flce.zero_()
+                    local_loss_path_checkpointed.zero_()
+                    local_loss_path_zero_masked.zero_()
+                    local_loss_path_other.zero_()
 
                 # Save accelerator state for resumable training
                 if metrics["train/steps"] % cfg.trainer.save_steps == 0:
