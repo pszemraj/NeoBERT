@@ -167,12 +167,15 @@ def _gather_decoder_weight_for_masked_objective(
         fsdp_version = _resolve_fsdp_version(accelerator)
         if fsdp_version >= 2:
             base_model = model
+            unwrapped_model: Optional[torch.nn.Module] = None
             unwrap_model = getattr(accelerator, "unwrap_model", None)
             if callable(unwrap_model):
                 try:
-                    base_model = unwrap_model(model)
+                    unwrapped_model = unwrap_model(model)
                 except Exception:
-                    base_model = model
+                    unwrapped_model = None
+            if unwrapped_model is not None:
+                base_model = unwrapped_model
 
             decoder_module = getattr(base_model, "decoder", None)
             if decoder_module is None:
@@ -191,24 +194,39 @@ def _gather_decoder_weight_for_masked_objective(
                 """
                 return hasattr(module, "unshard") and hasattr(module, "reshard")
 
-            fsdp_owner: Optional[torch.nn.Module] = None
-            for module in base_model.modules():
-                if not _is_fsdp2_module(module):
-                    continue
-                for param in module.parameters(recurse=False):
-                    if param is decoder_weight:
-                        fsdp_owner = module
-                        break
-                if fsdp_owner is not None:
-                    break
+            def _find_fsdp_owner(
+                search_root: torch.nn.Module,
+            ) -> Optional[torch.nn.Module]:
+                """Find FSDP2 module that should unshard ``decoder.weight``.
 
-            if fsdp_owner is None:
-                named_modules = dict(base_model.named_modules())
+                :param torch.nn.Module search_root: Candidate module tree root.
+                :return torch.nn.Module | None: Owning FSDP2 module or ``None``.
+                """
+                owner: Optional[torch.nn.Module] = None
+                for module in search_root.modules():
+                    if not _is_fsdp2_module(module):
+                        continue
+                    for param in module.parameters(recurse=False):
+                        if param is decoder_weight:
+                            owner = module
+                            break
+                    if owner is not None:
+                        break
+                if owner is not None:
+                    return owner
+
+                named_modules = dict(search_root.named_modules())
                 decoder_path = next(
                     (
                         path
                         for path, module in named_modules.items()
-                        if module is decoder_module
+                        if (
+                            module is decoder_module
+                            or (
+                                hasattr(module, "weight")
+                                and getattr(module, "weight", None) is decoder_weight
+                            )
+                        )
                     ),
                     None,
                 )
@@ -217,16 +235,21 @@ def _gather_decoder_weight_for_masked_objective(
                     for depth in range(len(path_parts), -1, -1):
                         ancestor_path = ".".join(path_parts[:depth])
                         ancestor = (
-                            base_model
+                            search_root
                             if ancestor_path == ""
                             else named_modules.get(ancestor_path)
                         )
                         if ancestor is not None and _is_fsdp2_module(ancestor):
-                            fsdp_owner = ancestor
-                            break
+                            return ancestor
 
-            if fsdp_owner is None and _is_fsdp2_module(base_model):
-                fsdp_owner = base_model
+                if _is_fsdp2_module(search_root):
+                    return search_root
+                return None
+
+            # Search wrapped model first; unwrapped views can hide FSDP2 hooks.
+            fsdp_owner: Optional[torch.nn.Module] = _find_fsdp_owner(model)
+            if fsdp_owner is None and base_model is not model:
+                fsdp_owner = _find_fsdp_owner(base_model)
 
             if fsdp_owner is None:
                 raise RuntimeError(

@@ -494,6 +494,66 @@ class TestPretrainComponents(unittest.TestCase):
             ],
         )
 
+    def test_gather_decoder_weight_fsdp2_owner_search_prefers_wrapped_model(self):
+        """Ensure owner search still works when unwrap_model strips FSDP2 hooks."""
+
+        class _WaitHandle:
+            def __init__(self, calls: list[tuple[str, bool | None]]) -> None:
+                self._calls = calls
+
+            def wait(self) -> None:
+                self._calls.append(("wait", None))
+
+        class _CoreModel(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.decoder = torch.nn.Linear(4, 6, bias=False)
+
+        class _WrappedFSDP2Model(torch.nn.Module):
+            def __init__(self, calls: list[tuple[str, bool | None]]) -> None:
+                super().__init__()
+                self.module = _CoreModel()
+                self._calls = calls
+
+            def unshard(self, async_op: bool = False) -> _WaitHandle:
+                self._calls.append(("unshard", async_op))
+                return _WaitHandle(self._calls)
+
+            def reshard(self) -> None:
+                self._calls.append(("reshard", None))
+
+        calls: list[tuple[str, bool | None]] = []
+        wrapped_model = _WrappedFSDP2Model(calls)
+
+        class _FSDPPluginStub:
+            fsdp_version = 2
+
+        class _StateStub:
+            fsdp_plugin = _FSDPPluginStub()
+
+        class _AcceleratorStub:
+            distributed_type = DistributedType.FSDP
+            state = _StateStub()
+
+            @staticmethod
+            def unwrap_model(module: torch.nn.Module) -> torch.nn.Module:
+                # Mimic Accelerate unwrapping that removes a top-level wrapper.
+                return module.module
+
+        with _gather_decoder_weight_for_masked_objective(
+            wrapped_model, _AcceleratorStub()
+        ) as lm_weight:
+            self.assertIs(lm_weight, wrapped_model.module.decoder.weight)
+
+        self.assertEqual(
+            calls,
+            [
+                ("unshard", True),
+                ("wait", None),
+                ("reshard", None),
+            ],
+        )
+
     def test_run_masked_objective_step_backprops_inside_gather_on_zero3(self):
         """Ensure ZeRO-3 objective step runs backward before gather context exits."""
 
