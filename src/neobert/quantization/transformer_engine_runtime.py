@@ -220,30 +220,32 @@ def _wrap_forward_with_fp8_autocast(
     te_pytorch: Any,
     te_recipe_obj: Any,
     use_during_eval: bool,
+    prefer_accelerate_helper: bool,
     logger: logging.Logger,
 ) -> bool:
     """Wrap ``model.forward`` in TE fp8 autocast context."""
-    try:
-        from accelerate.utils.transformer_engine import contextual_fp8_autocast
+    if prefer_accelerate_helper:
+        try:
+            from accelerate.utils.transformer_engine import contextual_fp8_autocast
 
-        new_forward = contextual_fp8_autocast(
-            model.forward,
-            te_recipe_obj,
-            use_during_eval,
-        )
-        if hasattr(model.forward, "__func__"):
-            model.forward = MethodType(new_forward, model)
-        else:
-            model.forward = new_forward
-        return True
-    except ImportError:
-        pass
-    except Exception as exc:
-        logger.warning(
-            "Accelerate TE autocast helper failed (%s); falling back to direct "
-            "transformer_engine autocast wrapper.",
-            exc,
-        )
+            new_forward = contextual_fp8_autocast(
+                model.forward,
+                te_recipe_obj,
+                use_during_eval,
+            )
+            if hasattr(model.forward, "__func__"):
+                model.forward = MethodType(new_forward, model)
+            else:
+                model.forward = new_forward
+            return True
+        except ImportError:
+            pass
+        except Exception as exc:
+            logger.warning(
+                "Accelerate TE autocast helper failed (%s); falling back to direct "
+                "transformer_engine autocast wrapper.",
+                exc,
+            )
 
     fp8_autocast = getattr(te_pytorch, "fp8_autocast", None)
     if fp8_autocast is None:
@@ -357,6 +359,20 @@ def apply_transformer_engine_pretraining_quantization(
         )
 
     te_recipe_obj = _build_recipe(recipe, te_cfg, te_recipe)
+    prefer_accelerate_helper = True
+    if recipe == "nvfp4":
+        prefer_accelerate_helper = False
+        if bool(getattr(cfg.datacollator, "pack_sequences", False)) and not bool(
+            getattr(te_cfg, "disable_2d_quantization", False)
+        ):
+            log.warning(
+                "TE NVFP4 with packed sequences can fail on some Blackwell stacks "
+                "when 2D quantization is enabled. Forcing "
+                "transformer_engine.disable_2d_quantization=true for this run."
+            )
+            te_cfg.disable_2d_quantization = True
+            te_recipe_obj = _build_recipe(recipe, te_cfg, te_recipe)
+
     filter_fqns = list(getattr(te_cfg, "filter_fqns", []) or [])
     converted_linear_count, converted_layernorm_count = _convert_model_to_te_layers(
         model,
@@ -379,6 +395,7 @@ def apply_transformer_engine_pretraining_quantization(
             te_pytorch=te_pytorch,
             te_recipe_obj=te_recipe_obj,
             use_during_eval=bool(getattr(te_cfg, "use_autocast_during_eval", False)),
+            prefer_accelerate_helper=prefer_accelerate_helper,
             logger=log,
         )
         log.info(

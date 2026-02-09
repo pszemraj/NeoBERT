@@ -51,6 +51,25 @@ Actions:
 - reduce dynamic control flow and per-step Python-side variability,
 - use `TORCH_LOGS="recompiles"` to inspect root causes.
 
+### Transformer Engine NVFP4 kernel launch failures
+
+Symptoms:
+
+- `Error: Failed to set Shared Memory size`
+- TE runtime errors such as `current_scaling.cu ... CUDA Error: invalid argument`
+
+Actions:
+
+1. Use conservative NVFP4 settings:
+   `transformer_engine.disable_2d_quantization: true`,
+   `transformer_engine.disable_rht: true`,
+   `transformer_engine.disable_stochastic_rounding: true`.
+2. Disable compile for this run:
+   `trainer.torch_compile: false` and
+   `transformer_engine.require_compile: false`.
+3. If instability continues, prefer `transformer_engine.recipe: "mxfp8"` or
+   TorchAO FP8 for pretraining, and keep NVFP4 runs as controlled experiments.
+
 ### Streaming resume rejected for pretraining
 
 - Pretraining trainer raises if `trainer.resume_from_checkpoint` is set while

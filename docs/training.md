@@ -183,6 +183,13 @@ Notes:
   helper when available.
 - Current guardrails: pretraining-only path; DeepSpeed + Transformer Engine is
   blocked.
+- For `recipe: "nvfp4"` on packed-sequence pretraining, prefer conservative
+  settings first:
+  `transformer_engine.disable_2d_quantization: true`,
+  `transformer_engine.disable_rht: true`,
+  `transformer_engine.disable_stochastic_rounding: true`.
+  If kernel launch errors persist, set `trainer.torch_compile: false` and
+  `transformer_engine.require_compile: false`.
 
 ## Quartet-II Low-Precision Pretraining
 

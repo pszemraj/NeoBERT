@@ -298,6 +298,55 @@ class TestTransformerEngineRuntime(unittest.TestCase):
                     accelerator=_AcceleratorStub(),
                 )
 
+    def test_nvfp4_uses_native_autocast_wrapper_even_if_accelerate_helper_exists(self):
+        """NVFP4 path should use native TE autocast wrapper for compatibility."""
+        cfg = self._base_cfg()
+        cfg.transformer_engine.recipe = "nvfp4"
+        model = _TinyModel()
+        fake_state: dict = {"nvfp4_available": True}
+
+        modules = _build_fake_transformer_engine_modules(fake_state)
+        modules.update(_build_fake_accelerate_te_module(fake_state))
+        with patch.dict(sys.modules, modules, clear=False):
+            state = apply_transformer_engine_pretraining_quantization(
+                model,
+                cfg,
+                accelerator=_AcceleratorStub(),
+            )
+            _ = model(torch.randn(2, 16))
+
+        self.assertTrue(state.enabled)
+        self.assertEqual(state.recipe, "nvfp4")
+        self.assertFalse(state.used_accelerate_helper)
+        self.assertEqual(fake_state.get("accelerate_helper_calls", 0), 0)
+        self.assertGreater(fake_state.get("autocast_calls", 0), 0)
+
+    def test_nvfp4_packed_sequences_force_disable_2d_quantization(self):
+        """Packed-sequence NVFP4 path should force disable_2d_quantization for stability."""
+        cfg = self._base_cfg()
+        cfg.transformer_engine.recipe = "nvfp4"
+        cfg.datacollator.pack_sequences = True
+        cfg.transformer_engine.disable_2d_quantization = False
+        model = _TinyModel()
+        fake_state: dict = {"nvfp4_available": True}
+
+        with patch.dict(
+            sys.modules,
+            _build_fake_transformer_engine_modules(fake_state),
+            clear=False,
+        ):
+            state = apply_transformer_engine_pretraining_quantization(
+                model,
+                cfg,
+                accelerator=_AcceleratorStub(),
+            )
+            _ = model(torch.randn(2, 16))
+
+        self.assertTrue(state.enabled)
+        recipe_obj = fake_state.get("autocast_recipe")
+        self.assertIsNotNone(recipe_obj)
+        self.assertTrue(bool(getattr(recipe_obj, "disable_2d_quantization", False)))
+
     def test_mxfp8_support_check_is_enforced(self):
         """MXFP8 recipe should fail fast when backend reports unsupported."""
         cfg = self._base_cfg()
