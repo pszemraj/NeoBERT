@@ -59,6 +59,8 @@ def _build_fake_quartet_modules(state: dict) -> dict:
     """Build fake quartet2.linear module for runtime adapter tests."""
     quartet2_mod = types.ModuleType("quartet2")
     linear_mod = types.ModuleType("quartet2.linear")
+    qutlass_mod = types.ModuleType("qutlass")
+    qutlass_mod.matmul_nvf4_bf16_tn = lambda *args, **kwargs: None
 
     class Quartet_II_linear(nn.Linear):
         def __init__(
@@ -88,6 +90,7 @@ def _build_fake_quartet_modules(state: dict) -> dict:
     return {
         "quartet2": quartet2_mod,
         "quartet2.linear": linear_mod,
+        "qutlass": qutlass_mod,
     }
 
 
@@ -142,6 +145,31 @@ class TestQuartet2Runtime(unittest.TestCase):
                 cfg,
                 accelerator=_AcceleratorStub(),
             )
+
+    def test_runtime_validates_qutlass_kernel_symbols(self):
+        """Quartet-II should fail fast when qutlass kernel symbols are missing."""
+        cfg = self._base_cfg()
+        model = _TinyModel()
+        fake_state: dict = {}
+        broken_qutlass = types.ModuleType("qutlass")
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    **_build_fake_quartet_modules(fake_state),
+                    "qutlass": broken_qutlass,
+                },
+                clear=False,
+            ),
+            patch("torch.cuda.is_available", return_value=True),
+            patch("torch.cuda.get_device_capability", return_value=(12, 0)),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "matmul_nvf4_bf16_tn"):
+                apply_quartet2_pretraining_quantization(
+                    model,
+                    cfg,
+                    accelerator=_AcceleratorStub(),
+                )
 
     def test_quartet_recipe_converts_linear_layers(self):
         """Quartet-II path should convert linear modules when kernels are available."""

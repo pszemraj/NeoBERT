@@ -103,6 +103,33 @@ def _normalize_floating_dtypes_for_fsdp(
     model.to(dtype=target_dtype)
 
 
+def _validate_qutlass_kernel_symbols() -> None:
+    """Validate that required qutlass symbols for Quartet-II are available."""
+    try:
+        import qutlass  # type: ignore[import-not-found]
+    except Exception as exc:
+        raise ImportError(
+            "Quartet-II kernels require the qutlass Python module. Install with: "
+            "pip install --no-build-isolation "
+            "'git+https://github.com/IST-DASLab/Quartet-II.git#subdirectory=kernels'"
+        ) from exc
+
+    required_symbols = ("matmul_nvf4_bf16_tn",)
+    missing_symbols = [
+        symbol for symbol in required_symbols if not hasattr(qutlass, symbol)
+    ]
+    if missing_symbols:
+        qutlass_path = getattr(qutlass, "__file__", "<unknown>")
+        raise RuntimeError(
+            "Quartet-II runtime check failed: qutlass is missing required kernel "
+            f"symbols {missing_symbols} (loaded from {qutlass_path}). This usually "
+            "means a Quartet-II/qutlass version mismatch or stale installation. "
+            "Reinstall Quartet-II kernels with: pip install --no-build-isolation "
+            "'git+https://github.com/IST-DASLab/Quartet-II.git#subdirectory=kernels' "
+            "and ensure no older qutlass package shadows this environment."
+        )
+
+
 def apply_quartet2_pretraining_quantization(
     model: nn.Module,
     cfg: Any,
@@ -176,6 +203,7 @@ def apply_quartet2_pretraining_quantization(
             "'git+https://github.com/IST-DASLab/Quartet-II.git#subdirectory=kernels' "
             "(and ensure qutlass/scipy/nvtx are available)."
         ) from exc
+    _validate_qutlass_kernel_symbols()
 
     filter_fqns = list(getattr(q_cfg, "filter_fqns", []) or [])
     first_linear, last_linear = _get_first_last_linear_fqns(model)
