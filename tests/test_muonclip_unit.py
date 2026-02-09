@@ -4,6 +4,8 @@ Unit tests for MuonClip optimizer.
 Run: pytest tests/test_muonclip_unit.py -v
 """
 
+import copy
+
 import pytest
 import torch
 
@@ -458,6 +460,35 @@ class TestMuonClipOptimizer:
         optimizer_clone.load_state_dict(state)
 
         assert optimizer_clone._step == optimizer._step
+
+    def test_state_dict_param_groups_are_deepcopy_safe(self, model):
+        """Serialized param groups should avoid runtime tensor references."""
+        model_instance, config = model
+        optimizer = MuonClipOptimizer(
+            model_instance, config, MuonClipConfig(enable_clipping=False)
+        )
+
+        state = optimizer.state_dict()
+        # Mirrors the path used by accelerate.AcceleratedOptimizer.
+        copy.deepcopy(state["param_groups"])
+        for group in state["param_groups"]:
+            assert "param_info" not in group
+
+    def test_load_state_dict_restores_runtime_param_info(self, model):
+        """Loading optimizer state should keep MuonClip clipping metadata."""
+        model_instance, config = model
+        muon_config = MuonClipConfig(enable_clipping=True)
+        optimizer = MuonClipOptimizer(model_instance, config, muon_config)
+        state = optimizer.state_dict()
+
+        model_clone = NeoBERT(config)
+        optimizer_clone = MuonClipOptimizer(model_clone, config, muon_config)
+        optimizer_clone.load_state_dict(state)
+
+        for group in optimizer_clone.param_groups:
+            assert "param_info" in group
+            assert len(group["param_info"]) == len(group["params"])
+            assert all("param" in info for info in group["param_info"])
 
     def test_clipping_applied(self, model):
         """Test QK-clipping actually modifies weights."""

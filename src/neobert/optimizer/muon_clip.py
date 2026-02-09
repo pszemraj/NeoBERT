@@ -819,6 +819,20 @@ class MuonClipOptimizer(Optimizer):
         :return dict[str, Any]: Optimizer state dictionary.
         """
         base = super().state_dict()
+        # Keep optimizer state_dict deepcopy-safe for wrappers like
+        # accelerate.AcceleratedOptimizer. ``param_info`` contains runtime-only
+        # tensor references that should not be serialized.
+        param_groups = base.get("param_groups")
+        if isinstance(param_groups, list):
+            sanitized_groups = []
+            for group in param_groups:
+                if not isinstance(group, dict):
+                    sanitized_groups.append(group)
+                    continue
+                group_copy = dict(group)
+                group_copy.pop("param_info", None)
+                sanitized_groups.append(group_copy)
+            base["param_groups"] = sanitized_groups
         base["muonclip_step"] = int(self._step)
         return base
 
@@ -829,7 +843,31 @@ class MuonClipOptimizer(Optimizer):
         """
         payload = dict(state_dict)
         muonclip_step = payload.pop("muonclip_step", None)
+        # ``param_info`` is runtime-only metadata and may contain tensor refs that
+        # are not deepcopy-safe in some distributed wrapper stacks.
+        payload_param_groups = payload.get("param_groups")
+        if isinstance(payload_param_groups, list):
+            sanitized_groups = []
+            for group in payload_param_groups:
+                if not isinstance(group, dict):
+                    sanitized_groups.append(group)
+                    continue
+                group_copy = dict(group)
+                group_copy.pop("param_info", None)
+                sanitized_groups.append(group_copy)
+            payload["param_groups"] = sanitized_groups
+
+        # Preserve current runtime metadata so clipping continues working after
+        # optimizer state restore.
+        current_param_info = [
+            group.get("param_info") for group in getattr(self, "param_groups", [])
+        ]
         super().load_state_dict(payload)
+        for group, param_info in zip(
+            getattr(self, "param_groups", []), current_param_info
+        ):
+            if param_info is not None:
+                group["param_info"] = param_info
 
         if muonclip_step is not None:
             self._step = int(muonclip_step)
