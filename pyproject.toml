@@ -43,6 +43,7 @@ flash = ["flash-attn>=2.5"]
 quant = ["torchao>=0.14.0"]
 quant_te = ["transformer_engine[pytorch]"]
 quant_quartet = [
+    "qutlass @ git+https://github.com/IST-DASLab/qutlass.git",
     "quartet2 @ git+https://github.com/IST-DASLab/Quartet-II.git#subdirectory=kernels",
     "scipy>=1.17.0",
     "nvtx>=0.2.14",
@@ -50,6 +51,7 @@ quant_quartet = [
 quant_all = [
     "torchao>=0.14.0",
     "transformer_engine[pytorch]",
+    "qutlass @ git+https://github.com/IST-DASLab/qutlass.git",
     "quartet2 @ git+https://github.com/IST-DASLab/Quartet-II.git#subdirectory=kernels",
     "scipy>=1.17.0",
     "nvtx>=0.2.14",

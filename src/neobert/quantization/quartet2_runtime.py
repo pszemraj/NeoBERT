@@ -111,7 +111,8 @@ def _validate_qutlass_kernel_symbols() -> None:
         raise ImportError(
             "Quartet-II kernels require the qutlass Python module. Install with: "
             "pip install --no-build-isolation "
-            "'git+https://github.com/IST-DASLab/Quartet-II.git#subdirectory=kernels'"
+            "'git+https://github.com/IST-DASLab/qutlass.git' "
+            "and then install Quartet-II kernels."
         ) from exc
 
     required_symbols = ("matmul_nvf4_bf16_tn",)
@@ -124,9 +125,12 @@ def _validate_qutlass_kernel_symbols() -> None:
             "Quartet-II runtime check failed: qutlass is missing required kernel "
             f"symbols {missing_symbols} (loaded from {qutlass_path}). This usually "
             "means a Quartet-II/qutlass version mismatch or stale installation. "
-            "Reinstall Quartet-II kernels with: pip install --no-build-isolation "
-            "'git+https://github.com/IST-DASLab/Quartet-II.git#subdirectory=kernels' "
-            "and ensure no older qutlass package shadows this environment."
+            "Reinstall qutlass from GitHub with: pip install --no-build-isolation "
+            "'git+https://github.com/IST-DASLab/qutlass.git' "
+            "and then reinstall Quartet-II kernels with: pip install "
+            "--no-build-isolation "
+            "'git+https://github.com/IST-DASLab/Quartet-II.git#subdirectory=kernels'. "
+            "Also ensure no older PyPI qutlass package shadows this environment."
         )
 
 

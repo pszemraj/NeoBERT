@@ -409,7 +409,7 @@ Conversion is applied before `torch.compile` and before
 > - Quartet-II requires CUDA + Blackwell-class GPUs (`sm120a`) and BF16 mixed precision;
 > - enable exactly one backend: `torchao.enable`, `transformer_engine.enable`,
 >   or `quartet2.enable`.
-> - avoid installing standalone `qutlass` from PyPI; install Quartet-II kernels from GitHub.
+> - install `qutlass` from GitHub (`IST-DASLab/qutlass`), not the PyPI `qutlass==0.0.0` package.
 
 > [!TIP]
 > Install support via
