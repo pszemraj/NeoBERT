@@ -61,12 +61,44 @@ def _replace_module(model: nn.Module, fqn: str, new_module: nn.Module) -> None:
     setattr(parent, leaf, new_module)
 
 
-def _patch_disable_backward_quant(module: nn.Module) -> None:
-    """Patch module forward to always run with ``disable_backward_quant=True``."""
+def _patch_quartet_forward_runtime(
+    module: nn.Module,
+    *,
+    force_disable_backward_quant: bool,
+) -> None:
+    """Patch Quartet forward for robust BF16 runtime behavior.
+
+    Some distributed runtime stacks can upcast buffers/params. Quartet kernels
+    expect BF16 activations and BF16 Hadamard buffers, so we normalize these at
+    call time and optionally force ``disable_backward_quant``.
+    """
     original_forward = module.forward
 
-    def _forward(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
-        return original_forward(x, disable_backward_quant=True)
+    def _forward(
+        self: nn.Module,
+        x: torch.Tensor,
+        disable_backward_quant: bool = False,
+        input_abs_max: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if x.dtype != torch.bfloat16:
+            x = x.to(dtype=torch.bfloat16)
+
+        had = getattr(self, "had", None)
+        if isinstance(had, torch.Tensor) and had.dtype != torch.bfloat16:
+            had_bf16 = had.to(dtype=torch.bfloat16)
+            if isinstance(getattr(self, "_buffers", None), dict) and "had" in self._buffers:
+                self._buffers["had"] = had_bf16
+            else:
+                setattr(self, "had", had_bf16)
+
+        if force_disable_backward_quant:
+            disable_backward_quant = True
+
+        return original_forward(
+            x,
+            disable_backward_quant=disable_backward_quant,
+            input_abs_max=input_abs_max,
+        )
 
     module.forward = MethodType(_forward, module)
 
@@ -247,8 +279,10 @@ def apply_quartet2_pretraining_quantization(
         )
         with torch.no_grad():
             quartet_linear.weight.copy_(mod.weight.to(dtype=torch.bfloat16))
-        if disable_backward_quant:
-            _patch_disable_backward_quant(quartet_linear)
+        _patch_quartet_forward_runtime(
+            quartet_linear,
+            force_disable_backward_quant=disable_backward_quant,
+        )
 
         _replace_module(model, fqn, quartet_linear)
         converted_linear_count += 1

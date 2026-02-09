@@ -73,6 +73,14 @@ def _build_fake_quartet_modules(state: dict) -> dict:
             super().__init__(*args, dtype=dtype, **kwargs)
             self.four_over_six = four_over_six
             self.weight_abs_max = None
+            self.register_buffer(
+                "had",
+                torch.eye(self.in_features, dtype=dtype),
+            )
+            self.register_buffer(
+                "scratch_amax",
+                torch.empty((), dtype=torch.int32),
+            )
 
         def forward(
             self,
@@ -241,6 +249,34 @@ class TestQuartet2Runtime(unittest.TestCase):
             _ = model(torch.randn(2, 128, dtype=torch.bfloat16))
 
         self.assertTrue(bool(fake_state.get("disable_backward_quant", False)))
+
+    def test_runtime_recasts_hadamard_buffer_to_bf16(self):
+        """Quartet wrapper should recast Hadamard buffer to BF16 at runtime."""
+        cfg = self._base_cfg()
+        model = _TinyModel()
+        fake_state: dict = {}
+        with (
+            patch.dict(
+                sys.modules,
+                _build_fake_quartet_modules(fake_state),
+                clear=False,
+            ),
+            patch("torch.cuda.is_available", return_value=True),
+            patch("torch.cuda.get_device_capability", return_value=(12, 0)),
+        ):
+            _ = apply_quartet2_pretraining_quantization(
+                model,
+                cfg,
+                accelerator=_AcceleratorStub(DistributedType.FSDP),
+            )
+            for module in model.modules():
+                if type(module).__name__ == "Quartet_II_linear":
+                    module.had = module.had.to(torch.float32)
+            _ = model(torch.randn(2, 128, dtype=torch.bfloat16))
+
+        for module in model.modules():
+            if type(module).__name__ == "Quartet_II_linear":
+                self.assertEqual(module.had.dtype, torch.bfloat16)
 
     def test_fsdp_normalizes_floating_param_dtypes(self):
         """FSDP Quartet path should enforce uniform BF16 floating param dtype."""
