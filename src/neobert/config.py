@@ -276,6 +276,20 @@ class TransformerEngineConfig:
 
 
 @dataclass
+class QuartetIIConfig:
+    """Quartet-II quantized training configuration for pretraining."""
+
+    enable: bool = False
+    recipe: str = "none"
+    filter_fqns: List[str] = field(default_factory=lambda: ["decoder"])
+    skip_first_last_linear: bool = True
+    require_compile: bool = True
+    required_dim_multiple: int = 128
+    four_over_six: bool = True
+    disable_backward_quant: bool = False
+
+
+@dataclass
 class DataCollatorConfig:
     """Masking and padding configuration for data collators."""
 
@@ -352,6 +366,7 @@ class Config:
     transformer_engine: TransformerEngineConfig = field(
         default_factory=TransformerEngineConfig
     )
+    quartet2: QuartetIIConfig = field(default_factory=QuartetIIConfig)
     datacollator: DataCollatorConfig = field(default_factory=DataCollatorConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
     glue: GLUEConfig = field(default_factory=GLUEConfig)
@@ -769,6 +784,7 @@ class ConfigLoader:
         _check_section("trainer", TrainerConfig)
         _check_section("torchao", TorchAOConfig)
         _check_section("transformer_engine", TransformerEngineConfig)
+        _check_section("quartet2", QuartetIIConfig)
         _check_section("datacollator", DataCollatorConfig)
         _check_section("wandb", WandbConfig)
         _check_section("glue", GLUEConfig)
@@ -874,6 +890,12 @@ class ConfigLoader:
                 if hasattr(config.transformer_engine, k):
                     setattr(config.transformer_engine, k, v)
 
+        # Update Quartet-II config
+        if "quartet2" in cfg_dict:
+            for k, v in cfg_dict["quartet2"].items():
+                if hasattr(config.quartet2, k):
+                    setattr(config.quartet2, k, v)
+
         # Update datacollator config
         if "datacollator" in cfg_dict:
             for k, v in cfg_dict["datacollator"].items():
@@ -913,6 +935,7 @@ class ConfigLoader:
                 "trainer",
                 "torchao",
                 "transformer_engine",
+                "quartet2",
                 "datacollator",
                 "wandb",
                 "glue",
@@ -1024,6 +1047,7 @@ class ConfigLoader:
             "trainer": asdict(config.trainer),
             "torchao": asdict(config.torchao),
             "transformer_engine": asdict(config.transformer_engine),
+            "quartet2": asdict(config.quartet2),
             "datacollator": asdict(config.datacollator),
             "wandb": asdict(config.wandb),
             "glue": asdict(config.glue),
@@ -1346,6 +1370,46 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         "--transformer_engine.disable_2d_quantization",
         type=_parse_cli_bool,
         help="Disable 2D quantization in TE NVFP4 recipe",
+    )
+    parser.add_argument(
+        "--quartet2.enable",
+        type=_parse_cli_bool,
+        help="Enable Quartet-II quantized pretraining",
+    )
+    parser.add_argument(
+        "--quartet2.recipe",
+        type=str,
+        help="Quartet-II recipe name: none, quartet_ii",
+    )
+    parser.add_argument(
+        "--quartet2.filter_fqns",
+        type=_parse_cli_csv,
+        help="Comma-separated module FQN substrings to skip conversion",
+    )
+    parser.add_argument(
+        "--quartet2.skip_first_last_linear",
+        type=_parse_cli_bool,
+        help="Skip first and last linear modules for stability",
+    )
+    parser.add_argument(
+        "--quartet2.require_compile",
+        type=_parse_cli_bool,
+        help="Require trainer.torch_compile=true when Quartet-II is enabled",
+    )
+    parser.add_argument(
+        "--quartet2.required_dim_multiple",
+        type=int,
+        help="Require in/out features to be divisible by this value for conversion",
+    )
+    parser.add_argument(
+        "--quartet2.four_over_six",
+        type=_parse_cli_bool,
+        help="Use Quartet-II four-over-six rounding mode",
+    )
+    parser.add_argument(
+        "--quartet2.disable_backward_quant",
+        type=_parse_cli_bool,
+        help="Disable Quartet-II backward quantization in converted layers",
     )
 
     # Data collator arguments

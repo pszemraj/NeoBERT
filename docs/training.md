@@ -175,11 +175,43 @@ Notes:
 
 - Supported recipe families: `fp8_delayed`, `fp8_current`, `mxfp8`, and `nvfp4`.
 - Backend selection is explicit: enable only one of `torchao.enable` or
-  `transformer_engine.enable`.
+  `transformer_engine.enable` (or `quartet2.enable`).
 - The runtime wraps model forward in TE autocast and prefers Accelerate's
   helper when available.
 - Current guardrails: pretraining-only path; DeepSpeed + Transformer Engine is
   blocked.
+
+## Quartet-II Low-Precision Pretraining
+
+NeoBERT can also apply Quartet-II NVFP4 linears before
+`torch.compile`/`accelerator.prepare`. Configuration lives under `quartet2.*`.
+
+Example:
+
+```yaml
+trainer:
+  torch_compile: true
+  mixed_precision: "bf16"
+
+quartet2:
+  enable: true
+  recipe: "quartet_ii"
+  filter_fqns: ["decoder"]
+  skip_first_last_linear: true
+  required_dim_multiple: 128
+  four_over_six: true
+  require_compile: true
+```
+
+Notes:
+
+- Quartet-II uses the `quartet2.linear.Quartet_II_linear` drop-in linear.
+- Runtime backend selection is explicit: enable only one of `torchao.enable`,
+  `transformer_engine.enable`, or `quartet2.enable`.
+- Current guardrails: pretraining-only path; DeepSpeed + Quartet-II is blocked.
+- Hardware/runtime requirements follow upstream kernels: CUDA, Blackwell-class
+  GPUs (`sm120a`), and BF16 mixed precision.
+- Install dependencies with: `pip install --no-build-isolation -e .[quant_quartet]`.
 
 ## MLM Loss Path Selection
 

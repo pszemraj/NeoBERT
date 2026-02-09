@@ -52,6 +52,7 @@ from neobert.pretraining.masked_objective import (
 from neobert.scheduler import get_scheduler, resolve_scheduler_steps
 from neobert.tokenizer import get_tokenizer, resolve_text_column
 from neobert.quantization import (
+    apply_quartet2_pretraining_quantization,
     apply_torchao_pretraining_quantization,
     apply_transformer_engine_pretraining_quantization,
 )
@@ -2005,10 +2006,14 @@ def trainer(cfg: Config) -> None:
 
     torchao_enabled = bool(getattr(cfg.torchao, "enable", False))
     transformer_engine_enabled = bool(getattr(cfg.transformer_engine, "enable", False))
-    if torchao_enabled and transformer_engine_enabled:
+    quartet2_enabled = bool(getattr(cfg.quartet2, "enable", False))
+    enabled_quant_backends = int(torchao_enabled) + int(transformer_engine_enabled) + int(
+        quartet2_enabled
+    )
+    if enabled_quant_backends > 1:
         raise ValueError(
             "Quantized pretraining backends are mutually exclusive. Enable only one "
-            "of torchao.enable or transformer_engine.enable."
+            "of torchao.enable, transformer_engine.enable, or quartet2.enable."
         )
 
     quantization_post_optimizer_hook = None
@@ -2028,6 +2033,14 @@ def trainer(cfg: Config) -> None:
             logger=logger,
         )
         quantization_post_optimizer_hook = te_runtime.post_optimizer_hook
+    elif quartet2_enabled:
+        quartet_runtime = apply_quartet2_pretraining_quantization(
+            model,
+            cfg,
+            accelerator=accelerator,
+            logger=logger,
+        )
+        quantization_post_optimizer_hook = quartet_runtime.post_optimizer_hook
 
     model = _maybe_compile_model(model, cfg, accelerator, logger)
 

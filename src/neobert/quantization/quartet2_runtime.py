@@ -1,0 +1,225 @@
+"""Quartet-II pretraining integration helpers."""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from types import MethodType
+from typing import Any, Callable, Optional
+
+import torch
+import torch.nn as nn
+from accelerate.utils import DistributedType
+
+LOGGER = logging.getLogger(__name__)
+
+_CANONICAL_RECIPES = {"none", "quartet_ii"}
+_RECIPE_ALIASES = {
+    "none": "none",
+    "quartet_ii": "quartet_ii",
+    "quartet-ii": "quartet_ii",
+    "quartet2": "quartet_ii",
+    "quartet_ii_linear": "quartet_ii",
+    "nvfp4": "quartet_ii",
+}
+
+
+@dataclass
+class QuartetIIRuntimeState:
+    """Runtime state for Quartet-II pretraining integration."""
+
+    enabled: bool = False
+    recipe: str = "none"
+    converted_linear_count: int = 0
+    skipped_bias_linear_count: int = 0
+    skipped_dim_linear_count: int = 0
+    post_optimizer_hook: Optional[Callable[[nn.Module], None]] = None
+
+
+def _normalize_recipe(recipe: Any) -> str:
+    """Normalize a user recipe token."""
+    normalized = str(recipe or "none").strip().lower()
+    return _RECIPE_ALIASES.get(normalized, normalized)
+
+
+def _get_first_last_linear_fqns(model: nn.Module) -> tuple[Optional[str], Optional[str]]:
+    """Return first and last linear-module FQNs in model traversal order."""
+    linear_fqns = [name for name, mod in model.named_modules() if isinstance(mod, nn.Linear)]
+    if not linear_fqns:
+        return None, None
+    return linear_fqns[0], linear_fqns[-1]
+
+
+def _replace_module(model: nn.Module, fqn: str, new_module: nn.Module) -> None:
+    """Replace a submodule by its fully-qualified name."""
+    if "." in fqn:
+        parent_fqn, leaf = fqn.rsplit(".", 1)
+        parent = model.get_submodule(parent_fqn)
+    else:
+        parent = model
+        leaf = fqn
+    setattr(parent, leaf, new_module)
+
+
+def _patch_disable_backward_quant(module: nn.Module) -> None:
+    """Patch module forward to always run with ``disable_backward_quant=True``."""
+    original_forward = module.forward
+
+    def _forward(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
+        return original_forward(x, disable_backward_quant=True)
+
+    module.forward = MethodType(_forward, module)
+
+
+def apply_quartet2_pretraining_quantization(
+    model: nn.Module,
+    cfg: Any,
+    *,
+    accelerator: Any,
+    logger: Optional[logging.Logger] = None,
+) -> QuartetIIRuntimeState:
+    """Apply Quartet-II quantized-training transforms for pretraining."""
+    log = logger or LOGGER
+    q_cfg = getattr(cfg, "quartet2", None)
+    if q_cfg is None or not bool(getattr(q_cfg, "enable", False)):
+        return QuartetIIRuntimeState(enabled=False, recipe="none")
+
+    recipe = _normalize_recipe(getattr(q_cfg, "recipe", "none"))
+    if recipe not in _CANONICAL_RECIPES:
+        valid = sorted(_CANONICAL_RECIPES)
+        raise ValueError(
+            f"Unknown quartet2.recipe='{recipe}'. Supported values: {valid}."
+        )
+    if recipe == "none":
+        return QuartetIIRuntimeState(enabled=False, recipe="none")
+
+    if str(getattr(cfg, "task", "pretraining")).strip().lower() != "pretraining":
+        raise ValueError(
+            "Quartet-II integration is currently supported for task='pretraining' only."
+        )
+
+    if bool(getattr(q_cfg, "require_compile", True)) and not bool(
+        getattr(cfg.trainer, "torch_compile", False)
+    ):
+        raise ValueError(
+            "Quartet-II quantized training requires trainer.torch_compile=true. "
+            "Set trainer.torch_compile=true or quartet2.require_compile=false."
+        )
+    if not bool(getattr(cfg.trainer, "torch_compile", False)):
+        log.warning(
+            "Quartet-II is enabled with trainer.torch_compile=false. This is typically "
+            "slower and can be less stable than compiled mode."
+        )
+
+    mixed_precision = str(getattr(cfg.trainer, "mixed_precision", "bf16")).strip().lower()
+    if mixed_precision not in {"bf16", "bfloat16"}:
+        raise ValueError(
+            "Quartet-II requires BF16 mixed precision. Set "
+            "trainer.mixed_precision='bf16'."
+        )
+
+    if accelerator.distributed_type is DistributedType.DEEPSPEED:
+        raise RuntimeError(
+            "Quartet-II quantized pretraining is not supported with DeepSpeed in this "
+            "release. Use DDP or FSDP2."
+        )
+
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "Quartet-II kernels require CUDA. No CUDA device is available in this runtime."
+        )
+    device_capability = torch.cuda.get_device_capability()
+    if tuple(device_capability) < (12, 0):
+        raise RuntimeError(
+            "Quartet-II kernels target Blackwell-class GPUs. Detected compute "
+            f"capability {device_capability}, but >= (12, 0) is required."
+        )
+
+    try:
+        from quartet2.linear import Quartet_II_linear
+    except Exception as exc:
+        raise ImportError(
+            "Quartet-II recipe requested but quartet2 kernels are unavailable. Install "
+            "with: pip install --no-build-isolation "
+            "'git+https://github.com/IST-DASLab/Quartet-II.git#subdirectory=kernels' "
+            "(and ensure qutlass/scipy/nvtx are available)."
+        ) from exc
+
+    filter_fqns = list(getattr(q_cfg, "filter_fqns", []) or [])
+    first_linear, last_linear = _get_first_last_linear_fqns(model)
+    skip_first_last_linear = bool(getattr(q_cfg, "skip_first_last_linear", True))
+    required_dim_multiple = int(getattr(q_cfg, "required_dim_multiple", 128))
+    four_over_six = bool(getattr(q_cfg, "four_over_six", True))
+    disable_backward_quant = bool(getattr(q_cfg, "disable_backward_quant", False))
+
+    converted_linear_count = 0
+    skipped_bias_linear_count = 0
+    skipped_dim_linear_count = 0
+
+    for fqn, mod in list(model.named_modules()):
+        if not fqn or not isinstance(mod, nn.Linear):
+            continue
+        if skip_first_last_linear and fqn in {first_linear, last_linear}:
+            continue
+        if any(skip and skip in fqn for skip in filter_fqns):
+            continue
+        if mod.bias is not None:
+            skipped_bias_linear_count += 1
+            continue
+        if (
+            mod.in_features % required_dim_multiple != 0
+            or mod.out_features % required_dim_multiple != 0
+        ):
+            skipped_dim_linear_count += 1
+            continue
+
+        quartet_linear = Quartet_II_linear(
+            mod.in_features,
+            mod.out_features,
+            bias=False,
+            four_over_six=four_over_six,
+            dtype=torch.bfloat16,
+            device=mod.weight.device,
+        )
+        with torch.no_grad():
+            quartet_linear.weight.copy_(mod.weight.to(dtype=torch.bfloat16))
+        if disable_backward_quant:
+            _patch_disable_backward_quant(quartet_linear)
+
+        _replace_module(model, fqn, quartet_linear)
+        converted_linear_count += 1
+
+    if skipped_bias_linear_count > 0:
+        log.warning(
+            "Quartet-II skipped %s biased linear layers (Quartet_II_linear currently "
+            "does not preserve bias in forward).",
+            skipped_bias_linear_count,
+        )
+    if skipped_dim_linear_count > 0:
+        log.warning(
+            "Quartet-II skipped %s linear layers that are not divisible by %s.",
+            skipped_dim_linear_count,
+            required_dim_multiple,
+        )
+
+    if converted_linear_count <= 0:
+        log.warning(
+            "Quartet-II recipe '%s' enabled but converted 0 linear modules. "
+            "Check filter rules and layer dimensions.",
+            recipe,
+        )
+    else:
+        log.info(
+            "Quartet-II recipe '%s' active: converted %s linear modules.",
+            recipe,
+            converted_linear_count,
+        )
+
+    return QuartetIIRuntimeState(
+        enabled=True,
+        recipe=recipe,
+        converted_linear_count=converted_linear_count,
+        skipped_bias_linear_count=skipped_bias_linear_count,
+        skipped_dim_linear_count=skipped_dim_linear_count,
+        post_optimizer_hook=None,
+    )

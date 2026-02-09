@@ -28,6 +28,7 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
   - [MuonClip (`optimizer.muon_config`)](#muonclip-optimizermuon_config)
 - [TorchAO Quantized Pretraining](#torchao-quantized-pretraining)
 - [Transformer Engine Quantized Pretraining](#transformer-engine-quantized-pretraining)
+- [Quartet-II Quantized Pretraining](#quartet-ii-quantized-pretraining)
 - [Data Collator](#data-collator)
 - [Checkpointing and Resume](#checkpointing-and-resume)
 - [Logging and Tracking](#logging-and-tracking)
@@ -373,13 +374,46 @@ runs. Conversion is applied before `torch.compile` and before
 > Runtime guardrails:
 > - currently supported for `task: pretraining` only;
 > - DeepSpeed path is blocked for Transformer Engine recipes in this release;
-> - enable exactly one backend: `torchao.enable` or `transformer_engine.enable`.
+> - enable exactly one backend: `torchao.enable`, `transformer_engine.enable`,
+>   or `quartet2.enable`.
 
 > [!TIP]
 > On RTX 5090-class hardware, `transformer_engine.recipe: "nvfp4"` is typically
 > the practical FP4 path; MXFP8 availability depends on TE kernel support in the
 > installed TE/CUDA build. Use `jobs/dual_5090_v011/pretrain_mxfp8_te.yaml` as a
 > starting template when MXFP8 is available.
+
+---
+
+## Quartet-II Quantized Pretraining
+
+These settings control Quartet-II NVFP4 linear replacement for pretraining runs.
+Conversion is applied before `torch.compile` and before
+`accelerator.prepare(...)`.
+
+| Key                                   | Type        | Default       | Description |
+| ------------------------------------- | ----------- | ------------- | ----------- |
+| `quartet2.enable`                     | `bool`      | `false`       | Enable Quartet-II conversion path. |
+| `quartet2.recipe`                     | `str`       | `"none"`      | Recipe selector: `none`, `quartet_ii`. |
+| `quartet2.filter_fqns`                | `list[str]` | `["decoder"]` | Substring filters for module FQNs to skip conversion. |
+| `quartet2.skip_first_last_linear`     | `bool`      | `true`        | Skip first/last `nn.Linear` for stability. |
+| `quartet2.require_compile`            | `bool`      | `true`        | Require `trainer.torch_compile: true` when enabled. |
+| `quartet2.required_dim_multiple`      | `int`       | `128`         | Convert only linears where in/out features are divisible by this value. |
+| `quartet2.four_over_six`              | `bool`      | `true`        | Enable four-over-six rounding mode in Quartet-II kernels. |
+| `quartet2.disable_backward_quant`     | `bool`      | `false`       | Disable backward quantization in converted Quartet-II layers. |
+
+> [!IMPORTANT]
+> Runtime guardrails:
+> - currently supported for `task: pretraining` only;
+> - DeepSpeed path is blocked for Quartet-II in this release;
+> - Quartet-II requires CUDA + Blackwell-class GPUs (`sm120a`) and BF16 mixed precision;
+> - enable exactly one backend: `torchao.enable`, `transformer_engine.enable`,
+>   or `quartet2.enable`.
+
+> [!TIP]
+> Install support via
+> `pip install --no-build-isolation -e .[quant_quartet]`.
+> Use `jobs/dual_5090_v011/pretrain_quartet2.yaml` as a starting template.
 
 ---
 

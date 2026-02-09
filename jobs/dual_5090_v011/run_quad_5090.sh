@@ -7,6 +7,7 @@
 #
 # Override configs via env vars when needed, for example:
 #   MXFP8_CONFIG=/path/to/pretrain_mxfp8_te.yaml ./jobs/dual_5090_v011/run_quad_5090.sh
+#   NVFP4_CONFIG=/path/to/pretrain_quartet2.yaml ./jobs/dual_5090_v011/run_quad_5090.sh
 
 set -euo pipefail
 

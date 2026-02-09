@@ -17,6 +17,7 @@ from neobert.config import (
     DatasetConfig,
     ModelConfig,
     OptimizerConfig,
+    QuartetIIConfig,
     SchedulerConfig,
     TransformerEngineConfig,
     TorchAOConfig,
@@ -47,6 +48,7 @@ class TestConfigSystem(unittest.TestCase):
         self.assertIsInstance(config.scheduler, SchedulerConfig)
         self.assertIsInstance(config.torchao, TorchAOConfig)
         self.assertIsInstance(config.transformer_engine, TransformerEngineConfig)
+        self.assertIsInstance(config.quartet2, QuartetIIConfig)
 
         # Check some default values
         self.assertEqual(config.model.hidden_size, 768)
@@ -59,6 +61,8 @@ class TestConfigSystem(unittest.TestCase):
         self.assertEqual(config.torchao.recipe, "none")
         self.assertFalse(config.transformer_engine.enable)
         self.assertEqual(config.transformer_engine.recipe, "none")
+        self.assertFalse(config.quartet2.enable)
+        self.assertEqual(config.quartet2.recipe, "none")
 
     def test_config_from_yaml(self):
         """Test loading config from YAML file."""
@@ -252,6 +256,44 @@ class TestConfigSystem(unittest.TestCase):
         finally:
             sys.argv = original_argv
 
+    def test_cli_quartet2_overrides(self):
+        """Ensure CLI parsing supports quartet2 section overrides."""
+        config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"
+        test_args = [
+            "script.py",
+            str(config_path),
+            "--trainer.torch_compile",
+            "true",
+            "--quartet2.enable",
+            "true",
+            "--quartet2.recipe",
+            "quartet_ii",
+            "--quartet2.filter_fqns",
+            "decoder,head",
+            "--quartet2.skip_first_last_linear",
+            "false",
+            "--quartet2.required_dim_multiple",
+            "64",
+            "--quartet2.four_over_six",
+            "false",
+            "--quartet2.disable_backward_quant",
+            "true",
+        ]
+
+        original_argv = sys.argv
+        sys.argv = test_args
+        try:
+            config = load_config_from_args()
+            self.assertTrue(config.quartet2.enable)
+            self.assertEqual(config.quartet2.recipe, "quartet_ii")
+            self.assertEqual(config.quartet2.filter_fqns, ["decoder", "head"])
+            self.assertFalse(config.quartet2.skip_first_last_linear)
+            self.assertEqual(config.quartet2.required_dim_multiple, 64)
+            self.assertFalse(config.quartet2.four_over_six)
+            self.assertTrue(config.quartet2.disable_backward_quant)
+        finally:
+            sys.argv = original_argv
+
     def test_nested_config_override(self):
         """Test deeply nested configuration overrides."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -403,6 +445,27 @@ optimizer:
             self.assertEqual(
                 data["transformer_engine"]["filter_fqns"], ["decoder", "qkv"]
             )
+        finally:
+            os.unlink(path)
+
+    def test_config_save_includes_quartet2_section(self):
+        """Ensure saved configs include quartet2 settings."""
+        config = Config()
+        config.quartet2.enable = True
+        config.quartet2.recipe = "quartet_ii"
+        config.quartet2.filter_fqns = ["decoder", "qkv"]
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            path = f.name
+
+        try:
+            ConfigLoader.save(config, path)
+            with open(path, "r") as fh:
+                data = yaml.safe_load(fh)
+            self.assertIn("quartet2", data)
+            self.assertTrue(data["quartet2"]["enable"])
+            self.assertEqual(data["quartet2"]["recipe"], "quartet_ii")
+            self.assertEqual(data["quartet2"]["filter_fqns"], ["decoder", "qkv"])
         finally:
             os.unlink(path)
 
