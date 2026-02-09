@@ -1077,18 +1077,29 @@ def _compute_weight_norm_for_logging(
     :param Accelerator accelerator: Active accelerator runtime.
     :return float | None: L2 weight norm or ``None`` when unavailable.
     """
+    # Always run this on all ranks when distributed. Some backends (notably
+    # FSDP2/DTensor and ZeRO helpers) may perform collectives while materializing
+    # norms; rank-local execution can deadlock if only rank0 enters this path.
+    local_sq = torch.zeros(1, device=accelerator.device, dtype=torch.float64)
+
     if accelerator.distributed_type is DistributedType.DEEPSPEED:
-        squared_norms: list[torch.Tensor] = []
+        found_any = False
         for param in model.parameters():
             full_param = safe_get_full_fp32_param(param)
             if full_param is None:
                 continue
-            squared_norms.append(full_param.norm(2) ** 2)
-        if not squared_norms:
+            found_any = True
+            local_sq += full_param.detach().to(dtype=torch.float64).pow(2).sum().reshape(1)
+        if not found_any:
             return None
-        return (sum(squared_norms) ** 0.5).item()
+    else:
+        for param in model.parameters():
+            if not param.is_floating_point():
+                continue
+            local_sq += param.detach().to(dtype=torch.float64).pow(2).sum().reshape(1)
 
-    return (sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5).item()
+    global_sq = accelerator.reduce(local_sq, reduction="sum")
+    return float(global_sq.clamp_min_(0.0).sqrt().item())
 
 
 def _clear_stored_batch(stored_batch: BatchEncoding) -> None:
@@ -2558,11 +2569,11 @@ def trainer(cfg: Config) -> None:
                     if grad_norm_value is not None:
                         metrics["train/grad_norm"] = grad_norm_value
 
-                    if cfg.trainer.log_weight_norms and accelerator.is_main_process:
+                    if cfg.trainer.log_weight_norms:
                         weight_norm_value = _compute_weight_norm_for_logging(
                             model, accelerator
                         )
-                        if weight_norm_value is not None:
+                        if accelerator.is_main_process and weight_norm_value is not None:
                             metrics["train/weight_norm"] = weight_norm_value
                         else:
                             metrics.pop("train/weight_norm", None)
