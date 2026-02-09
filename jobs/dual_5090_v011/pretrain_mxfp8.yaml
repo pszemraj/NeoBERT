@@ -81,4 +81,6 @@ torchao:
   mxfp8_dim1_cast_kernel_choice: "torch"
   require_compile: true
 
+use_deepspeed: false
+
 seed: 69

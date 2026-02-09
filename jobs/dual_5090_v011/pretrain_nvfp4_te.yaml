@@ -84,4 +84,6 @@ transformer_engine:
   disable_stochastic_rounding: false
   disable_2d_quantization: false
 
+use_deepspeed: false
+
 seed: 69

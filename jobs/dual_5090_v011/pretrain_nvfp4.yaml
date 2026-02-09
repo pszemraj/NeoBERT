@@ -80,4 +80,6 @@ torchao:
   skip_first_last_linear: true
   require_compile: true
 
+use_deepspeed: false
+
 seed: 69

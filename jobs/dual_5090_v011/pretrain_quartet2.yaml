@@ -83,4 +83,6 @@ quartet2:
   disable_backward_quant: false
   require_compile: true
 
+use_deepspeed: false
+
 seed: 69

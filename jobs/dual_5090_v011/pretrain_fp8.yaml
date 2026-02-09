@@ -82,4 +82,6 @@ torchao:
   auto_filter_small_kn: false
   require_compile: true
 
+use_deepspeed: false
+
 seed: 69

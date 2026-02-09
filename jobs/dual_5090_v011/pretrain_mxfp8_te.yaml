@@ -81,4 +81,6 @@ transformer_engine:
   require_compile: true
   fp8_format: "E4M3"
 
+use_deepspeed: false
+
 seed: 69

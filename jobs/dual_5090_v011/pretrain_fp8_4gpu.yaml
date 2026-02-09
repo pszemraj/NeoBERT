@@ -82,4 +82,7 @@ torchao:
   auto_filter_small_kn: false
   require_compile: true
 
+accelerate_config_file: "jobs/dual_5090_v011/accelerate_fsdp2_4gpu.yaml"
+use_deepspeed: false
+
 seed: 69

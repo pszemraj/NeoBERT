@@ -73,4 +73,6 @@ wandb:
   name: "neobert-100m-wordpc_msp_32k_tok-muon-compile-bf16"
   mode: "online"
 
+use_deepspeed: false
+
 seed: 69
