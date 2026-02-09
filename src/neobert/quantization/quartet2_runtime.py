@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from types import MethodType
 from typing import Any, Callable, Optional
 
 import torch
@@ -71,36 +70,53 @@ def _patch_quartet_forward_runtime(
     Some distributed runtime stacks can upcast buffers/params. Quartet kernels
     expect BF16 activations and BF16 Hadamard buffers, so we normalize these at
     call time and optionally force ``disable_backward_quant``.
+
+    Important: patch at class scope (once) and use per-instance attributes for
+    runtime flags. This avoids per-module closure identities that can trigger
+    excessive ``torch.compile`` recompiles across transformer blocks.
     """
-    original_forward = module.forward
+    module_cls = type(module)
+    if not bool(getattr(module_cls, "_neobert_runtime_patch_applied", False)):
+        original_forward = module_cls.forward
 
-    def _forward(
-        self: nn.Module,
-        x: torch.Tensor,
-        disable_backward_quant: bool = False,
-        input_abs_max: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        if x.dtype != torch.bfloat16:
-            x = x.to(dtype=torch.bfloat16)
+        def _forward(
+            self: nn.Module,
+            x: torch.Tensor,
+            disable_backward_quant: bool = False,
+            input_abs_max: Optional[torch.Tensor] = None,
+        ) -> torch.Tensor:
+            if x.dtype != torch.bfloat16:
+                x = x.to(dtype=torch.bfloat16)
 
-        had = getattr(self, "had", None)
-        if isinstance(had, torch.Tensor) and had.dtype != torch.bfloat16:
-            had_bf16 = had.to(dtype=torch.bfloat16)
-            if isinstance(getattr(self, "_buffers", None), dict) and "had" in self._buffers:
-                self._buffers["had"] = had_bf16
-            else:
-                setattr(self, "had", had_bf16)
+            had = getattr(self, "had", None)
+            if isinstance(had, torch.Tensor) and had.dtype != torch.bfloat16:
+                had_bf16 = had.to(dtype=torch.bfloat16)
+                if (
+                    isinstance(getattr(self, "_buffers", None), dict)
+                    and "had" in self._buffers
+                ):
+                    self._buffers["had"] = had_bf16
+                else:
+                    setattr(self, "had", had_bf16)
 
-        if force_disable_backward_quant:
-            disable_backward_quant = True
+            if bool(getattr(self, "_neobert_force_disable_backward_quant", False)):
+                disable_backward_quant = True
 
-        return original_forward(
-            x,
-            disable_backward_quant=disable_backward_quant,
-            input_abs_max=input_abs_max,
-        )
+            return original_forward(
+                self,
+                x,
+                disable_backward_quant=disable_backward_quant,
+                input_abs_max=input_abs_max,
+            )
 
-    module.forward = MethodType(_forward, module)
+        setattr(module_cls, "forward", _forward)
+        setattr(module_cls, "_neobert_runtime_patch_applied", True)
+
+    setattr(
+        module,
+        "_neobert_force_disable_backward_quant",
+        bool(force_disable_backward_quant),
+    )
 
 
 def _normalize_floating_dtypes_for_fsdp(

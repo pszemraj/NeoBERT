@@ -278,6 +278,38 @@ class TestQuartet2Runtime(unittest.TestCase):
             if type(module).__name__ == "Quartet_II_linear":
                 self.assertEqual(module.had.dtype, torch.bfloat16)
 
+    def test_forward_patch_is_shared_across_converted_layers(self):
+        """Converted Quartet layers should share one forward callable for compile stability."""
+        cfg = self._base_cfg()
+        model = _TinyModel()
+        fake_state: dict = {}
+        with (
+            patch.dict(
+                sys.modules,
+                _build_fake_quartet_modules(fake_state),
+                clear=False,
+            ),
+            patch("torch.cuda.is_available", return_value=True),
+            patch("torch.cuda.get_device_capability", return_value=(12, 0)),
+        ):
+            _ = apply_quartet2_pretraining_quantization(
+                model,
+                cfg,
+                accelerator=_AcceleratorStub(),
+            )
+
+        quartet_layers = [
+            module
+            for module in model.modules()
+            if type(module).__name__ == "Quartet_II_linear"
+        ]
+        self.assertGreaterEqual(len(quartet_layers), 2)
+        forward_funcs = {module.forward.__func__ for module in quartet_layers}
+        self.assertEqual(len(forward_funcs), 1)
+        closure = quartet_layers[0].forward.__func__.__closure__ or ()
+        for cell in closure:
+            self.assertFalse(isinstance(cell.cell_contents, types.MethodType))
+
     def test_fsdp_normalizes_floating_param_dtypes(self):
         """FSDP Quartet path should enforce uniform BF16 floating param dtype."""
         cfg = self._base_cfg()
