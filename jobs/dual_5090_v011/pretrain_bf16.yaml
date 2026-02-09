@@ -1,0 +1,76 @@
+task: "pretraining"
+
+model:
+  hidden_size: 768
+  num_hidden_layers: 12
+  num_attention_heads: 12
+  intermediate_size: 3072
+  dropout_prob: 0.0
+  vocab_size: 31999
+  max_position_embeddings: 4096
+  attn_backend: flash_attn_varlen
+  kernel_backend: auto
+  ngpt: false
+  hidden_act: "swiglu"
+  rope: true
+  rms_norm: true
+
+dataset:
+  name: "EleutherAI/SmolLM2-1.7B-stage-4-100B"
+  streaming: true
+  num_proc: 8
+  num_workers: 4
+  max_seq_length: 1024
+  train_split: "train"
+  eval_split: null
+  eval_samples: 4096
+
+tokenizer:
+  name: "BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp"
+  vocab_size: 31999
+  max_length: 1024
+
+datacollator:
+  mlm_probability: 0.25
+  pad_to_multiple_of: 8
+  pack_sequences: true
+
+trainer:
+  output_dir: "./outputs/v-0.1.1/neobert-100m-wordpc_msp_32k_tok-muon-compile-bf16"
+  max_steps: 100000
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 4
+  logging_steps: 25
+  eval_steps: 5000
+  save_steps: 10000
+  save_total_limit: 1
+  report_to: ["wandb"]
+  mixed_precision: "bf16"
+  gradient_checkpointing: false
+  torch_compile: true
+  resume_from_checkpoint: false
+
+optimizer:
+  name: "muonclip"
+  lr: 1e-4
+  weight_decay: 0.01
+  betas: [0.9, 0.95]
+  eps: 1e-8
+  muon_config:
+    orthogonalization: polar_express
+    muon_beta: 0.95
+    muon_decay: 0.01
+    ns_steps: 5
+    enable_clipping: false
+
+scheduler:
+  name: "cosine"
+  warmup_steps: 5000
+
+wandb:
+  project: "neobert-pretraining"
+  name: "neobert-100m-wordpc_msp_32k_tok-muon-compile-bf16"
+  mode: "online"
+
+seed: 69

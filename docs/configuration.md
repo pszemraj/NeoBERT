@@ -26,6 +26,7 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 - [Optimizer](#optimizer)
   - [Base Optimizer](#base-optimizer)
   - [MuonClip (`optimizer.muon_config`)](#muonclip-optimizermuon_config)
+- [TorchAO Quantized Pretraining](#torchao-quantized-pretraining)
 - [Data Collator](#data-collator)
 - [Checkpointing and Resume](#checkpointing-and-resume)
 - [Logging and Tracking](#logging-and-tracking)
@@ -309,6 +310,37 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `algorithm`                    | `str \| None`    | `null`            | Deprecated alias of `orthogonalization`.                     |
 | `polar_express`                | `bool \| None`   | `null`            | Deprecated legacy toggle.                                    |
 | `clipping_layers_mapping`      | `dict[str, str]` | `{}`              | Projection-name overrides for non-standard attention blocks. |
+
+---
+
+## TorchAO Quantized Pretraining
+
+These settings control low-precision module conversion for pretraining runs.
+Conversion is applied before `torch.compile` and before `accelerator.prepare(...)`.
+
+| Key                                               | Type        | Default       | Description |
+| ------------------------------------------------- | ----------- | ------------- | ----------- |
+| `torchao.enable`                                  | `bool`      | `false`       | Enable TorchAO conversion path. |
+| `torchao.recipe`                                  | `str`       | `"none"`      | Recipe selector: `none`, `float8_tensorwise`, `float8_rowwise`, `float8_rowwise_with_gw_hp`, `mxfp8_emulated`, `mxfp8_cublas`, `mxfp8_cublas_rceil`, `mxfp4_cutlass`, `mxfp4_emulated`, `nvfp4_qat`, `mxfp4_qat`. |
+| `torchao.filter_fqns`                             | `list[str]` | `["decoder"]` | Substring filters for module FQNs to skip conversion. |
+| `torchao.skip_first_last_linear`                  | `bool`      | `true`        | Skip first/last `nn.Linear` for stability. |
+| `torchao.auto_filter_small_kn`                    | `bool`      | `true`        | Enable TorchAO auto-filter for small float8 GEMMs when available. |
+| `torchao.enable_fsdp_float8_all_gather`           | `bool`      | `false`       | Enable float8 all-gather for tensorwise float8 + FSDP. |
+| `torchao.precompute_float8_dynamic_scale_for_fsdp`| `bool`      | `false`       | Run post-step dynamic-scale precompute hook for FSDP tensorwise float8 all-gather path. |
+| `torchao.mxfp8_dim1_cast_kernel_choice`           | `str`       | `"cuda"`      | MX dim1 cast kernel: `triton`, `cuda`, or `torch`. |
+| `torchao.emulate`                                 | `bool`      | `false`       | Enable emulation mode where supported by recipe/backend. |
+| `torchao.require_compile`                         | `bool`      | `true`        | Require `trainer.torch_compile: true` when TorchAO is enabled. |
+
+> [!IMPORTANT]
+> Runtime guardrails:
+> - currently supported for `task: pretraining` only;
+> - DeepSpeed path is blocked for TorchAO recipes in this release;
+> - `torchao.enable_fsdp_float8_all_gather` is valid only for `float8_tensorwise`.
+
+> [!TIP]
+> Stability-first defaults mirror TorchTitan/Accelerate guidance: skip first/last
+> linear layers, retain divisibility-by-16 filtering, and keep `torch.compile`
+> enabled for competitive performance.
 
 ---
 

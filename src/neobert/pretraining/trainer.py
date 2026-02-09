@@ -51,6 +51,7 @@ from neobert.pretraining.masked_objective import (
 )
 from neobert.scheduler import get_scheduler, resolve_scheduler_steps
 from neobert.tokenizer import get_tokenizer, resolve_text_column
+from neobert.quantization import apply_torchao_pretraining_quantization
 from neobert.training_utils import (
     _maybe_compile_model,
     _maybe_prepare_for_forward,
@@ -1999,6 +2000,14 @@ def trainer(cfg: Config) -> None:
     if accelerator.is_main_process:
         model_summary(model, max_depth=3, show_param_shapes=True)
 
+    torchao_runtime = apply_torchao_pretraining_quantization(
+        model,
+        cfg,
+        accelerator=accelerator,
+        logger=logger,
+    )
+    torchao_post_optimizer_hook = torchao_runtime.post_optimizer_hook
+
     model = _maybe_compile_model(model, cfg, accelerator, logger)
 
     # Optimizer and Scheduler
@@ -2476,6 +2485,8 @@ def trainer(cfg: Config) -> None:
 
                 # Update the parameters and the scheduler
                 optimizer.step()
+                if torchao_post_optimizer_hook is not None:
+                    torchao_post_optimizer_hook(model)
                 scheduler.step()
                 accum_tokens.zero_()
 

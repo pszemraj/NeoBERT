@@ -37,6 +37,17 @@ def _parse_cli_bool(value: str) -> bool:
     )
 
 
+def _parse_cli_csv(value: str) -> List[str]:
+    """Parse comma-separated CLI strings into a list of non-empty tokens.
+
+    :param str value: Raw CLI token.
+    :return list[str]: Parsed list.
+    """
+    if value is None:
+        return []
+    return [item.strip() for item in str(value).split(",") if item.strip()]
+
+
 # Note: mutable defaults in dataclasses below use default_factory to avoid shared state.
 
 
@@ -228,6 +239,22 @@ class TrainerConfig:
 
 
 @dataclass
+class TorchAOConfig:
+    """TorchAO quantized training configuration for pretraining."""
+
+    enable: bool = False
+    recipe: str = "none"
+    filter_fqns: List[str] = field(default_factory=lambda: ["decoder"])
+    skip_first_last_linear: bool = True
+    auto_filter_small_kn: bool = True
+    enable_fsdp_float8_all_gather: bool = False
+    precompute_float8_dynamic_scale_for_fsdp: bool = False
+    mxfp8_dim1_cast_kernel_choice: str = "cuda"
+    emulate: bool = False
+    require_compile: bool = True
+
+
+@dataclass
 class DataCollatorConfig:
     """Masking and padding configuration for data collators."""
 
@@ -300,6 +327,7 @@ class Config:
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     trainer: TrainerConfig = field(default_factory=TrainerConfig)
+    torchao: TorchAOConfig = field(default_factory=TorchAOConfig)
     datacollator: DataCollatorConfig = field(default_factory=DataCollatorConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
     glue: GLUEConfig = field(default_factory=GLUEConfig)
@@ -715,6 +743,7 @@ class ConfigLoader:
         _check_section("optimizer", OptimizerConfig)
         _check_section("scheduler", SchedulerConfig)
         _check_section("trainer", TrainerConfig)
+        _check_section("torchao", TorchAOConfig)
         _check_section("datacollator", DataCollatorConfig)
         _check_section("wandb", WandbConfig)
         _check_section("glue", GLUEConfig)
@@ -808,6 +837,12 @@ class ConfigLoader:
                 if hasattr(config.trainer, k):
                     setattr(config.trainer, k, v)
 
+        # Update TorchAO config
+        if "torchao" in cfg_dict:
+            for k, v in cfg_dict["torchao"].items():
+                if hasattr(config.torchao, k):
+                    setattr(config.torchao, k, v)
+
         # Update datacollator config
         if "datacollator" in cfg_dict:
             for k, v in cfg_dict["datacollator"].items():
@@ -845,6 +880,7 @@ class ConfigLoader:
                 "optimizer",
                 "scheduler",
                 "trainer",
+                "torchao",
                 "datacollator",
                 "wandb",
                 "glue",
@@ -954,6 +990,7 @@ class ConfigLoader:
             "optimizer": asdict(config.optimizer),
             "scheduler": asdict(config.scheduler),
             "trainer": asdict(config.trainer),
+            "torchao": asdict(config.torchao),
             "datacollator": asdict(config.datacollator),
             "wandb": asdict(config.wandb),
             "glue": asdict(config.glue),
@@ -1143,6 +1180,61 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         "--trainer.torch_compile_backend",
         type=str,
         help="torch.compile backend: 'inductor', 'aot_eager', or 'eager'",
+    )
+    parser.add_argument(
+        "--torchao.enable",
+        type=_parse_cli_bool,
+        help="Enable TorchAO quantized pretraining",
+    )
+    parser.add_argument(
+        "--torchao.recipe",
+        type=str,
+        help=(
+            "TorchAO recipe name: none, float8_tensorwise, float8_rowwise, "
+            "float8_rowwise_with_gw_hp, mxfp8_emulated, mxfp8_cublas, "
+            "mxfp8_cublas_rceil, mxfp4_cutlass, mxfp4_emulated, nvfp4_qat, "
+            "mxfp4_qat"
+        ),
+    )
+    parser.add_argument(
+        "--torchao.filter_fqns",
+        type=_parse_cli_csv,
+        help="Comma-separated module FQN substrings to skip conversion",
+    )
+    parser.add_argument(
+        "--torchao.skip_first_last_linear",
+        type=_parse_cli_bool,
+        help="Skip first and last linear modules for stability",
+    )
+    parser.add_argument(
+        "--torchao.auto_filter_small_kn",
+        type=_parse_cli_bool,
+        help="Enable TorchAO auto-filter for small float8 GEMMs when available",
+    )
+    parser.add_argument(
+        "--torchao.enable_fsdp_float8_all_gather",
+        type=_parse_cli_bool,
+        help="Enable float8 all-gather for FSDP2 tensorwise float8",
+    )
+    parser.add_argument(
+        "--torchao.precompute_float8_dynamic_scale_for_fsdp",
+        type=_parse_cli_bool,
+        help="Precompute dynamic float8 scales for FSDP2 after optimizer steps",
+    )
+    parser.add_argument(
+        "--torchao.mxfp8_dim1_cast_kernel_choice",
+        type=str,
+        help="MXFP8 dim1 cast kernel: triton, cuda, or torch",
+    )
+    parser.add_argument(
+        "--torchao.emulate",
+        type=_parse_cli_bool,
+        help="Enable emulation mode where supported by recipe/backend",
+    )
+    parser.add_argument(
+        "--torchao.require_compile",
+        type=_parse_cli_bool,
+        help="Require trainer.torch_compile=true when TorchAO is enabled",
     )
 
     # Data collator arguments

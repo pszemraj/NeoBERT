@@ -18,6 +18,7 @@ from neobert.config import (
     ModelConfig,
     OptimizerConfig,
     SchedulerConfig,
+    TorchAOConfig,
     TokenizerConfig,
     TrainerConfig,
     load_config_from_args,
@@ -43,6 +44,7 @@ class TestConfigSystem(unittest.TestCase):
         self.assertIsInstance(config.trainer, TrainerConfig)
         self.assertIsInstance(config.optimizer, OptimizerConfig)
         self.assertIsInstance(config.scheduler, SchedulerConfig)
+        self.assertIsInstance(config.torchao, TorchAOConfig)
 
         # Check some default values
         self.assertEqual(config.model.hidden_size, 768)
@@ -51,6 +53,8 @@ class TestConfigSystem(unittest.TestCase):
         self.assertFalse(config.trainer.torch_compile)
         self.assertEqual(config.trainer.torch_compile_backend, "inductor")
         self.assertTrue(config.trainer.enforce_full_packed_batches)
+        self.assertFalse(config.torchao.enable)
+        self.assertEqual(config.torchao.recipe, "none")
 
     def test_config_from_yaml(self):
         """Test loading config from YAML file."""
@@ -174,6 +178,41 @@ class TestConfigSystem(unittest.TestCase):
         finally:
             sys.argv = original_argv
 
+    def test_cli_torchao_overrides(self):
+        """Ensure CLI parsing supports torchao section overrides."""
+        config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"
+        test_args = [
+            "script.py",
+            str(config_path),
+            "--trainer.torch_compile",
+            "true",
+            "--torchao.enable",
+            "true",
+            "--torchao.recipe",
+            "mxfp8_emulated",
+            "--torchao.filter_fqns",
+            "decoder,head",
+            "--torchao.skip_first_last_linear",
+            "false",
+            "--torchao.auto_filter_small_kn",
+            "false",
+            "--torchao.require_compile",
+            "true",
+        ]
+
+        original_argv = sys.argv
+        sys.argv = test_args
+        try:
+            config = load_config_from_args()
+            self.assertTrue(config.torchao.enable)
+            self.assertEqual(config.torchao.recipe, "mxfp8_emulated")
+            self.assertEqual(config.torchao.filter_fqns, ["decoder", "head"])
+            self.assertFalse(config.torchao.skip_first_last_linear)
+            self.assertFalse(config.torchao.auto_filter_small_kn)
+            self.assertTrue(config.torchao.require_compile)
+        finally:
+            sys.argv = original_argv
+
     def test_nested_config_override(self):
         """Test deeply nested configuration overrides."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -281,6 +320,27 @@ optimizer:
             self.assertIn("contrastive", data)
             self.assertEqual(data["glue"]["task_name"], "sst2")
             self.assertEqual(data["contrastive"]["temperature"], 0.1)
+        finally:
+            os.unlink(path)
+
+    def test_config_save_includes_torchao_section(self):
+        """Ensure saved configs include torchao settings."""
+        config = Config()
+        config.torchao.enable = True
+        config.torchao.recipe = "float8_rowwise"
+        config.torchao.filter_fqns = ["decoder", "embed"]
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            path = f.name
+
+        try:
+            ConfigLoader.save(config, path)
+            with open(path, "r") as fh:
+                data = yaml.safe_load(fh)
+            self.assertIn("torchao", data)
+            self.assertTrue(data["torchao"]["enable"])
+            self.assertEqual(data["torchao"]["recipe"], "float8_rowwise")
+            self.assertEqual(data["torchao"]["filter_fqns"], ["decoder", "embed"])
         finally:
             os.unlink(path)
 

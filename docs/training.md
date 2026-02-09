@@ -92,6 +92,50 @@ Runtime behavior:
   default behavior prefers static-shape compile for stability.
 - `trainer.masked_logits_only_loss`: `true | false`
 
+## TorchAO Low-Precision Pretraining
+
+NeoBERT can apply TorchAO conversion before `torch.compile`/`accelerator.prepare`.
+Configuration lives under `torchao.*`.
+
+Example (float8 rowwise):
+
+```yaml
+trainer:
+  torch_compile: true
+
+torchao:
+  enable: true
+  recipe: "float8_rowwise"
+  skip_first_last_linear: true
+  auto_filter_small_kn: true
+  filter_fqns: ["decoder"]
+```
+
+Example (tensorwise float8 + FSDP precompute hook):
+
+```yaml
+trainer:
+  torch_compile: true
+
+torchao:
+  enable: true
+  recipe: "float8_tensorwise"
+  enable_fsdp_float8_all_gather: true
+  precompute_float8_dynamic_scale_for_fsdp: true
+```
+
+Notes:
+
+- Supported recipe families: float8 (`tensorwise`, `rowwise`, `rowwise_with_gw_hp`),
+  MXFP8/MXFP4 (`mxfp8_emulated`, `mxfp8_cublas`, `mxfp8_cublas_rceil`,
+  `mxfp4_cutlass`, `mxfp4_emulated`), and prototype FP4 QAT recipes
+  (`nvfp4_qat`, `mxfp4_qat`).
+- The runtime prefers the existing `accelerate.utils.ao.convert_model_to_fp8_ao`
+  helper for float8 when available and falls back to direct TorchAO conversion.
+- Keep `trainer.torch_compile: true` for best performance/stability. The default
+  `torchao.require_compile: true` enforces this.
+- Current guardrails: pretraining-only path; DeepSpeed + TorchAO is blocked.
+
 ## MLM Loss Path Selection
 
 Use exactly one pretraining loss path per run:
