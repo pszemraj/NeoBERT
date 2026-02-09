@@ -27,6 +27,7 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
   - [Base Optimizer](#base-optimizer)
   - [MuonClip (`optimizer.muon_config`)](#muonclip-optimizermuon_config)
 - [TorchAO Quantized Pretraining](#torchao-quantized-pretraining)
+- [Transformer Engine Quantized Pretraining](#transformer-engine-quantized-pretraining)
 - [Data Collator](#data-collator)
 - [Checkpointing and Resume](#checkpointing-and-resume)
 - [Logging and Tracking](#logging-and-tracking)
@@ -341,6 +342,43 @@ Conversion is applied before `torch.compile` and before `accelerator.prepare(...
 > Stability-first defaults mirror TorchTitan/Accelerate guidance: skip first/last
 > linear layers, retain divisibility-by-16 filtering, and keep `torch.compile`
 > enabled for competitive performance.
+
+---
+
+## Transformer Engine Quantized Pretraining
+
+These settings control Transformer Engine low-precision conversion for pretraining
+runs. Conversion is applied before `torch.compile` and before
+`accelerator.prepare(...)`.
+
+| Key                                                   | Type        | Default       | Description |
+| ----------------------------------------------------- | ----------- | ------------- | ----------- |
+| `transformer_engine.enable`                           | `bool`      | `false`       | Enable Transformer Engine conversion path. |
+| `transformer_engine.recipe`                           | `str`       | `"none"`      | Recipe selector: `none`, `fp8_delayed`, `fp8_current`, `mxfp8`, `nvfp4`. |
+| `transformer_engine.filter_fqns`                      | `list[str]` | `["decoder"]` | Substring filters for module FQNs to skip conversion. |
+| `transformer_engine.skip_first_last_linear`           | `bool`      | `true`        | Skip first/last `nn.Linear` for stability. |
+| `transformer_engine.convert_layernorm`                | `bool`      | `false`       | Convert `nn.LayerNorm` modules to TE `LayerNorm`. |
+| `transformer_engine.use_autocast_during_eval`         | `bool`      | `false`       | Keep TE autocast enabled during eval. |
+| `transformer_engine.require_compile`                  | `bool`      | `true`        | Require `trainer.torch_compile: true` when enabled. |
+| `transformer_engine.fp8_format`                       | `str`       | `"HYBRID"`    | FP format token for FP8/MXFP8 recipes (`HYBRID`, `E4M3`, `E5M2`). |
+| `transformer_engine.margin`                           | `int`       | `0`           | Margin parameter for delayed/current or block scaling recipes. |
+| `transformer_engine.interval`                         | `int`       | `1`           | Reserved compatibility field (currently ignored by runtime adapter). |
+| `transformer_engine.amax_history_len`                 | `int`       | `1024`        | Amax history length for delayed scaling. |
+| `transformer_engine.amax_compute_algo`                | `str`       | `"most_recent"` | Amax selection algorithm for delayed scaling. |
+| `transformer_engine.disable_rht`                      | `bool`      | `false`       | Disable random Hadamard transform for NVFP4 recipe. |
+| `transformer_engine.disable_stochastic_rounding`      | `bool`      | `false`       | Disable stochastic rounding for NVFP4 recipe. |
+| `transformer_engine.disable_2d_quantization`          | `bool`      | `false`       | Disable 2D quantization for NVFP4 recipe. |
+
+> [!IMPORTANT]
+> Runtime guardrails:
+> - currently supported for `task: pretraining` only;
+> - DeepSpeed path is blocked for Transformer Engine recipes in this release;
+> - enable exactly one backend: `torchao.enable` or `transformer_engine.enable`.
+
+> [!TIP]
+> On RTX 5090-class hardware, `transformer_engine.recipe: "nvfp4"` is typically
+> the practical FP4 path; MXFP8 availability depends on TE kernel support in the
+> installed TE/CUDA build.
 
 ---
 

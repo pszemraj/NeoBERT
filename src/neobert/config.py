@@ -255,6 +255,27 @@ class TorchAOConfig:
 
 
 @dataclass
+class TransformerEngineConfig:
+    """Transformer Engine quantized training configuration for pretraining."""
+
+    enable: bool = False
+    recipe: str = "none"
+    filter_fqns: List[str] = field(default_factory=lambda: ["decoder"])
+    skip_first_last_linear: bool = True
+    convert_layernorm: bool = False
+    use_autocast_during_eval: bool = False
+    require_compile: bool = True
+    fp8_format: str = "HYBRID"
+    margin: int = 0
+    interval: int = 1
+    amax_history_len: int = 1024
+    amax_compute_algo: str = "most_recent"
+    disable_rht: bool = False
+    disable_stochastic_rounding: bool = False
+    disable_2d_quantization: bool = False
+
+
+@dataclass
 class DataCollatorConfig:
     """Masking and padding configuration for data collators."""
 
@@ -328,6 +349,9 @@ class Config:
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     trainer: TrainerConfig = field(default_factory=TrainerConfig)
     torchao: TorchAOConfig = field(default_factory=TorchAOConfig)
+    transformer_engine: TransformerEngineConfig = field(
+        default_factory=TransformerEngineConfig
+    )
     datacollator: DataCollatorConfig = field(default_factory=DataCollatorConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
     glue: GLUEConfig = field(default_factory=GLUEConfig)
@@ -744,6 +768,7 @@ class ConfigLoader:
         _check_section("scheduler", SchedulerConfig)
         _check_section("trainer", TrainerConfig)
         _check_section("torchao", TorchAOConfig)
+        _check_section("transformer_engine", TransformerEngineConfig)
         _check_section("datacollator", DataCollatorConfig)
         _check_section("wandb", WandbConfig)
         _check_section("glue", GLUEConfig)
@@ -843,6 +868,12 @@ class ConfigLoader:
                 if hasattr(config.torchao, k):
                     setattr(config.torchao, k, v)
 
+        # Update Transformer Engine config
+        if "transformer_engine" in cfg_dict:
+            for k, v in cfg_dict["transformer_engine"].items():
+                if hasattr(config.transformer_engine, k):
+                    setattr(config.transformer_engine, k, v)
+
         # Update datacollator config
         if "datacollator" in cfg_dict:
             for k, v in cfg_dict["datacollator"].items():
@@ -881,6 +912,7 @@ class ConfigLoader:
                 "scheduler",
                 "trainer",
                 "torchao",
+                "transformer_engine",
                 "datacollator",
                 "wandb",
                 "glue",
@@ -991,6 +1023,7 @@ class ConfigLoader:
             "scheduler": asdict(config.scheduler),
             "trainer": asdict(config.trainer),
             "torchao": asdict(config.torchao),
+            "transformer_engine": asdict(config.transformer_engine),
             "datacollator": asdict(config.datacollator),
             "wandb": asdict(config.wandb),
             "glue": asdict(config.glue),
@@ -1235,6 +1268,84 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         "--torchao.require_compile",
         type=_parse_cli_bool,
         help="Require trainer.torch_compile=true when TorchAO is enabled",
+    )
+    parser.add_argument(
+        "--transformer_engine.enable",
+        type=_parse_cli_bool,
+        help="Enable Transformer Engine quantized pretraining",
+    )
+    parser.add_argument(
+        "--transformer_engine.recipe",
+        type=str,
+        help=(
+            "Transformer Engine recipe name: none, fp8_delayed, fp8_current, "
+            "mxfp8, nvfp4"
+        ),
+    )
+    parser.add_argument(
+        "--transformer_engine.filter_fqns",
+        type=_parse_cli_csv,
+        help="Comma-separated module FQN substrings to skip conversion",
+    )
+    parser.add_argument(
+        "--transformer_engine.skip_first_last_linear",
+        type=_parse_cli_bool,
+        help="Skip first and last linear modules for stability",
+    )
+    parser.add_argument(
+        "--transformer_engine.convert_layernorm",
+        type=_parse_cli_bool,
+        help="Convert LayerNorm modules to Transformer Engine LayerNorm",
+    )
+    parser.add_argument(
+        "--transformer_engine.use_autocast_during_eval",
+        type=_parse_cli_bool,
+        help="Enable TE fp8 autocast during eval mode",
+    )
+    parser.add_argument(
+        "--transformer_engine.require_compile",
+        type=_parse_cli_bool,
+        help="Require trainer.torch_compile=true when Transformer Engine is enabled",
+    )
+    parser.add_argument(
+        "--transformer_engine.fp8_format",
+        type=str,
+        help="TE FP8 format token (for example: HYBRID, E4M3, E5M2)",
+    )
+    parser.add_argument(
+        "--transformer_engine.margin",
+        type=int,
+        help="Margin for TE delayed/current or block scaling recipes",
+    )
+    parser.add_argument(
+        "--transformer_engine.interval",
+        type=int,
+        help="Reserved compatibility field (currently ignored by runtime adapter)",
+    )
+    parser.add_argument(
+        "--transformer_engine.amax_history_len",
+        type=int,
+        help="Amax history length for TE delayed scaling",
+    )
+    parser.add_argument(
+        "--transformer_engine.amax_compute_algo",
+        type=str,
+        help="Amax compute algorithm for TE delayed scaling",
+    )
+    parser.add_argument(
+        "--transformer_engine.disable_rht",
+        type=_parse_cli_bool,
+        help="Disable random Hadamard transform in TE NVFP4 recipe",
+    )
+    parser.add_argument(
+        "--transformer_engine.disable_stochastic_rounding",
+        type=_parse_cli_bool,
+        help="Disable stochastic rounding in TE NVFP4 recipe",
+    )
+    parser.add_argument(
+        "--transformer_engine.disable_2d_quantization",
+        type=_parse_cli_bool,
+        help="Disable 2D quantization in TE NVFP4 recipe",
     )
 
     # Data collator arguments

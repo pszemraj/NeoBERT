@@ -3,7 +3,7 @@
 # - GPU 0: BF16 baseline
 # - GPU 1: FP8 (TorchAO float8 rowwise)
 # - GPU 2: MXFP8 (TorchAO mxfp8_emulated)
-# - GPU 3: NVFP4 (TorchAO nvfp4_qat)
+# - GPU 3: NVFP4 (Transformer Engine)
 
 set -euo pipefail
 
@@ -14,7 +14,7 @@ PRETRAIN_SCRIPT="${ROOT_DIR}/scripts/pretraining/pretrain.py"
 BF16_CONFIG="${RUN_DIR}/pretrain_bf16.yaml"
 FP8_CONFIG="${RUN_DIR}/pretrain_fp8.yaml"
 MXFP8_CONFIG="${RUN_DIR}/pretrain_mxfp8.yaml"
-NVFP4_CONFIG="${RUN_DIR}/pretrain_nvfp4.yaml"
+NVFP4_CONFIG="${RUN_DIR}/pretrain_nvfp4_te.yaml"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 GPU_BF16="${GPU_BF16:-0}"

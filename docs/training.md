@@ -136,6 +136,36 @@ Notes:
   `torchao.require_compile: true` enforces this.
 - Current guardrails: pretraining-only path; DeepSpeed + TorchAO is blocked.
 
+## Transformer Engine Low-Precision Pretraining
+
+NeoBERT can also apply Transformer Engine conversion before
+`torch.compile`/`accelerator.prepare`. Configuration lives under
+`transformer_engine.*`.
+
+Example (NVFP4 for FP4-capable path):
+
+```yaml
+trainer:
+  torch_compile: true
+
+transformer_engine:
+  enable: true
+  recipe: "nvfp4"
+  filter_fqns: ["decoder"]
+  skip_first_last_linear: true
+  require_compile: true
+```
+
+Notes:
+
+- Supported recipe families: `fp8_delayed`, `fp8_current`, `mxfp8`, and `nvfp4`.
+- Backend selection is explicit: enable only one of `torchao.enable` or
+  `transformer_engine.enable`.
+- The runtime wraps model forward in TE autocast and prefers Accelerate's
+  helper when available.
+- Current guardrails: pretraining-only path; DeepSpeed + Transformer Engine is
+  blocked.
+
 ## MLM Loss Path Selection
 
 Use exactly one pretraining loss path per run:

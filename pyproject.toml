@@ -41,6 +41,8 @@ keywords = []
 dev = ["ruff", "isort", "pytest", "pytest-cov", "pytest-clarity", "xeger"]
 flash = ["flash-attn>=2.5"]
 quant = ["torchao>=0.14.0"]
+quant_te = ["transformer_engine[pytorch]"]
+quant_all = ["torchao>=0.14.0", "transformer_engine[pytorch]"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

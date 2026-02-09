@@ -18,6 +18,7 @@ from neobert.config import (
     ModelConfig,
     OptimizerConfig,
     SchedulerConfig,
+    TransformerEngineConfig,
     TorchAOConfig,
     TokenizerConfig,
     TrainerConfig,
@@ -45,6 +46,7 @@ class TestConfigSystem(unittest.TestCase):
         self.assertIsInstance(config.optimizer, OptimizerConfig)
         self.assertIsInstance(config.scheduler, SchedulerConfig)
         self.assertIsInstance(config.torchao, TorchAOConfig)
+        self.assertIsInstance(config.transformer_engine, TransformerEngineConfig)
 
         # Check some default values
         self.assertEqual(config.model.hidden_size, 768)
@@ -55,6 +57,8 @@ class TestConfigSystem(unittest.TestCase):
         self.assertTrue(config.trainer.enforce_full_packed_batches)
         self.assertFalse(config.torchao.enable)
         self.assertEqual(config.torchao.recipe, "none")
+        self.assertFalse(config.transformer_engine.enable)
+        self.assertEqual(config.transformer_engine.recipe, "none")
 
     def test_config_from_yaml(self):
         """Test loading config from YAML file."""
@@ -213,6 +217,41 @@ class TestConfigSystem(unittest.TestCase):
         finally:
             sys.argv = original_argv
 
+    def test_cli_transformer_engine_overrides(self):
+        """Ensure CLI parsing supports transformer_engine section overrides."""
+        config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"
+        test_args = [
+            "script.py",
+            str(config_path),
+            "--trainer.torch_compile",
+            "true",
+            "--transformer_engine.enable",
+            "true",
+            "--transformer_engine.recipe",
+            "nvfp4",
+            "--transformer_engine.filter_fqns",
+            "decoder,qkv",
+            "--transformer_engine.skip_first_last_linear",
+            "false",
+            "--transformer_engine.require_compile",
+            "true",
+            "--transformer_engine.disable_stochastic_rounding",
+            "true",
+        ]
+
+        original_argv = sys.argv
+        sys.argv = test_args
+        try:
+            config = load_config_from_args()
+            self.assertTrue(config.transformer_engine.enable)
+            self.assertEqual(config.transformer_engine.recipe, "nvfp4")
+            self.assertEqual(config.transformer_engine.filter_fqns, ["decoder", "qkv"])
+            self.assertFalse(config.transformer_engine.skip_first_last_linear)
+            self.assertTrue(config.transformer_engine.require_compile)
+            self.assertTrue(config.transformer_engine.disable_stochastic_rounding)
+        finally:
+            sys.argv = original_argv
+
     def test_nested_config_override(self):
         """Test deeply nested configuration overrides."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -341,6 +380,29 @@ optimizer:
             self.assertTrue(data["torchao"]["enable"])
             self.assertEqual(data["torchao"]["recipe"], "float8_rowwise")
             self.assertEqual(data["torchao"]["filter_fqns"], ["decoder", "embed"])
+        finally:
+            os.unlink(path)
+
+    def test_config_save_includes_transformer_engine_section(self):
+        """Ensure saved configs include transformer_engine settings."""
+        config = Config()
+        config.transformer_engine.enable = True
+        config.transformer_engine.recipe = "nvfp4"
+        config.transformer_engine.filter_fqns = ["decoder", "qkv"]
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            path = f.name
+
+        try:
+            ConfigLoader.save(config, path)
+            with open(path, "r") as fh:
+                data = yaml.safe_load(fh)
+            self.assertIn("transformer_engine", data)
+            self.assertTrue(data["transformer_engine"]["enable"])
+            self.assertEqual(data["transformer_engine"]["recipe"], "nvfp4")
+            self.assertEqual(
+                data["transformer_engine"]["filter_fqns"], ["decoder", "qkv"]
+            )
         finally:
             os.unlink(path)
 

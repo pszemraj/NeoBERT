@@ -51,7 +51,10 @@ from neobert.pretraining.masked_objective import (
 )
 from neobert.scheduler import get_scheduler, resolve_scheduler_steps
 from neobert.tokenizer import get_tokenizer, resolve_text_column
-from neobert.quantization import apply_torchao_pretraining_quantization
+from neobert.quantization import (
+    apply_torchao_pretraining_quantization,
+    apply_transformer_engine_pretraining_quantization,
+)
 from neobert.training_utils import (
     _maybe_compile_model,
     _maybe_prepare_for_forward,
@@ -2000,13 +2003,31 @@ def trainer(cfg: Config) -> None:
     if accelerator.is_main_process:
         model_summary(model, max_depth=3, show_param_shapes=True)
 
-    torchao_runtime = apply_torchao_pretraining_quantization(
-        model,
-        cfg,
-        accelerator=accelerator,
-        logger=logger,
-    )
-    torchao_post_optimizer_hook = torchao_runtime.post_optimizer_hook
+    torchao_enabled = bool(getattr(cfg.torchao, "enable", False))
+    transformer_engine_enabled = bool(getattr(cfg.transformer_engine, "enable", False))
+    if torchao_enabled and transformer_engine_enabled:
+        raise ValueError(
+            "Quantized pretraining backends are mutually exclusive. Enable only one "
+            "of torchao.enable or transformer_engine.enable."
+        )
+
+    quantization_post_optimizer_hook = None
+    if torchao_enabled:
+        torchao_runtime = apply_torchao_pretraining_quantization(
+            model,
+            cfg,
+            accelerator=accelerator,
+            logger=logger,
+        )
+        quantization_post_optimizer_hook = torchao_runtime.post_optimizer_hook
+    elif transformer_engine_enabled:
+        te_runtime = apply_transformer_engine_pretraining_quantization(
+            model,
+            cfg,
+            accelerator=accelerator,
+            logger=logger,
+        )
+        quantization_post_optimizer_hook = te_runtime.post_optimizer_hook
 
     model = _maybe_compile_model(model, cfg, accelerator, logger)
 
@@ -2485,8 +2506,8 @@ def trainer(cfg: Config) -> None:
 
                 # Update the parameters and the scheduler
                 optimizer.step()
-                if torchao_post_optimizer_hook is not None:
-                    torchao_post_optimizer_hook(model)
+                if quantization_post_optimizer_hook is not None:
+                    quantization_post_optimizer_hook(model)
                 scheduler.step()
                 accum_tokens.zero_()
 
