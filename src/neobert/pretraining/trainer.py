@@ -133,6 +133,53 @@ def _resolve_fsdp_version(accelerator: Accelerator) -> int:
         return 1
 
 
+def _safe_unwrap_model(
+    accelerator: Accelerator,
+    model: torch.nn.Module,
+) -> torch.nn.Module:
+    """Best-effort model unwrap across Accelerate, compile, and parallel wrappers.
+
+    Some wrapper stacks used during distributed + compiled training can cause
+    ``accelerator.unwrap_model`` to fail (for example when ``_orig_mod`` is
+    missing). This helper always returns a usable module by trying Accelerate
+    first, then falling back to common wrapper attributes.
+
+    :param Accelerator accelerator: Active accelerator runtime.
+    :param torch.nn.Module model: Potentially wrapped model.
+    :return torch.nn.Module: Unwrapped model when possible, otherwise original.
+    """
+    unwrap_model = getattr(accelerator, "unwrap_model", None)
+    if callable(unwrap_model):
+        try:
+            return unwrap_model(model)
+        except Exception:
+            try:
+                unwrap_params = inspect.signature(unwrap_model).parameters
+            except (TypeError, ValueError):
+                unwrap_params = {}
+            retry_kwargs = {}
+            if "keep_torch_compile" in unwrap_params:
+                retry_kwargs["keep_torch_compile"] = False
+            if retry_kwargs:
+                try:
+                    return unwrap_model(model, **retry_kwargs)
+                except Exception:
+                    pass
+
+    unwrapped = model
+    visited: set[int] = set()
+    while id(unwrapped) not in visited:
+        visited.add(id(unwrapped))
+        for attr_name in ("_orig_mod", "module"):
+            candidate = getattr(unwrapped, attr_name, None)
+            if isinstance(candidate, torch.nn.Module):
+                unwrapped = candidate
+                break
+        else:
+            break
+    return unwrapped
+
+
 @contextmanager
 def _gather_decoder_weight_for_masked_objective(
     model: torch.nn.Module,
@@ -160,27 +207,16 @@ def _gather_decoder_weight_for_masked_objective(
         decoder = getattr(model, "decoder", None)
         if decoder is not None and hasattr(decoder, "weight"):
             return decoder.weight
-        unwrap_model = getattr(accelerator, "unwrap_model", None)
-        if callable(unwrap_model):
-            unwrapped = unwrap_model(model)
-            decoder = getattr(unwrapped, "decoder", None)
-            if decoder is not None and hasattr(decoder, "weight"):
-                return decoder.weight
+        unwrapped = _safe_unwrap_model(accelerator, model)
+        decoder = getattr(unwrapped, "decoder", None)
+        if decoder is not None and hasattr(decoder, "weight"):
+            return decoder.weight
         raise AttributeError("Could not resolve decoder.weight for masked objective.")
 
     if accelerator.distributed_type is DistributedType.FSDP:
         fsdp_version = _resolve_fsdp_version(accelerator)
         if fsdp_version >= 2:
-            base_model = model
-            unwrapped_model: Optional[torch.nn.Module] = None
-            unwrap_model = getattr(accelerator, "unwrap_model", None)
-            if callable(unwrap_model):
-                try:
-                    unwrapped_model = unwrap_model(model)
-                except Exception:
-                    unwrapped_model = None
-            if unwrapped_model is not None:
-                base_model = unwrapped_model
+            base_model = _safe_unwrap_model(accelerator, model)
 
             decoder_module = getattr(base_model, "decoder", None)
             if decoder_module is None:
@@ -286,13 +322,7 @@ def _gather_decoder_weight_for_masked_objective(
 
     import deepspeed
 
-    fwd_module = None
-    unwrap_model = getattr(accelerator, "unwrap_model", None)
-    if callable(unwrap_model):
-        try:
-            fwd_module = unwrap_model(model)
-        except Exception:
-            fwd_module = None
+    fwd_module = _safe_unwrap_model(accelerator, model)
 
     with deepspeed.zero.GatheredParameters(
         [lm_weight], modifier_rank=None, fwd_module=fwd_module
@@ -2206,7 +2236,7 @@ def trainer(cfg: Config) -> None:
 
             if watch_mode:
                 wandb.watch(
-                    accelerator.unwrap_model(model),
+                    _safe_unwrap_model(accelerator, model),
                     log=watch_mode,
                     log_freq=getattr(cfg.wandb, "log_interval", 100),
                 )
@@ -2671,7 +2701,7 @@ def trainer(cfg: Config) -> None:
                         model.save_checkpoint(model_checkpoint_dir, tag=tmp_tag)
                     else:
                         save_model_safetensors(
-                            accelerator.unwrap_model(model),
+                            _safe_unwrap_model(accelerator, model),
                             checkpoint_path,
                         )
 
