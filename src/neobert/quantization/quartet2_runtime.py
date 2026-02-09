@@ -71,6 +71,38 @@ def _patch_disable_backward_quant(module: nn.Module) -> None:
     module.forward = MethodType(_forward, module)
 
 
+def _normalize_floating_dtypes_for_fsdp(
+    model: nn.Module,
+    target_dtype: torch.dtype,
+    log: logging.Logger,
+) -> None:
+    """Normalize floating parameter/buffer dtypes for FSDP uniformity checks.
+
+    FSDP2 currently expects uniform original parameter dtype at lazy init.
+    Quartet conversion materializes BF16 linears while untouched modules remain
+    FP32 by default, which can trip this invariant.
+    """
+    observed_param_dtypes = {
+        param.dtype for param in model.parameters() if param.is_floating_point()
+    }
+    observed_buffer_dtypes = {
+        buffer.dtype for buffer in model.buffers() if buffer.is_floating_point()
+    }
+    if observed_param_dtypes == {target_dtype} and (
+        not observed_buffer_dtypes or observed_buffer_dtypes == {target_dtype}
+    ):
+        return
+
+    log.info(
+        "Quartet-II FSDP dtype normalization: casting floating params/buffers to %s "
+        "(params before=%s, buffers before=%s).",
+        target_dtype,
+        sorted(str(dtype) for dtype in observed_param_dtypes),
+        sorted(str(dtype) for dtype in observed_buffer_dtypes),
+    )
+    model.to(dtype=target_dtype)
+
+
 def apply_quartet2_pretraining_quantization(
     model: nn.Module,
     cfg: Any,
@@ -209,6 +241,8 @@ def apply_quartet2_pretraining_quantization(
             recipe,
         )
     else:
+        if accelerator.distributed_type is DistributedType.FSDP:
+            _normalize_floating_dtypes_for_fsdp(model, torch.bfloat16, log)
         log.info(
             "Quartet-II recipe '%s' active: converted %s linear modules.",
             recipe,

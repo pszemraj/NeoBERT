@@ -210,9 +210,34 @@ class TestQuartet2Runtime(unittest.TestCase):
                 cfg,
                 accelerator=_AcceleratorStub(),
             )
-            _ = model(torch.randn(2, 128))
+            _ = model(torch.randn(2, 128, dtype=torch.bfloat16))
 
         self.assertTrue(bool(fake_state.get("disable_backward_quant", False)))
+
+    def test_fsdp_normalizes_floating_param_dtypes(self):
+        """FSDP Quartet path should enforce uniform BF16 floating param dtype."""
+        cfg = self._base_cfg()
+        model = _TinyModel()
+        fake_state: dict = {}
+        with (
+            patch.dict(
+                sys.modules,
+                _build_fake_quartet_modules(fake_state),
+                clear=False,
+            ),
+            patch("torch.cuda.is_available", return_value=True),
+            patch("torch.cuda.get_device_capability", return_value=(12, 0)),
+        ):
+            _ = apply_quartet2_pretraining_quantization(
+                model,
+                cfg,
+                accelerator=_AcceleratorStub(DistributedType.FSDP),
+            )
+
+        floating_dtypes = {
+            param.dtype for param in model.parameters() if param.is_floating_point()
+        }
+        self.assertEqual(floating_dtypes, {torch.bfloat16})
 
 
 if __name__ == "__main__":
