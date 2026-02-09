@@ -378,7 +378,8 @@ runs. Conversion is applied before `torch.compile` and before
 > [!TIP]
 > On RTX 5090-class hardware, `transformer_engine.recipe: "nvfp4"` is typically
 > the practical FP4 path; MXFP8 availability depends on TE kernel support in the
-> installed TE/CUDA build.
+> installed TE/CUDA build. Use `jobs/dual_5090_v011/pretrain_mxfp8_te.yaml` as a
+> starting template when MXFP8 is available.
 
 ---
 

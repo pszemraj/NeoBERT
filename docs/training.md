@@ -156,6 +156,21 @@ transformer_engine:
   require_compile: true
 ```
 
+Example (MXFP8):
+
+```yaml
+trainer:
+  torch_compile: true
+
+transformer_engine:
+  enable: true
+  recipe: "mxfp8"
+  filter_fqns: ["decoder"]
+  skip_first_last_linear: true
+  require_compile: true
+  fp8_format: "E4M3"
+```
+
 Notes:
 
 - Supported recipe families: `fp8_delayed`, `fp8_current`, `mxfp8`, and `nvfp4`.

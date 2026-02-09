@@ -4,6 +4,9 @@
 # - GPU 1: FP8 (TorchAO float8 rowwise)
 # - GPU 2: MXFP8 (TorchAO mxfp8_emulated)
 # - GPU 3: NVFP4 (Transformer Engine)
+#
+# Override configs via env vars when needed, for example:
+#   MXFP8_CONFIG=/path/to/pretrain_mxfp8_te.yaml ./jobs/dual_5090_v011/run_quad_5090.sh
 
 set -euo pipefail
 
@@ -11,10 +14,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUN_DIR="${ROOT_DIR}/jobs/dual_5090_v011"
 PRETRAIN_SCRIPT="${ROOT_DIR}/scripts/pretraining/pretrain.py"
 
-BF16_CONFIG="${RUN_DIR}/pretrain_bf16.yaml"
-FP8_CONFIG="${RUN_DIR}/pretrain_fp8.yaml"
-MXFP8_CONFIG="${RUN_DIR}/pretrain_mxfp8.yaml"
-NVFP4_CONFIG="${RUN_DIR}/pretrain_nvfp4_te.yaml"
+BF16_CONFIG="${BF16_CONFIG:-${RUN_DIR}/pretrain_bf16.yaml}"
+FP8_CONFIG="${FP8_CONFIG:-${RUN_DIR}/pretrain_fp8.yaml}"
+MXFP8_CONFIG="${MXFP8_CONFIG:-${RUN_DIR}/pretrain_mxfp8.yaml}"
+NVFP4_CONFIG="${NVFP4_CONFIG:-${RUN_DIR}/pretrain_nvfp4_te.yaml}"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 GPU_BF16="${GPU_BF16:-0}"

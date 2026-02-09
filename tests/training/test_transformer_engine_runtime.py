@@ -298,6 +298,47 @@ class TestTransformerEngineRuntime(unittest.TestCase):
                     accelerator=_AcceleratorStub(),
                 )
 
+    def test_mxfp8_support_check_is_enforced(self):
+        """MXFP8 recipe should fail fast when backend reports unsupported."""
+        cfg = self._base_cfg()
+        cfg.transformer_engine.recipe = "mxfp8"
+        model = _TinyModel()
+        fake_state = {"mxfp8_available": False}
+
+        with patch.dict(
+            sys.modules,
+            _build_fake_transformer_engine_modules(fake_state),
+            clear=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "mxfp8"):
+                apply_transformer_engine_pretraining_quantization(
+                    model,
+                    cfg,
+                    accelerator=_AcceleratorStub(),
+                )
+
+    def test_mxfp8_recipe_converts_when_supported(self):
+        """MXFP8 recipe should convert linear layers when backend is supported."""
+        cfg = self._base_cfg()
+        cfg.transformer_engine.recipe = "mxfp8"
+        model = _TinyModel()
+        fake_state = {"mxfp8_available": True}
+
+        with patch.dict(
+            sys.modules,
+            _build_fake_transformer_engine_modules(fake_state),
+            clear=False,
+        ):
+            state = apply_transformer_engine_pretraining_quantization(
+                model,
+                cfg,
+                accelerator=_AcceleratorStub(),
+            )
+
+        self.assertTrue(state.enabled)
+        self.assertEqual(state.recipe, "mxfp8")
+        self.assertGreater(state.converted_linear_count, 0)
+
     def test_skip_first_last_linear_applies_to_te_conversion(self):
         """First/last linear skipping should keep edge layers in nn.Linear form."""
         cfg = self._base_cfg()
