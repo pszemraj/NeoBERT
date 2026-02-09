@@ -57,6 +57,28 @@ def _count_module_class_names(model: nn.Module, class_names: set[str]) -> int:
     return sum(1 for mod in model.modules() if mod.__class__.__name__ in class_names)
 
 
+def _has_cuda_kernel_for_mxfp8_quantize() -> Optional[bool]:
+    """Return whether torchao::mxfp8_quantize has a CUDA kernel.
+
+    Returns ``False`` when the op is missing, ``True`` when CUDA kernel is present,
+    and ``None`` when dispatch metadata cannot be queried in this runtime.
+    """
+    try:
+        _ = torch.ops.torchao.mxfp8_quantize.default
+    except Exception:
+        return False
+
+    has_kernel_for_dispatch = getattr(
+        torch._C, "_dispatch_has_kernel_for_dispatch_key", None
+    )
+    if not callable(has_kernel_for_dispatch):
+        return None
+    try:
+        return bool(has_kernel_for_dispatch("torchao::mxfp8_quantize", "CUDA"))
+    except Exception:
+        return None
+
+
 def _build_linear_filter(
     *,
     filter_fqns: list[str],
@@ -183,6 +205,15 @@ def apply_torchao_pretraining_quantization(
         )
 
     filter_fqns = list(getattr(torchao_cfg, "filter_fqns", []) or [])
+    attn_backend = str(getattr(cfg.model, "attn_backend", "sdpa")).strip().lower()
+    if recipe in _QAT_RECIPES and attn_backend == "flash_attn_varlen":
+        if not any("qkv" in skip for skip in filter_fqns):
+            raise ValueError(
+                "TorchAO recipe "
+                f"'{recipe}' with model.attn_backend='flash_attn_varlen' requires "
+                "excluding qkv projections from quantization. Add 'qkv' to "
+                "torchao.filter_fqns (or switch attn_backend to 'sdpa')."
+            )
     first_linear, last_linear = _get_first_last_linear_fqns(model)
 
     post_optimizer_hook: Optional[Callable[[nn.Module], None]] = None
@@ -282,6 +313,18 @@ def apply_torchao_pretraining_quantization(
                 MXLinearConfig,
             )
             from torchao.quantization import quantize_
+
+            if recipe in {"mxfp8_cublas", "mxfp8_cublas_rceil"} and torch.cuda.is_available():
+                has_cuda_kernel = _has_cuda_kernel_for_mxfp8_quantize()
+                if has_cuda_kernel is False:
+                    raise RuntimeError(
+                        "TorchAO recipe "
+                        f"'{recipe}' requires CUDA MXFP8 kernels, but "
+                        "torchao::mxfp8_quantize has no CUDA backend in this "
+                        "environment. Install a torchao build with MXFP8 CUDA "
+                        "extensions (often source/nightly), or use "
+                        "torchao.recipe='mxfp8_emulated'."
+                    )
 
             mx_cfg = MXLinearConfig.from_recipe_name(recipe)
             choice_name = str(

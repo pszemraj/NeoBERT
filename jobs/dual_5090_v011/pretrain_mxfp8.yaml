@@ -36,7 +36,7 @@ datacollator:
   pack_sequences: true
 
 trainer:
-  output_dir: "./outputs/v-0.1.1/neobert-100m-wordpc_msp_32k_tok-muon-compile-mxfp8"
+  output_dir: "./outputs/v-0.1.1/neobert-100m-wordpc_msp_32k_tok-muon-compile-mxfp8-emulated"
   max_steps: 100000
   per_device_train_batch_size: 32
   per_device_eval_batch_size: 32
@@ -70,15 +70,15 @@ scheduler:
 
 wandb:
   project: "neobert-pretraining"
-  name: "neobert-100m-wordpc_msp_32k_tok-muon-compile-mxfp8"
+  name: "neobert-100m-wordpc_msp_32k_tok-muon-compile-mxfp8-emulated"
   mode: "online"
 
 torchao:
   enable: true
-  recipe: "mxfp8_cublas"
+  recipe: "mxfp8_emulated"
   filter_fqns: ["decoder"]
   skip_first_last_linear: true
-  mxfp8_dim1_cast_kernel_choice: "cuda"
+  mxfp8_dim1_cast_kernel_choice: "torch"
   require_compile: true
 
 seed: 69

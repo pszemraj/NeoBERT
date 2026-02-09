@@ -2,7 +2,7 @@
 # Launch four pretraining runs in parallel on a 4-GPU host:
 # - GPU 0: BF16 baseline
 # - GPU 1: FP8 (TorchAO float8 rowwise)
-# - GPU 2: MXFP8 (TorchAO mxfp8_cublas)
+# - GPU 2: MXFP8 (TorchAO mxfp8_emulated)
 # - GPU 3: NVFP4 (TorchAO nvfp4_qat)
 
 set -euo pipefail

@@ -76,7 +76,7 @@ wandb:
 torchao:
   enable: true
   recipe: "nvfp4_qat"
-  filter_fqns: ["decoder"]
+  filter_fqns: ["decoder", "qkv"]
   skip_first_last_linear: true
   require_compile: true
 
