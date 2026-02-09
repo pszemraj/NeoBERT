@@ -215,6 +215,8 @@ Notes:
 - Hardware/runtime requirements follow upstream kernels: CUDA, Blackwell-class
   GPUs (`sm120a`), and BF16 mixed precision.
 - Install dependencies with: `pip install --no-build-isolation -e .[quant_quartet]`.
+- Do not install standalone `qutlass` from PyPI; use the Quartet-II kernels build
+  from the GitHub source above.
 
 ## MLM Loss Path Selection
 
