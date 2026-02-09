@@ -219,6 +219,7 @@ def apply_torchao_pretraining_quantization(
     post_optimizer_hook: Optional[Callable[[nn.Module], None]] = None
     converted_linear_count = 0
     used_accelerate_helper = False
+    used_auto_filter = False
 
     if recipe in _FLOAT8_RECIPES:
         recipe_name = _FLOAT8_RECIPES[recipe]
@@ -227,6 +228,7 @@ def apply_torchao_pretraining_quantization(
             bool(getattr(torchao_cfg, "auto_filter_small_kn", True)),
             log,
         )
+        used_auto_filter = auto_filter_fn is not None
         module_filter_fn = _build_linear_filter(
             filter_fqns=filter_fqns,
             first_linear_fqn=first_linear,
@@ -414,6 +416,12 @@ def apply_torchao_pretraining_quantization(
             "Check filter rules and layer dimensions.",
             recipe,
         )
+        if recipe in _FLOAT8_RECIPES and used_auto_filter:
+            log.warning(
+                "TorchAO float8 auto-filter is enabled and may have filtered every "
+                "layer for this model shape. Consider setting "
+                "torchao.auto_filter_small_kn=false."
+            )
     else:
         log.info(
             "TorchAO recipe '%s' active: converted %s linear modules (%s path).",

@@ -78,7 +78,8 @@ torchao:
   recipe: "float8_rowwise"
   filter_fqns: ["decoder"]
   skip_first_last_linear: true
-  auto_filter_small_kn: true
+  # Rowwise auto-filter thresholds can exclude all layers at this model width.
+  auto_filter_small_kn: false
   require_compile: true
 
 seed: 69

@@ -107,7 +107,7 @@ torchao:
   enable: true
   recipe: "float8_rowwise"
   skip_first_last_linear: true
-  auto_filter_small_kn: true
+  auto_filter_small_kn: false
   filter_fqns: ["decoder"]
 ```
 
@@ -132,6 +132,9 @@ Notes:
   (`nvfp4_qat`, `mxfp4_qat`).
 - The runtime prefers the existing `accelerate.utils.ao.convert_model_to_fp8_ao`
   helper for float8 when available and falls back to direct TorchAO conversion.
+- For narrower hidden sizes (for example 768), `float8_rowwise` with
+  `auto_filter_small_kn: true` can filter out all linear layers. Set
+  `auto_filter_small_kn: false` to force conversion when needed.
 - Keep `trainer.torch_compile: true` for best performance/stability. The default
   `torchao.require_compile: true` enforces this.
 - Current guardrails: pretraining-only path; DeepSpeed + TorchAO is blocked.
