@@ -605,6 +605,7 @@ class TestPretrainComponents(unittest.TestCase):
             def __init__(self, marker: dict[str, bool]) -> None:
                 self._marker = marker
                 self.backward_calls = 0
+                self.device = torch.device("cpu")
 
             def backward(self, _loss: torch.Tensor) -> None:
                 self.backward_calls += 1
@@ -612,6 +613,10 @@ class TestPretrainComponents(unittest.TestCase):
                     raise AssertionError(
                         "backward must run while gather context is still active"
                     )
+
+            def reduce(self, tensor: torch.Tensor, reduction: str = "sum") -> torch.Tensor:
+                _ = reduction
+                return tensor
 
         class _GatherMarkerContext:
             def __init__(self, state: dict[str, bool], value: torch.Tensor) -> None:
@@ -641,17 +646,20 @@ class TestPretrainComponents(unittest.TestCase):
                 marker, model.decoder.weight
             ),
         ):
-            _objective_out, _loss_sum, backward_done = _run_masked_objective_step(
-                model=model,
-                batch=batch,
-                pad_mask=None,
-                packed_seqlens=None,
-                masked_objective=_ObjectiveStub(),
-                accelerator=accelerator,
-                log_train_accuracy=False,
+            _objective_out, _loss_sum, backward_done, loss_is_finite = (
+                _run_masked_objective_step(
+                    model=model,
+                    batch=batch,
+                    pad_mask=None,
+                    packed_seqlens=None,
+                    masked_objective=_ObjectiveStub(),
+                    accelerator=accelerator,
+                    log_train_accuracy=False,
+                )
             )
 
         self.assertTrue(backward_done)
+        self.assertTrue(loss_is_finite)
         self.assertEqual(accelerator.backward_calls, 1)
 
     def test_run_masked_objective_step_backprops_inside_gather_on_fsdp(self):
@@ -709,6 +717,7 @@ class TestPretrainComponents(unittest.TestCase):
             def __init__(self, marker: dict[str, bool]) -> None:
                 self._marker = marker
                 self.backward_calls = 0
+                self.device = torch.device("cpu")
 
             def backward(self, _loss: torch.Tensor) -> None:
                 self.backward_calls += 1
@@ -716,6 +725,10 @@ class TestPretrainComponents(unittest.TestCase):
                     raise AssertionError(
                         "backward must run while gather context is still active"
                     )
+
+            def reduce(self, tensor: torch.Tensor, reduction: str = "sum") -> torch.Tensor:
+                _ = reduction
+                return tensor
 
         class _GatherMarkerContext:
             def __init__(self, state: dict[str, bool], value: torch.Tensor) -> None:
@@ -744,17 +757,20 @@ class TestPretrainComponents(unittest.TestCase):
                 marker, model.decoder.weight
             ),
         ):
-            _objective_out, _loss_sum, backward_done = _run_masked_objective_step(
-                model=model,
-                batch=batch,
-                pad_mask=None,
-                packed_seqlens=None,
-                masked_objective=_ObjectiveStub(),
-                accelerator=accelerator,
-                log_train_accuracy=False,
+            _objective_out, _loss_sum, backward_done, loss_is_finite = (
+                _run_masked_objective_step(
+                    model=model,
+                    batch=batch,
+                    pad_mask=None,
+                    packed_seqlens=None,
+                    masked_objective=_ObjectiveStub(),
+                    accelerator=accelerator,
+                    log_train_accuracy=False,
+                )
             )
 
         self.assertTrue(backward_done)
+        self.assertTrue(loss_is_finite)
         self.assertEqual(accelerator.backward_calls, 1)
 
     def test_should_backward_inside_gather_fsdp_depends_on_version(self):
@@ -825,9 +841,14 @@ class TestPretrainComponents(unittest.TestCase):
 
             def __init__(self) -> None:
                 self.backward_calls = 0
+                self.device = torch.device("cpu")
 
             def backward(self, _loss: torch.Tensor) -> None:
                 self.backward_calls += 1
+
+            def reduce(self, tensor: torch.Tensor, reduction: str = "sum") -> torch.Tensor:
+                _ = reduction
+                return tensor
 
         model = _ModelStub()
         accelerator = _AcceleratorStub()
@@ -836,16 +857,19 @@ class TestPretrainComponents(unittest.TestCase):
             "labels": torch.full((1, 2), -100, dtype=torch.long),
         }
 
-        _objective_out, _loss_sum, backward_done = _run_masked_objective_step(
-            model=model,
-            batch=batch,
-            pad_mask=None,
-            packed_seqlens=None,
-            masked_objective=_ObjectiveStub(),
-            accelerator=accelerator,
-            log_train_accuracy=False,
+        _objective_out, _loss_sum, backward_done, loss_is_finite = (
+            _run_masked_objective_step(
+                model=model,
+                batch=batch,
+                pad_mask=None,
+                packed_seqlens=None,
+                masked_objective=_ObjectiveStub(),
+                accelerator=accelerator,
+                log_train_accuracy=False,
+            )
         )
         self.assertFalse(backward_done)
+        self.assertTrue(loss_is_finite)
         self.assertEqual(accelerator.backward_calls, 0)
 
     def test_compute_weight_norm_for_logging_deepspeed_skips_missing_full_params(self):
@@ -854,6 +878,11 @@ class TestPretrainComponents(unittest.TestCase):
 
         class _AcceleratorStub:
             distributed_type = DistributedType.DEEPSPEED
+            device = torch.device("cpu")
+
+            def reduce(self, tensor: torch.Tensor, reduction: str = "sum") -> torch.Tensor:
+                _ = reduction
+                return tensor
 
         params = list(model.parameters())
         weight_full = torch.full_like(params[0], 2.0)
@@ -880,6 +909,11 @@ class TestPretrainComponents(unittest.TestCase):
 
         class _AcceleratorStub:
             distributed_type = DistributedType.DEEPSPEED
+            device = torch.device("cpu")
+
+            def reduce(self, tensor: torch.Tensor, reduction: str = "sum") -> torch.Tensor:
+                _ = reduction
+                return tensor
 
         with patch(
             "neobert.pretraining.trainer.safe_get_full_fp32_param",

@@ -351,6 +351,24 @@ def _should_backward_inside_gathered_decoder_weight(
     return getattr(lm_weight, "ds_id", None) is not None
 
 
+def _is_finite_scalar_across_ranks(
+    value: torch.Tensor,
+    accelerator: Accelerator,
+) -> bool:
+    """Return whether a scalar tensor is finite across all ranks.
+
+    :param torch.Tensor value: Scalar tensor to validate.
+    :param Accelerator accelerator: Active accelerator runtime.
+    :return bool: ``True`` when all ranks report finite value.
+    """
+    finite_local = torch.isfinite(value.detach())
+    if finite_local.ndim > 0:
+        finite_local = finite_local.all()
+    finite_i32 = finite_local.to(device=accelerator.device, dtype=torch.int32)
+    finite_all = accelerator.reduce(finite_i32, reduction="min")
+    return bool(finite_all.item())
+
+
 def _run_masked_objective_step(
     model: torch.nn.Module,
     batch: BatchEncoding,
@@ -360,7 +378,7 @@ def _run_masked_objective_step(
     accelerator: Accelerator,
     *,
     log_train_accuracy: bool,
-) -> tuple[MaskedObjectiveOut, torch.Tensor, bool]:
+) -> tuple[MaskedObjectiveOut, torch.Tensor, bool, bool]:
     """Compute masked-objective loss and optionally backprop inside gather.
 
     :param torch.nn.Module model: Training model.
@@ -370,8 +388,9 @@ def _run_masked_objective_step(
     :param MaskedPositionsOnlyMLMObjective masked_objective: Objective module.
     :param Accelerator accelerator: Active accelerator runtime.
     :param bool log_train_accuracy: Whether to compute masked accuracy.
-    :return tuple[MaskedObjectiveOut, torch.Tensor, bool]:
-        Objective output, local loss sum, and whether backward already ran.
+    :return tuple[MaskedObjectiveOut, torch.Tensor, bool, bool]:
+        Objective output, local loss sum, whether backward already ran, and
+        whether the loss is finite across all ranks.
     """
     hidden = model(
         src=batch["input_ids"],
@@ -387,11 +406,14 @@ def _run_masked_objective_step(
             compute_accuracy=log_train_accuracy,
         )
         loss_sum = objective_out.loss_sum_local
+        loss_is_finite = _is_finite_scalar_across_ranks(loss_sum, accelerator)
         backward_done = False
-        if _should_backward_inside_gathered_decoder_weight(accelerator, lm_weight):
+        if loss_is_finite and _should_backward_inside_gathered_decoder_weight(
+            accelerator, lm_weight
+        ):
             accelerator.backward(loss_sum)
             backward_done = True
-    return objective_out, loss_sum, backward_done
+    return objective_out, loss_sum, backward_done, loss_is_finite
 
 
 def _move_batch_to_device(batch: BatchEncoding, device: torch.device) -> BatchEncoding:
@@ -2353,6 +2375,9 @@ def trainer(cfg: Config) -> None:
         "packed_seqlens": None,
     }
     warned_low_token_scale = False
+    skip_update_due_to_non_finite = False
+    consecutive_non_finite_updates = 0
+    max_consecutive_non_finite_updates = 8
     while cfg.trainer.max_steps > metrics["train/steps"]:
         # Use skipped_train_dataloader the first epoch after resuming
         dataloader = (
@@ -2419,9 +2444,10 @@ def trainer(cfg: Config) -> None:
                     is_last_microbatch=sync_gradients,
                 )
                 backward_called = False
+                loss_is_finite = True
                 with accelerator.autocast():
                     if masked_objective is not None:
-                        objective_out, loss_sum, backward_called = (
+                        objective_out, loss_sum, backward_called, loss_is_finite = (
                             _run_masked_objective_step(
                                 model,
                                 batch,
@@ -2465,27 +2491,69 @@ def trainer(cfg: Config) -> None:
                             logits.view(-1, model_config.vocab_size),
                             batch["labels"].view(-1),
                         )
-
-                # Compute gradient
-                if not backward_called:
-                    accelerator.backward(loss_sum)
-                accum_tokens += num_pred.to(accum_tokens.dtype)
-
-                # Accumulate metrics on device to avoid per-batch syncs.
-                local_samples += batch["input_ids"].shape[0]
-                local_tokens += num_tokens
-                local_num_pred += num_pred
-                local_sum_loss += loss_sum.detach().float()
-                if log_train_accuracy:
-                    if masked_objective is not None:
-                        if objective_out.num_correct_local is not None:
-                            local_num_correct += objective_out.num_correct_local
-                    else:
-                        local_num_correct += _count_masked_correct(
-                            logits, batch["labels"]
+                        loss_is_finite = _is_finite_scalar_across_ranks(
+                            loss_sum, accelerator
                         )
 
+                # Compute gradient
+                if loss_is_finite:
+                    if not backward_called:
+                        accelerator.backward(loss_sum)
+                    accum_tokens += num_pred.to(accum_tokens.dtype)
+
+                    # Accumulate metrics on device to avoid per-batch syncs.
+                    local_samples += batch["input_ids"].shape[0]
+                    local_tokens += num_tokens
+                    local_num_pred += num_pred
+                    local_sum_loss += loss_sum.detach().float()
+                    if log_train_accuracy:
+                        if masked_objective is not None:
+                            if objective_out.num_correct_local is not None:
+                                local_num_correct += objective_out.num_correct_local
+                        else:
+                            local_num_correct += _count_masked_correct(
+                                logits, batch["labels"]
+                            )
+                else:
+                    skip_update_due_to_non_finite = True
+
             if sync_gradients:
+                if skip_update_due_to_non_finite:
+                    skip_update_due_to_non_finite = False
+                    consecutive_non_finite_updates += 1
+                    metrics["train/non_finite_updates"] = (
+                        int(metrics.get("train/non_finite_updates", 0)) + 1
+                    )
+                    optimizer.zero_grad(set_to_none=True)
+                    accum_tokens.zero_()
+                    local_samples.zero_()
+                    local_tokens.zero_()
+                    local_num_pred.zero_()
+                    local_sum_loss.zero_()
+                    local_num_correct.zero_()
+                    local_loss_path_liger_flce.zero_()
+                    local_loss_path_checkpointed.zero_()
+                    local_loss_path_zero_masked.zero_()
+                    local_loss_path_other.zero_()
+                    if accelerator.is_main_process:
+                        logger.warning(
+                            "Skipped optimizer update %s due to non-finite loss "
+                            "(consecutive skipped updates=%s).",
+                            metrics["train/steps"] + 1,
+                            consecutive_non_finite_updates,
+                        )
+                    if (
+                        consecutive_non_finite_updates
+                        >= max_consecutive_non_finite_updates
+                    ):
+                        raise RuntimeError(
+                            "Aborting training after repeated non-finite losses. "
+                            "Lower learning rate and/or enable stronger stabilization "
+                            "(e.g., gradient clipping, conservative quant recipe)."
+                        )
+                    continue
+
+                consecutive_non_finite_updates = 0
                 should_log = (metrics["train/steps"] + 1) % log_interval == 0
                 # Reduce to global token count to handle uneven sharding across ranks.
                 tokens_global = accelerator.reduce(accum_tokens, reduction="sum")
