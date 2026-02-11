@@ -438,18 +438,18 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 
 ### Weights and Biases
 
-| Key                  | Type          | Default        | Description                                                 |
-| -------------------- | ------------- | -------------- | ----------------------------------------------------------- |
-| `wandb.enabled`      | `bool`        | `false`        | Enable W&B logging.                                         |
-| `wandb.project`      | `str`         | `"neo-bert"`   | W&B project name.                                           |
-| `wandb.entity`       | `str \| None` | `null`         | W&B entity/team.                                            |
-| `wandb.name`         | `str \| None` | `null`         | Run name override.                                          |
-| `wandb.tags`         | `list[str]`   | `[]`           | Run tags.                                                   |
-| `wandb.mode`         | `str`         | `"online"`     | `online`, `offline`, or `disabled`.                         |
+| Key                  | Type          | Default        | Description                                                                                |
+| -------------------- | ------------- | -------------- | ------------------------------------------------------------------------------------------ |
+| `wandb.enabled`      | `bool`        | `false`        | Enable W&B logging.                                                                        |
+| `wandb.project`      | `str`         | `"neo-bert"`   | W&B project name.                                                                          |
+| `wandb.entity`       | `str \| None` | `null`         | W&B entity/team.                                                                           |
+| `wandb.name`         | `str \| None` | `null`         | Run name override.                                                                         |
+| `wandb.tags`         | `list[str]`   | `[]`           | Run tags.                                                                                  |
+| `wandb.mode`         | `str`         | `"online"`     | `online`, `offline`, or `disabled`.                                                        |
 | `wandb.watch`        | `str`         | `"gradients"`  | Model-watch mode: `gradients`, `parameters`, `all`, or disabled (`off`/`none`/`disabled`). |
-| `wandb.log_interval` | `int`         | `100`          | Legacy field; trainer logging uses `trainer.logging_steps`. |
-| `wandb.resume`       | `str`         | `"never"`      | W&B resume policy.                                          |
-| `wandb.dir`          | `str`         | `"logs/wandb"` | Artifact/run directory.                                     |
+| `wandb.log_interval` | `int`         | `100`          | Legacy field; trainer logging uses `trainer.logging_steps`.                                |
+| `wandb.resume`       | `str`         | `"never"`      | W&B resume policy.                                                                         |
+| `wandb.dir`          | `str`         | `"logs/wandb"` | Artifact/run directory.                                                                    |
 
 > [!NOTE]
 > Runtime logging prints a task-scoped resolved config before training and sends
@@ -499,16 +499,16 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 
 ### Contrastive (`contrastive`)
 
-| Key                                | Type    | Default    | Description                                                                 |
-| ---------------------------------- | ------- | ---------- | --------------------------------------------------------------------------- |
-| `contrastive.temperature`          | `float` | `0.05`     | Contrastive temperature.                                                    |
-| `contrastive.pooling`              | `str`   | `"avg"`    | Pooling mode: `avg`, `cls`, `max`.                                          |
-| `contrastive.loss_type`            | `str`   | `"simcse"` | Loss variant: `simcse`, `supcon`.                                           |
-| `contrastive.hard_negative_weight` | `float` | `0.0`      | Additional hard-negative weighting.                                         |
-| `contrastive.pretraining_prob`     | `float` | `0.3`      | Fraction of steps that draw the pretraining branch in contrastive training. |
-| `contrastive.pretrained_checkpoint_dir` | `str \| None` | `null` | Optional pretraining checkpoint root used to initialize contrastive runs. |
-| `contrastive.pretrained_checkpoint` | `str \| int \| None` | `null` | Optional checkpoint tag/step selector for contrastive initialization. |
-| `contrastive.allow_random_weights` | `bool` | `false` | Allow random initialization when no pretrained checkpoint is configured. |
+| Key                                     | Type                 | Default    | Description                                                                 |
+| --------------------------------------- | -------------------- | ---------- | --------------------------------------------------------------------------- |
+| `contrastive.temperature`               | `float`              | `0.05`     | Contrastive temperature.                                                    |
+| `contrastive.pooling`                   | `str`                | `"avg"`    | Pooling mode: `avg`, `cls`, `max`.                                          |
+| `contrastive.loss_type`                 | `str`                | `"simcse"` | Loss variant: `simcse`, `supcon`.                                           |
+| `contrastive.hard_negative_weight`      | `float`              | `0.0`      | Additional hard-negative weighting.                                         |
+| `contrastive.pretraining_prob`          | `float`              | `0.3`      | Fraction of steps that draw the pretraining branch in contrastive training. |
+| `contrastive.pretrained_checkpoint_dir` | `str \| None`        | `null`     | Optional pretraining checkpoint root used to initialize contrastive runs.   |
+| `contrastive.pretrained_checkpoint`     | `str \| int \| None` | `null`     | Optional checkpoint tag/step selector for contrastive initialization.       |
+| `contrastive.allow_random_weights`      | `bool`               | `false`    | Allow random initialization when no pretrained checkpoint is configured.    |
 
 ### MTEB Top-Level Keys
 
