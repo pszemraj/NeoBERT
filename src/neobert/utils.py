@@ -95,6 +95,15 @@ _LEGACY_TRAINER_EXCLUDE_FIELDS = {
 
 _NON_CONTRASTIVE_TRAINER_EXCLUDE_FIELDS = {"dataloader_num_workers"}
 
+_PRETRAINING_TRAINER_EXCLUDE_FIELDS = {
+    "disable_tqdm",
+    "early_stopping",
+    "metric_for_best_model",
+    "greater_is_better",
+    "load_best_model_at_end",
+    "save_model",
+}
+
 
 def _serialize_config(cfg: Any) -> Dict[str, Any]:
     """Serialize a config-like object into a dictionary.
@@ -170,6 +179,9 @@ def _task_filter_config(config_dict: Dict[str, Any]) -> Dict[str, Any]:
             trainer_cfg.pop(key, None)
         if task != "contrastive":
             for key in _NON_CONTRASTIVE_TRAINER_EXCLUDE_FIELDS:
+                trainer_cfg.pop(key, None)
+        if task == "pretraining":
+            for key in _PRETRAINING_TRAINER_EXCLUDE_FIELDS:
                 trainer_cfg.pop(key, None)
 
     return _drop_empty_values(filtered)
