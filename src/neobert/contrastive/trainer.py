@@ -191,10 +191,9 @@ def trainer(cfg: Config) -> None:
             "Resolved task config:\n" + format_resolved_config(tracker_config_dict)
         )
         logger.info(
-            "contrastive.pretraining_prob=%s: %.1f%% of steps sample the pretraining "
-            "dataset branch (SimCSE anti-forgetting path).",
-            pretraining_mix_prob,
-            pretraining_mix_prob * 100.0,
+            f"contrastive.pretraining_prob={pretraining_mix_prob}: "
+            f"{pretraining_mix_prob * 100.0:.1f}% of steps sample the pretraining "
+            "dataset branch (SimCSE anti-forgetting path)."
         )
 
     # Initialise the wandb run and pass wandb parameters
@@ -229,8 +228,8 @@ def trainer(cfg: Config) -> None:
                     wandb.run.log_artifact(artifact)
                 else:
                     logger.warning(
-                        "Configured config_path '%s' not found; skipping wandb artifact upload",
-                        config_path,
+                        f"Configured config_path '{config_path}' not found; "
+                        "skipping wandb artifact upload"
                     )
 
     # Set the seed
@@ -252,9 +251,8 @@ def trainer(cfg: Config) -> None:
     use_packed = cfg.model.attn_backend != "sdpa"
     if use_packed and tokenizer.padding_side != "right":
         logger.warning(
-            "tokenizer.padding_side=%s is incompatible with packed attention; "
-            "falling back to attn_backend='sdpa'.",
-            tokenizer.padding_side,
+            f"tokenizer.padding_side={tokenizer.padding_side} is incompatible with "
+            "packed attention; falling back to attn_backend='sdpa'."
         )
         use_packed = False
 
@@ -487,8 +485,8 @@ def trainer(cfg: Config) -> None:
             accelerator.load_state()
         else:
             logger.warning(
-                "resume_from_checkpoint is set but no checkpoints were found in %s",
-                checkpoint_dir,
+                "resume_from_checkpoint is set but no checkpoints were found in "
+                f"{checkpoint_dir}"
             )
 
     # Signal handler that save the accelerate state

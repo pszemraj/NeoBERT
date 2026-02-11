@@ -139,32 +139,31 @@ def _log_masking_strategy(cfg: Config) -> None:
 
     selected_pct = mlm_probability * 100.0
     untouched_pct = max(0.0, 100.0 - selected_pct)
+    selected_pct_str = _format_percent(selected_pct)
+    untouched_pct_str = _format_percent(untouched_pct)
 
     if cfg.datacollator.mask_all:
         logger.info(
-            "datacollator.mask_all=true with mlm_probability=%s%%: "
-            "%s%% tokens replaced with [MASK], %s%% untouched.",
-            _format_percent(selected_pct),
-            _format_percent(selected_pct),
-            _format_percent(untouched_pct),
+            "datacollator.mask_all=true with mlm_probability="
+            f"{selected_pct_str}%: {selected_pct_str}% tokens replaced with [MASK], "
+            f"{untouched_pct_str}% untouched."
         )
         return
 
     mask_pct = selected_pct * 0.8
     random_pct = selected_pct * 0.1
     unchanged_labeled_pct = selected_pct * 0.1
+    mask_pct_str = _format_percent(mask_pct)
+    random_pct_str = _format_percent(random_pct)
+    unchanged_labeled_pct_str = _format_percent(unchanged_labeled_pct)
     logger.warning(
-        "datacollator.mask_all=false with mlm_probability=%s%%: %s%% of tokens are "
-        "sampled; sampled tokens use BERT 80/10/10 ([MASK]/random/original). "
-        "Global token mix is %s%% untouched, %s%% [MASK], %s%% random-token, "
-        "%s%% original-token (labeled). "
-        "Set datacollator.mask_all=true for 100%% [MASK] replacement on sampled tokens.",
-        _format_percent(selected_pct),
-        _format_percent(selected_pct),
-        _format_percent(untouched_pct),
-        _format_percent(mask_pct),
-        _format_percent(random_pct),
-        _format_percent(unchanged_labeled_pct),
+        "datacollator.mask_all=false with mlm_probability="
+        f"{selected_pct_str}%: {selected_pct_str}% of tokens are sampled; sampled "
+        "tokens use BERT 80/10/10 ([MASK]/random/original). Global token mix is "
+        f"{untouched_pct_str}% untouched, {mask_pct_str}% [MASK], "
+        f"{random_pct_str}% random-token, {unchanged_labeled_pct_str}% original-token "
+        "(labeled). Set datacollator.mask_all=true for 100% [MASK] replacement on "
+        "sampled tokens."
     )
 
 
@@ -671,10 +670,8 @@ def _load_streaming_split(
                 total_examples = builder.info.splits[base].num_examples
         except Exception as exc:
             logger.warning(
-                "Unable to resolve streaming split size for %s (%s): %s",
-                dataset_name,
-                split,
-                exc,
+                "Unable to resolve streaming split size for "
+                f"{dataset_name} ({split}): {exc}"
             )
 
     if needs_total and total_examples is None:
@@ -693,7 +690,7 @@ def _load_streaming_split(
     if end_idx is not None:
         take_n = end_idx - (start_idx or 0)
         if take_n <= 0:
-            logger.warning("Resolved split %s is empty after slicing.", split)
+            logger.warning(f"Resolved split {split} is empty after slicing.")
             return dataset.take(0)
         dataset = dataset.take(take_n)
 
@@ -719,9 +716,7 @@ def _infer_eval_split_name(
         split_names = list(getattr(builder.info, "splits", {}).keys())
     except Exception as exc:
         logger.warning(
-            "Unable to infer eval split for %s from dataset metadata: %s",
-            dataset_name,
-            exc,
+            f"Unable to infer eval split for {dataset_name} from dataset metadata: {exc}"
         )
         return None
 
@@ -773,11 +768,9 @@ def _split_train_dataset_for_eval_samples(
     eval_count = min(eval_samples, total_samples - 1)
     if eval_count < eval_samples:
         logger.warning(
-            "Requested dataset.eval_samples=%s but dataset has %s rows; "
-            "using eval_samples=%s to keep at least one training sample.",
-            eval_samples,
-            total_samples,
-            eval_count,
+            "Requested dataset.eval_samples="
+            f"{eval_samples} but dataset has {total_samples} rows; using "
+            f"eval_samples={eval_count} to keep at least one training sample."
         )
     eval_dataset = train_dataset.select(range(eval_count))
     remaining_train = train_dataset.select(range(eval_count, total_samples))
@@ -821,8 +814,8 @@ def _set_default_worker_env(num_workers: int) -> None:
             applied[key] = value
     if applied:
         logger.info(
-            "Set default worker env: %s",
-            ", ".join(f"{k}={v}" for k, v in sorted(applied.items())),
+            "Set default worker env: "
+            + ", ".join(f"{k}={v}" for k, v in sorted(applied.items()))
         )
 
 
@@ -1147,8 +1140,8 @@ def _append_to_stored_batch(
             stored_batch[key] = existing + value
         else:
             raise TypeError(
-                "Stored batch key '%s' has incompatible types: %s vs %s"
-                % (key, type(existing).__name__, type(value).__name__)
+                f"Stored batch key '{key}' has incompatible types: "
+                f"{type(existing).__name__} vs {type(value).__name__}"
             )
     return stored_batch
 
@@ -1539,7 +1532,7 @@ def trainer(cfg: Config) -> None:
                 "NeoBERT pretraining is FSDP2-first. "
                 "FSDP v1 is unsupported; set Accelerate fsdp_version=2."
             )
-        logger.info("FSDP2 runtime detected (fsdp_version=%s).", fsdp_version)
+        logger.info(f"FSDP2 runtime detected (fsdp_version={fsdp_version}).")
     if accelerator.distributed_type is DistributedType.DEEPSPEED:
         is_muon = cfg.optimizer.name.lower() in {"muonclip", "muon-clip", "muon_clip"}
         if is_muon:
@@ -1589,8 +1582,8 @@ def trainer(cfg: Config) -> None:
                     wandb.run.log_artifact(artifact)
                 else:
                     logger.warning(
-                        "Configured config_path '%s' not found; skipping wandb artifact upload",
-                        config_path,
+                        f"Configured config_path '{config_path}' not found; "
+                        "skipping wandb artifact upload"
                     )
 
     # Set the seed
@@ -1652,16 +1645,14 @@ def trainer(cfg: Config) -> None:
         or prior_tokenizer_vocab_size != resolved_vocab_size
     ):
         logger.warning(
-            "Config vocab_size updated: tokenizer len=%s -> %s (was model=%s).",
-            original_vocab_size,
-            resolved_vocab_size,
-            prior_model_vocab_size,
+            "Config vocab_size updated: tokenizer len="
+            f"{original_vocab_size} -> {resolved_vocab_size} "
+            f"(was model={prior_model_vocab_size})."
         )
     if accelerator.is_main_process and added_tokens > 0:
         logger.info(
-            "Added %s inert tokenizer tokens to align tokenizer/model vocab_size=%s.",
-            added_tokens,
-            resolved_vocab_size,
+            f"Added {added_tokens} inert tokenizer tokens to align "
+            f"tokenizer/model vocab_size={resolved_vocab_size}."
         )
 
     resolved_config_dict = prepare_wandb_config(cfg)
@@ -1701,8 +1692,7 @@ def trainer(cfg: Config) -> None:
             train_dataset = _select_train_split(train_dataset, cfg.dataset.train_split)
         else:
             logger.warning(
-                "Dataset path %s not found; falling back to load_dataset().",
-                dataset_path,
+                f"Dataset path {dataset_path} not found; falling back to load_dataset()."
             )
 
     if train_dataset is None:
@@ -1850,9 +1840,8 @@ def trainer(cfg: Config) -> None:
         if inferred_eval_split is not None:
             eval_split = inferred_eval_split
             logger.info(
-                "Auto-detected streaming eval split '%s'. "
-                "Override with dataset.eval_split when needed.",
-                eval_split,
+                "Auto-detected streaming eval split "
+                f"'{eval_split}'. Override with dataset.eval_split when needed."
             )
 
     eval_dataset = None
@@ -1863,9 +1852,8 @@ def trainer(cfg: Config) -> None:
                 eval_dataset = eval_source[eval_split]
             else:
                 logger.warning(
-                    "eval_split=%s requested but dataset path is not a DatasetDict; "
-                    "skipping evaluation.",
-                    eval_split,
+                    f"eval_split={eval_split} requested but dataset path is not a "
+                    "DatasetDict; skipping evaluation."
                 )
         else:
             if cfg.dataset.streaming:
@@ -1901,9 +1889,9 @@ def trainer(cfg: Config) -> None:
             is_streaming=is_streaming,
         )
         logger.info(
-            "dataset.eval_samples=%s with no eval split configured; reserving "
-            "head samples for eval and excluding them from training.",
-            eval_samples,
+            "dataset.eval_samples="
+            f"{eval_samples} with no eval split configured; reserving head samples "
+            "for eval and excluding them from training."
         )
 
     if eval_dataset is not None and eval_samples is not None:
@@ -2215,8 +2203,8 @@ def trainer(cfg: Config) -> None:
                 watch_mode = "parameters"
             elif watch_mode not in {"gradients", "parameters", "all"}:
                 logger.warning(
-                    "Unrecognized WANDB_WATCH value '%s'; skipping wandb.watch()",
-                    wandb_watch,
+                    f"Unrecognized WANDB_WATCH value '{wandb_watch}'; "
+                    "skipping wandb.watch()"
                 )
                 watch_mode = None
 
@@ -2263,18 +2251,15 @@ def trainer(cfg: Config) -> None:
                 math.ceil(eval_samples / per_device_eval_batch_size),
             )
             logger.info(
-                "Streaming eval detected with dataset.eval_samples=%s; "
-                "defaulting eval_max_batches to %s. "
-                "Set trainer.eval_max_batches to override.",
-                eval_samples,
-                eval_max_batches,
+                "Streaming eval detected with dataset.eval_samples="
+                f"{eval_samples}; defaulting eval_max_batches to {eval_max_batches}. "
+                "Set trainer.eval_max_batches to override."
             )
         else:
             eval_max_batches = 100
             logger.info(
-                "Streaming eval detected; defaulting eval_max_batches to %s. "
-                "Set trainer.eval_max_batches to override.",
-                eval_max_batches,
+                "Streaming eval detected; defaulting eval_max_batches to "
+                f"{eval_max_batches}. Set trainer.eval_max_batches to override."
             )
 
     # Resume from the latest checkpoint
@@ -2291,8 +2276,8 @@ def trainer(cfg: Config) -> None:
         )
     elif cfg.trainer.resume_from_checkpoint:
         logger.warning(
-            "resume_from_checkpoint is set but no valid checkpoints were found in %s",
-            checkpoint_dir,
+            "resume_from_checkpoint is set but no valid checkpoints were found in "
+            f"{checkpoint_dir}"
         )
 
     # Progress bar
@@ -2422,8 +2407,8 @@ def trainer(cfg: Config) -> None:
                             and objective_out.used_path != "zero_masked"
                         ):
                             logger.debug(
-                                "Masked-logits loss path active (first non-empty microbatch): %s",
-                                objective_out.used_path,
+                                "Masked-logits loss path active (first non-empty "
+                                f"microbatch): {objective_out.used_path}"
                             )
                             logged_masked_loss_path = True
                     else:
@@ -2485,13 +2470,15 @@ def trainer(cfg: Config) -> None:
                     and bool(clamped.detach().cpu().item())
                 ):
                     warned_low_token_scale = True
+                    min_safe_tokens = (
+                        accelerator.num_processes
+                        * accelerator.gradient_accumulation_steps
+                    )
                     logger.warning(
                         "Masked-token count was below the safe minimum for an update "
-                        "(tokens_global=%s, min=%s); clamped gradient scale to avoid "
-                        "pathological amplification.",
-                        int(tokens_global.item()),
-                        accelerator.num_processes
-                        * accelerator.gradient_accumulation_steps,
+                        f"(tokens_global={int(tokens_global.item())}, "
+                        f"min={min_safe_tokens}); clamped gradient scale to avoid "
+                        "pathological amplification."
                     )
 
                 grad_norm_value = None
@@ -2589,16 +2576,14 @@ def trainer(cfg: Config) -> None:
                             if path_total > 0:
                                 logger.debug(
                                     "Masked-loss path window: "
-                                    "liger_flce=%s (%.3f), checkpointed=%s (%.3f), "
-                                    "zero_masked=%s (%.3f), other=%s (%.3f)",
-                                    steps_liger,
-                                    steps_liger / path_total,
-                                    steps_checkpointed,
-                                    steps_checkpointed / path_total,
-                                    steps_zero,
-                                    steps_zero / path_total,
-                                    steps_other,
-                                    steps_other / path_total,
+                                    f"liger_flce={steps_liger} "
+                                    f"({steps_liger / path_total:.3f}), "
+                                    f"checkpointed={steps_checkpointed} "
+                                    f"({steps_checkpointed / path_total:.3f}), "
+                                    f"zero_masked={steps_zero} "
+                                    f"({steps_zero / path_total:.3f}), "
+                                    f"other={steps_other} "
+                                    f"({steps_other / path_total:.3f})"
                                 )
                             else:
                                 logger.debug(
@@ -2655,9 +2640,8 @@ def trainer(cfg: Config) -> None:
                                 if old_path.exists():
                                     shutil.rmtree(old_path)
                                     logger.info(
-                                        "Removed old accelerator checkpoint: %s (limit=%s)",
-                                        old_path,
-                                        limit,
+                                        "Removed old accelerator checkpoint: "
+                                        f"{old_path} (limit={limit})"
                                     )
 
                 # Save model weights checkpoint
@@ -2727,8 +2711,8 @@ def trainer(cfg: Config) -> None:
                         checkpoint_path = final_path
                         # Use logger instead of accelerator.print to avoid progress bar interference
                         logger.info(
-                            "Saved checkpoint with config, tokenizer info, and full tokenizer to %s",
-                            checkpoint_path,
+                            "Saved checkpoint with config, tokenizer info, and full "
+                            f"tokenizer to {checkpoint_path}"
                         )
 
                     accelerator.wait_for_everyone()
