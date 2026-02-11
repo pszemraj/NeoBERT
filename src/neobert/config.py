@@ -959,10 +959,10 @@ class ConfigLoader:
             )
         if (
             config.trainer.save_total_limit is not None
-            and config.trainer.save_total_limit <= 0
+            and config.trainer.save_total_limit < 0
         ):
             errors.append(
-                "trainer.save_total_limit must be > 0 when set, got "
+                "trainer.save_total_limit must be >= 0 when set, got "
                 f"{config.trainer.save_total_limit}."
             )
         if (
@@ -979,9 +979,9 @@ class ConfigLoader:
                 f"{config.trainer.dataloader_num_workers}."
             )
         if config.trainer.max_ckpt is not None:
-            if config.trainer.max_ckpt <= 0:
+            if config.trainer.max_ckpt < 0:
                 errors.append(
-                    "trainer.max_ckpt must be > 0 when set, got "
+                    "trainer.max_ckpt must be >= 0 when set, got "
                     f"{config.trainer.max_ckpt}."
                 )
             warnings.warn(

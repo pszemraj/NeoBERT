@@ -417,6 +417,11 @@ optimizer:
         with self.assertRaises(ValueError):
             ConfigLoader.dict_to_config({"trainer": {"save_steps": 0}})
 
+    def test_save_total_limit_zero_is_allowed(self):
+        """Ensure save_total_limit=0 remains valid to disable retention."""
+        cfg = ConfigLoader.dict_to_config({"trainer": {"save_total_limit": 0}})
+        self.assertEqual(cfg.trainer.save_total_limit, 0)
+
     def test_pretraining_seq_length_syncs_tokenizer_max_length(self):
         """Ensure tokenizer.max_length is synced to dataset.max_seq_length for pretraining."""
         with warnings.catch_warnings(record=True) as caught:
