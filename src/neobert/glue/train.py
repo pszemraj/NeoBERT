@@ -39,7 +39,7 @@ from neobert.checkpointing import (
 from neobert.model import NeoBERTConfig, NeoBERTForSequenceClassification
 from neobert.tokenizer import get_tokenizer
 
-from neobert.config import Config
+from neobert.config import Config, resolve_mixed_precision
 from neobert.glue.process import process_function
 from neobert.optimizer import get_optimizer
 from neobert.scheduler import get_scheduler
@@ -213,6 +213,15 @@ def compute_glue_score(task: str, metrics: dict[str, float]) -> float | None:
     return float(sum(values) / len(values))
 
 
+def _resolve_glue_task(cfg: Any) -> str:
+    """Resolve the active GLUE task name from config.
+
+    :param Any cfg: Runtime config object.
+    :return str: Normalized GLUE task name.
+    """
+    return str(getattr(cfg.glue, "task_name", getattr(cfg, "task", "glue"))).strip()
+
+
 def _update_wandb_config(accelerator: Accelerator, cfg: Config) -> None:
     """Update W&B run config with GLUE metadata.
 
@@ -220,7 +229,7 @@ def _update_wandb_config(accelerator: Accelerator, cfg: Config) -> None:
     :param Config cfg: Training configuration.
     """
     metadata = getattr(cfg, "pretraining_metadata", {}) or {}
-    glue_task = getattr(cfg.glue, "task_name", getattr(cfg, "task", "glue"))
+    glue_task = _resolve_glue_task(cfg)
     glue_max_len = getattr(cfg.glue, "max_seq_length", None)
     glue_labels = getattr(cfg.glue, "num_labels", None)
 
@@ -435,6 +444,7 @@ def run_evaluation_and_save(
     :param bool use_hf_signature: Whether to call model with HF-style kwargs.
     :return tuple[dict[str, float], float, bool]: Metrics, score, early-stop flag.
     """
+    glue_task = _resolve_glue_task(cfg)
     model.eval()
     eval_result = get_evaluation(
         model=model,
@@ -449,7 +459,7 @@ def run_evaluation_and_save(
     eval_metric = eval_result["eval_metric"]
 
     # Log metrics
-    if cfg.task == "stsb" and "spearmanr" in eval_metric:
+    if glue_task == "stsb" and "spearmanr" in eval_metric:
         logger.info(
             f"step {completed_steps} eval pearson: {eval_metric.get('pearson', 0):.4f}"
         )
@@ -466,7 +476,7 @@ def run_evaluation_and_save(
 
     # Handle MNLI mismatched set
     results = {}
-    if cfg.task == "mnli":
+    if glue_task == "mnli":
         results["accuracy"] = eval_metric["accuracy"]
 
         if mm_eval_dataloader is not None and mm_metric is not None:
@@ -497,8 +507,8 @@ def run_evaluation_and_save(
     }
 
     # Add evaluation metrics
-    metrics_for_score = eval_metric if cfg.task != "mnli" else results
-    if cfg.task != "mnli":
+    metrics_for_score = eval_metric if glue_task != "mnli" else results
+    if glue_task != "mnli":
         for key, value in eval_metric.items():
             metrics_to_log[f"eval_{key}"] = value
     else:
@@ -506,7 +516,7 @@ def run_evaluation_and_save(
             metrics_to_log[f"eval_{key}"] = value
 
     score_for_early_stop = compute_glue_score(
-        cfg.task, metrics_for_score or eval_metric
+        glue_task, metrics_for_score or eval_metric
     )
     if score_for_early_stop is not None:
         metrics_to_log["eval_score"] = score_for_early_stop
@@ -521,7 +531,7 @@ def run_evaluation_and_save(
 
     # Save results to JSON
     all_results = {f"eval_{k}": v for k, v in eval_metric.items()}
-    if cfg.task == "mnli":
+    if glue_task == "mnli":
         all_results = {f"eval_{k}": v for k, v in results.items()}
 
     output_file = (
@@ -731,7 +741,7 @@ def trainer(cfg: Config) -> None:
     canonical_cfg = deepcopy(cfg)
 
     # Extract task and meta_task from config
-    task = canonical_cfg.glue.task_name if hasattr(canonical_cfg, "glue") else cfg.task
+    glue_task = _resolve_glue_task(canonical_cfg)
     meta_task = "glue"  # Default for GLUE tasks
     experiment_id = getattr(canonical_cfg, "id", "0")
 
@@ -739,7 +749,7 @@ def trainer(cfg: Config) -> None:
     cfg = deepcopy(canonical_cfg)
 
     # Update cfg to have these as direct attributes for compatibility
-    cfg.task = task
+    cfg.glue.task_name = glue_task
     cfg.meta_task = meta_task
     cfg.id = experiment_id
     cfg.mode = getattr(cfg, "mode", "eval")  # Default to eval mode
@@ -752,11 +762,11 @@ def trainer(cfg: Config) -> None:
         automatic_checkpoint_naming=False,
     )
     # Handle mixed precision setting (could be bool or string)
-    mixed_precision = cfg.trainer.mixed_precision
-    if isinstance(mixed_precision, bool):
-        mixed_precision = "no" if not mixed_precision else "bf16"
-    elif mixed_precision == "fp32":
-        mixed_precision = "no"
+    mixed_precision = resolve_mixed_precision(
+        cfg.trainer.mixed_precision,
+        task="glue",
+    )
+    cfg.trainer.mixed_precision = mixed_precision
 
     wandb_enabled = cfg.wandb.enabled and cfg.wandb.mode != "disabled"
     accelerator = create_accelerator(
@@ -893,17 +903,17 @@ def trainer(cfg: Config) -> None:
 
     print("Loading metric...")
     # Get the metric function
-    if cfg.task in ("multirc", "record"):
+    if glue_task in ("multirc", "record"):
         metric = evaluate.load("accuracy", experiment_id=cfg.id)
-    elif cfg.task == "snli":
+    elif glue_task == "snli":
         metric = evaluate.load(cfg.meta_task, "mnli", experiment_id=cfg.id)
-    elif cfg.task == "allnli":
+    elif glue_task == "allnli":
         metric = evaluate.load(cfg.meta_task, "wnli", experiment_id=cfg.id)
     else:
-        metric = evaluate.load(cfg.meta_task, cfg.task, experiment_id=cfg.id)
+        metric = evaluate.load(cfg.meta_task, glue_task, experiment_id=cfg.id)
 
     # Load additional metric for the mismatched validation set of mnli
-    if cfg.task == "mnli":
+    if glue_task == "mnli":
         mm_metric = evaluate.load(
             cfg.meta_task, "mnli_mismatched", experiment_id=cfg.id
         )
@@ -918,10 +928,10 @@ def trainer(cfg: Config) -> None:
 
     # Loading the dataset
     print("Loading dataset...")
-    if cfg.task == "snli":
+    if glue_task == "snli":
         raw_datasets = load_dataset("stanfordnlp/snli")
         raw_datasets = raw_datasets.filter(lambda example: example["label"] != -1)
-    elif cfg.task == "allnli":
+    elif glue_task == "allnli":
         raw_datasets = load_dataset("sentence-transformers/all-nli", name="pair-class")
 
         def collapse_classes(examples: dict[str, Any]) -> dict[str, Any]:
@@ -942,15 +952,15 @@ def trainer(cfg: Config) -> None:
         )
 
     elif cfg.meta_task == "glue":
-        raw_datasets = load_dataset("glue", cfg.task)
+        raw_datasets = load_dataset("glue", glue_task)
     else:
         raw_datasets = load_dataset(
             "json",
-            data_dir=Path(os.environ["HF_DATASETS_CACHE"]) / "super_glue" / cfg.task,
+            data_dir=Path(os.environ["HF_DATASETS_CACHE"]) / "super_glue" / glue_task,
         )
 
     # Split between train and validation for datasets that don't have it natively
-    if cfg.task in ("axb", "axg"):
+    if glue_task in ("axb", "axg"):
         tmp = raw_datasets["train"].train_test_split(test_size=0.1)
         raw_datasets["train"] = tmp["train"]
         raw_datasets["validation"] = tmp["test"]
@@ -968,7 +978,7 @@ def trainer(cfg: Config) -> None:
             desc="Preprocessing the dataset",
         )
 
-    is_regression = cfg.task == "stsb"
+    is_regression = glue_task == "stsb"
     if not is_regression:
         processed_datasets = processed_datasets.cast_column(
             "labels", ClassLabel(names=processed_datasets["train"].unique("labels"))
@@ -977,11 +987,11 @@ def trainer(cfg: Config) -> None:
     train_dataset = processed_datasets["train"]
     eval_dataset = processed_datasets[
         "validation_matched"
-        if cfg.task == "mnli"
-        else ("dev" if cfg.task == "allnli" else "validation")
+        if glue_task == "mnli"
+        else ("dev" if glue_task == "allnli" else "validation")
     ]
 
-    if cfg.task == "mnli":
+    if glue_task == "mnli":
         mm_eval_dataset = processed_datasets["validation_mismatched"]
 
     # Labels
@@ -1049,7 +1059,7 @@ def trainer(cfg: Config) -> None:
         eval_dataset,
         **eval_loader_kwargs,
     )
-    if cfg.task == "mnli":
+    if glue_task == "mnli":
         mm_eval_dataloader = DataLoader(
             mm_eval_dataset,
             **eval_loader_kwargs,
@@ -1057,12 +1067,13 @@ def trainer(cfg: Config) -> None:
 
     # Model
     if from_hub:
+        trust_remote_code = bool(getattr(cfg.tokenizer, "trust_remote_code", False))
         config = AutoConfig.from_pretrained(
             cfg.model.name,
             num_labels=num_labels,
-            finetuning_task=cfg.task,
+            finetuning_task=glue_task,
             revision="main",
-            trust_remote_code=True,
+            trust_remote_code=trust_remote_code,
         )
         # if "nomic" in cfg.model.name:
         #     base_model = AutoModelForMaskedLM.from_pretrained(
@@ -1087,7 +1098,7 @@ def trainer(cfg: Config) -> None:
                 from_tf=False,
                 config=config,
                 revision="main",
-                trust_remote_code=True,
+                trust_remote_code=trust_remote_code,
                 ignore_mismatched_sizes=False,
             )
     else:
@@ -1162,9 +1173,9 @@ def trainer(cfg: Config) -> None:
         )
 
     if cfg.glue.transfer_from_task:
-        task_to_transfer_from = TASK_TO_TRANSFER_FROM.get(cfg.task, None)
+        task_to_transfer_from = TASK_TO_TRANSFER_FROM.get(glue_task, None)
         if not task_to_transfer_from:
-            raise ValueError(f"Task to transfer from for {cfg.task} is not set.")
+            raise ValueError(f"Task to transfer from for {glue_task} is not set.")
         cfg.glue.pretrained_checkpoint_dir, checkpoint_list = get_best_checkpoint_path(
             str(
                 Path(cfg.glue.pretrained_checkpoint_dir)
@@ -1310,7 +1321,7 @@ def trainer(cfg: Config) -> None:
         )
     )
 
-    if cfg.task == "mnli":
+    if glue_task == "mnli":
         mm_eval_dataloader = accelerator.prepare(mm_eval_dataloader)
 
     # Recalculate steps after accelerator preparation
@@ -1368,7 +1379,7 @@ def trainer(cfg: Config) -> None:
     )
 
     logger.info("***** Running training *****")
-    logger.info(f"  Task = {cfg.task}")
+    logger.info(f"  Task = {glue_task}")
     logger.info(f"  Num train examples = {len(train_dataset)}")
     logger.info(f"  Num eval examples = {len(eval_dataset)}")
     logger.info(f"  Num epochs = {cfg.trainer.num_train_epochs}")
@@ -1551,7 +1562,7 @@ def trainer(cfg: Config) -> None:
                         )["eval_metric"]
 
                         # Log all metrics properly for STS-B (both Pearson and Spearman)
-                        if cfg.task == "stsb" and "spearmanr" in eval_metric:
+                        if glue_task == "stsb" and "spearmanr" in eval_metric:
                             logger.info(
                                 f"step {completed_steps} eval pearson: {eval_metric.get('pearson', 0):.4f}"
                             )
@@ -1570,7 +1581,7 @@ def trainer(cfg: Config) -> None:
                             f"step {completed_steps} train loss: {total_loss / completed_steps}"
                         )
 
-                        if cfg.task == "mnli":
+                        if glue_task == "mnli":
                             # Evaluation on matched MNLI
                             results["accuracy"] = eval_metric["accuracy"]
 
@@ -1612,13 +1623,15 @@ def trainer(cfg: Config) -> None:
                             for key, value in train_metric.items():
                                 log_payload[f"train/{key}"] = value
 
-                        val_metrics = eval_metric if cfg.task != "mnli" else results
+                        val_metrics = eval_metric if glue_task != "mnli" else results
                         val_epoch = train_epoch_pos
                         log_payload["val/epoch"] = val_epoch
                         for key, value in val_metrics.items():
                             log_payload[f"val/{key}"] = value
 
-                        score_for_early_stop = compute_glue_score(cfg.task, val_metrics)
+                        score_for_early_stop = compute_glue_score(
+                            glue_task, val_metrics
+                        )
                         if score_for_early_stop is not None:
                             log_payload["val/score"] = score_for_early_stop
 
@@ -1664,7 +1677,7 @@ def trainer(cfg: Config) -> None:
                             f"eval_{k}": _to_serializable(v)
                             for k, v in eval_metric.items()
                         }
-                        if cfg.task == "mnli":
+                        if glue_task == "mnli":
                             all_results = {
                                 f"eval_{k}": _to_serializable(v)
                                 for k, v in results.items()
@@ -1757,7 +1770,7 @@ def trainer(cfg: Config) -> None:
         }
         final_epoch_value = _to_serializable(last_val_metrics.get("epoch", epoch))
     elif eval_metric:
-        source = eval_metric if cfg.task != "mnli" else results
+        source = eval_metric if glue_task != "mnli" else results
         final_metrics = {key: _to_serializable(value) for key, value in source.items()}
         final_epoch_value = epoch
     else:
@@ -1767,7 +1780,7 @@ def trainer(cfg: Config) -> None:
     # Print final metrics to console (both logger and print for visibility)
     if accelerator.is_main_process:
         print("=" * 60)
-        print(f"Training completed for {cfg.task.upper()}")
+        print(f"Training completed for {glue_task.upper()}")
         print(f"Final metrics at step {completed_steps}:")
         for key, value in final_metrics.items():
             print(f"  {key}: {value:.4f}")
@@ -1775,7 +1788,7 @@ def trainer(cfg: Config) -> None:
 
         # Also log for debugging
         logger.info("=" * 60)
-        logger.info(f"Training completed for {cfg.task.upper()}")
+        logger.info(f"Training completed for {glue_task.upper()}")
         logger.info(f"Final metrics at step {completed_steps}:")
         for key, value in final_metrics.items():
             logger.info(f"  {key}: {value:.4f}")

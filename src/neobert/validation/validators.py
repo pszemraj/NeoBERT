@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from neobert.checkpointing import MODEL_WEIGHTS_NAME, load_model_safetensors
+from neobert.config import resolve_mixed_precision
 
 logger = logging.getLogger(__name__)
 
@@ -78,15 +79,13 @@ def validate_glue_config(cfg: Any) -> None:
                 errors.append(f"Cannot create output directory {output_dir}: {e}")
 
         if hasattr(cfg.trainer, "mixed_precision"):
-            valid_precision = ["no", "bf16", "fp32"]
-            mixed_precision = cfg.trainer.mixed_precision
-            if isinstance(mixed_precision, bool):
-                mixed_precision = "no" if not mixed_precision else "bf16"
-            if mixed_precision not in valid_precision:
-                errors.append(
-                    f"Invalid mixed_precision: {cfg.trainer.mixed_precision}. "
-                    f"Must be one of {valid_precision}"
+            try:
+                cfg.trainer.mixed_precision = resolve_mixed_precision(
+                    cfg.trainer.mixed_precision,
+                    task="glue",
                 )
+            except ValueError as exc:
+                errors.append(str(exc))
 
     if hasattr(cfg, "optimizer"):
         if hasattr(cfg.optimizer, "lr"):

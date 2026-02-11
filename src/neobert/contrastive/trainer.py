@@ -37,7 +37,7 @@ from neobert.collator.collator import (
     _is_right_padded_mask,
     attention_mask_to_packed_seqlens,
 )
-from neobert.config import Config
+from neobert.config import Config, resolve_mixed_precision
 from neobert.kernels.attention import resolve_runtime_attn_backend
 from neobert.model import NeoBERT, NeoBERTConfig
 from neobert.optimizer import get_optimizer
@@ -183,13 +183,11 @@ def trainer(cfg: Config) -> None:
         total_limit=save_total_limit or None,
         iteration=iteration,
     )
-    mixed_precision = cfg.trainer.mixed_precision
-    if isinstance(mixed_precision, bool):
-        mixed_precision = "bf16" if mixed_precision else "no"
-    else:
-        mixed_precision = str(mixed_precision).strip().lower()
-    if mixed_precision == "fp32":
-        mixed_precision = "no"
+    mixed_precision = resolve_mixed_precision(
+        cfg.trainer.mixed_precision,
+        task="contrastive",
+    )
+    cfg.trainer.mixed_precision = mixed_precision
     wandb_enabled = cfg.wandb.enabled and cfg.wandb.mode != "disabled"
     accelerator = create_accelerator(
         use_cpu=bool(getattr(cfg.trainer, "use_cpu", False)),

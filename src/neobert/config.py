@@ -37,6 +37,44 @@ def _parse_cli_bool(value: str) -> bool:
     )
 
 
+def resolve_mixed_precision(value: Any, *, task: str) -> str:
+    """Normalize and validate mixed-precision policy for a task.
+
+    Accepted user values:
+    - booleans: ``True`` -> ``"bf16"``, ``False`` -> ``"no"``
+    - strings: ``"bf16"``, ``"fp16"``, ``"fp32"``, ``"no"``
+
+    Runtime policy:
+    - ``fp32`` is normalized to ``no``
+    - ``fp16`` is rejected for pretraining and GLUE
+
+    :param Any value: Raw mixed-precision value from config/CLI.
+    :param str task: Active task name.
+    :raises ValueError: If the value is unsupported for the given task.
+    :return str: Normalized precision mode.
+    """
+    task_name = str(task).strip().lower()
+    if isinstance(value, bool):
+        normalized = "bf16" if value else "no"
+    else:
+        normalized = str(value).strip().lower()
+    if normalized == "fp32":
+        normalized = "no"
+
+    valid_values = {"no", "bf16", "fp16"}
+    if normalized not in valid_values:
+        raise ValueError(
+            "trainer.mixed_precision must be one of {'no','bf16','fp16','fp32'}, "
+            f"got {value!r}."
+        )
+    if normalized == "fp16" and task_name in {"pretraining", "glue"}:
+        raise ValueError(
+            f"trainer.mixed_precision='fp16' is not supported for {task_name}. "
+            "Use 'bf16' or 'no'/'fp32'."
+        )
+    return normalized
+
+
 # Note: mutable defaults in dataclasses below use default_factory to avoid shared state.
 
 
@@ -1049,19 +1087,13 @@ class ConfigLoader:
                     f"{config.optimizer.betas}."
                 )
 
-        mixed_precision = config.trainer.mixed_precision
-        if isinstance(mixed_precision, bool):
-            mixed_precision = "bf16" if mixed_precision else "no"
-        else:
-            mixed_precision = str(mixed_precision).strip().lower()
-        if mixed_precision == "fp32":
-            mixed_precision = "no"
-        if mixed_precision not in {"no", "bf16", "fp16"}:
-            errors.append(
-                "trainer.mixed_precision must be one of {'no','bf16','fp16','fp32'}, "
-                f"got {config.trainer.mixed_precision!r}."
+        try:
+            config.trainer.mixed_precision = resolve_mixed_precision(
+                config.trainer.mixed_precision,
+                task=task,
             )
-        config.trainer.mixed_precision = mixed_precision
+        except ValueError as exc:
+            errors.append(str(exc))
 
         valid_wandb_modes = {"online", "offline", "disabled"}
         wandb_mode = str(config.wandb.mode).strip().lower()

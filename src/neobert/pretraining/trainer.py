@@ -38,7 +38,13 @@ from deepspeed.utils import safe_get_full_fp32_param
 from tqdm import tqdm
 from transformers import BatchEncoding, PreTrainedTokenizerBase
 
-from neobert.config import Config, ConfigLoader, MuonConfig, round_up_to_multiple
+from neobert.config import (
+    Config,
+    ConfigLoader,
+    MuonConfig,
+    resolve_mixed_precision,
+    round_up_to_multiple,
+)
 from neobert.dataloader import get_dataloader
 from neobert.kernels.attention import resolve_runtime_attn_backend
 from neobert.kernels.backend import get_cross_entropy_loss, resolve_kernel_backend
@@ -1566,18 +1572,11 @@ def trainer(cfg: Config) -> None:
         dataloader_config = DataLoaderConfiguration(dispatch_batches=False)
         logger.info("Disabling Accelerate dispatch_batches for packed-sequence mode.")
 
-    mixed_precision = cfg.trainer.mixed_precision
-    if isinstance(mixed_precision, bool):
-        mixed_precision = "bf16" if mixed_precision else "no"
-    else:
-        mixed_precision = str(mixed_precision).strip().lower()
-    if mixed_precision == "fp32":
-        mixed_precision = "no"
-    if mixed_precision == "fp16":
-        raise ValueError(
-            "trainer.mixed_precision='fp16' is not supported for pretraining. "
-            "Use 'bf16' or 'no'/'fp32'."
-        )
+    mixed_precision = resolve_mixed_precision(
+        cfg.trainer.mixed_precision,
+        task="pretraining",
+    )
+    cfg.trainer.mixed_precision = mixed_precision
 
     accelerator = create_accelerator(
         use_cpu=bool(getattr(cfg.trainer, "use_cpu", False)),

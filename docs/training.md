@@ -85,7 +85,7 @@ Runtime behavior:
 
 ## Mixed Precision and Compile
 
-- `trainer.mixed_precision`: `no | fp32 | bf16` (`fp16` unsupported in pretraining)
+- `trainer.mixed_precision`: `no | fp32 | bf16 | fp16` (`fp16` unsupported in pretraining and GLUE)
 - `trainer.torch_compile`: enable `torch.compile`
 - `trainer.torch_compile_backend`: `inductor | aot_eager | eager`
 - `trainer.torch_compile_dynamic`: optional override for dynamic-shape compile;

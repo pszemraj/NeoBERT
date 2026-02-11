@@ -218,7 +218,7 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `trainer.eval_steps`                  | `int` | `10000`      | Eval interval in steps.                    |
 | `trainer.logging_steps`               | `int` | `100`        | Logging interval in steps.                 |
 | `trainer.output_dir`                  | `str` | `"./output"` | Output root for checkpoints and artifacts. |
-| `trainer.mixed_precision`             | `str` | `"bf16"`     | `no`, `fp32`, or `bf16` (`fp16` unsupported in pretraining). |
+| `trainer.mixed_precision`             | `str` | `"bf16"`     | `no`, `fp32`, `bf16`, or `fp16` (but `fp16` is rejected for pretraining and GLUE). |
 
 ### Stability and Performance
 
