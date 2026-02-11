@@ -165,7 +165,6 @@ class SchedulerConfig:
     name: str = "cosine"
     warmup_steps: int = 10000
     total_steps: Optional[int] = None
-    num_cycles: float = 0.5
     decay_steps: Optional[int] = None  # Optional absolute decay end step
     final_lr_ratio: float = 0.1
     warmup_percent: Optional[float] = None
@@ -625,6 +624,15 @@ class ConfigLoader:
             ConfigLoader._warn_legacy(
                 "Config key 'wandb.log_interval' is deprecated for trainer logging; "
                 "use 'trainer.logging_steps'."
+            )
+
+        # scheduler.num_cycles is unsupported by the current scheduler implementation.
+        scheduler = normalized.get("scheduler", {})
+        if isinstance(scheduler, dict) and "num_cycles" in scheduler:
+            scheduler.pop("num_cycles")
+            ConfigLoader._warn_legacy(
+                "Config key 'scheduler.num_cycles' is deprecated and ignored. "
+                "Use warmup/decay steps or percentages and final_lr_ratio instead."
             )
 
         # Legacy attention flags -> model.attn_backend

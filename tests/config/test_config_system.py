@@ -419,6 +419,19 @@ optimizer:
             "Expected deprecation warning for trainer.report_to",
         )
 
+    def test_legacy_scheduler_num_cycles_is_ignored(self):
+        """Ensure scheduler.num_cycles is deprecated and removed cleanly."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cfg = ConfigLoader.dict_to_config(
+                {"scheduler": {"name": "cosine", "num_cycles": 1.5}}
+            )
+        self.assertEqual(cfg.scheduler.name, "cosine")
+        self.assertTrue(
+            any("scheduler.num_cycles" in str(w.message) for w in caught),
+            "Expected deprecation warning for scheduler.num_cycles",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
