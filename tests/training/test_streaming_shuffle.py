@@ -46,8 +46,8 @@ class TestStreamingShuffle(unittest.TestCase):
         self.assertIs(out, dataset)
         self.assertEqual(dataset.shuffle_calls, [])
 
-    def test_prepare_resume_dataloader_skips_streaming(self):
-        """Ensure resume fails fast on streaming dataloaders."""
+    def test_prepare_resume_dataloader_streaming_best_effort_skip(self):
+        """Ensure streaming resume performs best-effort batch skipping."""
 
         class DummyDataloader:
             def __init__(self) -> None:
@@ -62,21 +62,24 @@ class TestStreamingShuffle(unittest.TestCase):
         class DummyAccelerator:
             def __init__(self) -> None:
                 self.skip_called = False
+                self.last_skip = None
 
             def skip_first_batches(self, dataloader, num_batches: int):
                 self.skip_called = True
+                self.last_skip = num_batches
                 return dataloader
 
         dataloader = DummyDataloader()
         accelerator = DummyAccelerator()
         metrics = {"train/epochs": 1, "train/batches": 5}
 
-        with self.assertRaises(ValueError):
-            _prepare_resume_dataloader(
-                dataloader, metrics, accelerator, is_streaming=True
-            )
-        self.assertFalse(dataloader.set_epoch_called)
-        self.assertFalse(accelerator.skip_called)
+        skipped = _prepare_resume_dataloader(
+            dataloader, metrics, accelerator, is_streaming=True
+        )
+        self.assertIs(skipped, dataloader)
+        self.assertTrue(dataloader.set_epoch_called)
+        self.assertTrue(accelerator.skip_called)
+        self.assertEqual(accelerator.last_skip, 5)
 
     def test_prepare_resume_dataloader_uses_len_for_non_streaming(self):
         """Ensure resume skip logic uses len and skip_first_batches when available."""

@@ -1465,7 +1465,7 @@ def _prepare_resume_dataloader(
     accelerator: Accelerator,
     is_streaming: bool,
 ) -> torch.utils.data.DataLoader | None:
-    """Prepare a skipped dataloader for resume when possible.
+    """Prepare a skipped dataloader for resume.
 
     :param torch.utils.data.DataLoader train_dataloader: Training dataloader.
     :param Metrics metrics: Metrics tracker with resumed counters.
@@ -1473,24 +1473,50 @@ def _prepare_resume_dataloader(
     :param bool is_streaming: Whether the dataset is streaming.
     :return torch.utils.data.DataLoader | None: Skipped dataloader or ``None``.
     """
-    if is_streaming:
-        raise ValueError(
-            "Cannot resume training with streaming datasets - data position is not "
-            "preserved. For resumable long runs, pre-tokenize your dataset:\n"
-            "  python scripts/pretraining/tokenize_dataset.py --dataset <name> --output <path>"
-        )
-
-    if not hasattr(train_dataloader, "__len__"):
-        logger.warning(
-            "Resume requested but dataloader has no length; "
-            "starting from the current epoch boundary."
-        )
+    completed_batches = int(metrics.get("train/batches", 0))
+    if completed_batches <= 0:
         return None
 
-    if hasattr(train_dataloader, "set_epoch"):
-        train_dataloader.set_epoch(metrics["train/epochs"])
+    loader_len: Optional[int] = None
+    if hasattr(train_dataloader, "__len__"):
+        try:
+            loader_len = len(train_dataloader)
+        except TypeError:
+            loader_len = None
 
-    resume_step = metrics["train/batches"] % len(train_dataloader)
+    if hasattr(train_dataloader, "set_epoch"):
+        train_dataloader.set_epoch(int(metrics.get("train/epochs", 0)))
+
+    if loader_len is not None:
+        if loader_len <= 0:
+            logger.warning(
+                "Resume requested but dataloader length is non-positive; "
+                "starting from the current epoch boundary."
+            )
+            return None
+        resume_step = completed_batches % loader_len
+        if is_streaming:
+            logger.info(
+                "Streaming resume: skipping "
+                f"{resume_step} batch(es) within current epoch "
+                f"(consumed={completed_batches}, loader_len={loader_len})."
+            )
+    else:
+        if not is_streaming:
+            logger.warning(
+                "Resume requested but dataloader has no length; "
+                "starting from the current epoch boundary."
+            )
+            return None
+        # Streaming fallback: we cannot derive a per-epoch modulo without a
+        # dataloader length, so skip the consumed batch count from stream start.
+        resume_step = completed_batches
+        logger.warning(
+            "Streaming resume with unknown dataloader length: skipping "
+            f"{resume_step} consumed batch(es) from stream start "
+            "(best-effort position recovery)."
+        )
+
     if resume_step == 0:
         return None
 
@@ -1687,12 +1713,6 @@ def trainer(cfg: Config) -> None:
     metrics["train/compute_accuracy"] = int(log_train_accuracy)
 
     is_streaming = cfg.dataset.streaming
-    if cfg.trainer.resume_from_checkpoint and is_streaming:
-        raise ValueError(
-            "Cannot resume training with streaming datasets - data position is not "
-            "preserved. For resumable long runs, pre-tokenize your dataset:\n"
-            "  python scripts/pretraining/tokenize_dataset.py --dataset <name> --output <path>"
-        )
 
     if cfg.datacollator.pack_sequences:
         logger.info(
@@ -2359,6 +2379,13 @@ def trainer(cfg: Config) -> None:
                 f"resume_from_checkpoint path not found: {resume_checkpoint_path}"
             )
         accelerator.load_state(str(resume_checkpoint))
+        if is_streaming and hasattr(train_dataset, "set_epoch"):
+            resume_epoch = int(metrics.get("train/epochs", 0))
+            train_dataset.set_epoch(resume_epoch)
+            logger.info(
+                "Restored streaming dataset epoch to "
+                f"{resume_epoch} before resume skipping."
+            )
         skipped_train_dataloader = _prepare_resume_dataloader(
             train_dataloader, metrics, accelerator, is_streaming
         )

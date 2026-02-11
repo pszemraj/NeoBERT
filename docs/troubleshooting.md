@@ -51,11 +51,15 @@ Actions:
 - reduce dynamic control flow and per-step Python-side variability,
 - use `TORCH_LOGS="recompiles"` to inspect root causes.
 
-### Streaming resume rejected for pretraining
+### Streaming resume is slow or not exact
 
-- Pretraining trainer raises if `trainer.resume_from_checkpoint` is set while
-  `dataset.streaming: true`.
-- Workaround: pre-tokenize data to disk and run with `dataset.streaming: false`.
+- Streaming resume is best-effort: trainer restores state and skips consumed
+  batches from stream start/current epoch position.
+- For large consumed-step counts, startup can take a while due to stream
+  advancement.
+- With shuffled streams, exact sample continuity is not guaranteed.
+- If you need deterministic continuation, pre-tokenize to disk and run with
+  `dataset.streaming: false`.
 
 ### Streaming eval budget error
 

@@ -87,8 +87,9 @@ Runtime behavior:
 
 ## Mixed Precision and Compile
 
-- `trainer.mixed_precision`: `no | fp32 | bf16 | fp16` (`fp16` unsupported in pretraining and GLUE)
+- `trainer.mixed_precision`: `no | fp32 | bf16` (`bf16` recommended default)
 - runtime normalization: `fp32 -> no`, `true -> bf16`, `false -> no`
+- `fp16` is unsupported in NeoBERT training paths
 - `trainer.torch_compile`: enable `torch.compile`
 - `trainer.torch_compile_backend`: `inductor | aot_eager | eager`
 - `trainer.torch_compile_dynamic`: optional override for dynamic-shape compile;
@@ -168,10 +169,17 @@ Important for this exact config:
 
 - `pretrain_neobert100m_smollm2data_muonclip.yaml` sets
   `dataset.streaming: true`
-- pretraining resume is rejected when streaming is enabled
+- streaming resume is supported as best-effort recovery:
+  trainer restores checkpoint state and advances the stream by consumed batches
+  before continuing
 
-If you started with streaming and must continue from checkpoint, switch to a
-non-streaming tokenized dataset and resume there:
+Streaming resume caveat:
+
+- stream advancement can take significant wall time for late checkpoints
+- with shuffled streams, exact sample continuity is not guaranteed
+
+For strict deterministic continuation, switch to a non-streaming tokenized
+dataset and resume there:
 
 ```bash
 # one-time tokenize-to-disk (example path)
@@ -195,8 +203,10 @@ match the interrupted streaming run.
 Notes:
 
 - resume and export both operate from `<output_dir>/checkpoints/`.
-- pretraining resume with `dataset.streaming: true` is rejected by trainer.
-  Use a pre-tokenized non-streaming dataset for resumable runs.
+- pretraining resume with `dataset.streaming: true` uses best-effort stream
+  advancement based on saved batch counters.
+- for exact deterministic continuation, prefer pre-tokenized
+  `dataset.streaming: false` runs.
 
 ## Pre-tokenized Datasets
 

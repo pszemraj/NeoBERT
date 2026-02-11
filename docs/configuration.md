@@ -221,7 +221,7 @@ This page is the primary source of truth for NeoBERT's YAML config schema
 | `trainer.eval_steps`                  | `int` | `10000`      | Eval interval in steps.                    |
 | `trainer.logging_steps`               | `int` | `100`        | Logging interval in steps.                 |
 | `trainer.output_dir`                  | `str` | `"./output"` | Output root for checkpoints and artifacts. |
-| `trainer.mixed_precision`             | `str` | `"bf16"`     | `no`, `fp32`, `bf16`, or `fp16` (but `fp16` is rejected for pretraining and GLUE). |
+| `trainer.mixed_precision`             | `str` | `"bf16"`     | `no`, `fp32`, or `bf16` (`fp16` unsupported). |
 
 ### Stability and Performance
 
@@ -440,7 +440,7 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 
 | Rule                                                              | Type               | Details                                                                                    |
 | ----------------------------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------ |
-| `trainer.resume_from_checkpoint` with `dataset.streaming=true`    | **ERROR**          | Streaming resume is disallowed because data position cannot be restored.                   |
+| `trainer.resume_from_checkpoint` with `dataset.streaming=true`    | **BEST-EFFORT**    | Streaming resume restores state and advances stream by consumed batches; exact sample continuity is not guaranteed. |
 | Streaming eval with neither `trainer.eval_max_batches` nor `dataset.eval_samples` | **ERROR** | Set an explicit eval budget for reproducible streaming metrics. |
 | `dataset.validation_split` with `dataset.streaming=true`          | **WARNING / SKIP** | Validation split creation is skipped for streaming datasets.                               |
 | `scheduler.warmup_percent` and `scheduler.warmup_steps`           | **PRECEDENCE**     | `warmup_percent` overrides absolute warmup steps.                                          |

@@ -42,18 +42,18 @@ def resolve_mixed_precision(value: Any, *, task: str) -> str:
 
     Accepted user values:
     - booleans: ``True`` -> ``"bf16"``, ``False`` -> ``"no"``
-    - strings: ``"bf16"``, ``"fp16"``, ``"fp32"``, ``"no"``
+    - strings: ``"bf16"``, ``"fp32"``, ``"no"``
 
     Runtime policy:
     - ``fp32`` is normalized to ``no``
-    - ``fp16`` is rejected for pretraining and GLUE
+    - ``fp16`` is unsupported and rejected for all tasks
 
     :param Any value: Raw mixed-precision value from config/CLI.
     :param str task: Active task name.
     :raises ValueError: If the value is unsupported for the given task.
     :return str: Normalized precision mode.
     """
-    task_name = str(task).strip().lower()
+    del task  # Mixed-precision policy is task-independent.
     if isinstance(value, bool):
         normalized = "bf16" if value else "no"
     else:
@@ -61,16 +61,17 @@ def resolve_mixed_precision(value: Any, *, task: str) -> str:
     if normalized == "fp32":
         normalized = "no"
 
-    valid_values = {"no", "bf16", "fp16"}
+    if normalized == "fp16":
+        raise ValueError(
+            "trainer.mixed_precision='fp16' is not supported. "
+            "Use 'bf16' (recommended) or 'no'/'fp32'."
+        )
+
+    valid_values = {"no", "bf16"}
     if normalized not in valid_values:
         raise ValueError(
-            "trainer.mixed_precision must be one of {'no','bf16','fp16','fp32'}, "
+            "trainer.mixed_precision must be one of {'no','bf16','fp32'}, "
             f"got {value!r}."
-        )
-    if normalized == "fp16" and task_name in {"pretraining", "glue"}:
-        raise ValueError(
-            f"trainer.mixed_precision='fp16' is not supported for {task_name}. "
-            "Use 'bf16' or 'no'/'fp32'."
         )
     return normalized
 
