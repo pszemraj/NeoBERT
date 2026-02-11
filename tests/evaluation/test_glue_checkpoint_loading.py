@@ -9,6 +9,7 @@ import torch
 from neobert.checkpointing import MODEL_WEIGHTS_NAME
 from neobert.glue.train import (
     _normalize_glue_pretrained_checkpoint_root,
+    get_best_checkpoint_path,
     load_pretrained_weights,
 )
 
@@ -198,3 +199,22 @@ def test_load_pretrained_weights_raises_when_no_supported_artifacts(
             checkpoint_id="100",
             logger=logging.getLogger("test.glue.checkpoint_loading"),
         )
+
+
+def test_get_best_checkpoint_path_prefers_canonical_checkpoints_root(
+    tmp_path: Path,
+) -> None:
+    """Ensure best-checkpoint discovery prefers ``checkpoints/`` over legacy roots."""
+    run_dir = tmp_path / "sst2" / "run_1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "checkpoints" / "100").mkdir(parents=True, exist_ok=True)
+    (run_dir / "model_checkpoints" / "100").mkdir(parents=True, exist_ok=True)
+    (run_dir / "all_results_step_100.json").write_text(
+        '{"eval_accuracy": 0.9}',
+        encoding="utf-8",
+    )
+
+    best_path, checkpoints = get_best_checkpoint_path(str(tmp_path), "sst2")
+
+    assert best_path == str(run_dir / "checkpoints")
+    assert checkpoints == [100]

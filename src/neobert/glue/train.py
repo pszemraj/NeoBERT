@@ -19,7 +19,7 @@ import numpy as np
 import torch
 from accelerate import Accelerator
 from accelerate.logging import get_logger
-from accelerate.utils import DistributedType, ProjectConfiguration, set_seed
+from accelerate.utils import ProjectConfiguration, set_seed
 from datasets import ClassLabel, load_dataset
 from torch.nn import CrossEntropyLoss, MSELoss
 from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -36,7 +36,7 @@ from neobert.checkpointing import (
     MODEL_WEIGHTS_NAME,
     load_deepspeed_fp32_state_dict,
     load_model_safetensors,
-    save_model_safetensors,
+    save_state_dict_safetensors,
 )
 from neobert.model import NeoBERTConfig, NeoBERTForSequenceClassification
 from neobert.tokenizer import get_tokenizer
@@ -393,15 +393,22 @@ def get_evaluation(
     # accumulate them when explicitly requested (debug/submission workflows).
     predictions_list = [] if return_predictions else None
     eval_metric = None
-    progress_bar = tqdm(range(len(dataloader)), desc="Running evaluation...")
+    show_progress = not (
+        accelerator is not None and not accelerator.is_local_main_process
+    )
+    progress_bar = tqdm(
+        enumerate(dataloader),
+        total=len(dataloader),
+        desc="Running evaluation...",
+        disable=not show_progress,
+    )
 
     # Ensure Flash Attention is disabled when running GLUE evaluations
     sdp_context = (
         sdpa_kernel(SDPBackend.MATH) if torch.cuda.is_available() else nullcontext()
     )
     with sdp_context:
-        for step, batch in tqdm(enumerate(dataloader)):
-            progress_bar.update(1)
+        for step, batch in progress_bar:
             with torch.no_grad(), torch.inference_mode():
                 attention_mask = batch["attention_mask"]
                 if not use_hf_signature:
@@ -497,14 +504,21 @@ def get_best_checkpoint_path(
             if eval_accuracy > best_accuracy:
                 best_accuracy = eval_accuracy
 
-                # Construct the corresponding checkpoint folder path
-                checkpoint_folder = json_path.parent / "model_checkpoints"
                 checkpoint = step_number
-                if (checkpoint_folder / str(checkpoint)).exists():
-                    best_checkpoint_path, best_checkpoint = (
-                        checkpoint_folder,
-                        checkpoint,
-                    )
+                checkpoint_candidates = [
+                    json_path.parent / "checkpoints",
+                    json_path.parent / "model_checkpoints",
+                ]
+                for checkpoint_folder in checkpoint_candidates:
+                    if (checkpoint_folder / str(checkpoint)).exists():
+                        best_checkpoint_path, best_checkpoint = (
+                            checkpoint_folder,
+                            checkpoint,
+                        )
+                        break
+
+    if best_checkpoint_path is None or best_checkpoint is None:
+        return None, [None]
 
     checkpoint_list = [best_checkpoint]
     if num_checkpoints_to_merge > 1:
@@ -655,6 +669,90 @@ def _prune_step_checkpoints(checkpoint_dir: Path, retention_limit: int) -> None:
         logger.info(f"Removed old checkpoint: {old_path} (limit={retention_limit})")
 
 
+def _save_portable_glue_checkpoint_weights(
+    model: torch.nn.Module,
+    accelerator: Accelerator,
+    checkpoint_path: Path,
+) -> bool:
+    """Ensure a portable ``model.safetensors`` exists in a GLUE step checkpoint.
+
+    :param torch.nn.Module model: Prepared GLUE model.
+    :param Accelerator accelerator: Active accelerator runtime.
+    :param Path checkpoint_path: Checkpoint directory ``checkpoints/<step>/``.
+    :return bool: True when portable weights exist (written or already present).
+    """
+    weights_path = checkpoint_path / MODEL_WEIGHTS_NAME
+    if weights_path.exists():
+        return True
+
+    try:
+        # Some distributed backends require all ranks to participate in
+        # state-dict collection even if only rank 0 writes the file.
+        state_dict = accelerator.get_state_dict(model, unwrap=True)
+    except Exception as exc:
+        if accelerator.is_main_process:
+            logger.warning(
+                "Unable to export portable GLUE weights to %s: %s. "
+                "Resumable state was still saved.",
+                weights_path,
+                exc,
+            )
+        return False
+
+    if not accelerator.is_main_process:
+        return False
+
+    try:
+        save_state_dict_safetensors(
+            state_dict,
+            checkpoint_path,
+            metadata={"format": "pt", "source": "accelerate.get_state_dict"},
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to persist portable GLUE weights at %s: %s. "
+            "Resumable state was still saved.",
+            weights_path,
+            exc,
+        )
+        return False
+    return True
+
+
+def _should_save_glue_checkpoint(
+    *,
+    save_strategy: str,
+    completed_steps: int,
+    num_update_steps_per_epoch: int,
+    save_steps: int | None,
+    eval_ran_this_step: bool,
+    metric_improved_this_eval: bool,
+) -> bool:
+    """Decide whether to save a GLUE checkpoint at the current update step.
+
+    :param str save_strategy: Trainer save strategy.
+    :param int completed_steps: Current completed optimizer steps.
+    :param int num_update_steps_per_epoch: Steps per epoch.
+    :param int | None save_steps: Step interval for ``save_strategy=steps``.
+    :param bool eval_ran_this_step: Whether evaluation ran on this update step.
+    :param bool metric_improved_this_eval: Whether eval metric improved this step.
+    :return bool: True when a checkpoint should be saved.
+    """
+    normalized = str(save_strategy).strip().lower()
+    if normalized == "no":
+        return False
+    if normalized == "best":
+        return eval_ran_this_step and metric_improved_this_eval
+    if normalized == "epoch":
+        return completed_steps % max(1, num_update_steps_per_epoch) == 0
+    if normalized == "steps":
+        if save_steps is None or int(save_steps) <= 0:
+            return False
+        return completed_steps % int(save_steps) == 0
+    # Preserve legacy fallback behavior for unknown strategies.
+    return eval_ran_this_step
+
+
 def _resolve_glue_training_schedule(
     cfg: Config,
     *,
@@ -694,31 +792,19 @@ def save_training_checkpoint(
     :param int completed_steps: Current training step.
     """
     output_dir = Path(cfg.trainer.output_dir)
-    model_checkpoint_dir = output_dir / "model_checkpoints"
     resume_checkpoint_dir = output_dir / "checkpoints"
     checkpoint_tag = str(completed_steps)
+    checkpoint_path = resume_checkpoint_dir / checkpoint_tag
 
     # Save resumable Accelerate state for true optimizer/scheduler resume.
-    accelerator.save_state(output_dir=str(resume_checkpoint_dir / checkpoint_tag))
+    accelerator.save_state(output_dir=str(checkpoint_path))
     accelerator.wait_for_everyone()
-
-    # Save export-friendly model checkpoint.
-    if accelerator.distributed_type is DistributedType.DEEPSPEED:
-        model.save_checkpoint(model_checkpoint_dir, tag=completed_steps)
-    else:
-        if accelerator.is_main_process:
-            path = model_checkpoint_dir / checkpoint_tag
-            path.mkdir(parents=True, exist_ok=True)
-            save_model_safetensors(
-                accelerator.unwrap_model(model),
-                path,
-            )
+    _save_portable_glue_checkpoint_weights(model, accelerator, checkpoint_path)
     accelerator.wait_for_everyone()
 
     if accelerator.is_main_process:
         retention_limit = _resolve_checkpoint_retention_limit(cfg)
         if retention_limit > 0:
-            _prune_step_checkpoints(model_checkpoint_dir, retention_limit)
             _prune_step_checkpoints(resume_checkpoint_dir, retention_limit)
     accelerator.wait_for_everyone()
 
@@ -1385,6 +1471,9 @@ def trainer(cfg: Config) -> None:
     max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
     if max_ckpt is not None and max_ckpt > 0 and early_stopping > 0:
         cfg.trainer.max_ckpt = max_ckpt + early_stopping
+    save_strategy = str(getattr(cfg.trainer, "save_strategy", "steps")).strip().lower()
+    save_model = bool(getattr(cfg.trainer, "save_model", True))
+    save_steps = getattr(cfg.trainer, "save_steps", None)
 
     # Get loss function
     if not is_regression:
@@ -1481,6 +1570,8 @@ def trainer(cfg: Config) -> None:
     last_train_metrics = {}
     last_val_metrics = {}
     evaluation_round = 0
+    train_predictions_buffer: list[torch.Tensor] = []
+    train_references_buffer: list[torch.Tensor] = []
 
     for epoch in range(starting_epoch, cfg.trainer.num_train_epochs):
         sampler = getattr(train_dataloader, "sampler", None)
@@ -1540,14 +1631,10 @@ def trainer(cfg: Config) -> None:
                             else logits
                         )
                     )
-                predictions, references = accelerator.gather(
-                    (predictions, batch["labels"])
-                )
-
-                train_metric_tracker.add_batch(
-                    predictions=predictions,
-                    references=references,
-                )
+                # Keep local train-metric buffers on CPU to avoid GPU-memory
+                # growth between eval windows.
+                train_predictions_buffer.append(predictions.detach().to("cpu"))
+                train_references_buffer.append(batch["labels"].detach().to("cpu"))
 
                 accelerator.backward(loss)
                 micro_loss_sum += float(loss.item())
@@ -1566,12 +1653,38 @@ def trainer(cfg: Config) -> None:
                     micro_loss_sum = 0.0
                     micro_loss_count = 0
 
+                    ran_evaluation = False
+                    metric_improved_this_eval = False
+
                     # Run evaluation
                     if (
                         cfg.trainer.eval_steps
                         and completed_steps % cfg.trainer.eval_steps == 0
                     ):
-                        train_metric = train_metric_tracker.compute()
+                        ran_evaluation = True
+                        train_metric: dict[str, Any] = {}
+                        if train_predictions_buffer and train_references_buffer:
+                            local_train_predictions = torch.cat(
+                                train_predictions_buffer,
+                                dim=0,
+                            ).to(accelerator.device)
+                            local_train_references = torch.cat(
+                                train_references_buffer,
+                                dim=0,
+                            ).to(accelerator.device)
+                            gathered_train_predictions, gathered_train_references = (
+                                accelerator.gather(
+                                    (local_train_predictions, local_train_references)
+                                )
+                            )
+                            train_metric_tracker.add_batch(
+                                predictions=gathered_train_predictions,
+                                references=gathered_train_references,
+                            )
+                            train_metric = train_metric_tracker.compute()
+                            train_predictions_buffer.clear()
+                            train_references_buffer.clear()
+
                         if len(train_metric) > 1:
                             train_metric["combined_score"] = np.mean(
                                 list(train_metric.values())
@@ -1696,11 +1809,6 @@ def trainer(cfg: Config) -> None:
                                 score_for_early_stop
                             )
 
-                        _save_metrics(
-                            cfg.trainer.output_dir, "train", last_train_metrics
-                        )
-                        _save_metrics(cfg.trainer.output_dir, "val", last_val_metrics)
-
                         all_results = {
                             f"eval_{k}": _to_serializable(v)
                             for k, v in eval_metric.items()
@@ -1711,12 +1819,24 @@ def trainer(cfg: Config) -> None:
                                 for k, v in results.items()
                             }
 
-                        result_path = (
-                            output_dir / f"all_results_step_{completed_steps}.json"
-                        )
-                        with result_path.open("w", encoding="utf-8") as f:
-                            accelerator.print(f"Writing eval metrics to {result_path}")
-                            json.dump(all_results, f, indent=2)
+                        if accelerator.is_main_process:
+                            _save_metrics(
+                                cfg.trainer.output_dir, "train", last_train_metrics
+                            )
+                            _save_metrics(
+                                cfg.trainer.output_dir,
+                                "val",
+                                last_val_metrics,
+                            )
+                            result_path = (
+                                output_dir / f"all_results_step_{completed_steps}.json"
+                            )
+                            with result_path.open("w", encoding="utf-8") as f:
+                                accelerator.print(
+                                    f"Writing eval metrics to {result_path}"
+                                )
+                                json.dump(all_results, f, indent=2)
+                        accelerator.wait_for_everyone()
 
                         fallback_metric = next(iter(val_metrics.values()), 0.0)
                         curr_accuracy = (
@@ -1724,10 +1844,10 @@ def trainer(cfg: Config) -> None:
                             if score_for_early_stop is not None
                             else fallback_metric
                         )
-                        metric_improved = curr_accuracy > prev_accuracy
+                        metric_improved_this_eval = curr_accuracy > prev_accuracy
 
                         # Update early stopping counter
-                        if metric_improved:
+                        if metric_improved_this_eval:
                             prev_accuracy = curr_accuracy
                             early_stopping_counter = 0
 
@@ -1743,38 +1863,22 @@ def trainer(cfg: Config) -> None:
                             )
                             early_stop = True
 
-                        # Save model checkpoint based on save_strategy
-                        save_strategy = getattr(cfg.trainer, "save_strategy", "steps")
-                        should_save = False
-
-                        if (
-                            save_strategy == "epoch"
-                            and completed_steps % num_update_steps_per_epoch == 0
-                        ):
-                            should_save = True
-                        elif save_strategy == "steps" and hasattr(
-                            cfg.trainer, "save_steps"
-                        ):
-                            if completed_steps % cfg.trainer.save_steps == 0:
-                                should_save = True
-                        elif save_strategy == "best":
-                            # Save only if this is the best model so far
-                            if metric_improved:
-                                should_save = True
-                        elif save_strategy != "no":
-                            # Default to saving at eval steps if strategy is not 'no'
-                            should_save = True
-
-                        # Only save checkpoint if explicitly enabled
-                        save_model = getattr(cfg.trainer, "save_model", True)
-                        # save_total_limit controls pruning only. save_total_limit=0
-                        # means keep all checkpoints while still saving.
-                        if should_save and save_model:
-                            save_training_checkpoint(
-                                cfg, model, accelerator, completed_steps
-                            )
-
                         model.train()
+
+                    should_save = _should_save_glue_checkpoint(
+                        save_strategy=save_strategy,
+                        completed_steps=completed_steps,
+                        num_update_steps_per_epoch=num_update_steps_per_epoch,
+                        save_steps=save_steps,
+                        eval_ran_this_step=ran_evaluation,
+                        metric_improved_this_eval=metric_improved_this_eval,
+                    )
+                    # save_total_limit controls pruning only. save_total_limit=0
+                    # means keep all checkpoints while still saving.
+                    if should_save and save_model:
+                        save_training_checkpoint(
+                            cfg, model, accelerator, completed_steps
+                        )
 
             if completed_steps >= cfg.trainer.max_steps or early_stop:
                 break
@@ -1851,24 +1955,29 @@ def trainer(cfg: Config) -> None:
     accelerator.end_training()
 
     # Save final results to disk
-    _save_metrics(
-        cfg.trainer.output_dir,
-        "final",
-        {**final_metrics, "train_loss": final_train_loss, "epoch": final_epoch_value},
-    )
-
     final_eval_dump = {
         f"eval_{k}": _to_serializable(v) for k, v in final_metrics.items()
     }
-
-    with (output_dir / "all_results.json").open("w", encoding="utf-8") as f:
-        json.dump(final_eval_dump, f, indent=2)
-
-    # Also save to timestamped file for clarity
-    with (output_dir / f"all_results_step_{completed_steps}.json").open(
-        "w", encoding="utf-8"
-    ) as f:
-        json.dump(final_eval_dump, f, indent=2)
-        logger.info(
-            f"Final results saved to {cfg.trainer.output_dir}/all_results_step_{completed_steps}.json"
+    if accelerator.is_main_process:
+        _save_metrics(
+            cfg.trainer.output_dir,
+            "final",
+            {
+                **final_metrics,
+                "train_loss": final_train_loss,
+                "epoch": final_epoch_value,
+            },
         )
+
+        with (output_dir / "all_results.json").open("w", encoding="utf-8") as f:
+            json.dump(final_eval_dump, f, indent=2)
+
+        # Also save to timestamped file for clarity
+        with (output_dir / f"all_results_step_{completed_steps}.json").open(
+            "w", encoding="utf-8"
+        ) as f:
+            json.dump(final_eval_dump, f, indent=2)
+            logger.info(
+                f"Final results saved to {cfg.trainer.output_dir}/all_results_step_{completed_steps}.json"
+            )
+    accelerator.wait_for_everyone()

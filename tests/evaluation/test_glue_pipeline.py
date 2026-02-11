@@ -7,7 +7,6 @@ from pathlib import Path
 from unittest import mock
 
 import torch
-from accelerate.utils import DistributedType
 
 from neobert.config import Config, ConfigLoader
 
@@ -374,9 +373,9 @@ class TestGLUETaskSpecific(unittest.TestCase):
     def test_save_training_checkpoint_zero_limit_still_saves(self):
         """Ensure save_total_limit=0 keeps all GLUE checkpoints while still saving."""
         from neobert.glue.train import save_training_checkpoint
+        from neobert.checkpointing import MODEL_WEIGHTS_NAME
 
         class DummyAccelerator:
-            distributed_type = DistributedType.NO
             is_main_process = True
 
             @staticmethod
@@ -390,6 +389,11 @@ class TestGLUETaskSpecific(unittest.TestCase):
             @staticmethod
             def unwrap_model(model):
                 return model
+
+            @staticmethod
+            def get_state_dict(model, unwrap=True):
+                del unwrap
+                return model.state_dict()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = Config()
@@ -403,19 +407,18 @@ class TestGLUETaskSpecific(unittest.TestCase):
             save_training_checkpoint(cfg, model, accelerator, completed_steps=10)
             save_training_checkpoint(cfg, model, accelerator, completed_steps=20)
 
-            ckpt_root = Path(tmpdir) / "model_checkpoints"
-            resume_root = Path(tmpdir) / "checkpoints"
-            self.assertTrue((ckpt_root / "10").exists())
-            self.assertTrue((ckpt_root / "20").exists())
-            self.assertTrue((resume_root / "10").exists())
-            self.assertTrue((resume_root / "20").exists())
+            checkpoint_root = Path(tmpdir) / "checkpoints"
+            self.assertTrue((checkpoint_root / "10").exists())
+            self.assertTrue((checkpoint_root / "20").exists())
+            self.assertTrue((checkpoint_root / "10" / MODEL_WEIGHTS_NAME).exists())
+            self.assertTrue((checkpoint_root / "20" / MODEL_WEIGHTS_NAME).exists())
+            self.assertFalse((Path(tmpdir) / "model_checkpoints").exists())
 
     def test_save_training_checkpoint_prunes_only_above_limit(self):
         """Ensure retention keeps exactly N checkpoints after each save."""
         from neobert.glue.train import save_training_checkpoint
 
         class DummyAccelerator:
-            distributed_type = DistributedType.NO
             is_main_process = True
 
             @staticmethod
@@ -429,6 +432,11 @@ class TestGLUETaskSpecific(unittest.TestCase):
             @staticmethod
             def unwrap_model(model):
                 return model
+
+            @staticmethod
+            def get_state_dict(model, unwrap=True):
+                del unwrap
+                return model.state_dict()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = Config()
@@ -443,12 +451,10 @@ class TestGLUETaskSpecific(unittest.TestCase):
                 save_training_checkpoint(cfg, model, accelerator, completed_steps=10)
                 save_training_checkpoint(cfg, model, accelerator, completed_steps=20)
 
-            ckpt_root = Path(tmpdir) / "model_checkpoints"
-            resume_root = Path(tmpdir) / "checkpoints"
-            self.assertFalse((ckpt_root / "10").exists())
-            self.assertTrue((ckpt_root / "20").exists())
-            self.assertFalse((resume_root / "10").exists())
-            self.assertTrue((resume_root / "20").exists())
+            checkpoint_root = Path(tmpdir) / "checkpoints"
+            self.assertFalse((checkpoint_root / "10").exists())
+            self.assertTrue((checkpoint_root / "20").exists())
+            self.assertFalse((Path(tmpdir) / "model_checkpoints").exists())
 
     def test_resolve_glue_training_schedule_handles_epoch_and_step_modes(self):
         """Ensure schedule helper computes steps/epochs from prepared loader length."""
@@ -485,6 +491,51 @@ class TestGLUETaskSpecific(unittest.TestCase):
         cfg.glue.pretrained_checkpoint = None
 
         validate_glue_config(cfg)
+
+    def test_should_save_glue_checkpoint_respects_strategy_semantics(self):
+        """Ensure step/epoch saves are independent of evaluation cadence."""
+        from neobert.glue.train import _should_save_glue_checkpoint
+
+        self.assertTrue(
+            _should_save_glue_checkpoint(
+                save_strategy="steps",
+                completed_steps=10,
+                num_update_steps_per_epoch=8,
+                save_steps=5,
+                eval_ran_this_step=False,
+                metric_improved_this_eval=False,
+            )
+        )
+        self.assertTrue(
+            _should_save_glue_checkpoint(
+                save_strategy="epoch",
+                completed_steps=16,
+                num_update_steps_per_epoch=8,
+                save_steps=None,
+                eval_ran_this_step=False,
+                metric_improved_this_eval=False,
+            )
+        )
+        self.assertFalse(
+            _should_save_glue_checkpoint(
+                save_strategy="best",
+                completed_steps=16,
+                num_update_steps_per_epoch=8,
+                save_steps=None,
+                eval_ran_this_step=False,
+                metric_improved_this_eval=True,
+            )
+        )
+        self.assertTrue(
+            _should_save_glue_checkpoint(
+                save_strategy="best",
+                completed_steps=16,
+                num_update_steps_per_epoch=8,
+                save_steps=None,
+                eval_ran_this_step=True,
+                metric_improved_this_eval=True,
+            )
+        )
 
 
 if __name__ == "__main__":
