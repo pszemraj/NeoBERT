@@ -1533,6 +1533,7 @@ def trainer(cfg: Config) -> None:
                         model,
                         input_ids=batch["input_ids"],
                         attention_mask=batch["attention_mask"],
+                        token_type_ids=batch.get("token_type_ids"),
                         use_hf_signature=from_hub,
                     )
 
