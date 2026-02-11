@@ -16,6 +16,31 @@ configs/
   contrastive/
 ```
 
+## Shared Explicit Defaults
+
+Pretraining and GLUE configs now include a small set of explicit defaults that
+users commonly ask about (instead of relying on implicit schema defaults):
+
+- `tokenizer.truncation: true`
+- `wandb.enabled: true|false` (explicit per config)
+- No deprecated `trainer.report_to` fields
+
+Pretraining configs also make these defaults explicit:
+
+- `datacollator.mask_all: false` (standard sampled-token 80/10/10 corruption)
+- `trainer.masked_logits_only_loss: true`
+- `trainer.log_train_accuracy: true`
+- `trainer.log_grad_norm: true`
+- `trainer.log_weight_norms: true`
+- `trainer.enforce_full_packed_batches: true`
+
+GLUE configs also make these defaults explicit:
+
+- `glue.num_workers: 4`
+- `glue.preprocessing_num_proc: 4`
+- `trainer.save_steps` is set to a positive value (even when `save_strategy: "no"`)
+  so configs pass strict validation
+
 ## Pretraining Configs
 
 - `pretrain_neobert.yaml` - baseline recipe

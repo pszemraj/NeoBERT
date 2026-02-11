@@ -29,9 +29,11 @@ tokenizer:
   name: "bert-base-uncased"
   vocab_size: 30522
   max_length: 512
+  truncation: true
 
 datacollator:
   mlm_probability: 0.15
+  mask_all: false
   pad_to_multiple_of: 8
 
 trainer:
@@ -40,10 +42,15 @@ trainer:
   per_device_train_batch_size: 8
   per_device_eval_batch_size: 32
   gradient_accumulation_steps: 2
+  enforce_full_packed_batches: true
   logging_steps: 10
+  log_train_accuracy: true
+  log_grad_norm: true
+  log_weight_norms: true
   eval_steps: 50
   save_steps: 50
   mixed_precision: "bf16"
+  masked_logits_only_loss: true
   gradient_checkpointing: false
   resume_from_checkpoint: false
 
