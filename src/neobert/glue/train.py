@@ -630,54 +630,48 @@ def load_pretrained_weights(
     :return torch.nn.Module: Model with loaded weights.
     """
     checkpoint_path = Path(checkpoint_dir) / str(checkpoint_id)
+    state_dict_path = checkpoint_path / MODEL_WEIGHTS_NAME
 
-    # Check if it's a DeepSpeed checkpoint
-    is_deepspeed = (checkpoint_path / "zero_to_fp32.py").exists()
-
-    if is_deepspeed:
-        logger.info(f"Loading DeepSpeed checkpoint from {checkpoint_path}")
-        try:
-            state_dict = load_deepspeed_fp32_state_dict(
-                checkpoint_path,
-            )
-            model.load_state_dict(state_dict, strict=False)
-            logger.info("Successfully loaded DeepSpeed checkpoint")
-        except Exception as e:
-            logger.error(f"Failed to load DeepSpeed checkpoint: {e}")
-            raise
-    else:
-        # Load state_dict directly
-        state_dict_path = checkpoint_path / MODEL_WEIGHTS_NAME
-        if not state_dict_path.exists():
-            raise FileNotFoundError(
-                f"No {MODEL_WEIGHTS_NAME} found at {state_dict_path}"
-            )
-
+    # Portable safetensors payload is preferred when available.
+    if state_dict_path.exists():
         logger.info(f"Loading state dict from {state_dict_path}")
         state_dict = load_model_safetensors(checkpoint_path, map_location="cpu")
-
-        # Log state dict info
         logger.info(f"Loaded state dict with {len(state_dict)} keys")
-
-        # Remove classifier and decoder keys for fine-tuning
-        cleaned_state_dict = {
-            k: v
-            for k, v in state_dict.items()
-            if "classifier" not in k and "decoder" not in k
-        }
-        logger.info(f"After filtering: {len(cleaned_state_dict)} keys to load")
-
-        # Load into model
-        missing_keys, unexpected_keys = model.load_state_dict(
-            cleaned_state_dict, strict=False
+        logger.info(f"✅ Successfully loaded pretrained weights from {state_dict_path}")
+    else:
+        logger.warning(
+            f"No {MODEL_WEIGHTS_NAME} found at {state_dict_path}; "
+            "attempting DeepSpeed fp32 shard conversion."
+        )
+        try:
+            state_dict = load_deepspeed_fp32_state_dict(checkpoint_path)
+        except Exception as exc:
+            raise FileNotFoundError(
+                f"Unable to load checkpoint {checkpoint_path}: expected either "
+                f"{MODEL_WEIGHTS_NAME} or a DeepSpeed ZeRO checkpoint layout."
+            ) from exc
+        logger.info(
+            "Loaded fp32 state dict from DeepSpeed checkpoint shards at "
+            f"{checkpoint_path}"
         )
 
-        if missing_keys:
-            logger.info(f"Missing keys: {missing_keys}")
-        if unexpected_keys:
-            logger.info(f"Unexpected keys: {unexpected_keys}")
+    # Remove classifier and decoder keys for fine-tuning.
+    cleaned_state_dict = {
+        k: v
+        for k, v in state_dict.items()
+        if "classifier" not in k and "decoder" not in k
+    }
+    logger.info(f"After filtering: {len(cleaned_state_dict)} keys to load")
 
-        logger.info(f"✅ Successfully loaded pretrained weights from {state_dict_path}")
+    # Load into model
+    missing_keys, unexpected_keys = model.load_state_dict(
+        cleaned_state_dict, strict=False
+    )
+
+    if missing_keys:
+        logger.info(f"Missing keys: {missing_keys}")
+    if unexpected_keys:
+        logger.info(f"Unexpected keys: {unexpected_keys}")
 
     return model
 
