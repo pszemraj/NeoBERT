@@ -74,6 +74,30 @@ overrides for sweep-style runs.
 - Circular variable references fail fast with an explicit error.
 - Unresolved `$variables.*` tokens in strings emit warnings with field location.
 
+Example: one `seq_len` driving multiple runtime fields (without coupling model
+context length yet):
+
+```yaml
+variables:
+  seq_len: 1024
+  run_tag: pretrain-1024
+
+dataset:
+  max_seq_length: $variables.seq_len
+
+tokenizer:
+  max_length: $variables.seq_len
+
+datacollator:
+  max_length: $variables.seq_len
+
+wandb:
+  name: "neobert-{$variables.run_tag}"
+```
+
+Use this pattern for shared run-time sequence settings. Keep
+`model.max_position_embeddings` as an explicit architecture decision.
+
 ### Dot-path overrides in Python
 
 When calling `ConfigLoader.load(path, overrides=...)`, overrides can be either:
