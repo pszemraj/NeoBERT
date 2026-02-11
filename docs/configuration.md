@@ -10,6 +10,7 @@ This page is the primary source of truth for NeoBERT's YAML config schema
 ---
 
 - [How To Use This Page](#how-to-use-this-page)
+- [Variables and Dot Overrides](#variables-and-dot-overrides)
 - [High-Impact Settings](#high-impact-settings)
 - [Model Architecture](#model-architecture)
   - [Core](#core)
@@ -55,6 +56,50 @@ This page is the primary source of truth for NeoBERT's YAML config schema
 - Defaults shown here are dataclass defaults unless noted.
 - High-impact tables are summaries; field semantics are defined in section tables.
 - Unknown keys fail fast during config loading.
+
+## Variables and Dot Overrides
+
+`ConfigLoader.load(...)` supports a small YAML variable system and post-load dot
+overrides for sweep-style runs.
+
+### YAML variables
+
+- Define top-level `variables:` in YAML.
+- Use exact replacement for type-preserving values:
+  - `dataset.max_seq_length: $variables.seq_len`
+- Use inline interpolation for strings:
+  - `wandb.name: "run-{$variables.tag}"`
+  - `wandb.name: "run-${variables.tag}"` (alternate form)
+- Nested variable references are supported.
+- Circular variable references fail fast with an explicit error.
+- Unresolved `$variables.*` tokens in strings emit warnings with field location.
+
+### Dot-path overrides in Python
+
+When calling `ConfigLoader.load(path, overrides=...)`, overrides can be either:
+
+- a nested mapping (existing behavior), or
+- a list of dot-path strings, for example:
+
+```python
+cfg = ConfigLoader.load(
+    "configs/pretraining/pretrain_neobert100m_smollm2data_muonclip.yaml",
+    overrides=[
+        "trainer.max_steps=2000",
+        "optimizer.lr=2e-4",
+        "dataset.streaming=false",
+    ],
+)
+```
+
+Accepted list token forms:
+
+- `section.key=value`
+- `--section.key=value`
+- `--section.key value`
+
+Unknown paths and invalid value types fail fast with path-specific errors.
+Overrides are validated with the same semantic checks as base YAML configs.
 
 ## High-Impact Settings
 

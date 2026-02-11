@@ -1,6 +1,7 @@
 """Configuration dataclasses and helpers for NeoBERT runs."""
 
 import argparse
+import re
 import warnings
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, fields
@@ -377,6 +378,363 @@ class Config:
 class ConfigLoader:
     """Load and merge configuration from YAML files and command line arguments."""
 
+    _VARIABLE_EXACT_PATTERN = re.compile(r"^\$variables\.([A-Za-z0-9_.-]+)$")
+    _VARIABLE_INLINE_PATTERN = re.compile(
+        r"\{\$variables\.([A-Za-z0-9_.-]+)\}|\$\{variables\.([A-Za-z0-9_.-]+)\}"
+    )
+    _VARIABLE_TOKEN_PATTERN = re.compile(r"\$variables\.([A-Za-z0-9_.-]+)")
+
+    @staticmethod
+    def _resolve_yaml_variables(cfg_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Resolve top-level ``variables`` references in a YAML mapping.
+
+        Supported forms:
+        - ``$variables.foo`` for exact, type-preserving replacement.
+        - ``{$variables.foo}`` and ``${variables.foo}`` for inline interpolation.
+
+        :param dict[str, Any] cfg_dict: Raw YAML mapping.
+        :raises ValueError: If variables section is malformed or references are cyclic.
+        :return dict[str, Any]: Mapping with variables resolved.
+        """
+        if not isinstance(cfg_dict, dict):
+            return cfg_dict
+
+        source = deepcopy(cfg_dict)
+        variables = source.pop("variables", None)
+        if variables is None:
+            return source
+        if not isinstance(variables, dict):
+            raise ValueError("Top-level 'variables' must be a mapping when provided.")
+
+        resolved_variables: Dict[str, Any] = {}
+        resolving_stack: List[str] = []
+        unresolved_refs: Dict[str, set[str]] = {}
+
+        def _lookup_variable(path: str) -> Any:
+            """Lookup a variable value by dot path.
+
+            :param str path: Dot path relative to ``variables``.
+            :raises KeyError: If the variable path does not exist.
+            :return Any: Raw variable value.
+            """
+            current: Any = variables
+            for segment in path.split("."):
+                if not isinstance(current, dict) or segment not in current:
+                    raise KeyError(path)
+                current = current[segment]
+            return current
+
+        def _resolve_variable(path: str) -> Any:
+            """Resolve a single variable path with cycle detection.
+
+            :param str path: Dot path inside ``variables``.
+            :raises ValueError: If a circular reference is detected.
+            :raises KeyError: If the path is unknown.
+            :return Any: Resolved variable value.
+            """
+            if path in resolved_variables:
+                return deepcopy(resolved_variables[path])
+            if path in resolving_stack:
+                cycle = " -> ".join(resolving_stack + [path])
+                raise ValueError(
+                    f"Circular variable reference detected in config variables: {cycle}"
+                )
+
+            raw_value = _lookup_variable(path)
+            resolving_stack.append(path)
+            try:
+                resolved_value = _resolve_node(raw_value, f"variables.{path}")
+            finally:
+                resolving_stack.pop()
+
+            resolved_variables[path] = resolved_value
+            return deepcopy(resolved_value)
+
+        def _resolve_string(value: str, location: str) -> Any:
+            """Resolve variable tokens in a string.
+
+            :param str value: String value to resolve.
+            :param str location: Dot path used for diagnostics.
+            :raises ValueError: If an exact variable token points to an unknown path.
+            :return Any: Resolved value.
+            """
+            exact_match = ConfigLoader._VARIABLE_EXACT_PATTERN.fullmatch(value)
+            if exact_match:
+                var_path = exact_match.group(1)
+                try:
+                    return _resolve_variable(var_path)
+                except KeyError as exc:
+                    raise ValueError(
+                        f"Unknown variable reference at '{location}': "
+                        f"$variables.{var_path}"
+                    ) from exc
+
+            def _replace_inline(match: re.Match[str]) -> str:
+                var_path = match.group(1) or match.group(2)
+                if var_path is None:
+                    return match.group(0)
+                try:
+                    replacement = _resolve_variable(var_path)
+                except KeyError:
+                    unresolved_refs.setdefault(location, set()).add(
+                        f"$variables.{var_path}"
+                    )
+                    return match.group(0)
+                return str(replacement)
+
+            resolved = ConfigLoader._VARIABLE_INLINE_PATTERN.sub(
+                _replace_inline,
+                value,
+            )
+
+            for unresolved in ConfigLoader._VARIABLE_TOKEN_PATTERN.findall(resolved):
+                unresolved_refs.setdefault(location, set()).add(
+                    f"$variables.{unresolved}"
+                )
+            return resolved
+
+        def _resolve_node(node: Any, location: str) -> Any:
+            """Resolve variables recursively for nested objects.
+
+            :param Any node: Nested mapping/list/scalar node.
+            :param str location: Dot path used for diagnostics.
+            :return Any: Resolved node.
+            """
+            if isinstance(node, dict):
+                return {
+                    key: _resolve_node(value, f"{location}.{key}")
+                    for key, value in node.items()
+                }
+            if isinstance(node, list):
+                return [
+                    _resolve_node(item, f"{location}[{idx}]")
+                    for idx, item in enumerate(node)
+                ]
+            if isinstance(node, str):
+                return _resolve_string(node, location)
+            return node
+
+        resolved_config = _resolve_node(source, "config")
+
+        for location in sorted(unresolved_refs):
+            tokens = ", ".join(sorted(unresolved_refs[location]))
+            warnings.warn(
+                f"Unresolved variable token(s) at '{location}': {tokens}",
+                UserWarning,
+                stacklevel=3,
+            )
+
+        return resolved_config
+
+    @staticmethod
+    def _normalize_dot_overrides(overrides: List[str]) -> List[tuple[str, str]]:
+        """Normalize dot-path overrides from ``key=value`` or ``--key value`` forms.
+
+        :param list[str] overrides: Raw override tokens.
+        :raises ValueError: If override syntax is malformed.
+        :return list[tuple[str, str]]: Normalized ``(path, raw_value)`` tuples.
+        """
+        parsed: List[tuple[str, str]] = []
+        idx = 0
+        while idx < len(overrides):
+            token = str(overrides[idx]).strip()
+            if not token:
+                idx += 1
+                continue
+
+            if token.startswith("--"):
+                stripped = token[2:].strip()
+                if not stripped:
+                    raise ValueError(
+                        "Invalid override token '--'. Expected '--section.key=value'."
+                    )
+                if "=" in stripped:
+                    key, value = stripped.split("=", 1)
+                    if not key:
+                        raise ValueError(
+                            f"Invalid override '{token}'. Missing override key."
+                        )
+                    parsed.append((key, value))
+                    idx += 1
+                    continue
+                if idx + 1 >= len(overrides):
+                    raise ValueError(
+                        f"Invalid override '{token}': missing value token."
+                    )
+                value = str(overrides[idx + 1])
+                if value.startswith("--"):
+                    raise ValueError(
+                        f"Invalid override '{token}': expected value after key token."
+                    )
+                parsed.append((stripped, value))
+                idx += 2
+                continue
+
+            if "=" not in token:
+                raise ValueError(
+                    f"Invalid override '{token}'. Expected 'section.key=value'."
+                )
+            key, value = token.split("=", 1)
+            if not key:
+                raise ValueError(f"Invalid override '{token}'. Missing override key.")
+            parsed.append((key.strip(), value))
+            idx += 1
+
+        return parsed
+
+    @staticmethod
+    def _coerce_dot_override_value(
+        path: str, raw_value: str, current_value: Any
+    ) -> Any:
+        """Coerce a dot override token into the existing field type.
+
+        :param str path: Dot-path field identifier.
+        :param str raw_value: Override value as provided by CLI/list.
+        :param Any current_value: Existing in-memory field value.
+        :raises ValueError: If coercion fails.
+        :return Any: Coerced value.
+        """
+        if isinstance(current_value, bool):
+            try:
+                return _parse_cli_bool(raw_value)
+            except argparse.ArgumentTypeError as exc:
+                raise ValueError(
+                    f"Invalid boolean override for '{path}': {raw_value!r}. "
+                    "Expected true/false, 1/0, yes/no, or on/off."
+                ) from exc
+
+        if isinstance(current_value, int) and not isinstance(current_value, bool):
+            try:
+                return int(raw_value)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid integer override for '{path}': {raw_value!r}."
+                ) from exc
+
+        if isinstance(current_value, float):
+            try:
+                return float(raw_value)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid float override for '{path}': {raw_value!r}."
+                ) from exc
+
+        if isinstance(current_value, str):
+            return raw_value
+
+        parsed = yaml.safe_load(raw_value)
+        if current_value is None:
+            return parsed
+
+        if isinstance(current_value, list):
+            if not isinstance(parsed, list):
+                raise ValueError(
+                    f"Invalid list override for '{path}': {raw_value!r}. "
+                    'Use YAML list syntax, e.g. "[a, b]".'
+                )
+            return parsed
+
+        if isinstance(current_value, dict):
+            if not isinstance(parsed, dict):
+                raise ValueError(
+                    f"Invalid mapping override for '{path}': {raw_value!r}. "
+                    'Use YAML mapping syntax, e.g. "{k: v}".'
+                )
+            return parsed
+
+        return parsed
+
+    @staticmethod
+    def _apply_dot_override(config: Config, path: str, raw_value: str) -> None:
+        """Apply one dot-path override directly onto a config object.
+
+        :param Config config: Configuration object to mutate.
+        :param str path: Dot-path override key.
+        :param str raw_value: Raw override value string.
+        :raises ValueError: If path is unknown or value cannot be coerced.
+        """
+        path = str(path).strip()
+        if not path or "." in {path[0], path[-1]}:
+            raise ValueError(
+                f"Invalid override path '{path}'. Expected dotted key path."
+            )
+
+        parts = path.split(".")
+        current: Any = config
+        traversed: List[str] = []
+
+        for part in parts[:-1]:
+            traversed.append(part)
+            if isinstance(current, dict):
+                if part not in current:
+                    available = ", ".join(sorted(current.keys())) or "<empty>"
+                    raise ValueError(
+                        f"Unknown override path '{path}': key '{part}' not found under "
+                        f"'{'.'.join(traversed[:-1]) or '<root>'}'. Available keys: "
+                        f"{available}."
+                    )
+                current = current[part]
+                continue
+
+            if not hasattr(current, part):
+                available_fields = (
+                    ", ".join(sorted(f.name for f in fields(type(current))))
+                    if hasattr(current, "__dataclass_fields__")
+                    else "<none>"
+                )
+                raise ValueError(
+                    f"Unknown override path '{path}': segment '{part}' does not exist "
+                    f"on '{type(current).__name__}'. Available fields: {available_fields}."
+                )
+            current = getattr(current, part)
+
+        leaf = parts[-1]
+        if isinstance(current, dict):
+            if leaf not in current:
+                available = ", ".join(sorted(current.keys())) or "<empty>"
+                raise ValueError(
+                    f"Unknown override path '{path}': key '{leaf}' not found. "
+                    f"Available keys: {available}."
+                )
+            current_value = current[leaf]
+            current[leaf] = ConfigLoader._coerce_dot_override_value(
+                path,
+                raw_value,
+                current_value,
+            )
+            return
+
+        if not hasattr(current, leaf):
+            available_fields = (
+                ", ".join(sorted(f.name for f in fields(type(current))))
+                if hasattr(current, "__dataclass_fields__")
+                else "<none>"
+            )
+            raise ValueError(
+                f"Unknown override path '{path}': field '{leaf}' does not exist on "
+                f"'{type(current).__name__}'. Available fields: {available_fields}."
+            )
+
+        current_value = getattr(current, leaf)
+        coerced_value = ConfigLoader._coerce_dot_override_value(
+            path,
+            raw_value,
+            current_value,
+        )
+        setattr(current, leaf, coerced_value)
+
+    @staticmethod
+    def _apply_dot_overrides(config: Config, overrides: List[str]) -> None:
+        """Apply dot-path overrides to an instantiated config.
+
+        :param Config config: Configuration object to mutate.
+        :param list[str] overrides: Dot-path overrides.
+        :raises ValueError: If any override token/path/value is invalid.
+        """
+        for path, raw_value in ConfigLoader._normalize_dot_overrides(overrides):
+            ConfigLoader._apply_dot_override(config, path, raw_value)
+        ConfigLoader._validate_config_values(config)
+
     @staticmethod
     def load_yaml(path: Union[str, Path]) -> Dict[str, Any]:
         """Load a YAML configuration file.
@@ -385,7 +743,12 @@ class ConfigLoader:
         :return dict[str, Any]: Parsed configuration mapping.
         """
         with open(path, "r") as f:
-            return yaml.safe_load(f) or {}
+            raw_cfg = yaml.safe_load(f) or {}
+        if not isinstance(raw_cfg, dict):
+            raise ValueError(
+                f"Config file '{path}' must define a top-level YAML mapping."
+            )
+        return ConfigLoader._resolve_yaml_variables(raw_cfg)
 
     @staticmethod
     def merge_configs(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -1365,13 +1728,15 @@ class ConfigLoader:
     @staticmethod
     def load(
         config_file: Optional[Union[str, Path]] = None,
-        overrides: Optional[Dict[str, Any]] = None,
+        overrides: Optional[Union[Dict[str, Any], List[str]]] = None,
         preprocess: bool = False,
     ) -> Config:
         """Load configuration from file and apply overrides.
 
         :param str | Path | None config_file: Optional YAML configuration path.
-        :param dict[str, Any] | None overrides: Optional override mapping.
+        :param dict[str, Any] | list[str] | None overrides: Optional overrides.
+            - mapping form is merged into YAML before dataclass hydration.
+            - list form accepts ``section.key=value`` and ``--section.key value``.
         :param bool preprocess: Whether to resolve dynamic values (e.g., vocab size).
         :return Config: Loaded configuration.
         """
@@ -1382,10 +1747,17 @@ class ConfigLoader:
             config_dict = ConfigLoader.load_yaml(config_file)
 
         # Apply overrides
-        if overrides:
+        if isinstance(overrides, dict) and overrides:
             config_dict = ConfigLoader.merge_configs(config_dict, overrides)
+        elif overrides is not None and not isinstance(overrides, list):
+            raise TypeError(
+                "ConfigLoader.load(..., overrides=...) expects either a mapping "
+                "or a list of dot-path override strings."
+            )
 
         config = ConfigLoader.dict_to_config(config_dict)
+        if isinstance(overrides, list) and overrides:
+            ConfigLoader._apply_dot_overrides(config, overrides)
 
         # Preprocess config to resolve dynamic values
         if preprocess:

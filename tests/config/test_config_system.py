@@ -260,6 +260,120 @@ optimizer:
         finally:
             os.unlink(temp_config_path)
 
+    def test_yaml_variables_exact_and_inline_resolution(self):
+        """Ensure top-level variables resolve for exact and inline forms."""
+        config_data = {
+            "variables": {
+                "seq": 384,
+                "tag": "exp-a",
+                "nested": {"lr": 2e-4},
+            },
+            "dataset": {"max_seq_length": "$variables.seq"},
+            "tokenizer": {"max_length": "$variables.seq"},
+            "wandb": {"name": "run-{$variables.tag}"},
+            "optimizer": {"lr": "$variables.nested.lr"},
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            path = f.name
+            yaml.safe_dump(config_data, f)
+
+        try:
+            cfg = ConfigLoader.load(path)
+            self.assertEqual(cfg.dataset.max_seq_length, 384)
+            self.assertEqual(cfg.tokenizer.max_length, 384)
+            self.assertEqual(cfg.wandb.name, "run-exp-a")
+            self.assertEqual(cfg.optimizer.lr, 2e-4)
+        finally:
+            os.unlink(path)
+
+    def test_yaml_variables_circular_reference_raises(self):
+        """Ensure circular variable references fail fast."""
+        config_data = {
+            "variables": {
+                "a": "$variables.b",
+                "b": "$variables.c",
+                "c": "$variables.a",
+            },
+            "dataset": {"max_seq_length": "$variables.a"},
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            path = f.name
+            yaml.safe_dump(config_data, f)
+
+        try:
+            with self.assertRaises(ValueError):
+                ConfigLoader.load(path)
+        finally:
+            os.unlink(path)
+
+    def test_yaml_unresolved_variable_tokens_warn(self):
+        """Ensure unresolved inline variable tokens warn with location."""
+        config_data = {
+            "variables": {"tag": "abc"},
+            "wandb": {"name": "run-${variables.missing}-{$variables.tag}"},
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            path = f.name
+            yaml.safe_dump(config_data, f)
+
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                cfg = ConfigLoader.load(path)
+            self.assertEqual(cfg.wandb.name, "run-${variables.missing}-abc")
+            self.assertTrue(
+                any("Unresolved variable token(s)" in str(w.message) for w in caught)
+            )
+        finally:
+            os.unlink(path)
+
+    def test_load_dot_overrides_list_key_value_form(self):
+        """Ensure ``ConfigLoader.load`` supports key=value dot overrides."""
+        config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"
+        cfg = ConfigLoader.load(
+            str(config_path),
+            overrides=[
+                "trainer.max_steps=77",
+                "dataset.streaming=false",
+                "optimizer.lr=3e-4",
+            ],
+        )
+        self.assertEqual(cfg.trainer.max_steps, 77)
+        self.assertFalse(cfg.dataset.streaming)
+        self.assertEqual(cfg.optimizer.lr, 3e-4)
+
+    def test_load_dot_overrides_list_cli_style_form(self):
+        """Ensure ``ConfigLoader.load`` supports --key value override tokens."""
+        config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"
+        cfg = ConfigLoader.load(
+            str(config_path),
+            overrides=[
+                "--trainer.max_steps",
+                "42",
+                "--wandb.name=test-run",
+            ],
+        )
+        self.assertEqual(cfg.trainer.max_steps, 42)
+        self.assertEqual(cfg.wandb.name, "test-run")
+
+    def test_load_dot_overrides_unknown_path_raises(self):
+        """Ensure unknown dot-path overrides fail with clear diagnostics."""
+        config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"
+        with self.assertRaises(ValueError):
+            ConfigLoader.load(str(config_path), overrides=["trainer.not_real=1"])
+
+    def test_load_dot_overrides_invalid_bool_raises(self):
+        """Ensure strict boolean coercion is enforced in list overrides."""
+        config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"
+        with self.assertRaises(ValueError):
+            ConfigLoader.load(
+                str(config_path),
+                overrides=["dataset.streaming=truthy-but-invalid"],
+            )
+
     def test_config_validation(self):
         """Test configuration validation."""
         # Test invalid hidden_size (not divisible by num_attention_heads)
