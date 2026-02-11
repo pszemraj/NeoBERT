@@ -104,7 +104,6 @@ BASE_TRAINER = {
     "load_best_model_at_end": True,
     "mixed_precision": "bf16",
     "tf32": True,
-    "report_to": ["wandb"],
 }
 
 
@@ -278,6 +277,7 @@ def build_wandb_section(
     :return dict[str, object]: W&B configuration mapping.
     """
     return {
+        "enabled": True,
         "project": project,
         "name": f"{run_prefix}-{task}-{checkpoint_step}",
         "mode": "online",

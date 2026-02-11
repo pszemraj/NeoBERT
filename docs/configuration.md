@@ -423,7 +423,9 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 | `pretrained_checkpoint` | `str` | `"latest"` | Checkpoint selector for downstream tasks. |
 
 > [!NOTE]
-> Pretraining checkpoints are written under `output_dir/checkpoints/<step>/`.
+> Pretraining and GLUE resumable state checkpoints are written under
+> `output_dir/checkpoints/<step>/`.
+> GLUE also writes export snapshots under `output_dir/model_checkpoints/<step>/`.
 > Resume path resolution uses numeric step directories and picks the highest
 > available step for `resume_from_checkpoint: latest`.
 > DeepSpeed `latest` indirection files are optional legacy metadata and are only
@@ -488,6 +490,11 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 | `glue.transfer_from_task`        | `bool`               | `false`  | Transfer weights from another GLUE task head.            |
 | `glue.num_workers`               | `int`                | `4`      | Data worker count for GLUE pipeline.                     |
 | `glue.preprocessing_num_proc`    | `int`                | `4`      | Multiprocessing workers for GLUE preprocessing.          |
+
+> [!NOTE]
+> Worker-count knobs are task-scoped in the current runtime:
+> pretraining uses `dataset.num_workers`, GLUE uses `glue.num_workers`, and
+> contrastive uses `trainer.dataloader_num_workers`.
 
 ### Contrastive (`contrastive`)
 

@@ -192,9 +192,10 @@ These are explicitly tracked for sweep-readiness follow-up work:
 
 - Pretraining and contrastive now write one canonical tree at
   `checkpoints/<step>/`.
-- GLUE still uses a legacy `model_checkpoints/` layout for fine-tuning saves.
-- Move remaining task paths to one consistent checkpoint structure and retention
-  policy.
+- GLUE now writes resumable Accelerate state to `checkpoints/<step>/` and keeps
+  export-friendly model snapshots under `model_checkpoints/<step>/`.
+- Remaining follow-up: converge GLUE export assets onto the same canonical tree
+  used by pretraining/contrastive.
 
 1. Tighten sweep-time observability parity
 

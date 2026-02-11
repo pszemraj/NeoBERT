@@ -1,4 +1,4 @@
-"""Finetuning a NeoBERT model for sequence classification on GLUE or Super GLUE."""
+"""Fine-tune NeoBERT sequence classifiers on GLUE and GLUE-like NLI tasks."""
 
 import json
 import logging
@@ -7,6 +7,7 @@ import os
 import random
 import re
 import shutil
+import warnings
 from contextlib import nullcontext
 from copy import deepcopy
 from functools import partial
@@ -47,6 +48,7 @@ from neobert.scheduler import get_scheduler
 from neobert.training_utils import (
     _maybe_compile_model,
     _maybe_prepare_for_forward,
+    _resolve_resume_checkpoint,
     _unwrap_optimizer,
     create_accelerator,
     validate_muon_distributed_compatibility,
@@ -461,150 +463,6 @@ def get_evaluation(
     return {"predictions": predictions, "eval_metric": eval_metric}
 
 
-def run_evaluation_and_save(
-    model: torch.nn.Module,
-    eval_dataloader: DataLoader,
-    metric: Any,
-    cfg: Config,
-    accelerator: Accelerator,
-    dtype_pad_mask: torch.dtype,
-    is_regression: bool,
-    completed_steps: int,
-    epoch: int,
-    train_metric: Optional[dict[str, float]],
-    total_loss: float,
-    logger: logging.Logger,
-    mm_eval_dataloader: DataLoader | None = None,
-    mm_metric: Any | None = None,
-    use_hf_signature: bool = False,
-) -> tuple[dict[str, float], float, bool]:
-    """Run evaluation, log metrics, and save results.
-
-    :param torch.nn.Module model: Model to evaluate.
-    :param DataLoader eval_dataloader: Evaluation dataloader.
-    :param Any metric: Metric object for evaluation.
-    :param Config cfg: Training configuration.
-    :param Accelerator accelerator: Accelerator for logging/sync.
-    :param torch.dtype dtype_pad_mask: Dtype for attention mask.
-    :param bool is_regression: Whether task is regression.
-    :param int completed_steps: Completed training steps.
-    :param int epoch: Current epoch.
-    :param dict[str, float] | None train_metric: Training metric values.
-    :param float total_loss: Running total loss.
-    :param logging.Logger logger: Logger for output.
-    :param DataLoader | None mm_eval_dataloader: MNLI mismatched dataloader.
-    :param Any | None mm_metric: Metric for mismatched evaluation.
-    :param bool use_hf_signature: Whether to call model with HF-style kwargs.
-    :return tuple[dict[str, float], float, bool]: Metrics, score, early-stop flag.
-    """
-    glue_task = _resolve_glue_task(cfg)
-    model.eval()
-    eval_result = get_evaluation(
-        model=model,
-        dataloader=eval_dataloader,
-        accelerator=accelerator,
-        metric=metric,
-        dtype_pad_mask=dtype_pad_mask,
-        is_regression=is_regression,
-        return_predictions=False,
-        use_hf_signature=use_hf_signature,
-    )
-    eval_metric = eval_result["eval_metric"]
-
-    # Log metrics
-    if glue_task == "stsb" and "spearmanr" in eval_metric:
-        logger.info(
-            f"step {completed_steps} eval pearson: {eval_metric.get('pearson', 0):.4f}"
-        )
-        logger.info(
-            f"step {completed_steps} eval spearmanr: {eval_metric.get('spearmanr', 0):.4f}"
-        )
-    else:
-        logger.info(f"step {completed_steps} eval metric: {eval_metric}")
-
-    logger.info(f"step {completed_steps} train metric: {train_metric}")
-    logger.info(
-        f"step {completed_steps} train loss: {total_loss / completed_steps if completed_steps > 0 else 0}"
-    )
-
-    # Handle MNLI mismatched set
-    results = {}
-    if glue_task == "mnli":
-        results["accuracy"] = eval_metric["accuracy"]
-
-        if mm_eval_dataloader is not None and mm_metric is not None:
-            mm_eval_result = get_evaluation(
-                model=model,
-                dataloader=mm_eval_dataloader,
-                accelerator=accelerator,
-                metric=mm_metric,
-                dtype_pad_mask=dtype_pad_mask,
-                is_regression=is_regression,
-                return_predictions=False,
-                use_hf_signature=use_hf_signature,
-            )
-            mm_eval_metric = mm_eval_result["eval_metric"]
-            results["accuracy_mm"] = mm_eval_metric["accuracy"]
-            logger.info(
-                f"step {completed_steps} eval metric mismatched: {results['accuracy_mm']}"
-            )
-
-    # Prepare metrics for logging
-    metrics_to_log = {
-        "train_loss": total_loss / completed_steps if completed_steps > 0 else 0,
-        "epoch": epoch,
-        "step": completed_steps,
-        "learning_rate": model.module.config
-        if hasattr(model, "module")
-        else 0.0001,  # Placeholder
-    }
-
-    # Add evaluation metrics
-    metrics_for_score = eval_metric if glue_task != "mnli" else results
-    if glue_task != "mnli":
-        for key, value in eval_metric.items():
-            metrics_to_log[f"eval_{key}"] = value
-    else:
-        for key, value in results.items():
-            metrics_to_log[f"eval_{key}"] = value
-
-    score_for_early_stop = compute_glue_score(
-        glue_task, metrics_for_score or eval_metric
-    )
-    if score_for_early_stop is not None:
-        metrics_to_log["eval_score"] = score_for_early_stop
-
-    # Add training metrics
-    if train_metric:
-        for key, value in train_metric.items():
-            metrics_to_log[f"train_{key}"] = value
-
-    # Log to wandb
-    accelerator.log(metrics_to_log, step=completed_steps)
-
-    # Save results to JSON
-    all_results = {f"eval_{k}": v for k, v in eval_metric.items()}
-    if glue_task == "mnli":
-        all_results = {f"eval_{k}": v for k, v in results.items()}
-
-    output_file = (
-        Path(cfg.trainer.output_dir) / f"all_results_step_{completed_steps}.json"
-    )
-    with output_file.open("w", encoding="utf-8") as f:
-        json.dump(all_results, f, indent=2)
-    logger.info(f"Saved evaluation results to {output_file}")
-
-    # Return current accuracy for early stopping (use official GLUE score when available)
-    curr_accuracy = (
-        score_for_early_stop
-        if score_for_early_stop is not None
-        else list(eval_metric.values())[0]
-    )
-
-    model.train()
-    return eval_metric, curr_accuracy, False  # Last value is early_stop flag
-
-
 def get_best_checkpoint_path(
     base_dir: str, task: str, num_checkpoints_to_merge: int = 1
 ) -> tuple[str | None, list[int | None]]:
@@ -755,6 +613,73 @@ def load_pretrained_weights(
     return model
 
 
+def _resolve_checkpoint_retention_limit(cfg: Config) -> int:
+    """Resolve effective checkpoint retention limit from trainer config.
+
+    :param Config cfg: Runtime GLUE training configuration.
+    :return int: Maximum number of retained checkpoints (0 disables pruning).
+    """
+    save_total_limit = getattr(cfg.trainer, "save_total_limit", None)
+    if save_total_limit is not None:
+        return max(0, int(save_total_limit))
+    max_ckpt = getattr(cfg.trainer, "max_ckpt", None)
+    if max_ckpt is not None:
+        return max(0, int(max_ckpt))
+    return 0
+
+
+def _prune_step_checkpoints(checkpoint_dir: Path, retention_limit: int) -> None:
+    """Prune old numeric step checkpoint folders in ``checkpoint_dir``.
+
+    :param Path checkpoint_dir: Root directory containing ``<step>/`` folders.
+    :param int retention_limit: Number of newest numeric checkpoints to keep.
+    """
+    if retention_limit <= 0 or not checkpoint_dir.exists():
+        return
+
+    checkpoints: list[tuple[int, Path]] = []
+    for item_path in checkpoint_dir.iterdir():
+        if not item_path.is_dir():
+            continue
+        try:
+            checkpoints.append((int(item_path.name), item_path))
+        except ValueError:
+            continue
+
+    if len(checkpoints) <= retention_limit:
+        return
+
+    checkpoints.sort(key=lambda item: item[0])
+    for _, old_path in checkpoints[: len(checkpoints) - retention_limit]:
+        shutil.rmtree(old_path)
+        logger.info(f"Removed old checkpoint: {old_path} (limit={retention_limit})")
+
+
+def _resolve_glue_training_schedule(
+    cfg: Config,
+    *,
+    batches_per_process: int,
+) -> tuple[int, int, int]:
+    """Resolve training step/epoch schedule from prepared dataloader length.
+
+    :param Config cfg: Runtime training config.
+    :param int batches_per_process: Prepared per-process train dataloader length.
+    :return tuple[int, int, int]: (updates_per_epoch, max_steps, num_train_epochs).
+    """
+    updates_per_epoch = max(
+        1,
+        math.ceil(batches_per_process / int(cfg.trainer.gradient_accumulation_steps)),
+    )
+    if cfg.trainer.max_steps is None or cfg.trainer.max_steps <= 0:
+        num_train_epochs = max(1, int(cfg.trainer.num_train_epochs))
+        max_steps = num_train_epochs * updates_per_epoch
+        return updates_per_epoch, max_steps, num_train_epochs
+
+    max_steps = int(cfg.trainer.max_steps)
+    num_train_epochs = math.ceil(max_steps / updates_per_epoch)
+    return updates_per_epoch, max_steps, num_train_epochs
+
+
 def save_training_checkpoint(
     cfg: Config,
     model: torch.nn.Module,
@@ -768,41 +693,34 @@ def save_training_checkpoint(
     :param Accelerator accelerator: Accelerator instance.
     :param int completed_steps: Current training step.
     """
-    model_checkpoint_dir = Path(cfg.trainer.output_dir) / "model_checkpoints"
+    output_dir = Path(cfg.trainer.output_dir)
+    model_checkpoint_dir = output_dir / "model_checkpoints"
+    resume_checkpoint_dir = output_dir / "checkpoints"
+    checkpoint_tag = str(completed_steps)
 
-    max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
-    save_total_limit = getattr(cfg.trainer, "save_total_limit", None)
+    # Save resumable Accelerate state for true optimizer/scheduler resume.
+    accelerator.save_state(output_dir=str(resume_checkpoint_dir / checkpoint_tag))
+    accelerator.wait_for_everyone()
 
-    # Determine effective limit from save_total_limit (preferred) or max_ckpt
-    effective_limit = None
-    if save_total_limit is not None and save_total_limit > 0:
-        effective_limit = save_total_limit
-    elif max_ckpt is not None and max_ckpt > 0:
-        effective_limit = max_ckpt
-
-    if effective_limit is not None and model_checkpoint_dir.is_dir():
-        files = list(model_checkpoint_dir.iterdir())
-        iterations = sorted([int(f.name) for f in files if f.name.isdigit()])
-
-        # Remove oldest checkpoints until under limit
-        while iterations and len(iterations) >= effective_limit:
-            file_to_remove = iterations.pop(0)
-            shutil.rmtree(model_checkpoint_dir / str(file_to_remove))
-            print(
-                f"Deleted old model checkpoint {file_to_remove} due to limit "
-                f"(limit = {effective_limit})"
-            )
-
-    # Save the checkpoint
+    # Save export-friendly model checkpoint.
     if accelerator.distributed_type is DistributedType.DEEPSPEED:
         model.save_checkpoint(model_checkpoint_dir, tag=completed_steps)
     else:
-        path = model_checkpoint_dir / str(completed_steps)
-        path.mkdir(parents=True, exist_ok=True)
-        save_model_safetensors(
-            accelerator.unwrap_model(model),
-            path,
-        )
+        if accelerator.is_main_process:
+            path = model_checkpoint_dir / checkpoint_tag
+            path.mkdir(parents=True, exist_ok=True)
+            save_model_safetensors(
+                accelerator.unwrap_model(model),
+                path,
+            )
+    accelerator.wait_for_everyone()
+
+    if accelerator.is_main_process:
+        retention_limit = _resolve_checkpoint_retention_limit(cfg)
+        if retention_limit > 0:
+            _prune_step_checkpoints(model_checkpoint_dir, retention_limit)
+            _prune_step_checkpoints(resume_checkpoint_dir, retention_limit)
+    accelerator.wait_for_everyone()
 
 
 def _build_glue_attention_mask(
@@ -1009,7 +927,7 @@ def trainer(cfg: Config) -> None:
                 allow_special_token_rewrite=cfg.tokenizer.allow_special_token_rewrite,
             )
 
-    print("Loading metric...")
+    accelerator.print("Loading metric...")
     # Keep train/eval metric state separate so eval.compute() does not reset
     # the running train metric window and vice versa.
     train_metric_tracker = _load_glue_metric(glue_task, cfg.meta_task, cfg.id)
@@ -1030,7 +948,7 @@ def trainer(cfg: Config) -> None:
     #     return result
 
     # Loading the dataset
-    print("Loading dataset...")
+    accelerator.print("Loading dataset...")
     if glue_task == "snli":
         raw_datasets = load_dataset("stanfordnlp/snli")
         raw_datasets = raw_datasets.filter(lambda example: example["label"] != -1)
@@ -1048,7 +966,7 @@ def trainer(cfg: Config) -> None:
             ]
             return examples
 
-        raw_datasets.map(
+        raw_datasets = raw_datasets.map(
             collapse_classes,
             batched=True,
             desc="Collapsing classes into entailment and not entailment.",
@@ -1061,12 +979,6 @@ def trainer(cfg: Config) -> None:
             "json",
             data_dir=Path(os.environ["HF_DATASETS_CACHE"]) / "super_glue" / glue_task,
         )
-
-    # Split between train and validation for datasets that don't have it natively
-    if glue_task in ("axb", "axg"):
-        tmp = raw_datasets["train"].train_test_split(test_size=0.1)
-        raw_datasets["train"] = tmp["train"]
-        raw_datasets["validation"] = tmp["test"]
 
     # Preprocessing the datasets
     mapping = partial(process_function, tokenizer=tokenizer, cfg=cfg)
@@ -1103,6 +1015,14 @@ def trainer(cfg: Config) -> None:
         num_labels = len(label_list)
     else:
         num_labels = 1
+    if getattr(cfg.glue, "num_labels", None) not in (None, num_labels):
+        logger.warning(
+            "Config glue.num_labels=%s does not match dataset-inferred value=%s; "
+            "using inferred value.",
+            cfg.glue.num_labels,
+            num_labels,
+        )
+    cfg.glue.num_labels = num_labels
 
     # Log a few random samples from the training set:
     for index in random.sample(range(len(train_dataset)), 3):
@@ -1368,78 +1288,72 @@ def trainer(cfg: Config) -> None:
         muon_config=getattr(cfg.optimizer, "muon_config", None),
     )
 
-    # Calculate training steps consistently
-    num_update_steps_per_epoch = math.ceil(
-        len(train_dataloader) / cfg.trainer.gradient_accumulation_steps
+    # Prepare with accelerator before deriving epoch-based max_steps so distributed
+    # runs use per-process dataloader length (not global pre-shard length).
+    model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
+        model,
+        optimizer,
+        train_dataloader,
+        eval_dataloader,
     )
 
-    # Determine max_steps: explicit value or calculate from epochs
-    if cfg.trainer.max_steps is None or cfg.trainer.max_steps <= 0:
-        cfg.trainer.max_steps = (
-            cfg.trainer.num_train_epochs * num_update_steps_per_epoch
+    if glue_task == "mnli":
+        mm_eval_dataloader = accelerator.prepare(mm_eval_dataloader)
+
+    num_update_steps_per_epoch, resolved_max_steps, resolved_num_train_epochs = (
+        _resolve_glue_training_schedule(
+            cfg,
+            batches_per_process=len(train_dataloader),
         )
-        logger.info(f"Calculated max_steps from epochs: {cfg.trainer.max_steps}")
-    else:
-        logger.info(f"Using explicit max_steps: {cfg.trainer.max_steps}")
+    )
+    cfg.trainer.max_steps = resolved_max_steps
+    cfg.trainer.num_train_epochs = resolved_num_train_epochs
+    if cfg.trainer.max_steps <= 0:
+        raise ValueError(
+            "GLUE max_steps resolved to a non-positive value after dataloader "
+            "preparation; check num_train_epochs/max_steps config."
+        )
 
     if cfg.scheduler.warmup_percent is not None:
         if cfg.scheduler.warmup_steps is not None:
-            UserWarning(
-                "Overrinding number of warmup steps based on warmup percentage."
+            warnings.warn(
+                "Overriding warmup_steps based on scheduler.warmup_percent.",
+                UserWarning,
+                stacklevel=2,
             )
         cfg.scheduler.warmup_steps = math.ceil(
             cfg.trainer.max_steps / 100 * cfg.scheduler.warmup_percent
         )
     if cfg.scheduler.decay_percent is not None:
         if cfg.scheduler.decay_steps is not None:
-            UserWarning("Overrinding number of decay steps based on decay percentage.")
+            warnings.warn(
+                "Overriding decay_steps based on scheduler.decay_percent.",
+                UserWarning,
+                stacklevel=2,
+            )
         cfg.scheduler.decay_steps = math.ceil(
             cfg.trainer.max_steps / 100 * cfg.scheduler.decay_percent
         )
     elif cfg.scheduler.decay_steps is None:
-        # For linear scheduler without decay_percent, set decay_steps to total steps
         cfg.scheduler.decay_steps = cfg.trainer.max_steps
 
-    # Get learning rate from optimizer config
-    lr = cfg.optimizer.lr
-
-    # Convert scheduler config to dict if needed
     scheduler_params = (
         cfg.scheduler.__dict__.copy()
         if hasattr(cfg.scheduler, "__dict__")
         else cfg.scheduler.copy()
     )
-
-    # Map 'name' to 'decay' if present
     if "name" in scheduler_params:
         scheduler_params["decay"] = scheduler_params.pop("name")
+    if "final_lr_ratio" in scheduler_params:
+        scheduler_params["final_ratio"] = scheduler_params.pop("final_lr_ratio")
 
-    # Debug logging
-    logger.info(f"Scheduler params before calling get_scheduler: {scheduler_params}")
-    logger.info(
-        f"warmup_steps: {scheduler_params.get('warmup_steps')}, decay_steps: {scheduler_params.get('decay_steps')}"
+    scheduler = get_scheduler(
+        optimizer=optimizer,
+        lr=cfg.optimizer.lr,
+        **scheduler_params,
     )
-
-    scheduler = get_scheduler(optimizer=optimizer, lr=lr, **scheduler_params)
-
-    # Prepare everything with our `accelerator`.
-    model, optimizer, train_dataloader, eval_dataloader, scheduler = (
-        accelerator.prepare(
-            model, optimizer, train_dataloader, eval_dataloader, scheduler
-        )
-    )
-
-    if glue_task == "mnli":
-        mm_eval_dataloader = accelerator.prepare(mm_eval_dataloader)
-
-    # Recalculate steps after accelerator preparation
-    num_update_steps_per_epoch = math.ceil(
-        len(train_dataloader) / cfg.trainer.gradient_accumulation_steps
-    )
-    # Recalculate epochs based on max_steps
-    cfg.trainer.num_train_epochs = math.ceil(
-        cfg.trainer.max_steps / num_update_steps_per_epoch
-    )
+    scheduler = accelerator.prepare(scheduler)
+    lr = cfg.optimizer.lr
 
     # Handle evaluation strategy - support both 'epoch' and 'steps'
     eval_strategy = getattr(cfg.trainer, "eval_strategy", "steps")
@@ -1510,30 +1424,30 @@ def trainer(cfg: Config) -> None:
     starting_epoch = 0
     resume_microbatch_in_epoch = 0
 
-    # Potentially load in the weights and states from a previous save
-    if cfg.trainer.resume_from_checkpoint:
-        if (
-            cfg.trainer.resume_from_checkpoint is not None
-            or cfg.trainer.resume_from_checkpoint != ""
-        ):
-            checkpoint_dir = cfg.trainer.checkpoint_dir
-        else:
-            # Get the most recent checkpoint
-            dirs = [path for path in Path.cwd().iterdir() if path.is_dir()]
-            dirs.sort(key=lambda path: path.stat().st_ctime)
-            checkpoint_dir = str(
-                dirs[-1]
-            )  # Sorts folders by date modified, most recent checkpoint is the last
+    # Optionally resume full Accelerate state (model/optimizer/scheduler/scaler).
+    resume_checkpoint_root = output_dir / "checkpoints"
+    resume_checkpoint_path, _ = _resolve_resume_checkpoint(
+        cfg.trainer.resume_from_checkpoint,
+        str(resume_checkpoint_root),
+        str(output_dir),
+    )
+    if cfg.trainer.resume_from_checkpoint and resume_checkpoint_path:
+        resume_checkpoint = Path(resume_checkpoint_path)
+        if not resume_checkpoint.exists():
+            raise FileNotFoundError(
+                f"resume_from_checkpoint path not found: {resume_checkpoint}"
+            )
 
-        accelerator.print(f"Resumed from checkpoint: {checkpoint_dir}")
-        accelerator.load_state(checkpoint_dir)
-        path = Path(checkpoint_dir).name
+        accelerator.print(f"Resuming GLUE run from checkpoint: {resume_checkpoint}")
+        accelerator.load_state(str(resume_checkpoint))
 
         step_from_optimizer = _get_optimizer_update_step(optimizer)
         if step_from_optimizer is not None and step_from_optimizer > 0:
             completed_steps = step_from_optimizer
+        elif resume_checkpoint.name.isdigit():
+            completed_steps = int(resume_checkpoint.name)
         else:
-            kind, value = _parse_checkpoint_progress(path)
+            kind, value = _parse_checkpoint_progress(str(resume_checkpoint))
             if kind == "epoch" and value is not None:
                 completed_steps = (value + 1) * num_update_steps_per_epoch
             elif kind == "step" and value is not None:
@@ -1543,6 +1457,11 @@ def trainer(cfg: Config) -> None:
         resume_update_in_epoch = completed_steps % num_update_steps_per_epoch
         resume_microbatch_in_epoch = (
             resume_update_in_epoch * cfg.trainer.gradient_accumulation_steps
+        )
+    elif cfg.trainer.resume_from_checkpoint:
+        logger.warning(
+            "resume_from_checkpoint is set but no valid checkpoints were found in "
+            f"{resume_checkpoint_root}"
         )
 
     # update the progress_bar if load from checkpoint
@@ -1796,7 +1715,7 @@ def trainer(cfg: Config) -> None:
                             output_dir / f"all_results_step_{completed_steps}.json"
                         )
                         with result_path.open("w", encoding="utf-8") as f:
-                            print("dumping in", result_path)
+                            accelerator.print(f"Writing eval metrics to {result_path}")
                             json.dump(all_results, f, indent=2)
 
                         fallback_metric = next(iter(val_metrics.values()), 0.0)
@@ -1819,7 +1738,7 @@ def trainer(cfg: Config) -> None:
                             early_stopping > 0
                             and early_stopping_counter >= early_stopping
                         ):
-                            print(
+                            accelerator.print(
                                 f"Evaluation accuracy has not improved in {early_stopping} cycles of {cfg.trainer.eval_steps} evaluation steps, stopping the training."
                             )
                             early_stop = True
@@ -1879,14 +1798,14 @@ def trainer(cfg: Config) -> None:
         final_metrics = {}
         final_epoch_value = epoch
 
-    # Print final metrics to console (both logger and print for visibility)
+    # Print final metrics to console and log file (main process only).
     if accelerator.is_main_process:
-        print("=" * 60)
-        print(f"Training completed for {glue_task.upper()}")
-        print(f"Final metrics at step {completed_steps}:")
+        accelerator.print("=" * 60)
+        accelerator.print(f"Training completed for {glue_task.upper()}")
+        accelerator.print(f"Final metrics at step {completed_steps}:")
         for key, value in final_metrics.items():
-            print(f"  {key}: {value:.4f}")
-        print("=" * 60)
+            accelerator.print(f"  {key}: {value:.4f}")
+        accelerator.print("=" * 60)
 
         # Also log for debugging
         logger.info("=" * 60)

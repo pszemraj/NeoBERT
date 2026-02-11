@@ -21,7 +21,10 @@ bash scripts/evaluation/glue/run_all_glue.sh configs/glue
 ### Important GLUE behavior
 
 - GLUE always runs with SDPA attention in classifier wrappers.
-- Pretrained weights are required unless `glue.allow_random_weights: true`.
+- Pretrained local checkpoints are required unless either
+  `glue.allow_random_weights: true` or `model.from_hub: true`.
+- GLUE resumable checkpoints are written to `trainer.output_dir/checkpoints/<step>/`
+  and model export snapshots to `trainer.output_dir/model_checkpoints/<step>/`.
 - Results are stored under `trainer.output_dir` as JSON metrics.
 
 ### Summarize GLUE outputs

@@ -377,6 +377,15 @@ class TestGLUETaskSpecific(unittest.TestCase):
 
         class DummyAccelerator:
             distributed_type = DistributedType.NO
+            is_main_process = True
+
+            @staticmethod
+            def save_state(output_dir):
+                Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+            @staticmethod
+            def wait_for_everyone():
+                return None
 
             @staticmethod
             def unwrap_model(model):
@@ -395,8 +404,87 @@ class TestGLUETaskSpecific(unittest.TestCase):
             save_training_checkpoint(cfg, model, accelerator, completed_steps=20)
 
             ckpt_root = Path(tmpdir) / "model_checkpoints"
+            resume_root = Path(tmpdir) / "checkpoints"
             self.assertTrue((ckpt_root / "10").exists())
             self.assertTrue((ckpt_root / "20").exists())
+            self.assertTrue((resume_root / "10").exists())
+            self.assertTrue((resume_root / "20").exists())
+
+    def test_save_training_checkpoint_prunes_only_above_limit(self):
+        """Ensure retention keeps exactly N checkpoints after each save."""
+        from neobert.glue.train import save_training_checkpoint
+
+        class DummyAccelerator:
+            distributed_type = DistributedType.NO
+            is_main_process = True
+
+            @staticmethod
+            def save_state(output_dir):
+                Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+            @staticmethod
+            def wait_for_everyone():
+                return None
+
+            @staticmethod
+            def unwrap_model(model):
+                return model
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Config()
+            cfg.trainer.output_dir = tmpdir
+            cfg.trainer.save_total_limit = 1
+            cfg.trainer.max_ckpt = None
+
+            model = torch.nn.Linear(8, 2)
+            accelerator = DummyAccelerator()
+
+            with mock.patch("neobert.glue.train.logger.info"):
+                save_training_checkpoint(cfg, model, accelerator, completed_steps=10)
+                save_training_checkpoint(cfg, model, accelerator, completed_steps=20)
+
+            ckpt_root = Path(tmpdir) / "model_checkpoints"
+            resume_root = Path(tmpdir) / "checkpoints"
+            self.assertFalse((ckpt_root / "10").exists())
+            self.assertTrue((ckpt_root / "20").exists())
+            self.assertFalse((resume_root / "10").exists())
+            self.assertTrue((resume_root / "20").exists())
+
+    def test_resolve_glue_training_schedule_handles_epoch_and_step_modes(self):
+        """Ensure schedule helper computes steps/epochs from prepared loader length."""
+        from neobert.glue.train import _resolve_glue_training_schedule
+
+        cfg = Config()
+        cfg.trainer.gradient_accumulation_steps = 2
+        cfg.trainer.num_train_epochs = 3
+        cfg.trainer.max_steps = -1
+
+        updates, max_steps, epochs = _resolve_glue_training_schedule(
+            cfg, batches_per_process=8
+        )
+        self.assertEqual(updates, 4)
+        self.assertEqual(max_steps, 12)
+        self.assertEqual(epochs, 3)
+
+        cfg.trainer.max_steps = 11
+        updates, max_steps, epochs = _resolve_glue_training_schedule(
+            cfg, batches_per_process=8
+        )
+        self.assertEqual(updates, 4)
+        self.assertEqual(max_steps, 11)
+        self.assertEqual(epochs, 3)
+
+    def test_validate_glue_config_allows_from_hub_without_pretrained_checkpoints(self):
+        """Ensure from-hub fine-tuning bypasses local checkpoint requirements."""
+        from neobert.validation.validators import validate_glue_config
+
+        cfg = Config()
+        cfg.glue.task_name = "sst2"
+        cfg.model.from_hub = True
+        cfg.glue.pretrained_checkpoint_dir = None
+        cfg.glue.pretrained_checkpoint = None
+
+        validate_glue_config(cfg)
 
 
 if __name__ == "__main__":

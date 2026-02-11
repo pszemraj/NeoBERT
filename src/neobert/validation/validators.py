@@ -28,7 +28,19 @@ def validate_glue_config(cfg: Any) -> None:
     """
     errors = []
 
-    valid_tasks = ["cola", "sst2", "mrpc", "stsb", "qqp", "mnli", "qnli", "rte", "wnli"]
+    valid_tasks = [
+        "cola",
+        "sst2",
+        "mrpc",
+        "stsb",
+        "qqp",
+        "mnli",
+        "qnli",
+        "rte",
+        "wnli",
+        "snli",
+        "allnli",
+    ]
     task = cfg.glue.task_name if hasattr(cfg, "glue") else getattr(cfg, "task", None)
 
     if not task:
@@ -69,13 +81,19 @@ def validate_glue_config(cfg: Any) -> None:
                     "migrate to glue.allow_random_weights."
                 )
 
-        if not allow_random:
+        model_cfg = getattr(cfg, "model", None)
+        from_hub = bool(getattr(model_cfg, "from_hub", False))
+        if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
+            from_hub = bool(cfg._raw_model_dict.get("from_hub", from_hub))
+
+        if not allow_random and not from_hub:
             if not checkpoint_dir or not checkpoint:
                 errors.append(
                     "GLUE requires pretrained weights. Specify "
                     "'glue.pretrained_checkpoint_dir' and "
                     "'glue.pretrained_checkpoint' or set "
-                    "'glue.allow_random_weights: true'."
+                    "'glue.allow_random_weights: true'. "
+                    "Use model.from_hub=true for direct HF model fine-tuning."
                 )
             elif checkpoint_dir and not Path(checkpoint_dir).exists():
                 errors.append(f"Checkpoint directory not found: {checkpoint_dir}")
@@ -169,6 +187,8 @@ def validate_glue_config(cfg: Any) -> None:
             "rte": 2,
             "wnli": 2,
             "stsb": 1,
+            "snli": 3,
+            "allnli": 2,
         }
 
         if task in expected_labels:
