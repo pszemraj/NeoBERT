@@ -1,5 +1,6 @@
 """Utility helpers for logging, TF32 setup, and model summaries."""
 
+import json
 import logging
 from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -8,33 +9,183 @@ import torch
 import torch.nn as nn
 
 
-def prepare_wandb_config(cfg: Any) -> Dict[str, Any]:
+_TASK_CONFIG_FIELDS: dict[str, tuple[str, ...]] = {
+    "pretraining": (
+        "task",
+        "seed",
+        "debug",
+        "config_path",
+        "accelerate_config_file",
+        "use_deepspeed",
+        "model",
+        "dataset",
+        "tokenizer",
+        "datacollator",
+        "trainer",
+        "optimizer",
+        "scheduler",
+        "wandb",
+        "pretraining_metadata",
+    ),
+    "contrastive": (
+        "task",
+        "seed",
+        "debug",
+        "config_path",
+        "accelerate_config_file",
+        "use_deepspeed",
+        "model",
+        "dataset",
+        "tokenizer",
+        "datacollator",
+        "trainer",
+        "optimizer",
+        "scheduler",
+        "wandb",
+        "contrastive",
+        "pretraining_metadata",
+    ),
+    "glue": (
+        "task",
+        "seed",
+        "debug",
+        "config_path",
+        "accelerate_config_file",
+        "use_deepspeed",
+        "model",
+        "dataset",
+        "tokenizer",
+        "trainer",
+        "optimizer",
+        "scheduler",
+        "wandb",
+        "glue",
+        "_raw_model_dict",
+        "pretraining_metadata",
+    ),
+    "mteb": (
+        "task",
+        "seed",
+        "debug",
+        "config_path",
+        "accelerate_config_file",
+        "model",
+        "tokenizer",
+        "wandb",
+        "pretrained_checkpoint",
+        "mteb_task_type",
+        "mteb_batch_size",
+        "mteb_pooling",
+        "mteb_overwrite_results",
+        "pretraining_metadata",
+    ),
+}
+
+_PRETRAIN_DATASET_EXCLUDE_FIELDS = {
+    "load_all_from_disk",
+    "force_redownload",
+    "min_length",
+}
+
+
+def _serialize_config(cfg: Any) -> Dict[str, Any]:
+    """Serialize a config-like object into a dictionary.
+
+    :param Any cfg: Config object or dataclass.
+    :raises TypeError: If the input cannot be serialized.
+    :return dict[str, Any]: Serialized config dictionary.
     """
-    Flatten config dataclass for logging while preserving dynamically attached fields.
-
-    Parameters
-    ----------
-    cfg:
-        Configuration object (typically a dataclass) to be serialized.
-
-    Returns
-    -------
-    Dict[str, Any]
-        Dictionary ready for tracker ingestion.
-    """
-
     if is_dataclass(cfg):
-        config_dict = asdict(cfg)
-    elif hasattr(cfg, "__dict__"):
-        config_dict = dict(cfg.__dict__)
-    else:
-        raise TypeError("Unsupported config type for wandb logging")
+        return asdict(cfg)
+    if hasattr(cfg, "__dict__"):
+        return dict(cfg.__dict__)
+    raise TypeError("Unsupported config type for wandb logging")
 
-    # Preserve dynamically attached metadata (e.g., original model YAML)
-    if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict is not None:
+
+def _drop_empty_values(value: Any) -> Any:
+    """Drop empty/null values recursively from mappings and sequences.
+
+    :param Any value: Value to clean.
+    :return Any: Cleaned value.
+    """
+    if isinstance(value, dict):
+        cleaned: dict[str, Any] = {}
+        for key, inner in value.items():
+            cleaned_inner = _drop_empty_values(inner)
+            if cleaned_inner is None:
+                continue
+            if isinstance(cleaned_inner, (dict, list)) and not cleaned_inner:
+                continue
+            cleaned[key] = cleaned_inner
+        return cleaned
+    if isinstance(value, list):
+        cleaned_list = []
+        for inner in value:
+            cleaned_inner = _drop_empty_values(inner)
+            if cleaned_inner is None:
+                continue
+            if isinstance(cleaned_inner, (dict, list)) and not cleaned_inner:
+                continue
+            cleaned_list.append(cleaned_inner)
+        return cleaned_list
+    return value
+
+
+def _task_filter_config(config_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Filter a config dictionary to keys relevant for the active task.
+
+    :param dict[str, Any] config_dict: Full serialized config dictionary.
+    :return dict[str, Any]: Task-scoped config dictionary.
+    """
+    task = str(config_dict.get("task", "pretraining")).strip().lower()
+    if task not in _TASK_CONFIG_FIELDS:
+        task = "pretraining"
+
+    allowed_keys = _TASK_CONFIG_FIELDS[task]
+    filtered: dict[str, Any] = {}
+    for key in allowed_keys:
+        if key in config_dict:
+            filtered[key] = config_dict[key]
+
+    if task == "pretraining":
+        dataset_cfg = filtered.get("dataset")
+        if isinstance(dataset_cfg, dict):
+            filtered["dataset"] = {
+                key: value
+                for key, value in dataset_cfg.items()
+                if key not in _PRETRAIN_DATASET_EXCLUDE_FIELDS
+            }
+
+    return _drop_empty_values(filtered)
+
+
+def format_resolved_config(config_dict: Dict[str, Any]) -> str:
+    """Format a resolved config dictionary for readable logging.
+
+    :param dict[str, Any] config_dict: Config dictionary to format.
+    :return str: Pretty-printed JSON string.
+    """
+    return json.dumps(config_dict, indent=2, sort_keys=False)
+
+
+def prepare_wandb_config(cfg: Any) -> Dict[str, Any]:
+    """Prepare task-scoped config payload for tracking backends.
+
+    :param Any cfg: Configuration object (typically a dataclass).
+    :return dict[str, Any]: Task-scoped dictionary ready for tracker ingestion.
+    """
+    config_dict = _serialize_config(cfg)
+
+    # Preserve dynamically attached metadata only for GLUE-oriented runs.
+    task = str(config_dict.get("task", "pretraining")).strip().lower()
+    if (
+        task == "glue"
+        and hasattr(cfg, "_raw_model_dict")
+        and cfg._raw_model_dict is not None
+    ):
         config_dict["_raw_model_dict"] = cfg._raw_model_dict
 
-    return config_dict
+    return _task_filter_config(config_dict)
 
 
 def configure_tf32(

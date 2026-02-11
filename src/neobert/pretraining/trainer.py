@@ -56,7 +56,12 @@ from neobert.training_utils import (
     _maybe_prepare_for_forward,
     _resolve_resume_checkpoint,
 )
-from neobert.utils import configure_tf32, model_summary, prepare_wandb_config
+from neobert.utils import (
+    configure_tf32,
+    format_resolved_config,
+    model_summary,
+    prepare_wandb_config,
+)
 
 # Our metric object and model
 from neobert.pretraining.metrics import Metrics, format_metrics
@@ -109,6 +114,56 @@ def _resolve_eval_samples(value: Any) -> Optional[int]:
     if resolved <= 0:
         return None
     return resolved
+
+
+def _format_percent(value: float) -> str:
+    """Format a percentage value for log output.
+
+    :param float value: Percentage in the range ``[0, 100]``.
+    :return str: Human-readable percentage string.
+    """
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def _log_masking_strategy(cfg: Config) -> None:
+    """Log the effective MLM corruption policy from runtime config.
+
+    :param Config cfg: Runtime configuration.
+    :raises ValueError: If ``datacollator.mlm_probability`` is out of range.
+    """
+    mlm_probability = float(cfg.datacollator.mlm_probability)
+    if mlm_probability < 0.0 or mlm_probability > 1.0:
+        raise ValueError(
+            f"datacollator.mlm_probability must be in [0, 1], got {mlm_probability}."
+        )
+
+    selected_pct = mlm_probability * 100.0
+    untouched_pct = max(0.0, 100.0 - selected_pct)
+
+    if cfg.datacollator.mask_all:
+        logger.info(
+            "datacollator.mask_all=true with mlm_probability=%s%%: "
+            "%s%% tokens replaced with [MASK], %s%% untouched.",
+            _format_percent(selected_pct),
+            _format_percent(selected_pct),
+            _format_percent(untouched_pct),
+        )
+        return
+
+    mask_pct = selected_pct * 0.8
+    random_pct = selected_pct * 0.1
+    unchanged_labeled_pct = selected_pct * 0.1
+    logger.warning(
+        "datacollator.mask_all=false with mlm_probability=%s%%: sampled tokens use "
+        "BERT 80/10/10 ([MASK]/random/original). Effective token mix is "
+        "%s%% untouched, %s%% [MASK], %s%% random-token, %s%% original-token (labeled). "
+        "Set datacollator.mask_all=true for 100%% [MASK] replacement on sampled tokens.",
+        _format_percent(selected_pct),
+        _format_percent(untouched_pct),
+        _format_percent(mask_pct),
+        _format_percent(random_pct),
+        _format_percent(unchanged_labeled_pct),
+    )
 
 
 def _resolve_fsdp_version(accelerator: Accelerator) -> int:
@@ -1500,16 +1555,16 @@ def trainer(cfg: Config) -> None:
                 )
 
     # Initialise the wandb run and pass wandb parameters
+    tracker_config_dict = prepare_wandb_config(cfg)
     if wandb_enabled:
         Path(cfg.wandb.dir).mkdir(parents=True, exist_ok=True)
-        config_dict = prepare_wandb_config(cfg)
         accelerator.init_trackers(
             project_name=cfg.wandb.project,
             init_kwargs={
                 "wandb": {
                     "name": cfg.wandb.name,
                     "entity": cfg.wandb.entity,
-                    "config": config_dict,
+                    "config": tracker_config_dict,
                     "tags": cfg.wandb.tags,
                     "dir": cfg.wandb.dir,
                     "mode": cfg.wandb.mode,
@@ -1518,7 +1573,7 @@ def trainer(cfg: Config) -> None:
             },
         )
         if accelerator.is_main_process and wandb.run is not None:
-            wandb.run.config.update(config_dict, allow_val_change=True)
+            wandb.run.config.update(tracker_config_dict, allow_val_change=True)
             config_path = getattr(cfg, "config_path", None)
             if config_path:
                 abs_config_path = Path(config_path).expanduser().resolve()
@@ -1573,13 +1628,7 @@ def trainer(cfg: Config) -> None:
                 "per-segment SDPA fallback will be used (slow on GPU). "
                 "Set attn_backend=flash_attn_varlen and install flash-attn for production."
             )
-    if not cfg.datacollator.mask_all:
-        # Keep BERT-style 80/10/10 masking as a supported mode, but make the
-        # methodological difference explicit for NeoBERT-style pretraining runs.
-        logger.warning(
-            "datacollator.mask_all=false uses standard 80/10/10 MLM corruption. "
-            "Set datacollator.mask_all=true to use NeoBERT's 100%% [MASK] strategy."
-        )
+    _log_masking_strategy(cfg)
 
     # Tokenizer
     with accelerator.main_process_first():
@@ -1612,6 +1661,15 @@ def trainer(cfg: Config) -> None:
             added_tokens,
             resolved_vocab_size,
         )
+
+    resolved_config_dict = prepare_wandb_config(cfg)
+    if accelerator.is_main_process:
+        logger.info(
+            "Resolved task config:\n%s",
+            format_resolved_config(resolved_config_dict),
+        )
+    if accelerator.is_main_process and wandb_enabled and wandb.run is not None:
+        wandb.run.config.update(resolved_config_dict, allow_val_change=True)
 
     # Tokenization strategy for packed sequences: strip special tokens and reinsert
     # boundaries in the collator to avoid duplicate BOS/EOS/SEP tokens.

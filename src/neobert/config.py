@@ -95,8 +95,7 @@ class DatasetConfig:
     # Contrastive-specific
     load_all_from_disk: bool = False
     force_redownload: bool = False
-    pretraining_prob: float = 0.3
-    min_length: int = 512
+    min_length: int = 5
 
 
 @dataclass
@@ -288,6 +287,7 @@ class ContrastiveConfig:
     pooling: str = "avg"  # avg, cls, max
     loss_type: str = "simcse"  # simcse, supcon
     hard_negative_weight: float = 0.0
+    pretraining_prob: float = 0.3
 
 
 @dataclass
@@ -548,6 +548,22 @@ class ConfigLoader:
                 dataset.setdefault("path", path_to_disk)
                 ConfigLoader._warn_legacy(
                     "Config key 'dataset.path_to_disk' is deprecated; use 'dataset.path'."
+                )
+            if "pretraining_prob" in dataset:
+                pretraining_prob = dataset.pop("pretraining_prob")
+                contrastive = _section("contrastive")
+                if (
+                    "pretraining_prob" in contrastive
+                    and contrastive["pretraining_prob"] != pretraining_prob
+                ):
+                    raise ValueError(
+                        "Both 'dataset.pretraining_prob' and "
+                        "'contrastive.pretraining_prob' are set with different values."
+                    )
+                contrastive.setdefault("pretraining_prob", pretraining_prob)
+                ConfigLoader._warn_legacy(
+                    "Config key 'dataset.pretraining_prob' is deprecated; "
+                    "use 'contrastive.pretraining_prob'."
                 )
 
         # tokenizer.tokenizer_name_or_path -> tokenizer.name
@@ -1061,7 +1077,9 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         "--dataset.force_redownload", action="store_true", help="Force redownload"
     )
     parser.add_argument(
-        "--dataset.pretraining_prob", type=float, help="Pretraining probability"
+        "--dataset.pretraining_prob",
+        type=float,
+        help="DEPRECATED: use --contrastive.pretraining_prob",
     )
     parser.add_argument(
         "--dataset.min_length", type=int, help="Minimum sequence length"
@@ -1153,6 +1171,13 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         "--datacollator.pack_sequences",
         type=lambda x: x.lower() == "true",
         help="Pack sequences into fixed-length chunks",
+    )
+
+    # Contrastive arguments
+    parser.add_argument(
+        "--contrastive.pretraining_prob",
+        type=float,
+        help="Probability of drawing a pretraining batch during contrastive training",
     )
 
     # WandB arguments

@@ -190,8 +190,11 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | ---------------------------- | ------- | ------- | ------------------------------------------------------- |
 | `dataset.load_all_from_disk` | `bool`  | `false` | Load full dataset into memory.                          |
 | `dataset.force_redownload`   | `bool`  | `false` | Force dataset redownload.                               |
-| `dataset.pretraining_prob`   | `float` | `0.3`   | Mixed pretraining probability in contrastive pipelines. |
-| `dataset.min_length`         | `int`   | `512`   | Minimum length filter for contrastive data.             |
+| `dataset.min_length`         | `int`   | `5`     | Short-text-friendly default for optional length filtering helpers. |
+
+> [!NOTE]
+> `dataset.pretraining_prob` is deprecated and normalized to
+> `contrastive.pretraining_prob`.
 
 ---
 
@@ -355,6 +358,10 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `wandb.resume`       | `str`         | `"never"`      | W&B resume policy.                                          |
 | `wandb.dir`          | `str`         | `"logs/wandb"` | Artifact/run directory.                                     |
 
+> [!NOTE]
+> Runtime logging prints a task-scoped resolved config before training and sends
+> the same task-scoped payload to W&B (irrelevant task sections are excluded).
+
 ### Top-Level Runtime Metadata
 
 | Key                      | Type             | Default | Description                                      |
@@ -395,6 +402,7 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `contrastive.pooling`              | `str`   | `"avg"`    | Pooling mode: `avg`, `cls`, `max`.  |
 | `contrastive.loss_type`            | `str`   | `"simcse"` | Loss variant: `simcse`, `supcon`.   |
 | `contrastive.hard_negative_weight` | `float` | `0.0`      | Additional hard-negative weighting. |
+| `contrastive.pretraining_prob`     | `float` | `0.3`      | Fraction of steps that draw the pretraining branch in contrastive training. |
 
 ### MTEB Top-Level Keys
 
@@ -438,6 +446,7 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `dataset.tokenizer_name`           | `tokenizer.name`            | Deprecated alias; normalized with warning.   |
 | `dataset.column`                   | `dataset.text_column`       | Deprecated alias; normalized with warning.   |
 | `dataset.path_to_disk`             | `dataset.path`              | Deprecated alias; normalized with warning.   |
+| `dataset.pretraining_prob`         | `contrastive.pretraining_prob` | Deprecated alias; normalized with warning. |
 | `tokenizer.tokenizer_name_or_path` | `tokenizer.name`            | Deprecated alias; normalized with warning.   |
 | `optimizer.hparams.*`              | `optimizer.*`               | Deprecated block; flattened with warning.    |
 | legacy attention booleans          | `model.attn_backend`        | Deprecated aliases; normalized with warning. |

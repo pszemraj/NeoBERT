@@ -50,7 +50,7 @@ from neobert.training_utils import (
 from neobert.contrastive.datasets import get_bsz
 from neobert.contrastive.loss import SupConLoss
 from neobert.contrastive.metrics import Metrics
-from neobert.utils import configure_tf32, prepare_wandb_config
+from neobert.utils import configure_tf32, format_resolved_config, prepare_wandb_config
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +150,12 @@ def trainer(cfg: Config) -> None:
         cfg.model.attn_backend,
         fallback_to_sdpa=True,
     )
+    pretraining_mix_prob = float(cfg.contrastive.pretraining_prob)
+    if pretraining_mix_prob < 0.0 or pretraining_mix_prob > 1.0:
+        raise ValueError(
+            "contrastive.pretraining_prob must be in [0, 1], got "
+            f"{pretraining_mix_prob}."
+        )
 
     # Get the last checkpoint id
     output_dir = Path(cfg.trainer.output_dir)
@@ -179,18 +185,29 @@ def trainer(cfg: Config) -> None:
         log_with="wandb" if wandb_enabled else None,
         project_config=project_config,
     )
+    tracker_config_dict = prepare_wandb_config(cfg)
+    if accelerator.is_main_process:
+        logger.info(
+            "Resolved task config:\n%s",
+            format_resolved_config(tracker_config_dict),
+        )
+        logger.info(
+            "contrastive.pretraining_prob=%s: %.1f%% of steps sample the pretraining "
+            "dataset branch (SimCSE anti-forgetting path).",
+            pretraining_mix_prob,
+            pretraining_mix_prob * 100.0,
+        )
 
     # Initialise the wandb run and pass wandb parameters
     if wandb_enabled:
         Path(cfg.wandb.dir).mkdir(parents=True, exist_ok=True)
-        config_dict = prepare_wandb_config(cfg)
         accelerator.init_trackers(
             project_name=cfg.wandb.project,
             init_kwargs={
                 "wandb": {
                     "name": cfg.wandb.name,
                     "entity": cfg.wandb.entity,
-                    "config": config_dict,
+                    "config": tracker_config_dict,
                     "tags": cfg.wandb.tags,
                     "dir": cfg.wandb.dir,
                     "mode": cfg.wandb.mode,
@@ -199,7 +216,7 @@ def trainer(cfg: Config) -> None:
             },
         )
         if accelerator.is_main_process and wandb.run is not None:
-            wandb.run.config.update(config_dict, allow_val_change=True)
+            wandb.run.config.update(tracker_config_dict, allow_val_change=True)
             config_path = getattr(cfg, "config_path", None)
             if config_path:
                 abs_config_path = Path(config_path).expanduser().resolve()
@@ -529,7 +546,7 @@ def trainer(cfg: Config) -> None:
             )
             return pad_mask, None
 
-        if coin_flip > cfg.dataset.pretraining_prob:
+        if coin_flip > pretraining_mix_prob:
             # Randomly select which task to draw a batch from
             task_name = numpy.random.choice(
                 list(sample_probs.keys()), p=list(sample_probs.values())

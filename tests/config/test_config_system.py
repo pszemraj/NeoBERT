@@ -51,6 +51,8 @@ class TestConfigSystem(unittest.TestCase):
         self.assertFalse(config.trainer.torch_compile)
         self.assertEqual(config.trainer.torch_compile_backend, "inductor")
         self.assertTrue(config.trainer.enforce_full_packed_batches)
+        self.assertEqual(config.dataset.min_length, 5)
+        self.assertEqual(config.contrastive.pretraining_prob, 0.3)
 
     def test_config_from_yaml(self):
         """Test loading config from YAML file."""
@@ -351,6 +353,27 @@ optimizer:
         # Contrastive config should be part of the main config
         self.assertEqual(config.task, "contrastive")  # Should be set in YAML
         self.assertEqual(config.dataset.name, "ALLNLI")
+
+    def test_legacy_dataset_pretraining_prob_maps_to_contrastive(self):
+        """Ensure legacy dataset.pretraining_prob maps to contrastive section."""
+        cfg = ConfigLoader.dict_to_config(
+            {
+                "task": "contrastive",
+                "dataset": {"pretraining_prob": 0.45},
+            }
+        )
+        self.assertEqual(cfg.contrastive.pretraining_prob, 0.45)
+
+    def test_legacy_dataset_pretraining_prob_conflict_raises(self):
+        """Ensure conflicting legacy and canonical pretraining_prob values fail fast."""
+        with self.assertRaises(ValueError):
+            ConfigLoader.dict_to_config(
+                {
+                    "task": "contrastive",
+                    "dataset": {"pretraining_prob": 0.4},
+                    "contrastive": {"pretraining_prob": 0.6},
+                }
+            )
 
 
 if __name__ == "__main__":

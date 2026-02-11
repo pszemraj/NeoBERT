@@ -5,7 +5,7 @@ from typing import Any
 
 from datasets import load_from_disk
 
-from neobert.config import load_config_from_args
+from neobert.config import DatasetConfig, load_config_from_args
 
 
 def longer_seq(cfg: Any) -> None:
@@ -18,8 +18,17 @@ def longer_seq(cfg: Any) -> None:
 
     dataset = load_from_disk(cfg.dataset.path)
 
-    # Default min_length if not specified
-    min_length = getattr(cfg.dataset, "min_length", 512)
+    # Keep this utility focused on long-sequence filtering. Global config defaults
+    # are short-text-oriented, so only honor cfg.dataset.min_length when explicitly
+    # changed away from the dataclass default.
+    configured_min_length = getattr(
+        cfg.dataset, "min_length", DatasetConfig().min_length
+    )
+    min_length = (
+        512
+        if configured_min_length == DatasetConfig().min_length
+        else int(configured_min_length)
+    )
 
     dataset = dataset.filter(
         lambda example: len(example["input_ids"]) >= min_length,
