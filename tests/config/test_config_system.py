@@ -616,14 +616,46 @@ optimizer:
         self.assertEqual(cfg.trainer.eval_strategy, "epoch")
         self.assertEqual(cfg.trainer.eval_steps, 0)
 
-    def test_pretraining_save_steps_still_required(self):
-        """Ensure pretraining still requires positive save_steps regardless of strategy."""
+    def test_pretraining_save_strategy_no_allows_zero_save_steps(self):
+        """Ensure pretraining accepts save_steps=0 when step-based saves are disabled."""
+        cfg = ConfigLoader.dict_to_config(
+            {
+                "task": "pretraining",
+                "trainer": {
+                    "save_strategy": "no",
+                    "save_steps": 0,
+                    "max_steps": 1,
+                },
+            }
+        )
+        self.assertEqual(cfg.task, "pretraining")
+        self.assertEqual(cfg.trainer.save_strategy, "no")
+        self.assertEqual(cfg.trainer.save_steps, 0)
+
+    def test_contrastive_save_strategy_no_allows_zero_save_steps(self):
+        """Ensure contrastive accepts save_steps=0 when step-based saves are disabled."""
+        cfg = ConfigLoader.dict_to_config(
+            {
+                "task": "contrastive",
+                "trainer": {
+                    "save_strategy": "no",
+                    "save_steps": 0,
+                    "max_steps": 1,
+                },
+            }
+        )
+        self.assertEqual(cfg.task, "contrastive")
+        self.assertEqual(cfg.trainer.save_strategy, "no")
+        self.assertEqual(cfg.trainer.save_steps, 0)
+
+    def test_pretraining_save_strategy_steps_requires_positive_save_steps(self):
+        """Ensure pretraining still requires positive save_steps for step-based saves."""
         with self.assertRaises(ValueError):
             ConfigLoader.dict_to_config(
                 {
                     "task": "pretraining",
                     "trainer": {
-                        "save_strategy": "no",
+                        "save_strategy": "steps",
                         "save_steps": 0,
                     },
                 }

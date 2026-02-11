@@ -1517,18 +1517,11 @@ class ConfigLoader:
             errors.append(
                 f"trainer.save_steps must be >= 0, got {config.trainer.save_steps}."
             )
-        elif task in {"pretraining", "contrastive"} or save_strategy == "steps":
-            if config.trainer.save_steps == 0:
-                if task in {"pretraining", "contrastive"}:
-                    errors.append(
-                        "trainer.save_steps must be > 0 for "
-                        f"{task}, got {config.trainer.save_steps}."
-                    )
-                else:
-                    errors.append(
-                        "trainer.save_steps must be > 0 when "
-                        f"trainer.save_strategy='steps', got {config.trainer.save_steps}."
-                    )
+        elif save_strategy == "steps" and config.trainer.save_steps == 0:
+            errors.append(
+                "trainer.save_steps must be > 0 when "
+                f"trainer.save_strategy='steps', got {config.trainer.save_steps}."
+            )
         if config.trainer.eval_steps < 0:
             errors.append(
                 f"trainer.eval_steps must be >= 0, got {config.trainer.eval_steps}."
