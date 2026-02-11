@@ -5,8 +5,10 @@ import os
 import shutil
 import signal
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from types import FrameType
+from typing import Any
 
 import numpy
 
@@ -14,7 +16,7 @@ import numpy
 import torch
 import wandb
 from accelerate.utils import DistributedType, ProjectConfiguration, set_seed
-from datasets import load_from_disk
+from datasets import DatasetDict, load_from_disk
 
 # Deepspeed
 from deepspeed.utils import safe_get_full_fp32_param
@@ -181,12 +183,19 @@ def trainer(cfg: Config) -> None:
         total_limit=save_total_limit or None,
         iteration=iteration,
     )
+    mixed_precision = cfg.trainer.mixed_precision
+    if isinstance(mixed_precision, bool):
+        mixed_precision = "bf16" if mixed_precision else "no"
+    else:
+        mixed_precision = str(mixed_precision).strip().lower()
+    if mixed_precision == "fp32":
+        mixed_precision = "no"
     wandb_enabled = cfg.wandb.enabled and cfg.wandb.mode != "disabled"
     accelerator = create_accelerator(
         use_cpu=bool(getattr(cfg.trainer, "use_cpu", False)),
         log=logger,
         step_scheduler_with_optimizer=False,  # enable manual control of the scheduler
-        mixed_precision=cfg.trainer.mixed_precision,
+        mixed_precision=mixed_precision,
         gradient_accumulation_steps=cfg.trainer.gradient_accumulation_steps,
         log_with="wandb" if wandb_enabled else None,
         project_config=project_config,
@@ -268,28 +277,65 @@ def trainer(cfg: Config) -> None:
     # Dataset
     dataset_path = Path(cfg.dataset.path)
     dataset = load_from_disk(os.fspath(dataset_path / "all"))
-    pretraining_dataset = load_from_disk(
+    pretraining_dataset_raw = load_from_disk(
         os.fspath(dataset_path)
     )  # Base dataset for pretraining SimCSE
+    if isinstance(pretraining_dataset_raw, DatasetDict):
+        if "train" in pretraining_dataset_raw:
+            pretraining_dataset = pretraining_dataset_raw["train"]
+        elif len(pretraining_dataset_raw) > 0:
+            first_split = next(iter(pretraining_dataset_raw.keys()))
+            logger.warning(
+                "Contrastive pretraining dataset is a DatasetDict without a 'train' "
+                f"split; using first split '{first_split}'."
+            )
+            pretraining_dataset = pretraining_dataset_raw[first_split]
+        else:
+            raise ValueError(
+                f"Pretraining dataset at '{dataset_path}' contains no splits."
+            )
+    else:
+        pretraining_dataset = pretraining_dataset_raw
 
     data_collator = CustomDataCollatorWithPadding(
         tokenizer=tokenizer,
         return_tensors="pt",
         pad_to_multiple_of=cfg.datacollator.pad_to_multiple_of,
     )
+    pretraining_column_names = set(getattr(pretraining_dataset, "column_names", []))
+    if {"input_ids", "attention_mask"}.issubset(pretraining_column_names):
+        pretraining_collator: DataCollatorWithPadding = DataCollatorWithPadding(
+            tokenizer=tokenizer,
+            return_tensors="pt",
+            pad_to_multiple_of=cfg.datacollator.pad_to_multiple_of,
+        )
+    elif {
+        "input_ids_query",
+        "attention_mask_query",
+        "input_ids_corpus",
+        "attention_mask_corpus",
+    }.issubset(pretraining_column_names):
+        pretraining_collator = data_collator
+    else:
+        logger.warning(
+            "Pretraining dataset columns do not match known SimCSE schemas; "
+            "falling back to CustomDataCollatorWithPadding. Found columns: "
+            f"{sorted(pretraining_column_names)}."
+        )
+        pretraining_collator = data_collator
     target_bsz = (
         cfg.trainer.per_device_train_batch_size or cfg.trainer.train_batch_size or 16
     )
     dataloader_kwargs = {
-        "collate_fn": data_collator,
         "num_workers": cfg.trainer.dataloader_num_workers,
-        "pin_memory": torch.cuda.is_available(),
+        "pin_memory": accelerator.device.type == "cuda",
         "shuffle": True,
     }
     dataloaders = {
         key: DataLoader(
             dataset[key],
             batch_size=max(1, get_bsz(key, target_bsz)),
+            collate_fn=data_collator,
             **dataloader_kwargs,
         )
         for key in dataset.keys()
@@ -297,11 +343,17 @@ def trainer(cfg: Config) -> None:
     dataloaders["pretraining"] = DataLoader(
         pretraining_dataset,
         batch_size=target_bsz,
+        collate_fn=pretraining_collator,
         **dataloader_kwargs,
     )
 
     alpha = getattr(cfg.dataset, "alpha", 1.0)
     total = sum(x**alpha for x in dataset.num_rows.values())
+    if total <= 0:
+        raise ValueError(
+            "Contrastive sampling probabilities are undefined because the aggregate "
+            "dataset size is zero."
+        )
     sample_probs = {
         key: num_rows**alpha / total for key, num_rows in dataset.num_rows.items()
     }
@@ -522,10 +574,137 @@ def trainer(cfg: Config) -> None:
         disable=(cfg.trainer.disable_tqdm or not accelerator.is_main_process),
     )
 
-    if cfg.trainer.mixed_precision == "bf16":
+    if mixed_precision == "bf16":
         dtype_pad_mask = torch.bfloat16
     else:
         dtype_pad_mask = torch.float32
+
+    dataloader_iters: dict[str, Any] = {
+        key: iter(loader) for key, loader in dataloaders.items()
+    }
+
+    def _next_batch(loader_key: str) -> dict[str, torch.Tensor]:
+        """Fetch the next batch from a persistent dataloader iterator.
+
+        :param str loader_key: Dataloader key.
+        :return dict[str, torch.Tensor]: Next batch.
+        :raises RuntimeError: If a dataloader is empty.
+        """
+        iterator = dataloader_iters[loader_key]
+        try:
+            return next(iterator)
+        except StopIteration:
+            iterator = iter(dataloaders[loader_key])
+            dataloader_iters[loader_key] = iterator
+            try:
+                return next(iterator)
+            except StopIteration as exc:
+                raise RuntimeError(
+                    f"Dataloader '{loader_key}' yielded no batches. Check dataset "
+                    "contents and preprocessing outputs."
+                ) from exc
+
+    def _normalize_batch(
+        batch: dict[str, torch.Tensor],
+        *,
+        allow_single_view: bool,
+    ) -> dict[str, torch.Tensor]:
+        """Normalize batch keys to plural query/corpus naming.
+
+        :param dict[str, torch.Tensor] batch: Raw batch dictionary.
+        :param bool allow_single_view: Whether single-view input_ids/mask is valid.
+        :return dict[str, torch.Tensor]: Normalized batch.
+        :raises KeyError: If required keys are missing.
+        """
+        if "input_ids_queries" not in batch:
+            if "input_ids_query" in batch:
+                batch["input_ids_queries"] = batch["input_ids_query"]
+            elif allow_single_view and "input_ids" in batch:
+                batch["input_ids_queries"] = batch["input_ids"]
+            else:
+                raise KeyError(
+                    "Missing query token ids in contrastive batch. Expected "
+                    "'input_ids_queries', 'input_ids_query', or (single-view) 'input_ids'."
+                )
+        if "input_ids_corpus" not in batch:
+            if "input_ids_query" in batch:
+                batch["input_ids_corpus"] = batch["input_ids_query"]
+            elif allow_single_view and "input_ids" in batch:
+                batch["input_ids_corpus"] = batch["input_ids"]
+            else:
+                raise KeyError(
+                    "Missing corpus token ids in contrastive batch. Expected "
+                    "'input_ids_corpus' or (single-view) 'input_ids'."
+                )
+
+        if "attention_mask_queries" not in batch:
+            if "attention_mask_query" in batch:
+                batch["attention_mask_queries"] = batch["attention_mask_query"]
+            elif allow_single_view and "attention_mask" in batch:
+                batch["attention_mask_queries"] = batch["attention_mask"]
+            else:
+                raise KeyError(
+                    "Missing query attention mask in contrastive batch. Expected "
+                    "'attention_mask_queries', 'attention_mask_query', or "
+                    "(single-view) 'attention_mask'."
+                )
+        if "attention_mask_corpus" not in batch:
+            if "attention_mask_query" in batch:
+                batch["attention_mask_corpus"] = batch["attention_mask_query"]
+            elif allow_single_view and "attention_mask" in batch:
+                batch["attention_mask_corpus"] = batch["attention_mask"]
+            else:
+                raise KeyError(
+                    "Missing corpus attention mask in contrastive batch. Expected "
+                    "'attention_mask_corpus' or (single-view) 'attention_mask'."
+                )
+        return batch
+
+    def _forward_and_loss(
+        batch: dict[str, torch.Tensor],
+        *,
+        pad_mask_queries: torch.Tensor | None,
+        packed_queries: torch.Tensor | None,
+        pad_mask_corpus: torch.Tensor | None,
+        packed_corpus: torch.Tensor | None,
+        pad_mask_negatives: torch.Tensor | None,
+        packed_negatives: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Run a forward pass and compute contrastive loss for one microbatch."""
+        queries = model(
+            batch["input_ids_queries"],
+            pad_mask_queries,
+            packed_seqlens=packed_queries,
+        )
+        corpus = model(
+            batch["input_ids_corpus"],
+            pad_mask_corpus,
+            packed_seqlens=packed_corpus,
+        )
+        if "input_ids_negative" in batch:
+            negatives = model(
+                batch["input_ids_negative"],
+                pad_mask_negatives,
+                packed_seqlens=packed_negatives,
+            )
+        else:
+            negatives = None
+
+        pooled_queries = (queries * batch["attention_mask_queries"].unsqueeze(-1)).sum(
+            dim=1
+        ) / batch["attention_mask_queries"].sum(dim=1, keepdim=True)
+        pooled_corpus = (corpus * batch["attention_mask_corpus"].unsqueeze(-1)).sum(
+            dim=1
+        ) / batch["attention_mask_corpus"].sum(dim=1, keepdim=True)
+
+        if negatives is not None:
+            pooled_negatives = (
+                negatives * batch["attention_mask_negative"].unsqueeze(-1)
+            ).sum(dim=1) / batch["attention_mask_negative"].sum(dim=1, keepdim=True)
+        else:
+            pooled_negatives = None
+
+        return train_loss_fn(pooled_queries, pooled_corpus, pooled_negatives)
 
     while cfg.trainer.max_steps > metrics["train/steps"]:
         coin_flip = numpy.random.random()
@@ -554,8 +733,8 @@ def trainer(cfg: Config) -> None:
             task_name = numpy.random.choice(
                 list(sample_probs.keys()), p=list(sample_probs.values())
             )
-            dataloader = dataloaders[task_name]
-            batch = next(iter(dataloader))
+            batch = _next_batch(task_name)
+            batch = _normalize_batch(batch, allow_single_view=False)
 
             pad_mask_queries, packed_queries = _prepare_attention(
                 batch["attention_mask_queries"], name="queries"
@@ -575,17 +754,15 @@ def trainer(cfg: Config) -> None:
 
         # Else, we do a step of SimCSE with the original pretraing dataset in order to avoid catastrophic forgetting. Warning: dropout needs to be greater than zero!
         else:
-            batch = next(iter(dataloaders["pretraining"]))
-
-            # Here, queries and corpus are identical
-            batch["input_ids_queries"] = batch["input_ids"]
-            batch["input_ids_corpus"] = batch["input_ids"]
+            batch = _next_batch("pretraining")
+            batch = _normalize_batch(batch, allow_single_view=True)
 
             pad_mask_queries, packed_queries = _prepare_attention(
-                batch["attention_mask"], name="pretraining"
+                batch["attention_mask_queries"], name="pretraining_query"
             )
-            pad_mask_corpus = pad_mask_queries
-            packed_corpus = packed_queries
+            pad_mask_corpus, packed_corpus = _prepare_attention(
+                batch["attention_mask_corpus"], name="pretraining_corpus"
+            )
 
             # Update specific number of batches
             metrics["train/pretraining_batches"] += 1
@@ -605,106 +782,28 @@ def trainer(cfg: Config) -> None:
             is_last_microbatch=is_last_microbatch,
         )
 
-        if not is_last_microbatch:
-            with accelerator.no_sync(model):
-                with accelerator.autocast():
-                    # Forward pass
-                    queries = model(
-                        batch["input_ids_queries"],
-                        pad_mask_queries,
-                        packed_seqlens=packed_queries,
-                    )
-                    corpus = model(
-                        batch["input_ids_corpus"],
-                        pad_mask_corpus,
-                        packed_seqlens=packed_corpus,
-                    )
-                    if "input_ids_negative" in batch.keys():
-                        negatives = model(
-                            batch["input_ids_negative"],
-                            pad_mask_negatives,
-                            packed_seqlens=packed_negatives,
-                        )
-
-                    # Pool representations
-                    pooled_queries = (
-                        queries * batch["attention_mask_queries"].unsqueeze(-1)
-                    ).sum(dim=1) / batch["attention_mask_queries"].sum(
-                        dim=1, keepdim=True
-                    )
-                    pooled_corpus = (
-                        corpus * batch["attention_mask_corpus"].unsqueeze(-1)
-                    ).sum(dim=1) / batch["attention_mask_corpus"].sum(
-                        dim=1, keepdim=True
-                    )
-
-                    # Pool each negative's representation
-                    if "input_ids_negative" in batch.keys():
-                        pooled_negatives = (
-                            negatives * batch["attention_mask_negative"].unsqueeze(-1)
-                        ).sum(dim=1) / batch["attention_mask_negative"].sum(
-                            dim=1, keepdim=True
-                        )
-                    else:
-                        pooled_negatives = None
-
-                    # Loss
-                    train_loss = train_loss_fn(
-                        pooled_queries, pooled_corpus, pooled_negatives
-                    )
-
-                # Compute gradient
-                accelerator.backward(train_loss)
-
-                # Log metrics
-                metrics["train/local_samples"] += batch["input_ids_queries"].shape[0]
-                metrics["train/local_sum_loss"] += train_loss.item()
-
-        else:
+        sync_context = (
+            nullcontext() if is_last_microbatch else accelerator.no_sync(model)
+        )
+        with sync_context:
             with accelerator.autocast():
-                # Forward pass
-                queries = model(
-                    batch["input_ids_queries"],
-                    pad_mask_queries,
-                    packed_seqlens=packed_queries,
+                train_loss = _forward_and_loss(
+                    batch,
+                    pad_mask_queries=pad_mask_queries,
+                    packed_queries=packed_queries,
+                    pad_mask_corpus=pad_mask_corpus,
+                    packed_corpus=packed_corpus,
+                    pad_mask_negatives=pad_mask_negatives,
+                    packed_negatives=packed_negatives,
                 )
-                corpus = model(
-                    batch["input_ids_corpus"],
-                    pad_mask_corpus,
-                    packed_seqlens=packed_corpus,
-                )
-                if "input_ids_negative" in batch.keys():
-                    negatives = model(
-                        batch["input_ids_negative"],
-                        pad_mask_negatives,
-                        packed_seqlens=packed_negatives,
-                    )
-
-                # Pool representations
-                pooled_queries = (
-                    queries * batch["attention_mask_queries"].unsqueeze(-1)
-                ).sum(dim=1) / batch["attention_mask_queries"].sum(dim=1, keepdim=True)
-                pooled_corpus = (
-                    corpus * batch["attention_mask_corpus"].unsqueeze(-1)
-                ).sum(dim=1) / batch["attention_mask_corpus"].sum(dim=1, keepdim=True)
-
-                # Pool each negative's representation
-                if "input_ids_negative" in batch.keys():
-                    pooled_negatives = (
-                        negatives * batch["attention_mask_negative"].unsqueeze(-1)
-                    ).sum(dim=1) / batch["attention_mask_negative"].sum(
-                        dim=1, keepdim=True
-                    )
-                else:
-                    pooled_negatives = None
-
-                # Loss
-                train_loss = train_loss_fn(
-                    pooled_queries, pooled_corpus, pooled_negatives
-                )
-
-            # Compute gradient and apply clipping
             accelerator.backward(train_loss)
+
+        # Log local metrics for this microbatch
+        metrics["train/local_samples"] += batch["input_ids_queries"].shape[0]
+        metrics["train/local_sum_loss"] += train_loss.item()
+
+        if is_last_microbatch:
+            # Apply clipping before optimizer step when syncing gradients
             if (
                 cfg.trainer.gradient_clipping is not None
                 and cfg.trainer.gradient_clipping > 0
@@ -720,8 +819,6 @@ def trainer(cfg: Config) -> None:
             # Log metrics
             pbar.update(1)
             metrics["train/steps"] += 1
-            metrics["train/local_samples"] += batch["input_ids_queries"].shape[0]
-            metrics["train/local_sum_loss"] += train_loss.item()
 
             if metrics["train/steps"] % log_interval == 0:
                 # https://deepspeed.readthedocs.io/en/latest/zero3.html#deepspeed.utils.safe_get_full_grad
