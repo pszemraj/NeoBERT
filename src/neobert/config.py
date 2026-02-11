@@ -334,6 +334,9 @@ class ContrastiveConfig:
     loss_type: str = "simcse"  # simcse, supcon
     hard_negative_weight: float = 0.0
     pretraining_prob: float = 0.3
+    pretrained_checkpoint_dir: Optional[str] = None
+    pretrained_checkpoint: Optional[Union[str, int]] = None
+    allow_random_weights: bool = False
 
 
 @dataclass
@@ -1239,30 +1242,64 @@ class ConfigLoader:
                     "'model.attn_backend' ('sdpa' or 'flash_attn_varlen')."
                 )
 
-            glue = normalized.get("glue", {})
-            if not isinstance(glue, dict):
-                glue = _section("glue")
-            glue_key_map = {
-                "pretrained_config_path": "pretrained_model_path",
-                "pretrained_checkpoint_dir": "pretrained_checkpoint_dir",
-                "pretrained_checkpoint": "pretrained_checkpoint",
-                "allow_random_weights": "allow_random_weights",
-                "classifier_dropout": "classifier_dropout",
-                "classifier_init_range": "classifier_init_range",
-                "transfer_from_task": "transfer_from_task",
-            }
-            for legacy_key, glue_key in glue_key_map.items():
-                if legacy_key in model:
-                    value = model.pop(legacy_key)
-                    if glue_key in glue and glue[glue_key] not in (None, value):
-                        raise ValueError(
-                            f"Both 'model.{legacy_key}' and 'glue.{glue_key}' are set with "
-                            "different values."
+            task = str(normalized.get("task", "")).strip().lower()
+            if task == "contrastive":
+                if "contrastive" not in normalized or not isinstance(
+                    normalized.get("contrastive"), dict
+                ):
+                    contrastive = _section("contrastive")
+                else:
+                    contrastive = normalized["contrastive"]
+                contrastive_key_map = {
+                    "pretrained_checkpoint_dir": "pretrained_checkpoint_dir",
+                    "pretrained_checkpoint": "pretrained_checkpoint",
+                    "allow_random_weights": "allow_random_weights",
+                }
+                for legacy_key, contrastive_key in contrastive_key_map.items():
+                    if legacy_key in model:
+                        value = model.pop(legacy_key)
+                        if contrastive_key in contrastive and contrastive[
+                            contrastive_key
+                        ] not in (None, value):
+                            raise ValueError(
+                                "Both 'model."
+                                f"{legacy_key}' and 'contrastive.{contrastive_key}' "
+                                "are set with different values."
+                            )
+                        contrastive.setdefault(contrastive_key, value)
+                        ConfigLoader._warn_legacy(
+                            "Config key 'model."
+                            f"{legacy_key}' is deprecated; use "
+                            f"'contrastive.{contrastive_key}'."
                         )
-                    glue.setdefault(glue_key, value)
-                    ConfigLoader._warn_legacy(
-                        f"Config key 'model.{legacy_key}' is deprecated; use 'glue.{glue_key}'."
-                    )
+            else:
+                if "glue" not in normalized or not isinstance(
+                    normalized.get("glue"), dict
+                ):
+                    glue = _section("glue")
+                else:
+                    glue = normalized["glue"]
+                glue_key_map = {
+                    "pretrained_config_path": "pretrained_model_path",
+                    "pretrained_checkpoint_dir": "pretrained_checkpoint_dir",
+                    "pretrained_checkpoint": "pretrained_checkpoint",
+                    "allow_random_weights": "allow_random_weights",
+                    "classifier_dropout": "classifier_dropout",
+                    "classifier_init_range": "classifier_init_range",
+                    "transfer_from_task": "transfer_from_task",
+                }
+                for legacy_key, glue_key in glue_key_map.items():
+                    if legacy_key in model:
+                        value = model.pop(legacy_key)
+                        if glue_key in glue and glue[glue_key] not in (None, value):
+                            raise ValueError(
+                                f"Both 'model.{legacy_key}' and 'glue.{glue_key}' are set with "
+                                "different values."
+                            )
+                        glue.setdefault(glue_key, value)
+                        ConfigLoader._warn_legacy(
+                            f"Config key 'model.{legacy_key}' is deprecated; use 'glue.{glue_key}'."
+                        )
 
         return normalized
 

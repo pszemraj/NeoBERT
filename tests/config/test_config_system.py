@@ -528,6 +528,44 @@ optimizer:
                 }
             )
 
+    def test_legacy_model_checkpoint_keys_map_to_contrastive(self):
+        """Ensure contrastive legacy model checkpoint keys map to contrastive section."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cfg = ConfigLoader.dict_to_config(
+                {
+                    "task": "contrastive",
+                    "model": {
+                        "pretrained_checkpoint_dir": "/tmp/pre_ckpts",
+                        "pretrained_checkpoint": "1234",
+                        "allow_random_weights": True,
+                    },
+                }
+            )
+        self.assertEqual(cfg.contrastive.pretrained_checkpoint_dir, "/tmp/pre_ckpts")
+        self.assertEqual(cfg.contrastive.pretrained_checkpoint, "1234")
+        self.assertTrue(cfg.contrastive.allow_random_weights)
+        self.assertTrue(
+            any(
+                "model.pretrained_checkpoint_dir" in str(w.message)
+                and "contrastive.pretrained_checkpoint_dir" in str(w.message)
+                for w in caught
+            )
+        )
+
+    def test_legacy_model_checkpoint_keys_conflict_for_contrastive(self):
+        """Ensure conflicting model/contrastive checkpoint keys fail fast."""
+        with self.assertRaises(ValueError):
+            ConfigLoader.dict_to_config(
+                {
+                    "task": "contrastive",
+                    "model": {"pretrained_checkpoint_dir": "/tmp/model_ckpts"},
+                    "contrastive": {
+                        "pretrained_checkpoint_dir": "/tmp/contrastive_ckpts"
+                    },
+                }
+            )
+
     def test_wandb_section_does_not_auto_enable(self):
         """Ensure wandb.enabled stays explicit even when wandb section is present."""
         cfg = ConfigLoader.dict_to_config({"wandb": {"project": "unit-test-project"}})

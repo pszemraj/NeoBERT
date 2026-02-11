@@ -496,6 +496,9 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 | `contrastive.loss_type`            | `str`   | `"simcse"` | Loss variant: `simcse`, `supcon`.                                           |
 | `contrastive.hard_negative_weight` | `float` | `0.0`      | Additional hard-negative weighting.                                         |
 | `contrastive.pretraining_prob`     | `float` | `0.3`      | Fraction of steps that draw the pretraining branch in contrastive training. |
+| `contrastive.pretrained_checkpoint_dir` | `str \| None` | `null` | Optional pretraining checkpoint root used to initialize contrastive runs. |
+| `contrastive.pretrained_checkpoint` | `str \| int \| None` | `null` | Optional checkpoint tag/step selector for contrastive initialization. |
+| `contrastive.allow_random_weights` | `bool` | `false` | Allow random initialization when no pretrained checkpoint is configured. |
 
 ### MTEB Top-Level Keys
 

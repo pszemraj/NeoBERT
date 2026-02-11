@@ -421,15 +421,40 @@ def trainer(cfg: Config) -> None:
         return str(checkpoint)
 
     # Load weights if provided
-    pretrained_checkpoint_dir = None
-    pretrained_checkpoint = None
-    allow_random_weights = False
+    pretrained_checkpoint_dir = getattr(
+        cfg.contrastive, "pretrained_checkpoint_dir", None
+    )
+    pretrained_checkpoint = getattr(cfg.contrastive, "pretrained_checkpoint", None)
+    allow_random_weights = bool(getattr(cfg.contrastive, "allow_random_weights", False))
     use_deepspeed = getattr(cfg, "use_deepspeed", False)
     if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
-        pretrained_checkpoint_dir = cfg._raw_model_dict.get("pretrained_checkpoint_dir")
-        pretrained_checkpoint = cfg._raw_model_dict.get("pretrained_checkpoint")
-        allow_random_weights = cfg._raw_model_dict.get("allow_random_weights", False)
-        if "deepspeed" in cfg._raw_model_dict:
+        if pretrained_checkpoint_dir is None:
+            pretrained_checkpoint_dir = cfg._raw_model_dict.get(
+                "pretrained_checkpoint_dir"
+            )
+            if pretrained_checkpoint_dir is not None:
+                logger.warning(
+                    "Using legacy model.pretrained_checkpoint_dir from _raw_model_dict; "
+                    "migrate to contrastive.pretrained_checkpoint_dir."
+                )
+        if pretrained_checkpoint is None:
+            pretrained_checkpoint = cfg._raw_model_dict.get("pretrained_checkpoint")
+            if pretrained_checkpoint is not None:
+                logger.warning(
+                    "Using legacy model.pretrained_checkpoint from _raw_model_dict; "
+                    "migrate to contrastive.pretrained_checkpoint."
+                )
+        if not allow_random_weights:
+            legacy_allow_random = cfg._raw_model_dict.get("allow_random_weights")
+            if legacy_allow_random is not None:
+                allow_random_weights = bool(legacy_allow_random)
+                logger.warning(
+                    "Using legacy model.allow_random_weights from _raw_model_dict; "
+                    "migrate to contrastive.allow_random_weights."
+                )
+        if "deepspeed" in cfg._raw_model_dict and not getattr(
+            cfg, "use_deepspeed", False
+        ):
             use_deepspeed = cfg._raw_model_dict.get("deepspeed")
 
     if pretrained_checkpoint_dir:
@@ -438,7 +463,9 @@ def trainer(cfg: Config) -> None:
             pretrained_checkpoint_dir = pretrained_checkpoint_dir / "checkpoints"
         tag = _resolve_checkpoint_tag(
             pretrained_checkpoint_dir,
-            pretrained_checkpoint or cfg.pretrained_checkpoint,
+            pretrained_checkpoint
+            if pretrained_checkpoint is not None
+            else cfg.pretrained_checkpoint,
         )
         if use_deepspeed:
             state_dict = load_deepspeed_fp32_state_dict(
