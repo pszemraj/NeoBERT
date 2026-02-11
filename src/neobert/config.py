@@ -1022,12 +1022,8 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         "--model.max_position_embeddings", type=int, help="Max position embeddings"
     )
     parser.add_argument("--model.vocab_size", type=int, help="Vocabulary size")
-    parser.add_argument(
-        "--model.rope", type=lambda x: x.lower() == "true", help="Use RoPE"
-    )
-    parser.add_argument(
-        "--model.rms_norm", type=lambda x: x.lower() == "true", help="Use RMS norm"
-    )
+    parser.add_argument("--model.rope", type=_parse_cli_bool, help="Use RoPE")
+    parser.add_argument("--model.rms_norm", type=_parse_cli_bool, help="Use RMS norm")
     parser.add_argument(
         "--model.hidden_act", type=str, help="Hidden activation function"
     )
@@ -1052,7 +1048,7 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     )
     parser.add_argument(
         "--dataset.streaming",
-        type=lambda x: x.lower() == "true",
+        type=_parse_cli_bool,
         help="Stream dataset from hub",
     )
     parser.add_argument(
@@ -1114,7 +1110,7 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     parser.add_argument("--trainer.max_steps", type=int, help="Maximum training steps")
     parser.add_argument(
         "--trainer.enforce_full_packed_batches",
-        type=lambda x: x.lower() == "true",
+        type=_parse_cli_bool,
         help=(
             "If true, buffer undersized packed batches to emit full microbatches. "
             "Improves token throughput stability but lowers step/s."
@@ -1122,12 +1118,12 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     )
     parser.add_argument(
         "--trainer.log_train_accuracy",
-        type=lambda x: x.lower() == "true",
+        type=_parse_cli_bool,
         help="Log MLM token accuracy during training (expensive)",
     )
     parser.add_argument(
         "--trainer.log_grad_norm",
-        type=lambda x: x.lower() == "true",
+        type=_parse_cli_bool,
         help="Log gradient norm during training",
     )
     parser.add_argument(
@@ -1154,7 +1150,7 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     )
     parser.add_argument(
         "--trainer.torch_compile",
-        type=lambda x: x.lower() == "true",
+        type=_parse_cli_bool,
         help="Enable torch.compile for model forward",
     )
     parser.add_argument(
@@ -1169,7 +1165,7 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     )
     parser.add_argument(
         "--datacollator.pack_sequences",
-        type=lambda x: x.lower() == "true",
+        type=_parse_cli_bool,
         help="Pack sequences into fixed-length chunks",
     )
 
@@ -1186,7 +1182,7 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     parser.add_argument("--wandb.name", type=str, help="WandB run name")
     parser.add_argument(
         "--wandb.enabled",
-        type=lambda x: x.lower() == "true",
+        type=_parse_cli_bool,
         help="Enable Weights & Biases logging",
     )
     parser.add_argument(
@@ -1212,9 +1208,7 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     parser.add_argument(
         "--pretrained_checkpoint", type=str, help="Pretrained checkpoint"
     )
-    parser.add_argument(
-        "--use_deepspeed", type=lambda x: x.lower() == "true", help="Use DeepSpeed"
-    )
+    parser.add_argument("--use_deepspeed", type=_parse_cli_bool, help="Use DeepSpeed")
 
     return parser
 
