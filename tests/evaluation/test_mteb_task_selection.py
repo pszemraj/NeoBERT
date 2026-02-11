@@ -238,7 +238,10 @@ def test_evaluate_mteb_prefers_safetensors_when_available(
     def _fake_load_safetensors(*args, **kwargs):
         del args, kwargs
         calls["safetensors"] += 1
-        return {"model.embeddings.weight": torch.zeros(1)}
+        return {
+            "model.embeddings.weight": torch.zeros(1),
+            "decoder.weight": torch.zeros(1),
+        }
 
     monkeypatch.setattr(
         _RUN_MTEB_MODULE,
@@ -261,4 +264,4 @@ def test_evaluate_mteb_prefers_safetensors_when_available(
 
     assert calls["safetensors"] == 1
     assert calls["deepspeed"] == 0
-    assert strict_flags == [True]
+    assert strict_flags == [False]

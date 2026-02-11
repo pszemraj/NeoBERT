@@ -184,6 +184,59 @@ def _resolve_mteb_tasks(cfg: Any) -> list[str]:
     return list(dict.fromkeys(selected))
 
 
+def _load_mteb_encoder_weights(
+    model: NeoBERTForMTEB,
+    state_dict: dict[str, torch.Tensor],
+    *,
+    source: str,
+) -> None:
+    """Load checkpoint weights for MTEB with encoder/head key tolerance.
+
+    Pretraining checkpoints commonly include LM-head parameters (for example
+    ``decoder.*``) that are not part of ``NeoBERTForMTEB``. We therefore load with
+    ``strict=False`` and log any unexpected keys that are not known LM-head extras.
+
+    :param NeoBERTForMTEB model: MTEB model instance.
+    :param dict[str, torch.Tensor] state_dict: Checkpoint state dict.
+    :param str source: Human-readable checkpoint source for logs.
+    """
+    incompatible = model.load_state_dict(state_dict, strict=False)
+    if incompatible is None:
+        # Compatibility for lightweight test doubles that don't return
+        # ``_IncompatibleKeys`` from ``load_state_dict``.
+        return
+
+    unexpected_keys = list(getattr(incompatible, "unexpected_keys", []))
+    missing_keys = list(getattr(incompatible, "missing_keys", []))
+
+    lm_head_prefixes = ("decoder.", "model.decoder.")
+    lm_head_unexpected = [
+        key for key in unexpected_keys if key.startswith(lm_head_prefixes)
+    ]
+    remaining_unexpected = [
+        key for key in unexpected_keys if key not in lm_head_unexpected
+    ]
+
+    if lm_head_unexpected:
+        logger.info(
+            "Ignoring %d LM-head keys while loading %s for MTEB.",
+            len(lm_head_unexpected),
+            source,
+        )
+    if remaining_unexpected:
+        logger.warning(
+            "Unexpected non-head keys while loading %s for MTEB: %s",
+            source,
+            ", ".join(sorted(remaining_unexpected)),
+        )
+    if missing_keys:
+        logger.warning(
+            "Missing model keys while loading %s for MTEB: %s",
+            source,
+            ", ".join(sorted(missing_keys)),
+        )
+
+
 def evaluate_mteb(cfg: Any) -> None:
     """Evaluate a model on the MTEB benchmark.
 
@@ -264,14 +317,22 @@ def evaluate_mteb(cfg: Any) -> None:
             checkpoint_root,
             tag=str(ckpt),
         )
-        model.load_state_dict(state_dict, strict=False)
+        _load_mteb_encoder_weights(
+            model,
+            state_dict,
+            source=f"DeepSpeed checkpoint tag={ckpt}",
+        )
     else:
         if checkpoint_path.exists():
             state_dict = load_model_safetensors(
                 checkpoint_step_dir,
                 map_location=device,
             )
-            model.load_state_dict(state_dict)
+            _load_mteb_encoder_weights(
+                model,
+                state_dict,
+                source=f"safetensors checkpoint {checkpoint_path}",
+            )
         else:
             logger.warning(
                 f"{MODEL_WEIGHTS_NAME} not found at {checkpoint_path}; "
@@ -281,7 +342,11 @@ def evaluate_mteb(cfg: Any) -> None:
                 checkpoint_root,
                 tag=str(ckpt),
             )
-            model.load_state_dict(state_dict, strict=False)
+            _load_mteb_encoder_weights(
+                model,
+                state_dict,
+                source=f"DeepSpeed fallback tag={ckpt}",
+            )
 
     model.to(device)
     model.eval()
