@@ -44,8 +44,6 @@ trainer:
   logging_steps: 25
   eval_steps: 5000
   save_steps: 10000
-  dataloader_num_workers: 4
-  report_to: ["wandb"]
   mixed_precision: "bf16"
   gradient_checkpointing: false
   resume_from_checkpoint: false
@@ -63,6 +61,7 @@ scheduler:
   total_steps: 100000
 
 wandb:
+  enabled: true
   project: "neobert-testing"
   name: "smollm2-32k-tokenizer-100k"
   mode: "online"

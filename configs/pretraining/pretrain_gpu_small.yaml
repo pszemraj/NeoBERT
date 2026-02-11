@@ -43,8 +43,6 @@ trainer:
   logging_steps: 10
   eval_steps: 50
   save_steps: 50
-  dataloader_num_workers: 4
-  report_to: []
   mixed_precision: "bf16"
   gradient_checkpointing: false
   resume_from_checkpoint: false
@@ -62,6 +60,7 @@ scheduler:
   total_steps: 100
 
 wandb:
+  enabled: false
   mode: "disabled"
 
 # Additional settings

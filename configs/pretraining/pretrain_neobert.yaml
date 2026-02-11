@@ -46,8 +46,6 @@ trainer:
   logging_steps: 100
   eval_steps: 10000
   save_steps: 10000
-  dataloader_num_workers: 4
-  report_to: ["wandb"]  # Remove if you don't want logging
   mixed_precision: "bf16"  # Use bf16 on modern GPUs
   masked_logits_only_loss: true  # default/recommended; false=legacy full-logits ablation path
   gradient_checkpointing: false
@@ -66,6 +64,7 @@ scheduler:
   total_steps: 1000000
 
 wandb:
+  enabled: true
   project: "neobert-pretraining"
   name: "neobert_pretrain"
   mode: "online"

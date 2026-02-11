@@ -43,8 +43,6 @@ trainer:
   logging_steps: 10
   eval_steps: 100
   save_steps: 100
-  dataloader_num_workers: 0
-  report_to: []
   mixed_precision: "bf16"  # Use bf16 on modern GPU
   gradient_checkpointing: false
   resume_from_checkpoint: false
@@ -62,6 +60,7 @@ scheduler:
   total_steps: 200
 
 wandb:
+  enabled: false
   mode: "disabled"
 
 # Additional settings

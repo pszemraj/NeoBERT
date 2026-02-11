@@ -45,7 +45,6 @@ trainer:
   eval_steps: 5000
   save_steps: 10000
   save_total_limit: 3 # Keep only last 3 checkpoints
-  report_to: ["wandb"]
   mixed_precision: "bf16"
   gradient_checkpointing: false
   resume_from_checkpoint: false
@@ -62,6 +61,7 @@ scheduler:
   warmup_steps: 5000
 
 wandb:
+  enabled: true
   project: "neobert-pretraining"
   name: "neobert-100m-wordpc_msp_32k_tok-adamw"
   mode: "online"

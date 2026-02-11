@@ -43,8 +43,6 @@ trainer:
   logging_steps: 100
   eval_steps: 10000
   save_steps: 10000
-  dataloader_num_workers: 4
-  report_to: ["wandb"]
   mixed_precision: "bf16"
   gradient_checkpointing: false
   resume_from_checkpoint: false
@@ -62,6 +60,7 @@ scheduler:
   total_steps: 1000000
 
 wandb:
+  enabled: true
   project: "neobert-streaming"
   name: "neobert_streaming"
   mode: "online"
