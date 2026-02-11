@@ -447,6 +447,9 @@ class ConfigLoader:
             raw_value = _lookup_variable(path)
             resolving_stack.append(path)
             try:
+                # Nested dict/list values still route variable tokens through
+                # ``_resolve_variable(...)``, so transitive cycles are caught by
+                # ``resolving_stack`` even when references appear deep in objects.
                 resolved_value = _resolve_node(raw_value, f"variables.{path}")
             finally:
                 resolving_stack.pop()

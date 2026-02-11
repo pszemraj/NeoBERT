@@ -75,6 +75,49 @@ def test_normalize_glue_pretrained_checkpoint_root_preserves_legacy_transfer_roo
     assert normalized == legacy_root
 
 
+def test_load_pretrained_weights_filters_only_head_prefixes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ensure filtering drops only ``classifier.``/``decoder.`` head prefixes."""
+    checkpoint_dir = tmp_path / "100"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    (checkpoint_dir / MODEL_WEIGHTS_NAME).touch()
+
+    captured: dict[str, torch.Tensor] = {}
+
+    class _ModelStub(torch.nn.Module):
+        def load_state_dict(self, state_dict, strict=False):
+            del strict
+            captured.update(state_dict)
+            return [], []
+
+    def _fake_load_safetensors(*args, **kwargs):
+        del args, kwargs
+        return {
+            "encoder.weight": torch.ones(2, 2),
+            "classifier.weight": torch.ones(2, 2),
+            "decoder.weight": torch.ones(2, 2),
+            "pre_classifier_norm.weight": torch.ones(2),
+        }
+
+    monkeypatch.setattr(
+        "neobert.glue.train.load_model_safetensors", _fake_load_safetensors
+    )
+
+    model = _ModelStub()
+    load_pretrained_weights(
+        model,
+        checkpoint_dir=str(tmp_path),
+        checkpoint_id="100",
+        logger=logging.getLogger("test.glue.checkpoint_loading"),
+    )
+
+    assert "encoder.weight" in captured
+    assert "pre_classifier_norm.weight" in captured
+    assert "classifier.weight" not in captured
+    assert "decoder.weight" not in captured
+
+
 def test_load_pretrained_weights_falls_back_to_deepspeed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

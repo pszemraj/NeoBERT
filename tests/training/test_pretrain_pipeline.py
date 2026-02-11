@@ -23,6 +23,7 @@ from neobert.pretraining.trainer import (
     _ensure_pinned_cpu_batch,
     _gather_decoder_weight_for_masked_objective,
     _infer_eval_split_name,
+    _prune_step_checkpoints,
     _resolve_checkpoint_retention_limit,
     _resolve_loader_perf_settings,
     _resolve_streaming_eval_budget,
@@ -387,6 +388,21 @@ class TestPretrainComponents(unittest.TestCase):
         cfg.trainer.max_ckpt = 3
 
         self.assertEqual(_resolve_checkpoint_retention_limit(cfg), 3)
+
+    def test_prune_step_checkpoints_keeps_latest_numeric_dirs(self):
+        """Ensure checkpoint pruning is resilient and keeps newest numeric dirs."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_dir = Path(tmpdir)
+            for step in (10, 20, 30):
+                (checkpoint_dir / str(step)).mkdir(parents=True, exist_ok=True)
+            (checkpoint_dir / "notes").mkdir(parents=True, exist_ok=True)
+
+            _prune_step_checkpoints(checkpoint_dir, retention_limit=2)
+
+            self.assertFalse((checkpoint_dir / "10").exists())
+            self.assertTrue((checkpoint_dir / "20").exists())
+            self.assertTrue((checkpoint_dir / "30").exists())
+            self.assertTrue((checkpoint_dir / "notes").exists())
 
     def test_save_portable_checkpoint_weights_from_accelerator_state_dict(self):
         """Ensure portable safetensors is emitted from accelerator state dicts."""

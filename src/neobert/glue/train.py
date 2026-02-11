@@ -408,6 +408,9 @@ def get_evaluation(
                     # If we are in a multiprocess environment, the last batch has duplicates
                     if accelerator.num_processes > 1:
                         if step == len(dataloader) - 1:
+                            # ``samples_seen`` intentionally tracks only prior gathered
+                            # batches (not the current one), so this slice keeps exactly
+                            # the remaining real examples from the final gathered batch.
                             batch_predictions = batch_predictions[
                                 : len(dataloader.dataset) - samples_seen
                             ]
@@ -711,11 +714,14 @@ def load_pretrained_weights(
             f"{checkpoint_path}"
         )
 
-    # Remove classifier and decoder keys for fine-tuning.
+    # For GLUE init we always drop task/LM heads:
+    # - ``decoder.*`` is MLM-only.
+    # - ``classifier.*`` is task-head specific and often shape-incompatible across
+    #   transfer map pairs (for example MNLI:3-way -> QNLI/MRPC/RTE:2-way).
     cleaned_state_dict = {
         k: v
         for k, v in state_dict.items()
-        if "classifier" not in k and "decoder" not in k
+        if not (k.startswith("classifier.") or k.startswith("decoder."))
     }
     logger.info(f"After filtering: {len(cleaned_state_dict)} keys to load")
 
@@ -1096,7 +1102,9 @@ def trainer(cfg: Config) -> None:
     # DataLoaders creation:
     data_collator = _create_glue_data_collator(tokenizer, cfg)
 
-    # Keep pad masks in float32 for numerical stability (match pretraining).
+    # Keep additive pad masks in float32 for numerical stability (match
+    # pretraining). This does not force full-fp32 model execution; runtime
+    # compute precision is still governed by Accelerator mixed precision.
     dtype_pad_mask = torch.float32
 
     def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:

@@ -140,6 +140,9 @@ def _log_masking_strategy(cfg: Config) -> None:
     :param Config cfg: Runtime configuration.
     :raises ValueError: If ``datacollator.mlm_probability`` is out of range.
     """
+    # Keep MLM probability policy intentionally config-driven; this fork runs
+    # controlled ablations at multiple masking rates, so only range validation is
+    # enforced here (task-level quality checks belong to experiment configs).
     mlm_probability = float(cfg.datacollator.mlm_probability)
     if mlm_probability < 0.0 or mlm_probability > 1.0:
         raise ValueError(
@@ -1562,6 +1565,41 @@ def _resolve_checkpoint_retention_limit(cfg: Config) -> int:
     return 0
 
 
+def _prune_step_checkpoints(checkpoint_dir: Path, retention_limit: int) -> None:
+    """Prune old numeric step checkpoint folders in ``checkpoint_dir``.
+
+    This helper is best-effort and resilient to concurrent filesystem mutations.
+    It never raises on a missing/deleted checkpoint directory.
+
+    :param Path checkpoint_dir: Root directory containing ``<step>/`` folders.
+    :param int retention_limit: Number of newest numeric checkpoints to keep.
+    """
+    if retention_limit <= 0 or not checkpoint_dir.exists():
+        return
+
+    checkpoints: list[tuple[int, Path]] = []
+    for item_path in checkpoint_dir.iterdir():
+        if not item_path.is_dir():
+            continue
+        try:
+            checkpoints.append((int(item_path.name), item_path))
+        except ValueError:
+            continue
+
+    if len(checkpoints) <= retention_limit:
+        return
+
+    checkpoints.sort(key=lambda item: item[0])
+    for _, old_path in checkpoints[: len(checkpoints) - retention_limit]:
+        try:
+            shutil.rmtree(old_path)
+            logger.info(f"Removed old checkpoint: {old_path} (limit={retention_limit})")
+        except FileNotFoundError:
+            logger.warning(f"Checkpoint already removed before prune: {old_path}")
+        except OSError as exc:
+            logger.warning(f"Failed to remove old checkpoint {old_path}: {exc}")
+
+
 def _save_portable_checkpoint_weights(
     model: torch.nn.Module,
     accelerator: Accelerator,
@@ -2784,11 +2822,20 @@ def trainer(cfg: Config) -> None:
                     local_loss_path_other.zero_()
 
                 save_strategy = str(getattr(cfg.trainer, "save_strategy", "steps"))
+                eval_strategy = str(getattr(cfg.trainer, "eval_strategy", "steps"))
                 save_model = bool(getattr(cfg.trainer, "save_model", True))
                 should_save = (
                     save_model
                     and save_strategy == "steps"
                     and metrics["train/steps"] % cfg.trainer.save_steps == 0
+                )
+                # Compute eval trigger from the same post-update step snapshot used
+                # for save logic to keep step-based scheduling deterministic.
+                should_eval = (
+                    eval_dataloader is not None
+                    and eval_strategy == "steps"
+                    and cfg.trainer.eval_steps > 0
+                    and metrics["train/steps"] % cfg.trainer.eval_steps == 0
                 )
                 if should_save:
                     step_tag = str(metrics["train/steps"])
@@ -2828,35 +2875,14 @@ def trainer(cfg: Config) -> None:
 
                     accelerator.wait_for_everyone()
 
-                    if (
-                        checkpoint_retention_limit > 0
-                        and checkpoint_dir.exists()
-                        and accelerator.is_main_process
-                    ):
-                        checkpoints = []
-                        for item_path in checkpoint_dir.iterdir():
-                            if item_path.is_dir() and item_path.name.isdigit():
-                                checkpoints.append(int(item_path.name))
+                    if checkpoint_retention_limit > 0 and accelerator.is_main_process:
+                        _prune_step_checkpoints(
+                            checkpoint_dir,
+                            checkpoint_retention_limit,
+                        )
+                    accelerator.wait_for_everyone()
 
-                        if len(checkpoints) > checkpoint_retention_limit:
-                            checkpoints.sort()
-                            for old_ckpt in checkpoints[
-                                : len(checkpoints) - checkpoint_retention_limit
-                            ]:
-                                old_path = checkpoint_dir / str(old_ckpt)
-                                if old_path.exists():
-                                    shutil.rmtree(old_path)
-                                    logger.info(
-                                        "Removed old checkpoint: "
-                                        f"{old_path} (limit={checkpoint_retention_limit})"
-                                    )
-
-                if (
-                    eval_dataloader is not None
-                    and getattr(cfg.trainer, "eval_strategy", "steps") == "steps"
-                    and cfg.trainer.eval_steps > 0
-                    and metrics["train/steps"] % cfg.trainer.eval_steps == 0
-                ):
+                if should_eval:
                     eval_metrics = _run_eval(
                         model,
                         eval_dataloader,

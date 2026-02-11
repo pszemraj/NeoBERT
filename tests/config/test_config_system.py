@@ -308,6 +308,26 @@ optimizer:
         finally:
             os.unlink(path)
 
+    def test_yaml_variables_nested_circular_reference_raises(self):
+        """Ensure nested object variable cycles are detected."""
+        config_data = {
+            "variables": {
+                "a": {"nested": "$variables.b"},
+                "b": {"nested": "$variables.a"},
+            },
+            "dataset": {"max_seq_length": "$variables.a.nested.nested"},
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            path = f.name
+            yaml.safe_dump(config_data, f)
+
+        try:
+            with self.assertRaises(ValueError):
+                ConfigLoader.load(path)
+        finally:
+            os.unlink(path)
+
     def test_yaml_unresolved_variable_tokens_warn(self):
         """Ensure unresolved inline variable tokens warn with location."""
         config_data = {
