@@ -564,6 +564,24 @@ class TestNewtonSchulz:
         assert X.norm() > 0
         assert X.norm() < G.norm() * 10  # Should not explode
 
+    def test_orthogonalization_rejects_fp16(self):
+        """Ensure MuonClip orthogonalization rejects unsupported fp16 grads."""
+        from neobert.optimizer.muon_clip import MuonClipOptimizer
+
+        G = torch.randn(32, 32, dtype=torch.float16)
+        config = NeoBERTConfig(
+            hidden_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            attn_backend="sdpa",
+        )
+        model = NeoBERT(config)
+        muon_config = MuonClipConfig()
+        optimizer = MuonClipOptimizer(model, config, muon_config)
+
+        with pytest.raises(RuntimeError, match="fp16/float16"):
+            optimizer._newton_schulz_update(G, steps=5)
+
 
 class TestMemoryLeaks:
     """Test for memory leaks."""

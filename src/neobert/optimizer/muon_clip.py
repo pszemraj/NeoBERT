@@ -950,7 +950,12 @@ class MuonClipOptimizer(Optimizer):
         working = grad.T if is_transpose else grad
 
         original_dtype = working.dtype
-        if working.dtype in (torch.float16, torch.bfloat16):
+        if working.dtype == torch.float16:
+            raise RuntimeError(
+                "fp16/float16 gradients are not supported by MuonClip "
+                "orthogonalization. Use bf16 or fp32."
+            )
+        if working.dtype == torch.bfloat16:
             working = working.float()
         norm = torch.linalg.norm(working)
         if norm == 0:

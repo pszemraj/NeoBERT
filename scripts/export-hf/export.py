@@ -54,8 +54,13 @@ def get_torch_dtype_from_state_dict(state_dict: Dict[str, torch.Tensor]) -> str:
         raise ValueError(f"Expected torch.Tensor, got {type(first_weight)}")
 
     dtype = first_weight.dtype
+    if dtype == torch.float16:
+        raise ValueError(
+            "fp16/float16 checkpoints are not supported for NeoBERT export. "
+            "Use bf16 or fp32 checkpoints."
+        )
     dtype_str = str(dtype).split(".")[-1]
-    if dtype_str not in {"float16", "bfloat16", "float32", "float64"}:
+    if dtype_str not in {"bfloat16", "float32", "float64"}:
         print(f"Warning: Found unexpected dtype {dtype}, using '{dtype_str}'")
     return dtype_str
 

@@ -190,8 +190,13 @@ class _AdaptiveRMSNorm(nn.Module):
             return _LigerRMSNormFunction.apply(x, self.weight, self.eps)
         # Native torch path (CPU or Liger unavailable). Torch>=2.6.0 guarantees
         # fused ``rms_norm`` availability.
-        if x.device.type == "cpu" and x.dtype in (torch.float16, torch.bfloat16):
-            # CPU half/bfloat16 paths are less stable; normalize in fp32 then cast back.
+        if x.device.type == "cpu" and x.dtype == torch.float16:
+            raise RuntimeError(
+                "fp16/float16 inputs are not supported in NeoBERT kernels. "
+                "Use bf16 or fp32."
+            )
+        if x.device.type == "cpu" and x.dtype == torch.bfloat16:
+            # CPU bf16 path normalizes in fp32 for numerical stability.
             out = nn.functional.rms_norm(
                 x.float(),
                 (self.weight.shape[0],),
