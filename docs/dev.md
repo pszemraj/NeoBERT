@@ -182,11 +182,6 @@ Priority order for next performance PR:
 
 These are explicitly tracked for sweep-readiness follow-up work:
 
-1. Add schema support for contrastive sampling alpha
-
-- `dataset.alpha` is referenced in contrastive sampling logic but not represented
-  in the config schema/CLI, so sweeps cannot set it reliably.
-
 1. Fix contrastive dataloader iterator lifecycle
 
 - The loop currently recreates iterators with `next(iter(dataloader))` patterns

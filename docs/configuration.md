@@ -196,6 +196,7 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `dataset.load_all_from_disk` | `bool`  | `false` | Load full dataset into memory.                          |
 | `dataset.force_redownload`   | `bool`  | `false` | Force dataset redownload.                               |
 | `dataset.min_length`         | `int`   | `5`     | Short-text-friendly default for optional length filtering helpers. |
+| `dataset.alpha`              | `float` | `1.0`   | Contrastive dataset sampling exponent (`1.0` = proportional by size). |
 
 > [!NOTE]
 > `dataset.pretraining_prob` is deprecated and normalized to
@@ -252,9 +253,9 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `trainer.eval_strategy`          | `str`         | `"steps"` | `steps` or `epoch`.                                       |
 | `trainer.save_strategy`          | `str`         | `"steps"` | `steps`, `epoch`, `best`, or `no`.                        |
 | `trainer.save_total_limit`       | `int \| None` | `3`       | Keep at most this many model checkpoints.                 |
-| `trainer.max_ckpt`               | `int`         | `3`       | Legacy checkpoint retention cap.                          |
+| `trainer.max_ckpt`               | `int \| None` | `null`    | Deprecated alias for `trainer.save_total_limit`.          |
 | `trainer.disable_tqdm`           | `bool`        | `false`   | Disable progress bars.                                    |
-| `trainer.dataloader_num_workers` | `int`         | `0`       | Legacy compatibility field.                               |
+| `trainer.dataloader_num_workers` | `int`         | `0`       | Contrastive-only dataloader worker override.              |
 | `trainer.use_cpu`                | `bool`        | `false`   | Force CPU execution.                                      |
 | `trainer.report_to`              | `list[str]`   | `[]`      | Deprecated and ignored. Use `wandb.enabled` explicitly.   |
 | `trainer.train_batch_size`       | `int \| None` | `null`    | Legacy batch-size alias.                                  |
@@ -337,7 +338,7 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | -------------------------------- | ------------- | ---------- | -------------------------------------------------- |
 | `trainer.save_steps`             | `int`         | `10000`    | Save cadence.                                      |
 | `trainer.save_total_limit`       | `int \| None` | `3`        | Maximum retained model checkpoints.                |
-| `trainer.max_ckpt`               | `int`         | `3`        | Legacy retention cap.                              |
+| `trainer.max_ckpt`               | `int \| None` | `null`     | Deprecated alias for `trainer.save_total_limit`.   |
 | `trainer.resume_from_checkpoint` | `str \| None` | `null`     | Resume source (`latest`, step dir, explicit path). |
 | `pretrained_checkpoint`          | `str`         | `"latest"` | Checkpoint selector for downstream tasks.          |
 

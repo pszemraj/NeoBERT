@@ -79,11 +79,21 @@ _TASK_CONFIG_FIELDS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-_PRETRAIN_DATASET_EXCLUDE_FIELDS = {
+_NON_CONTRASTIVE_DATASET_EXCLUDE_FIELDS = {
     "load_all_from_disk",
     "force_redownload",
     "min_length",
+    "alpha",
 }
+
+_LEGACY_TRAINER_EXCLUDE_FIELDS = {
+    "report_to",
+    "max_ckpt",
+    "train_batch_size",
+    "eval_batch_size",
+}
+
+_NON_CONTRASTIVE_TRAINER_EXCLUDE_FIELDS = {"dataloader_num_workers"}
 
 
 def _serialize_config(cfg: Any) -> Dict[str, Any]:
@@ -145,18 +155,22 @@ def _task_filter_config(config_dict: Dict[str, Any]) -> Dict[str, Any]:
         if key in config_dict:
             filtered[key] = config_dict[key]
 
-    if task == "pretraining":
+    if task != "contrastive":
         dataset_cfg = filtered.get("dataset")
         if isinstance(dataset_cfg, dict):
             filtered["dataset"] = {
                 key: value
                 for key, value in dataset_cfg.items()
-                if key not in _PRETRAIN_DATASET_EXCLUDE_FIELDS
+                if key not in _NON_CONTRASTIVE_DATASET_EXCLUDE_FIELDS
             }
 
     trainer_cfg = filtered.get("trainer")
     if isinstance(trainer_cfg, dict):
-        trainer_cfg.pop("report_to", None)
+        for key in _LEGACY_TRAINER_EXCLUDE_FIELDS:
+            trainer_cfg.pop(key, None)
+        if task != "contrastive":
+            for key in _NON_CONTRASTIVE_TRAINER_EXCLUDE_FIELDS:
+                trainer_cfg.pop(key, None)
 
     return _drop_empty_values(filtered)
 

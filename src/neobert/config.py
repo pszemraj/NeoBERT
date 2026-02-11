@@ -96,6 +96,7 @@ class DatasetConfig:
     load_all_from_disk: bool = False
     force_redownload: bool = False
     min_length: int = 5
+    alpha: float = 1.0
 
 
 @dataclass
@@ -223,7 +224,7 @@ class TrainerConfig:
         default_factory=list
     )  # Deprecated: ignored, use wandb.enabled.
     tf32: bool = True
-    max_ckpt: int = 3
+    max_ckpt: Optional[int] = None  # Deprecated alias for save_total_limit
     log_weight_norms: bool = True
     # Legacy batch size fields (use per_device versions instead)
     train_batch_size: Optional[int] = None
@@ -525,6 +526,57 @@ class ConfigLoader:
                         "NeoBERT. Set 'wandb.enabled: true' explicitly to enable W&B."
                     )
 
+            # trainer.train_batch_size -> trainer.per_device_train_batch_size
+            if "train_batch_size" in trainer:
+                train_batch_size = trainer.pop("train_batch_size")
+                if "per_device_train_batch_size" in trainer and trainer[
+                    "per_device_train_batch_size"
+                ] not in (None, train_batch_size):
+                    raise ValueError(
+                        "Both 'trainer.train_batch_size' and "
+                        "'trainer.per_device_train_batch_size' are set with different values."
+                    )
+                if trainer.get("per_device_train_batch_size") is None:
+                    trainer["per_device_train_batch_size"] = train_batch_size
+                ConfigLoader._warn_legacy(
+                    "Config key 'trainer.train_batch_size' is deprecated; use "
+                    "'trainer.per_device_train_batch_size'."
+                )
+
+            # trainer.eval_batch_size -> trainer.per_device_eval_batch_size
+            if "eval_batch_size" in trainer:
+                eval_batch_size = trainer.pop("eval_batch_size")
+                if "per_device_eval_batch_size" in trainer and trainer[
+                    "per_device_eval_batch_size"
+                ] not in (None, eval_batch_size):
+                    raise ValueError(
+                        "Both 'trainer.eval_batch_size' and "
+                        "'trainer.per_device_eval_batch_size' are set with different values."
+                    )
+                if trainer.get("per_device_eval_batch_size") is None:
+                    trainer["per_device_eval_batch_size"] = eval_batch_size
+                ConfigLoader._warn_legacy(
+                    "Config key 'trainer.eval_batch_size' is deprecated; use "
+                    "'trainer.per_device_eval_batch_size'."
+                )
+
+            # trainer.max_ckpt -> trainer.save_total_limit
+            if "max_ckpt" in trainer:
+                max_ckpt = trainer.pop("max_ckpt")
+                if "save_total_limit" in trainer and trainer[
+                    "save_total_limit"
+                ] not in (None, max_ckpt):
+                    raise ValueError(
+                        "Both 'trainer.max_ckpt' and 'trainer.save_total_limit' are set "
+                        "with different values."
+                    )
+                if trainer.get("save_total_limit") is None:
+                    trainer["save_total_limit"] = max_ckpt
+                ConfigLoader._warn_legacy(
+                    "Config key 'trainer.max_ckpt' is deprecated; use "
+                    "'trainer.save_total_limit'."
+                )
+
         # dataset.tokenizer_name -> tokenizer.name
         dataset = normalized.get("dataset", {})
         if isinstance(dataset, dict):
@@ -807,6 +859,24 @@ class ConfigLoader:
                 "dataset.min_length must be <= dataset.max_seq_length, got "
                 f"{config.dataset.min_length} > {config.dataset.max_seq_length}."
             )
+        if config.dataset.alpha <= 0.0:
+            errors.append(f"dataset.alpha must be > 0, got {config.dataset.alpha}.")
+        if config.dataset.num_workers < 0:
+            errors.append(
+                f"dataset.num_workers must be >= 0, got {config.dataset.num_workers}."
+            )
+        if config.dataset.num_proc < 0:
+            errors.append(
+                f"dataset.num_proc must be >= 0, got {config.dataset.num_proc}."
+            )
+        if (
+            config.dataset.eval_samples is not None
+            and int(config.dataset.eval_samples) <= 0
+        ):
+            errors.append(
+                "dataset.eval_samples must be > 0 when set, got "
+                f"{config.dataset.eval_samples}."
+            )
 
         if task in {"pretraining", "contrastive"}:
             if config.tokenizer.max_length != config.dataset.max_seq_length:
@@ -824,6 +894,30 @@ class ConfigLoader:
                     "dataset.max_seq_length must be <= model.max_position_embeddings "
                     f"for {task}, got {config.dataset.max_seq_length} > "
                     f"{config.model.max_position_embeddings}."
+                )
+        if task == "glue" and config.tokenizer.max_length != config.glue.max_seq_length:
+            warnings.warn(
+                "tokenizer.max_length does not match glue.max_seq_length; syncing "
+                f"tokenizer.max_length from {config.tokenizer.max_length} to "
+                f"{config.glue.max_seq_length}.",
+                UserWarning,
+                stacklevel=2,
+            )
+            config.tokenizer.max_length = config.glue.max_seq_length
+        if task == "glue":
+            if config.glue.max_seq_length <= 0:
+                errors.append(
+                    "glue.max_seq_length must be > 0, got "
+                    f"{config.glue.max_seq_length}."
+                )
+            if config.glue.num_workers < 0:
+                errors.append(
+                    f"glue.num_workers must be >= 0, got {config.glue.num_workers}."
+                )
+            if config.glue.preprocessing_num_proc < 0:
+                errors.append(
+                    "glue.preprocessing_num_proc must be >= 0, got "
+                    f"{config.glue.preprocessing_num_proc}."
                 )
 
         if not 0.0 <= float(config.datacollator.mlm_probability) <= 1.0:
@@ -862,6 +956,38 @@ class ConfigLoader:
         if task in {"pretraining", "contrastive"} and config.trainer.max_steps <= 0:
             errors.append(
                 f"trainer.max_steps must be > 0 for {task}, got {config.trainer.max_steps}."
+            )
+        if (
+            config.trainer.save_total_limit is not None
+            and config.trainer.save_total_limit <= 0
+        ):
+            errors.append(
+                "trainer.save_total_limit must be > 0 when set, got "
+                f"{config.trainer.save_total_limit}."
+            )
+        if (
+            config.trainer.eval_max_batches is not None
+            and config.trainer.eval_max_batches <= 0
+        ):
+            errors.append(
+                "trainer.eval_max_batches must be > 0 when set, got "
+                f"{config.trainer.eval_max_batches}."
+            )
+        if config.trainer.dataloader_num_workers < 0:
+            errors.append(
+                "trainer.dataloader_num_workers must be >= 0, got "
+                f"{config.trainer.dataloader_num_workers}."
+            )
+        if config.trainer.max_ckpt is not None:
+            if config.trainer.max_ckpt <= 0:
+                errors.append(
+                    "trainer.max_ckpt must be > 0 when set, got "
+                    f"{config.trainer.max_ckpt}."
+                )
+            warnings.warn(
+                "trainer.max_ckpt is deprecated; use trainer.save_total_limit.",
+                UserWarning,
+                stacklevel=2,
             )
 
         if config.scheduler.warmup_steps < 0:
@@ -953,6 +1079,43 @@ class ConfigLoader:
                 UserWarning,
                 stacklevel=2,
             )
+        if task == "pretraining":
+            if config.trainer.metric_for_best_model is not None:
+                warnings.warn(
+                    "trainer.metric_for_best_model is not implemented for pretraining "
+                    "and is currently ignored.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            if bool(config.trainer.load_best_model_at_end):
+                warnings.warn(
+                    "trainer.load_best_model_at_end is not implemented for "
+                    "pretraining and is currently ignored.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            if config.trainer.greater_is_better is not True:
+                warnings.warn(
+                    "trainer.greater_is_better is not implemented for pretraining "
+                    "and is currently ignored.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        if task == "contrastive":
+            if str(config.contrastive.loss_type).strip().lower() != "simcse":
+                warnings.warn(
+                    "contrastive.loss_type is currently informational and does not "
+                    "change runtime loss implementation; SupConLoss is used.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            if float(config.contrastive.hard_negative_weight) != 0.0:
+                warnings.warn(
+                    "contrastive.hard_negative_weight is currently informational and "
+                    "not applied in loss computation.",
+                    UserWarning,
+                    stacklevel=2,
+                )
 
         if errors:
             raise ValueError("Invalid configuration values:\n- " + "\n- ".join(errors))
@@ -1283,10 +1446,23 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     parser.add_argument(
         "--dataset.min_length", type=int, help="Minimum sequence length"
     )
+    parser.add_argument(
+        "--dataset.alpha",
+        type=float,
+        help="Contrastive dataset sampling exponent (1.0 = proportional to size)",
+    )
 
     # Tokenizer arguments
     parser.add_argument("--tokenizer.name", type=str, help="Tokenizer name")
     parser.add_argument("--tokenizer.path", type=str, help="Tokenizer path")
+    parser.add_argument(
+        "--tokenizer.max_length", type=int, help="Tokenizer maximum sequence length"
+    )
+    parser.add_argument(
+        "--tokenizer.truncation",
+        type=_parse_cli_bool,
+        help="Whether tokenizer preprocessing should truncate to max_length",
+    )
     parser.add_argument(
         "--tokenizer.trust_remote_code",
         type=_parse_cli_bool,

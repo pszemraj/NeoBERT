@@ -52,6 +52,7 @@ class TestConfigSystem(unittest.TestCase):
         self.assertFalse(config.trainer.torch_compile)
         self.assertEqual(config.trainer.torch_compile_backend, "inductor")
         self.assertTrue(config.trainer.enforce_full_packed_batches)
+        self.assertIsNone(config.trainer.max_ckpt)
         self.assertEqual(config.dataset.min_length, 5)
         self.assertEqual(config.contrastive.pretraining_prob, 0.3)
 
@@ -180,6 +181,30 @@ class TestConfigSystem(unittest.TestCase):
         try:
             config = load_config_from_args()
             self.assertEqual(config.dataset.eval_samples, 2048)
+        finally:
+            sys.argv = original_argv
+
+    def test_cli_dataset_alpha_and_tokenizer_truncation_overrides(self):
+        """Ensure CLI parsing supports dataset.alpha and tokenizer.truncation."""
+        config_path = (
+            self.test_config_dir / "contrastive" / "test_tiny_contrastive.yaml"
+        )
+
+        test_args = [
+            "script.py",
+            str(config_path),
+            "--dataset.alpha",
+            "0.75",
+            "--tokenizer.truncation",
+            "false",
+        ]
+
+        original_argv = sys.argv
+        sys.argv = test_args
+        try:
+            config = load_config_from_args()
+            self.assertEqual(config.dataset.alpha, 0.75)
+            self.assertFalse(config.tokenizer.truncation)
         finally:
             sys.argv = original_argv
 
@@ -437,6 +462,65 @@ optimizer:
             any("scheduler.num_cycles" in str(w.message) for w in caught),
             "Expected deprecation warning for scheduler.num_cycles",
         )
+
+    def test_dataset_alpha_must_be_positive(self):
+        """Ensure dataset.alpha must be strictly positive."""
+        with self.assertRaises(ValueError):
+            ConfigLoader.dict_to_config(
+                {"task": "contrastive", "dataset": {"alpha": 0.0}}
+            )
+
+    def test_legacy_trainer_aliases_map_to_canonical_fields(self):
+        """Ensure legacy trainer aliases map to canonical fields."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cfg = ConfigLoader.dict_to_config(
+                {
+                    "trainer": {
+                        "train_batch_size": 8,
+                        "eval_batch_size": 12,
+                        "max_ckpt": 5,
+                    }
+                }
+            )
+        self.assertEqual(cfg.trainer.per_device_train_batch_size, 8)
+        self.assertEqual(cfg.trainer.per_device_eval_batch_size, 12)
+        self.assertEqual(cfg.trainer.save_total_limit, 5)
+        self.assertIsNone(cfg.trainer.max_ckpt)
+        self.assertTrue(
+            any("trainer.train_batch_size" in str(w.message) for w in caught)
+        )
+        self.assertTrue(
+            any("trainer.eval_batch_size" in str(w.message) for w in caught)
+        )
+        self.assertTrue(any("trainer.max_ckpt" in str(w.message) for w in caught))
+
+    def test_glue_seq_length_syncs_tokenizer_max_length(self):
+        """Ensure tokenizer.max_length is synced to glue.max_seq_length for GLUE."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cfg = ConfigLoader.dict_to_config(
+                {
+                    "task": "glue",
+                    "glue": {"max_seq_length": 192},
+                    "tokenizer": {"max_length": 256},
+                }
+            )
+        self.assertEqual(cfg.tokenizer.max_length, 192)
+        self.assertTrue(
+            any(
+                "tokenizer.max_length does not match glue.max_seq_length"
+                in str(w.message)
+                for w in caught
+            )
+        )
+
+    def test_glue_preprocessing_num_proc_validation(self):
+        """Ensure glue.preprocessing_num_proc must be >= 0."""
+        with self.assertRaises(ValueError):
+            ConfigLoader.dict_to_config(
+                {"task": "glue", "glue": {"preprocessing_num_proc": -1}}
+            )
 
 
 if __name__ == "__main__":
