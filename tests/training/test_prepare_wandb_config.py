@@ -131,3 +131,33 @@ def test_format_resolved_config_flattens_nested_sections():
     assert "name=muonclip" in rendered
     assert "muon_config.enable_clipping=false" in rendered
     assert "muon_config.ns_steps=5" in rendered
+
+
+def test_format_resolved_config_uses_consistent_continuation_indent():
+    payload = {
+        "task": "pretraining",
+        "seed": 69,
+        "dataset": {
+            "name": "EleutherAI/SmolLM2-1.7B-stage-4-100B",
+            "max_seq_length": 1024,
+            "shuffle_buffer_size": 10000,
+            "streaming": True,
+        },
+        "trainer": {
+            "per_device_train_batch_size": 32,
+            "gradient_accumulation_steps": 4,
+            "mixed_precision": "bf16",
+            "logging_steps": 25,
+        },
+    }
+
+    rendered = format_resolved_config(payload, width=88)
+    lines = rendered.splitlines()
+
+    continuation_lines = [line for line in lines if line and not line.startswith("[")]
+    assert continuation_lines, "Expected at least one wrapped continuation line"
+
+    continuation_indents = {
+        len(line) - len(line.lstrip(" ")) for line in continuation_lines
+    }
+    assert len(continuation_indents) == 1

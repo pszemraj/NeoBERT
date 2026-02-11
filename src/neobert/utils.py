@@ -312,15 +312,27 @@ def format_resolved_config(
         rendered = _render_display_value(value, printer)
         meta_tokens.append(f"{key}={rendered}")
 
+    section_labels: List[str] = []
     if meta_tokens:
-        lines.extend(_wrap_tokens("[meta] ", meta_tokens, width=resolved_width))
+        section_labels.append("[meta]")
+    section_labels.extend(f"[{name}]" for name, _ in section_items)
+    section_label_width = max((len(label) for label in section_labels), default=0)
+
+    def _prefix(label: str) -> str:
+        """Build a padded section prefix with globally aligned continuation column."""
+        return f"{label:<{section_label_width}} "
+
+    if meta_tokens:
+        lines.extend(_wrap_tokens(_prefix("[meta]"), meta_tokens, width=resolved_width))
 
     for section_name, section_value in section_items:
         flattened = _flatten_display_items(section_value)
         tokens = [
             f"{key}={_render_display_value(value, printer)}" for key, value in flattened
         ]
-        lines.extend(_wrap_tokens(f"[{section_name}] ", tokens, width=resolved_width))
+        lines.extend(
+            _wrap_tokens(_prefix(f"[{section_name}]"), tokens, width=resolved_width)
+        )
 
     return "\n".join(lines)
 
