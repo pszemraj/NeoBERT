@@ -338,6 +338,39 @@ class TestGLUETaskSpecific(unittest.TestCase):
 
         collator_ctor.assert_called_once_with(tokenizer, pad_to_multiple_of=16)
 
+    def test_load_glue_metric_uses_expected_mapping(self):
+        """Ensure helper maps task aliases to the intended evaluate metric."""
+        from neobert.glue.train import _load_glue_metric
+
+        with mock.patch("neobert.glue.train.evaluate.load") as load_fn:
+            _load_glue_metric("multirc", "glue", "exp")
+        load_fn.assert_called_once_with("accuracy", experiment_id="exp")
+
+        with mock.patch("neobert.glue.train.evaluate.load") as load_fn:
+            _load_glue_metric("snli", "glue", "exp")
+        load_fn.assert_called_once_with("glue", "mnli", experiment_id="exp")
+
+    def test_load_glue_metric_returns_independent_instances(self):
+        """Ensure train/eval trackers can hold separate evaluate state."""
+        from neobert.glue.train import _load_glue_metric
+
+        created = []
+
+        def _fake_load(*args, **kwargs):
+            del args, kwargs
+            metric = mock.MagicMock()
+            created.append(metric)
+            return metric
+
+        with mock.patch("neobert.glue.train.evaluate.load", side_effect=_fake_load):
+            train_tracker = _load_glue_metric("cola", "glue", "exp")
+            eval_tracker = _load_glue_metric("cola", "glue", "exp")
+
+        self.assertEqual(len(created), 2)
+        self.assertIs(train_tracker, created[0])
+        self.assertIs(eval_tracker, created[1])
+        self.assertIsNot(train_tracker, eval_tracker)
+
     def test_save_training_checkpoint_zero_limit_still_saves(self):
         """Ensure save_total_limit=0 keeps all GLUE checkpoints while still saving."""
         from neobert.glue.train import save_training_checkpoint

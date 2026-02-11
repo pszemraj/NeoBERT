@@ -510,6 +510,9 @@ def _promote_tmp_checkpoint_dir(tmp_path: Path, final_path: Path) -> None:
     succeeds. This avoids deleting the prior checkpoint before the new one is in
     place when running on shared filesystems.
 
+    Note: active pretraining writes directly to ``checkpoints/<step>/`` and does
+    not currently call this helper; it is kept for legacy/manual migration paths.
+
     :param Path tmp_path: Newly written temporary checkpoint directory.
     :param Path final_path: Final checkpoint directory path.
     """
@@ -594,6 +597,9 @@ def _sync_tokenizer_derived_config(
         multiple=128,
     )
 
+    # This mutation is intentional and happens before model construction so all
+    # ranks build the same tensor shapes; resolved values are persisted into
+    # checkpoint ``config.yaml`` for deterministic resume/export.
     cfg.model.vocab_size = resolved_vocab_size
     cfg.tokenizer.vocab_size = resolved_vocab_size
     if tokenizer.pad_token_id is None:
@@ -2695,6 +2701,8 @@ def trainer(cfg: Config) -> None:
                 grad_norm_value = None
 
                 # Optional gradient clipping for stability on deep/long-context runs.
+                # Keep clipping after token-mean scaling so thresholds apply to the
+                # final effective update magnitude.
                 max_grad_norm = cfg.trainer.gradient_clipping
 
                 if max_grad_norm is not None and max_grad_norm > 0:

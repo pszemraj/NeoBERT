@@ -224,6 +224,23 @@ def _resolve_glue_task(cfg: Any) -> str:
     return str(getattr(cfg.glue, "task_name", getattr(cfg, "task", "glue"))).strip()
 
 
+def _load_glue_metric(glue_task: str, meta_task: str, experiment_id: str) -> Any:
+    """Load an evaluate metric object for a GLUE-like task identifier.
+
+    :param str glue_task: Task name (for example ``cola`` or ``mnli``).
+    :param str meta_task: Metric namespace (typically ``glue``).
+    :param str experiment_id: Evaluate experiment id.
+    :return Any: Instantiated evaluate metric object.
+    """
+    if glue_task in ("multirc", "record"):
+        return evaluate.load("accuracy", experiment_id=experiment_id)
+    if glue_task == "snli":
+        return evaluate.load(meta_task, "mnli", experiment_id=experiment_id)
+    if glue_task == "allnli":
+        return evaluate.load(meta_task, "wnli", experiment_id=experiment_id)
+    return evaluate.load(meta_task, glue_task, experiment_id=experiment_id)
+
+
 def _load_from_hub_tokenizer(cfg: Config) -> PreTrainedTokenizerBase:
     """Load tokenizer for hub sequence-classification models.
 
@@ -993,15 +1010,10 @@ def trainer(cfg: Config) -> None:
             )
 
     print("Loading metric...")
-    # Get the metric function
-    if glue_task in ("multirc", "record"):
-        metric = evaluate.load("accuracy", experiment_id=cfg.id)
-    elif glue_task == "snli":
-        metric = evaluate.load(cfg.meta_task, "mnli", experiment_id=cfg.id)
-    elif glue_task == "allnli":
-        metric = evaluate.load(cfg.meta_task, "wnli", experiment_id=cfg.id)
-    else:
-        metric = evaluate.load(cfg.meta_task, glue_task, experiment_id=cfg.id)
+    # Keep train/eval metric state separate so eval.compute() does not reset
+    # the running train metric window and vice versa.
+    train_metric_tracker = _load_glue_metric(glue_task, cfg.meta_task, cfg.id)
+    eval_metric_tracker = _load_glue_metric(glue_task, cfg.meta_task, cfg.id)
 
     # Load additional metric for the mismatched validation set of mnli
     if glue_task == "mnli":
@@ -1613,7 +1625,7 @@ def trainer(cfg: Config) -> None:
                     (predictions, batch["labels"])
                 )
 
-                metric.add_batch(
+                train_metric_tracker.add_batch(
                     predictions=predictions,
                     references=references,
                 )
@@ -1640,7 +1652,7 @@ def trainer(cfg: Config) -> None:
                         cfg.trainer.eval_steps
                         and completed_steps % cfg.trainer.eval_steps == 0
                     ):
-                        train_metric = metric.compute()
+                        train_metric = train_metric_tracker.compute()
                         if len(train_metric) > 1:
                             train_metric["combined_score"] = np.mean(
                                 list(train_metric.values())
@@ -1651,7 +1663,7 @@ def trainer(cfg: Config) -> None:
                             model=model,
                             dataloader=eval_dataloader,
                             accelerator=accelerator,
-                            metric=metric,
+                            metric=eval_metric_tracker,
                             dtype_pad_mask=dtype_pad_mask,
                             is_regression=is_regression,
                             return_predictions=False,
