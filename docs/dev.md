@@ -178,6 +178,26 @@ Priority order for next performance PR:
 - Collect recompile reasons under the harness above.
 - Remove avoidable dynamic guards and static-attribute churn in hot modules.
 
+### Contrastive Sweep TODOs
+
+These are explicitly tracked for sweep-readiness follow-up work:
+
+1. Add schema support for contrastive sampling alpha
+
+- `dataset.alpha` is referenced in contrastive sampling logic but not represented
+  in the config schema/CLI, so sweeps cannot set it reliably.
+
+1. Fix contrastive dataloader iterator lifecycle
+
+- The loop currently recreates iterators with `next(iter(dataloader))` patterns
+  that can bias sampling and reduce determinism.
+- Replace with persistent iterators that recycle on `StopIteration`.
+
+1. Unify mixed-precision validation/policy with pretraining
+
+- Contrastive accepts a broader/inconsistent precision surface vs pretraining.
+- Add shared validation and consistent fail-fast behavior for unsupported modes.
+
 ## Longer-Term Backlog
 
 1. Chunked/fused cross-entropy for long contexts

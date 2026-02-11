@@ -74,7 +74,7 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `datacollator.mask_all`               | `bool`        | `false`         | `false` uses BERT-style 80/10/10 masking.                     |
 | `datacollator.pack_sequences`         | `bool`        | `false`         | Enable packed-sequence collation.                             |
 | `trainer.resume_from_checkpoint`      | `str \| None` | `null`          | Checkpoint to resume from.                                    |
-| `use_deepspeed`                       | `bool`        | `true`          | Enable DeepSpeed backend when launched accordingly.           |
+| `use_deepspeed`                       | `bool`        | `false`         | Legacy hint for loading DeepSpeed-formatted contrastive checkpoints. |
 
 > [!NOTE]
 > Runtime preprocessing synchronizes tokenizer-derived values (including `model.pad_token_id`) and aligns vocab size for model/tokenizer consistency.
@@ -224,7 +224,7 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `trainer.torch_compile_dynamic`       | `bool \| None`  | `null`       | Dynamic-shape compile toggle when supported.             |
 | `trainer.torch_compile_backend`       | `str`           | `"inductor"` | Compile backend name.                                    |
 | `trainer.enforce_full_packed_batches` | `bool`          | `true`       | Buffer packed fragments to emit full-sized microbatches. |
-| `trainer.eval_max_batches`            | `int \| None`   | `null`       | Optional eval cap (useful for streaming eval).           |
+| `trainer.eval_max_batches`            | `int \| None`   | `null`       | Optional eval cap; required for streaming eval when `dataset.eval_samples` is unset. |
 | `trainer.log_train_accuracy`          | `bool`          | `false`      | Log MLM token accuracy (extra compute).                  |
 | `trainer.log_grad_norm`               | `bool`          | `true`       | Log grad norm each logging interval.                     |
 | `trainer.log_weight_norms`            | `bool`          | `true`       | Log parameter norms (main-process overhead).             |
@@ -251,7 +251,7 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `trainer.disable_tqdm`           | `bool`        | `false`   | Disable progress bars.                                    |
 | `trainer.dataloader_num_workers` | `int`         | `0`       | Legacy compatibility field.                               |
 | `trainer.use_cpu`                | `bool`        | `false`   | Force CPU execution.                                      |
-| `trainer.report_to`              | `list[str]`   | `[]`      | Legacy reporting hooks list.                              |
+| `trainer.report_to`              | `list[str]`   | `[]`      | Deprecated and ignored. Use `wandb.enabled` explicitly.   |
 | `trainer.train_batch_size`       | `int \| None` | `null`    | Legacy batch-size alias.                                  |
 | `trainer.eval_batch_size`        | `int \| None` | `null`    | Legacy batch-size alias.                                  |
 | `trainer.early_stopping`         | `int`         | `0`       | Reserved in pretraining path.                             |
@@ -272,7 +272,6 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `scheduler.decay_steps`    | `int \| None`   | `null`     | Absolute decay end step.                 |
 | `scheduler.warmup_percent` | `float \| None` | `null`     | Percentage override for warmup.          |
 | `scheduler.decay_percent`  | `float \| None` | `null`     | Percentage override for decay.           |
-| `scheduler.num_cycles`     | `float`         | `0.5`      | Cosine cycles parameter.                 |
 | `scheduler.final_lr_ratio` | `float`         | `0.1`      | Final LR floor ratio.                    |
 
 > [!IMPORTANT]
@@ -361,6 +360,8 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 > [!NOTE]
 > Runtime logging prints a task-scoped resolved config before training and sends
 > the same task-scoped payload to W&B (irrelevant task sections are excluded).
+> W&B is not auto-enabled by presence of a `wandb` section; set
+> `wandb.enabled: true` explicitly.
 
 ### Top-Level Runtime Metadata
 
@@ -368,7 +369,7 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | ------------------------ | ---------------- | ------- | ------------------------------------------------ |
 | `seed`                   | `int`            | `0`     | Global random seed.                              |
 | `debug`                  | `bool`           | `false` | Extra debug logging/prints.                      |
-| `use_deepspeed`          | `bool`           | `true`  | DeepSpeed toggle for launch/runtime integration. |
+| `use_deepspeed`          | `bool`           | `false` | Legacy hint for DeepSpeed-formatted contrastive checkpoint loading only. |
 | `accelerate_config_file` | `str \| None`    | `null`  | Accelerate launch config path.                   |
 | `pretraining_metadata`   | `dict[str, Any]` | `{}`    | Metadata passed to downstream evaluations.       |
 | `config_path`            | `str \| None`    | `null`  | Source config path metadata.                     |
@@ -420,6 +421,7 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | Rule                                                              | Type               | Details                                                                                    |
 | ----------------------------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------ |
 | `trainer.resume_from_checkpoint` with `dataset.streaming=true`    | **ERROR**          | Streaming resume is disallowed because data position cannot be restored.                   |
+| Streaming eval with neither `trainer.eval_max_batches` nor `dataset.eval_samples` | **ERROR** | Set an explicit eval budget for reproducible streaming metrics. |
 | `dataset.validation_split` with `dataset.streaming=true`          | **WARNING / SKIP** | Validation split creation is skipped for streaming datasets.                               |
 | `scheduler.warmup_percent` and `scheduler.warmup_steps`           | **PRECEDENCE**     | `warmup_percent` overrides absolute warmup steps.                                          |
 | `scheduler.decay_percent` and `scheduler.decay_steps`             | **PRECEDENCE**     | `decay_percent` overrides absolute decay steps.                                            |
