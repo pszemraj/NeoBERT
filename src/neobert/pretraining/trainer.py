@@ -154,10 +154,12 @@ def _log_masking_strategy(cfg: Config) -> None:
     random_pct = selected_pct * 0.1
     unchanged_labeled_pct = selected_pct * 0.1
     logger.warning(
-        "datacollator.mask_all=false with mlm_probability=%s%%: sampled tokens use "
-        "BERT 80/10/10 ([MASK]/random/original). Effective token mix is "
-        "%s%% untouched, %s%% [MASK], %s%% random-token, %s%% original-token (labeled). "
+        "datacollator.mask_all=false with mlm_probability=%s%%: %s%% of tokens are "
+        "sampled; sampled tokens use BERT 80/10/10 ([MASK]/random/original). "
+        "Global token mix is %s%% untouched, %s%% [MASK], %s%% random-token, "
+        "%s%% original-token (labeled). "
         "Set datacollator.mask_all=true for 100%% [MASK] replacement on sampled tokens.",
+        _format_percent(selected_pct),
         _format_percent(selected_pct),
         _format_percent(untouched_pct),
         _format_percent(mask_pct),
@@ -1664,9 +1666,8 @@ def trainer(cfg: Config) -> None:
 
     resolved_config_dict = prepare_wandb_config(cfg)
     if accelerator.is_main_process:
-        logger.info(
-            "Resolved task config:\n%s",
-            format_resolved_config(resolved_config_dict),
+        accelerator.print(
+            "Resolved task config:\n" + format_resolved_config(resolved_config_dict)
         )
     if accelerator.is_main_process and wandb_enabled and wandb.run is not None:
         wandb.run.config.update(resolved_config_dict, allow_val_change=True)

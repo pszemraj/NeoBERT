@@ -187,9 +187,8 @@ def trainer(cfg: Config) -> None:
     )
     tracker_config_dict = prepare_wandb_config(cfg)
     if accelerator.is_main_process:
-        logger.info(
-            "Resolved task config:\n%s",
-            format_resolved_config(tracker_config_dict),
+        accelerator.print(
+            "Resolved task config:\n" + format_resolved_config(tracker_config_dict)
         )
         logger.info(
             "contrastive.pretraining_prob=%s: %.1f%% of steps sample the pretraining "
