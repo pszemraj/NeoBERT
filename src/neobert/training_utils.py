@@ -71,8 +71,7 @@ def _maybe_compile_model(
     ).lower()
     if compile_backend not in {"inductor", "aot_eager", "eager"}:
         log.warning(
-            "Unknown trainer.torch_compile_backend='%s'; using 'inductor'.",
-            compile_backend,
+            f"Unknown trainer.torch_compile_backend='{compile_backend}'; using 'inductor'."
         )
         compile_backend = "inductor"
     dynamic_override = getattr(cfg.trainer, "torch_compile_dynamic", None)
@@ -84,9 +83,8 @@ def _maybe_compile_model(
     else:
         use_dynamic = bool(dynamic_override)
     log.info(
-        "Compiling model with torch.compile (backend=%s, dynamic=%s).",
-        compile_backend,
-        use_dynamic,
+        f"Compiling model with torch.compile (backend={compile_backend}, "
+        f"dynamic={use_dynamic})."
     )
     return torch.compile(model, backend=compile_backend, dynamic=use_dynamic)
 
