@@ -52,6 +52,15 @@ def format_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
 class Metrics(defaultdict):
     """Dictionary-like metrics container with distributed aggregation helpers."""
 
+    TRACKER_EXCLUDE_KEYS = {
+        "train/steps",
+        "train/compute_accuracy",
+        "train/batches",
+        "train/samples",
+        "train/masked_tokens",
+        "train/epochs",
+    }
+
     LOCAL_COUNT_KEYS = (
         "train/local_samples",
         "train/local_tokens",
@@ -167,13 +176,15 @@ class Metrics(defaultdict):
         # fields out of external trackers.
         formatted = format_metrics(metrics_log)
         tracker_payload = dict(formatted)
-        tracker_payload.pop("train/steps", None)
-        tracker_payload.pop("train/compute_accuracy", None)
+        for key in self.TRACKER_EXCLUDE_KEYS:
+            tracker_payload.pop(key, None)
         for key in list(tracker_payload):
+            if key.startswith("train/local_"):
+                tracker_payload.pop(key, None)
             if key.startswith("train/loss_path_"):
                 tracker_payload.pop(key, None)
         if not compute_accuracy:
-            tracker_payload.pop("train/local_num_correct", None)
+            tracker_payload.pop("train/accuracy", None)
         accelerator.log(tracker_payload, step=current_step)
         if emit_console and accelerator.is_main_process:
             if console_fn is None:

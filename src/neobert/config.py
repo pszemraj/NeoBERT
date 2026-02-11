@@ -188,7 +188,7 @@ class TrainerConfig:
     eval_max_batches: Optional[int] = None
     logging_steps: int = 100
     enforce_full_packed_batches: bool = True
-    log_train_accuracy: bool = False
+    log_train_accuracy: bool = True
     log_grad_norm: bool = True
     output_dir: str = "./output"
     overwrite_output_dir: bool = True
@@ -1527,6 +1527,9 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         "--trainer.save_steps", type=int, help="Save checkpoint every N steps"
     )
     parser.add_argument("--trainer.eval_steps", type=int, help="Evaluate every N steps")
+    parser.add_argument(
+        "--trainer.logging_steps", type=int, help="Log metrics every N steps"
+    )
     parser.add_argument(
         "--trainer.eval_max_batches",
         type=int,

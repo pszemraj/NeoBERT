@@ -49,6 +49,7 @@ class TestConfigSystem(unittest.TestCase):
         self.assertEqual(config.model.hidden_size, 768)
         self.assertEqual(config.model.num_hidden_layers, 12)
         self.assertEqual(config.trainer.per_device_train_batch_size, 16)
+        self.assertTrue(config.trainer.log_train_accuracy)
         self.assertFalse(config.trainer.torch_compile)
         self.assertEqual(config.trainer.torch_compile_backend, "inductor")
         self.assertTrue(config.trainer.enforce_full_packed_batches)
@@ -84,6 +85,8 @@ class TestConfigSystem(unittest.TestCase):
             "5e-4",
             "--trainer.per_device_train_batch_size",
             "4",
+            "--trainer.logging_steps",
+            "17",
             "--dataset.streaming",
             "false",
             "--datacollator.pack_sequences",
@@ -115,6 +118,7 @@ class TestConfigSystem(unittest.TestCase):
             )  # Overridden from 2
             self.assertFalse(config.dataset.streaming)
             self.assertTrue(config.datacollator.pack_sequences)
+            self.assertEqual(config.trainer.logging_steps, 17)
             self.assertTrue(config.trainer.torch_compile)
             self.assertEqual(config.trainer.torch_compile_backend, "aot_eager")
             self.assertFalse(config.trainer.enforce_full_packed_batches)
