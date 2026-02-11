@@ -58,6 +58,24 @@ from neobert.utils import configure_tf32, format_resolved_config, prepare_wandb_
 logger = logging.getLogger(__name__)
 
 
+def _resolve_checkpoint_retention_limit(cfg: Config) -> int:
+    """Resolve effective checkpoint retention limit from trainer config.
+
+    ``trainer.save_total_limit`` is preferred; deprecated ``trainer.max_ckpt``
+    is used only as a fallback when ``save_total_limit`` is unset.
+
+    :param Config cfg: Runtime training configuration.
+    :return int: Maximum number of retained checkpoints (0 disables pruning).
+    """
+    save_total_limit = getattr(cfg.trainer, "save_total_limit", None)
+    if save_total_limit is not None:
+        return max(0, int(save_total_limit))
+    max_ckpt = getattr(cfg.trainer, "max_ckpt", None)
+    if max_ckpt is not None:
+        return max(0, int(max_ckpt))
+    return 0
+
+
 def _build_packed_seqlens(attention_mask: torch.Tensor, *, name: str) -> torch.Tensor:
     """Build packed sequence lengths from a right-padded attention mask.
 
@@ -171,12 +189,7 @@ def trainer(cfg: Config) -> None:
         str(output_dir),
     )
 
-    raw_save_total_limit = getattr(cfg.trainer, "save_total_limit", None)
-    raw_max_ckpt = getattr(cfg.trainer, "max_ckpt", None)
-    save_total_limit = max(
-        int(raw_save_total_limit or 0),
-        int(raw_max_ckpt or 0),
-    )
+    save_total_limit = _resolve_checkpoint_retention_limit(cfg)
     project_config = ProjectConfiguration(
         str(output_dir),
         automatic_checkpoint_naming=True,
@@ -864,9 +877,7 @@ def trainer(cfg: Config) -> None:
 
             # Save model weights checkpoint
             if metrics["train/steps"] % cfg.trainer.save_steps == 0:
-                save_total_limit = getattr(cfg.trainer, "save_total_limit", 0)
-                max_ckpt = int(getattr(cfg.trainer, "max_ckpt", 0) or 0)
-                limit = max(save_total_limit, max_ckpt)
+                limit = _resolve_checkpoint_retention_limit(cfg)
                 if limit > 0:
                     # Delete checkpoints if there are too many
                     files = list(model_checkpoint_dir.iterdir())

@@ -8,7 +8,7 @@ from unittest import mock
 
 import torch
 
-from neobert.config import ConfigLoader
+from neobert.config import Config, ConfigLoader
 
 
 class TestContrastivePipeline(unittest.TestCase):
@@ -200,6 +200,23 @@ class TestContrastivePipeline(unittest.TestCase):
                 self.skipTest(f"Expected dataset/network error: {e}")
             else:
                 raise e
+
+    def test_checkpoint_retention_limit_resolves_null_and_fallback(self):
+        """Ensure retention limit handles optional fields without TypeError."""
+        from neobert.contrastive.trainer import _resolve_checkpoint_retention_limit
+
+        cfg = Config()
+        cfg.task = "contrastive"
+
+        cfg.trainer.save_total_limit = None
+        cfg.trainer.max_ckpt = None
+        self.assertEqual(_resolve_checkpoint_retention_limit(cfg), 0)
+
+        cfg.trainer.max_ckpt = 5
+        self.assertEqual(_resolve_checkpoint_retention_limit(cfg), 5)
+
+        cfg.trainer.save_total_limit = 2
+        self.assertEqual(_resolve_checkpoint_retention_limit(cfg), 2)
 
     def test_muonclip_trainer_passes_model_config(self):
         """Ensure MuonClip optimizer receives a model config in trainer."""
