@@ -14,6 +14,8 @@ training performance and stability work.
 - [Lessons Learned](#lessons-learned)
 - [Known Gaps](#known-gaps)
 - [Next PR TODOs](#next-pr-todos)
+  - [Contrastive Sweep TODOs](#contrastive-sweep-todos)
+  - [Config Loader Architecture TODOs (Separate PR)](#config-loader-architecture-todos-separate-pr)
 - [Longer-Term Backlog](#longer-term-backlog)
 
 ---

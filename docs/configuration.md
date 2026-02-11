@@ -11,6 +11,8 @@ This page is the primary source of truth for NeoBERT's YAML config schema
 
 - [How To Use This Page](#how-to-use-this-page)
 - [Variables and Dot Overrides](#variables-and-dot-overrides)
+  - [YAML variables](#yaml-variables)
+  - [Dot-path overrides in Python](#dot-path-overrides-in-python)
 - [High-Impact Settings](#high-impact-settings)
 - [Model Architecture](#model-architecture)
   - [Core](#core)
@@ -127,25 +129,25 @@ Overrides are validated with the same semantic checks as base YAML configs.
 
 ## High-Impact Settings
 
-| Key                                   | Type          | Default         | Description                                                   |
-| ------------------------------------- | ------------- | --------------- | ------------------------------------------------------------- |
-| `task`                                | `str`         | `"pretraining"` | Run mode: `pretraining`, `glue`, `mteb`, `contrastive`.       |
-| `model.hidden_size`                   | `int`         | `768`           | Main width of the transformer.                                |
-| `model.num_hidden_layers`             | `int`         | `12`            | Depth of the encoder stack.                                   |
-| `model.num_attention_heads`           | `int`         | `12`            | Attention heads per layer.                                    |
-| `model.max_position_embeddings`       | `int`         | `512`           | Maximum sequence length the model is built for.               |
-| `dataset.name`                        | `str`         | `"refinedweb"`  | HF dataset name when loading from hub.                        |
-| `dataset.path`                        | `str`         | `""`            | Local dataset path (preferred when available).                |
-| `dataset.streaming`                   | `bool`        | `true`          | Stream from dataset source instead of materializing all data. |
-| `trainer.per_device_train_batch_size` | `int`         | `16`            | Per-device train microbatch size.                             |
-| `trainer.gradient_accumulation_steps` | `int`         | `1`             | Number of microbatches per optimizer step.                    |
-| `trainer.max_steps`                   | `int`         | `1000000`       | Total training steps.                                         |
-| `optimizer.name`                      | `str`         | `"adamw"`       | Optimizer family (`adamw`, `adam`, `muonclip`).               |
-| `optimizer.lr`                        | `float`       | `1e-4`          | Base learning rate.                                           |
-| `scheduler.name`                      | `str`         | `"cosine"`      | LR schedule type.                                             |
-| `datacollator.mask_all`               | `bool`        | `false`         | `false` uses sampled-token BERT-style 80/10/10 masking.       |
-| `datacollator.pack_sequences`         | `bool`        | `false`         | Enable packed-sequence collation.                             |
-| `trainer.resume_from_checkpoint`      | `str \| None` | `null`          | Checkpoint to resume from.                                    |
+| Key                                   | Type          | Default         | Description                                                          |
+| ------------------------------------- | ------------- | --------------- | -------------------------------------------------------------------- |
+| `task`                                | `str`         | `"pretraining"` | Run mode: `pretraining`, `glue`, `mteb`, `contrastive`.              |
+| `model.hidden_size`                   | `int`         | `768`           | Main width of the transformer.                                       |
+| `model.num_hidden_layers`             | `int`         | `12`            | Depth of the encoder stack.                                          |
+| `model.num_attention_heads`           | `int`         | `12`            | Attention heads per layer.                                           |
+| `model.max_position_embeddings`       | `int`         | `512`           | Maximum sequence length the model is built for.                      |
+| `dataset.name`                        | `str`         | `"refinedweb"`  | HF dataset name when loading from hub.                               |
+| `dataset.path`                        | `str`         | `""`            | Local dataset path (preferred when available).                       |
+| `dataset.streaming`                   | `bool`        | `true`          | Stream from dataset source instead of materializing all data.        |
+| `trainer.per_device_train_batch_size` | `int`         | `16`            | Per-device train microbatch size.                                    |
+| `trainer.gradient_accumulation_steps` | `int`         | `1`             | Number of microbatches per optimizer step.                           |
+| `trainer.max_steps`                   | `int`         | `1000000`       | Total training steps.                                                |
+| `optimizer.name`                      | `str`         | `"adamw"`       | Optimizer family (`adamw`, `adam`, `muonclip`).                      |
+| `optimizer.lr`                        | `float`       | `1e-4`          | Base learning rate.                                                  |
+| `scheduler.name`                      | `str`         | `"cosine"`      | LR schedule type.                                                    |
+| `datacollator.mask_all`               | `bool`        | `false`         | `false` uses sampled-token BERT-style 80/10/10 masking.              |
+| `datacollator.pack_sequences`         | `bool`        | `false`         | Enable packed-sequence collation.                                    |
+| `trainer.resume_from_checkpoint`      | `str \| None` | `null`          | Checkpoint to resume from.                                           |
 | `use_deepspeed`                       | `bool`        | `false`         | Legacy hint for loading DeepSpeed-formatted contrastive checkpoints. |
 
 > [!NOTE]
@@ -203,17 +205,17 @@ Overrides are validated with the same semantic checks as base YAML configs.
 
 ## Tokenizer
 
-| Key                    | Type          | Default               | Description                                            |
-| ---------------------- | ------------- | --------------------- | ------------------------------------------------------ |
-| `tokenizer.name`       | `str`         | `"bert-base-uncased"` | Tokenizer name from HF hub.                            |
-| `tokenizer.path`       | `str \| None` | `null`                | Local tokenizer path (takes precedence when provided). |
-| `tokenizer.max_length` | `int`         | `512`                 | Tokenizer max length used during preprocessing.        |
-| `tokenizer.padding`    | `str`         | `"max_length"`        | Padding behavior passed to tokenization pipeline.      |
-| `tokenizer.truncation` | `bool`        | `true`                | Truncate to max length during tokenization.            |
-| `tokenizer.vocab_size` | `int \| None` | `null`                | Runtime-synchronized to effective model vocab size.    |
-| `tokenizer.trust_remote_code` | `bool` | `false` | Allow tokenizer remote code execution. |
-| `tokenizer.revision` | `str \| None` | `null` | Optional tokenizer revision/commit pin for reproducibility. |
-| `tokenizer.allow_special_token_rewrite` | `bool` | `false` | Explicit opt-in for fallback special-token rewrite when tokenizer lacks `mask_token`. |
+| Key                                     | Type          | Default               | Description                                                                           |
+| --------------------------------------- | ------------- | --------------------- | ------------------------------------------------------------------------------------- |
+| `tokenizer.name`                        | `str`         | `"bert-base-uncased"` | Tokenizer name from HF hub.                                                           |
+| `tokenizer.path`                        | `str \| None` | `null`                | Local tokenizer path (takes precedence when provided).                                |
+| `tokenizer.max_length`                  | `int`         | `512`                 | Tokenizer max length used during preprocessing.                                       |
+| `tokenizer.padding`                     | `str`         | `"max_length"`        | Padding behavior passed to tokenization pipeline.                                     |
+| `tokenizer.truncation`                  | `bool`        | `true`                | Truncate to max length during tokenization.                                           |
+| `tokenizer.vocab_size`                  | `int \| None` | `null`                | Runtime-synchronized to effective model vocab size.                                   |
+| `tokenizer.trust_remote_code`           | `bool`        | `false`               | Allow tokenizer remote code execution.                                                |
+| `tokenizer.revision`                    | `str \| None` | `null`                | Optional tokenizer revision/commit pin for reproducibility.                           |
+| `tokenizer.allow_special_token_rewrite` | `bool`        | `false`               | Explicit opt-in for fallback special-token rewrite when tokenizer lacks `mask_token`. |
 
 > [!NOTE]
 > Trainer now pads tokenizer length with inert placeholder tokens to keep `len(tokenizer) == model.vocab_size`.
@@ -226,18 +228,18 @@ Overrides are validated with the same semantic checks as base YAML configs.
 
 ### Core
 
-| Key                        | Type            | Default        | Description                                             |
-| -------------------------- | --------------- | -------------- | ------------------------------------------------------- |
-| `dataset.name`             | `str`           | `"refinedweb"` | Dataset name for `load_dataset`.                        |
-| `dataset.config`           | `str \| None`   | `null`         | Dataset config/split variant name.                      |
-| `dataset.path`             | `str`           | `""`           | Local path loaded with `load_from_disk` when present.   |
-| `dataset.streaming`        | `bool`          | `true`         | Streaming mode for large datasets.                      |
-| `dataset.max_seq_length`   | `int`           | `512`          | Target max sequence length for preprocessing/collation. |
-| `dataset.text_column`      | `str \| None`   | `null`         | Text field override for tokenization.                   |
-| `dataset.train_split`      | `str \| None`   | `null`         | Train split (supports slice syntax).                    |
-| `dataset.eval_split`       | `str \| None`   | `null`         | Eval split override.                                    |
+| Key                        | Type            | Default        | Description                                                                                                        |
+| -------------------------- | --------------- | -------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `dataset.name`             | `str`           | `"refinedweb"` | Dataset name for `load_dataset`.                                                                                   |
+| `dataset.config`           | `str \| None`   | `null`         | Dataset config/split variant name.                                                                                 |
+| `dataset.path`             | `str`           | `""`           | Local path loaded with `load_from_disk` when present.                                                              |
+| `dataset.streaming`        | `bool`          | `true`         | Streaming mode for large datasets.                                                                                 |
+| `dataset.max_seq_length`   | `int`           | `512`          | Target max sequence length for preprocessing/collation.                                                            |
+| `dataset.text_column`      | `str \| None`   | `null`         | Text field override for tokenization.                                                                              |
+| `dataset.train_split`      | `str \| None`   | `null`         | Train split (supports slice syntax).                                                                               |
+| `dataset.eval_split`       | `str \| None`   | `null`         | Eval split override.                                                                                               |
 | `dataset.eval_samples`     | `int \| None`   | `null`         | Eval sample cap. If no eval split is configured, trainer can reserve the first `eval_samples` from train for eval. |
-| `dataset.validation_split` | `float \| None` | `null`         | Fraction for random eval split (non-streaming only).    |
+| `dataset.validation_split` | `float \| None` | `null`         | Fraction for random eval split (non-streaming only).                                                               |
 
 > [!NOTE]
 > Streaming pretraining defaults to `dataset.eval_split: null`. When unset, trainer
@@ -263,11 +265,11 @@ Overrides are validated with the same semantic checks as base YAML configs.
 
 ### Contrastive-Only Data Fields
 
-| Key                          | Type    | Default | Description                                             |
-| ---------------------------- | ------- | ------- | ------------------------------------------------------- |
-| `dataset.load_all_from_disk` | `bool`  | `false` | Load full dataset into memory.                          |
-| `dataset.force_redownload`   | `bool`  | `false` | Force dataset redownload.                               |
-| `dataset.min_length`         | `int`   | `5`     | Short-text-friendly default for optional length filtering helpers. |
+| Key                          | Type    | Default | Description                                                           |
+| ---------------------------- | ------- | ------- | --------------------------------------------------------------------- |
+| `dataset.load_all_from_disk` | `bool`  | `false` | Load full dataset into memory.                                        |
+| `dataset.force_redownload`   | `bool`  | `false` | Force dataset redownload.                                             |
+| `dataset.min_length`         | `int`   | `5`     | Short-text-friendly default for optional length filtering helpers.    |
 | `dataset.alpha`              | `float` | `1.0`   | Contrastive dataset sampling exponent (`1.0` = proportional by size). |
 
 > [!NOTE]
@@ -280,33 +282,33 @@ Overrides are validated with the same semantic checks as base YAML configs.
 
 ### Core
 
-| Key                                   | Type  | Default      | Description                                |
-| ------------------------------------- | ----- | ------------ | ------------------------------------------ |
-| `trainer.per_device_train_batch_size` | `int` | `16`         | Train microbatch size per device.          |
-| `trainer.per_device_eval_batch_size`  | `int` | `32`         | Eval microbatch size per device.           |
-| `trainer.gradient_accumulation_steps` | `int` | `1`          | Accumulation steps per optimizer update.   |
-| `trainer.max_steps`                   | `int` | `1000000`    | Max optimizer steps.                       |
-| `trainer.save_steps`                  | `int` | `10000`      | Save interval in steps.                    |
-| `trainer.eval_steps`                  | `int` | `10000`      | Eval interval in steps.                    |
-| `trainer.logging_steps`               | `int` | `100`        | Logging interval in steps.                 |
-| `trainer.output_dir`                  | `str` | `"./output"` | Output root for checkpoints and artifacts. |
+| Key                                   | Type  | Default      | Description                                   |
+| ------------------------------------- | ----- | ------------ | --------------------------------------------- |
+| `trainer.per_device_train_batch_size` | `int` | `16`         | Train microbatch size per device.             |
+| `trainer.per_device_eval_batch_size`  | `int` | `32`         | Eval microbatch size per device.              |
+| `trainer.gradient_accumulation_steps` | `int` | `1`          | Accumulation steps per optimizer update.      |
+| `trainer.max_steps`                   | `int` | `1000000`    | Max optimizer steps.                          |
+| `trainer.save_steps`                  | `int` | `10000`      | Save interval in steps.                       |
+| `trainer.eval_steps`                  | `int` | `10000`      | Eval interval in steps.                       |
+| `trainer.logging_steps`               | `int` | `100`        | Logging interval in steps.                    |
+| `trainer.output_dir`                  | `str` | `"./output"` | Output root for checkpoints and artifacts.    |
 | `trainer.mixed_precision`             | `str` | `"bf16"`     | `no`, `fp32`, or `bf16` (`fp16` unsupported). |
 
 ### Stability and Performance
 
-| Key                                   | Type            | Default      | Description                                              |
-| ------------------------------------- | --------------- | ------------ | -------------------------------------------------------- |
-| `trainer.gradient_checkpointing`      | `bool`          | `false`      | Activation checkpointing for lower memory usage.         |
-| `trainer.gradient_clipping`           | `float \| None` | `null`       | Clip gradient norm when set.                             |
-| `trainer.torch_compile`               | `bool`          | `false`      | Enable `torch.compile`.                                  |
-| `trainer.torch_compile_dynamic`       | `bool \| None`  | `null`       | Dynamic-shape compile toggle when supported.             |
-| `trainer.torch_compile_backend`       | `str`           | `"inductor"` | Compile backend name.                                    |
-| `trainer.enforce_full_packed_batches` | `bool`          | `true`       | Buffer packed fragments to emit full-sized microbatches. |
-| `trainer.eval_max_batches`            | `int \| None`   | `null`       | Optional eval cap; required for streaming eval when `dataset.eval_samples` is unset. |
-| `trainer.log_train_accuracy`          | `bool`          | `true`       | Log MLM masked-token train accuracy (disable only for max-throughput sweeps). |
-| `trainer.log_grad_norm`               | `bool`          | `true`       | Log grad norm each logging interval.                     |
-| `trainer.log_weight_norms`            | `bool`          | `true`       | Log parameter norms (main-process overhead).             |
-| `trainer.tf32`                        | `bool`          | `true`       | Enable TF32 on supported CUDA GPUs.                      |
+| Key                                   | Type            | Default      | Description                                                                                                                                                 |
+| ------------------------------------- | --------------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `trainer.gradient_checkpointing`      | `bool`          | `false`      | Activation checkpointing for lower memory usage.                                                                                                            |
+| `trainer.gradient_clipping`           | `float \| None` | `null`       | Clip gradient norm when set.                                                                                                                                |
+| `trainer.torch_compile`               | `bool`          | `false`      | Enable `torch.compile`.                                                                                                                                     |
+| `trainer.torch_compile_dynamic`       | `bool \| None`  | `null`       | Dynamic-shape compile toggle when supported.                                                                                                                |
+| `trainer.torch_compile_backend`       | `str`           | `"inductor"` | Compile backend name.                                                                                                                                       |
+| `trainer.enforce_full_packed_batches` | `bool`          | `true`       | Buffer packed fragments to emit full-sized microbatches.                                                                                                    |
+| `trainer.eval_max_batches`            | `int \| None`   | `null`       | Optional eval cap; required for streaming eval when `dataset.eval_samples` is unset.                                                                        |
+| `trainer.log_train_accuracy`          | `bool`          | `true`       | Log MLM masked-token train accuracy (disable only for max-throughput sweeps).                                                                               |
+| `trainer.log_grad_norm`               | `bool`          | `true`       | Log grad norm each logging interval.                                                                                                                        |
+| `trainer.log_weight_norms`            | `bool`          | `true`       | Log parameter norms (main-process overhead).                                                                                                                |
+| `trainer.tf32`                        | `bool`          | `true`       | Enable TF32 on supported CUDA GPUs.                                                                                                                         |
 | `trainer.masked_logits_only_loss`     | `bool`          | `true`       | Pretraining MLM loss path selector: `true` = masked-logits-only path (default/recommended), `false` = original full-logits CE path (legacy ablation/debug). |
 
 > [!IMPORTANT]
@@ -454,14 +456,14 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 
 ### Top-Level Runtime Metadata
 
-| Key                      | Type             | Default | Description                                      |
-| ------------------------ | ---------------- | ------- | ------------------------------------------------ |
-| `seed`                   | `int`            | `0`     | Global random seed.                              |
-| `debug`                  | `bool`           | `false` | Extra debug logging/prints.                      |
+| Key                      | Type             | Default | Description                                                              |
+| ------------------------ | ---------------- | ------- | ------------------------------------------------------------------------ |
+| `seed`                   | `int`            | `0`     | Global random seed.                                                      |
+| `debug`                  | `bool`           | `false` | Extra debug logging/prints.                                              |
 | `use_deepspeed`          | `bool`           | `false` | Legacy hint for DeepSpeed-formatted contrastive checkpoint loading only. |
-| `accelerate_config_file` | `str \| None`    | `null`  | Accelerate launch config path.                   |
-| `pretraining_metadata`   | `dict[str, Any]` | `{}`    | Metadata passed to downstream evaluations.       |
-| `config_path`            | `str \| None`    | `null`  | Source config path metadata.                     |
+| `accelerate_config_file` | `str \| None`    | `null`  | Accelerate launch config path.                                           |
+| `pretraining_metadata`   | `dict[str, Any]` | `{}`    | Metadata passed to downstream evaluations.                               |
+| `config_path`            | `str \| None`    | `null`  | Source config path metadata.                                             |
 
 ---
 
@@ -486,12 +488,12 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 
 ### Contrastive (`contrastive`)
 
-| Key                                | Type    | Default    | Description                         |
-| ---------------------------------- | ------- | ---------- | ----------------------------------- |
-| `contrastive.temperature`          | `float` | `0.05`     | Contrastive temperature.            |
-| `contrastive.pooling`              | `str`   | `"avg"`    | Pooling mode: `avg`, `cls`, `max`.  |
-| `contrastive.loss_type`            | `str`   | `"simcse"` | Loss variant: `simcse`, `supcon`.   |
-| `contrastive.hard_negative_weight` | `float` | `0.0`      | Additional hard-negative weighting. |
+| Key                                | Type    | Default    | Description                                                                 |
+| ---------------------------------- | ------- | ---------- | --------------------------------------------------------------------------- |
+| `contrastive.temperature`          | `float` | `0.05`     | Contrastive temperature.                                                    |
+| `contrastive.pooling`              | `str`   | `"avg"`    | Pooling mode: `avg`, `cls`, `max`.                                          |
+| `contrastive.loss_type`            | `str`   | `"simcse"` | Loss variant: `simcse`, `supcon`.                                           |
+| `contrastive.hard_negative_weight` | `float` | `0.0`      | Additional hard-negative weighting.                                         |
 | `contrastive.pretraining_prob`     | `float` | `0.3`      | Fraction of steps that draw the pretraining branch in contrastive training. |
 
 ### MTEB Top-Level Keys
@@ -507,40 +509,40 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 
 ## Constraints, Requirements, and Gotchas
 
-| Rule                                                              | Type               | Details                                                                                    |
-| ----------------------------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------ |
-| `trainer.resume_from_checkpoint` with `dataset.streaming=true`    | **BEST-EFFORT**    | Streaming resume restores state and advances stream by consumed batches; exact sample continuity is not guaranteed. |
-| Streaming eval with neither `trainer.eval_max_batches` nor `dataset.eval_samples` | **ERROR** | Set an explicit eval budget for reproducible streaming metrics. |
-| `dataset.validation_split` with `dataset.streaming=true`          | **WARNING / SKIP** | Validation split creation is skipped for streaming datasets.                               |
-| `scheduler.warmup_percent` and `scheduler.warmup_steps`           | **PRECEDENCE**     | `warmup_percent` overrides absolute warmup steps.                                          |
-| `scheduler.decay_percent` and `scheduler.decay_steps`             | **PRECEDENCE**     | `decay_percent` overrides absolute decay steps.                                            |
-| `optimizer.name=muonclip` with DeepSpeed ZeRO stage >= 2          | **ERROR**          | MuonClip is incompatible with sharded grads/params at ZeRO stage >= 2.                     |
-| `datacollator.pack_sequences=true` with `model.attn_backend=sdpa` | **WARNING**        | Works, but slower than `flash_attn_varlen`; SDPA uses fallback path.                       |
-| `dataset.path` and `dataset.name` both set                        | **PRECEDENCE**     | Existing local `dataset.path` is used first; hub dataset acts as fallback.                 |
-| Tokenizer/model vocab sizes                                       | **IMPORTANT**      | Runtime now pads tokenizer with inert tokens so tokenizer length matches model vocab size. |
-| `model.pad_token_id`                                              | **IMPORTANT**      | Runtime syncs this from tokenizer before model init/checkpoint save.                       |
+| Rule                                                                              | Type               | Details                                                                                                             |
+| --------------------------------------------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| `trainer.resume_from_checkpoint` with `dataset.streaming=true`                    | **BEST-EFFORT**    | Streaming resume restores state and advances stream by consumed batches; exact sample continuity is not guaranteed. |
+| Streaming eval with neither `trainer.eval_max_batches` nor `dataset.eval_samples` | **ERROR**          | Set an explicit eval budget for reproducible streaming metrics.                                                     |
+| `dataset.validation_split` with `dataset.streaming=true`                          | **WARNING / SKIP** | Validation split creation is skipped for streaming datasets.                                                        |
+| `scheduler.warmup_percent` and `scheduler.warmup_steps`                           | **PRECEDENCE**     | `warmup_percent` overrides absolute warmup steps.                                                                   |
+| `scheduler.decay_percent` and `scheduler.decay_steps`                             | **PRECEDENCE**     | `decay_percent` overrides absolute decay steps.                                                                     |
+| `optimizer.name=muonclip` with DeepSpeed ZeRO stage >= 2                          | **ERROR**          | MuonClip is incompatible with sharded grads/params at ZeRO stage >= 2.                                              |
+| `datacollator.pack_sequences=true` with `model.attn_backend=sdpa`                 | **WARNING**        | Works, but slower than `flash_attn_varlen`; SDPA uses fallback path.                                                |
+| `dataset.path` and `dataset.name` both set                                        | **PRECEDENCE**     | Existing local `dataset.path` is used first; hub dataset acts as fallback.                                          |
+| Tokenizer/model vocab sizes                                                       | **IMPORTANT**      | Runtime now pads tokenizer with inert tokens so tokenizer length matches model vocab size.                          |
+| `model.pad_token_id`                                                              | **IMPORTANT**      | Runtime syncs this from tokenizer before model init/checkpoint save.                                                |
 
 ---
 
 ## Legacy Key Mapping (Still Normalized)
 
-| Legacy Key                         | Canonical Key               | Behavior                                     |
-| ---------------------------------- | --------------------------- | -------------------------------------------- |
-| top-level `mixed_precision`        | `trainer.mixed_precision`   | Deprecated alias; normalized with warning.   |
-| `trainer.bf16`                     | `trainer.mixed_precision`   | Deprecated alias; normalized with warning.   |
-| `trainer.seed`                     | top-level `seed`            | Deprecated alias; normalized with warning.   |
-| `trainer.run_name`                 | `wandb.name`                | Deprecated alias; normalized with warning.   |
-| `trainer.learning_rate`            | `optimizer.lr`              | Deprecated alias; normalized with warning.   |
-| `trainer.warmup_steps`             | `scheduler.warmup_steps`    | Deprecated alias; normalized with warning.   |
-| `trainer.max_grad_norm`            | `trainer.gradient_clipping` | Deprecated alias; normalized with warning.   |
-| `trainer.dir`                      | `trainer.output_dir`        | Deprecated alias; normalized with warning.   |
-| `dataset.tokenizer_name`           | `tokenizer.name`            | Deprecated alias; normalized with warning.   |
-| `dataset.column`                   | `dataset.text_column`       | Deprecated alias; normalized with warning.   |
-| `dataset.path_to_disk`             | `dataset.path`              | Deprecated alias; normalized with warning.   |
-| `dataset.pretraining_prob`         | `contrastive.pretraining_prob` | Deprecated alias; normalized with warning. |
-| `tokenizer.tokenizer_name_or_path` | `tokenizer.name`            | Deprecated alias; normalized with warning.   |
-| `optimizer.hparams.*`              | `optimizer.*`               | Deprecated block; flattened with warning.    |
-| legacy attention booleans          | `model.attn_backend`        | Deprecated aliases; normalized with warning. |
+| Legacy Key                         | Canonical Key                  | Behavior                                     |
+| ---------------------------------- | ------------------------------ | -------------------------------------------- |
+| top-level `mixed_precision`        | `trainer.mixed_precision`      | Deprecated alias; normalized with warning.   |
+| `trainer.bf16`                     | `trainer.mixed_precision`      | Deprecated alias; normalized with warning.   |
+| `trainer.seed`                     | top-level `seed`               | Deprecated alias; normalized with warning.   |
+| `trainer.run_name`                 | `wandb.name`                   | Deprecated alias; normalized with warning.   |
+| `trainer.learning_rate`            | `optimizer.lr`                 | Deprecated alias; normalized with warning.   |
+| `trainer.warmup_steps`             | `scheduler.warmup_steps`       | Deprecated alias; normalized with warning.   |
+| `trainer.max_grad_norm`            | `trainer.gradient_clipping`    | Deprecated alias; normalized with warning.   |
+| `trainer.dir`                      | `trainer.output_dir`           | Deprecated alias; normalized with warning.   |
+| `dataset.tokenizer_name`           | `tokenizer.name`               | Deprecated alias; normalized with warning.   |
+| `dataset.column`                   | `dataset.text_column`          | Deprecated alias; normalized with warning.   |
+| `dataset.path_to_disk`             | `dataset.path`                 | Deprecated alias; normalized with warning.   |
+| `dataset.pretraining_prob`         | `contrastive.pretraining_prob` | Deprecated alias; normalized with warning.   |
+| `tokenizer.tokenizer_name_or_path` | `tokenizer.name`               | Deprecated alias; normalized with warning.   |
+| `optimizer.hparams.*`              | `optimizer.*`                  | Deprecated block; flattened with warning.    |
+| legacy attention booleans          | `model.attn_backend`           | Deprecated aliases; normalized with warning. |
 
 ---
 

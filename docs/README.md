@@ -18,14 +18,14 @@ Core docs for training, evaluating, exporting, and maintaining NeoBERT.
 
 ## Source-of-Truth Map
 
-| Concept | Canonical doc | Notes |
-| --- | --- | --- |
-| Training runtime behavior | [training.md](training.md) | Script READMEs should link here for behavior semantics. |
-| Field-level config defaults and schema | [configuration.md](configuration.md) | Avoid duplicating defaults elsewhere. |
-| Evaluation behavior/caveats | [evaluation.md](evaluation.md) | Includes current known limitations. |
-| Export behavior/constraints | [export.md](export.md) | Script README is command-focused only. |
-| Failure diagnosis | [troubleshooting.md](troubleshooting.md) | Keep fixes centralized here. |
-| Test process and authoring | [testing.md](testing.md) | `tests/README.md` stays lightweight. |
+| Concept                                | Canonical doc                            | Notes                                                   |
+| -------------------------------------- | ---------------------------------------- | ------------------------------------------------------- |
+| Training runtime behavior              | [training.md](training.md)               | Script READMEs should link here for behavior semantics. |
+| Field-level config defaults and schema | [configuration.md](configuration.md)     | Avoid duplicating defaults elsewhere.                   |
+| Evaluation behavior/caveats            | [evaluation.md](evaluation.md)           | Includes current known limitations.                     |
+| Export behavior/constraints            | [export.md](export.md)                   | Script README is command-focused only.                  |
+| Failure diagnosis                      | [troubleshooting.md](troubleshooting.md) | Keep fixes centralized here.                            |
+| Test process and authoring             | [testing.md](testing.md)                 | `tests/README.md` stays lightweight.                    |
 
 Directory-level READMEs (`configs/`, `scripts/`, `tests/`, `jobs/`) should stay
 index/usage-focused and link back to these canonical docs instead of

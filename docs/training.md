@@ -150,7 +150,7 @@ find outputs/neobert-100m-wordpc_msp_32k_tok-muonclip/checkpoints \
   -mindepth 1 -maxdepth 1 -type d -printf "%f\n" | sort -n | tail -n 1
 ```
 
-2. Resume from latest checkpoint:
+1. Resume from latest checkpoint:
 
 ```bash
 python scripts/pretraining/pretrain.py \
@@ -158,7 +158,7 @@ python scripts/pretraining/pretrain.py \
   --trainer.resume_from_checkpoint latest
 ```
 
-3. Confirm resume in logs:
+1. Confirm resume in logs:
 
 - startup prints checkpoint loading from
   `outputs/.../checkpoints/<step>/`

@@ -46,6 +46,7 @@ Commonly pinned fields in repo configs (for transparency in experiment YAMLs):
 ## GLUE Configs
 
 Task configs under `configs/glue/`:
+
 - `cola.yaml`, `sst2.yaml`, `mrpc.yaml`, `stsb.yaml`, `qqp.yaml`,
   `mnli.yaml`, `qnli.yaml`, `rte.yaml`, `wnli.yaml`
 
