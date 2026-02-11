@@ -10,7 +10,11 @@ import torch
 from accelerate.utils import DistributedType
 
 from neobert.config import Config
-from neobert.training_utils import _maybe_compile_model, resolve_wandb_watch_mode
+from neobert.training_utils import (
+    _maybe_compile_model,
+    resolve_wandb_watch_mode,
+    validate_muon_distributed_compatibility,
+)
 
 
 def _make_cfg() -> Config:
@@ -206,3 +210,15 @@ def test_resolve_wandb_watch_mode_uses_config_when_env_missing() -> None:
     )
     assert mode == "parameters"
     assert warning is None
+
+
+def test_validate_muon_distributed_compatibility_rejects_fsdp() -> None:
+    """MuonClip must fail fast under FSDP-sharded training."""
+    accelerator = SimpleNamespace(distributed_type=DistributedType.FSDP)
+    with pytest.raises(RuntimeError, match="not compatible with FSDP"):
+        validate_muon_distributed_compatibility(
+            accelerator=accelerator,
+            optimizer_name="muonclip",
+            log=logging.getLogger("test"),
+            context="unit-test",
+        )

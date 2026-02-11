@@ -63,6 +63,7 @@ from neobert.training_utils import (
     _resolve_resume_checkpoint,
     create_accelerator,
     resolve_wandb_watch_mode,
+    validate_muon_distributed_compatibility,
 )
 from neobert.utils import (
     configure_tf32,
@@ -1699,21 +1700,12 @@ def trainer(cfg: Config) -> None:
                 "FSDP v1 is unsupported; set Accelerate fsdp_version=2."
             )
         logger.info(f"FSDP2 runtime detected (fsdp_version={fsdp_version}).")
-    if accelerator.distributed_type is DistributedType.DEEPSPEED:
-        is_muon = cfg.optimizer.name.lower() in {"muonclip", "muon-clip", "muon_clip"}
-        if is_muon:
-            deepspeed_plugin = getattr(accelerator.state, "deepspeed_plugin", None)
-            zero_stage = getattr(deepspeed_plugin, "zero_stage", None)
-            if zero_stage is None:
-                logger.warning(
-                    "MuonClip optimizer enabled with DeepSpeed, but zero stage is unknown. "
-                    "Ensure ZeRO stage < 2 to avoid incorrect sharded updates."
-                )
-            elif zero_stage >= 2:
-                raise RuntimeError(
-                    "MuonClip is not compatible with DeepSpeed ZeRO stage >= 2 "
-                    "(sharded grads/params). Use ZeRO stage 0/1 or disable MuonClip."
-                )
+    validate_muon_distributed_compatibility(
+        accelerator=accelerator,
+        optimizer_name=cfg.optimizer.name,
+        log=logger,
+        context="pretraining",
+    )
 
     # Initialise the wandb run and pass wandb parameters
     tracker_config_dict = prepare_wandb_config(cfg)
@@ -1786,7 +1778,8 @@ def trainer(cfg: Config) -> None:
                 "per-segment SDPA fallback will be used (slow on GPU). "
                 "Set attn_backend=flash_attn_varlen and install flash-attn for production."
             )
-    _log_masking_strategy(cfg)
+    if accelerator.is_main_process:
+        _log_masking_strategy(cfg)
 
     # Tokenizer
     with accelerator.main_process_first():

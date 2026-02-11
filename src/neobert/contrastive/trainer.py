@@ -49,6 +49,7 @@ from neobert.training_utils import (
     _resolve_resume_checkpoint,
     create_accelerator,
     resolve_wandb_watch_mode,
+    validate_muon_distributed_compatibility,
 )
 from neobert.contrastive.datasets import get_bsz
 from neobert.contrastive.loss import SupConLoss
@@ -210,6 +211,12 @@ def trainer(cfg: Config) -> None:
         gradient_accumulation_steps=cfg.trainer.gradient_accumulation_steps,
         log_with="wandb" if wandb_enabled else None,
         project_config=project_config,
+    )
+    validate_muon_distributed_compatibility(
+        accelerator=accelerator,
+        optimizer_name=cfg.optimizer.name,
+        log=logger,
+        context="contrastive",
     )
     tracker_config_dict = prepare_wandb_config(cfg)
     if accelerator.is_main_process:

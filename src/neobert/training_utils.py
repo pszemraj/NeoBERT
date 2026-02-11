@@ -100,6 +100,56 @@ def create_accelerator(
         raise
 
 
+def validate_muon_distributed_compatibility(
+    *,
+    accelerator: Accelerator,
+    optimizer_name: str,
+    log: logging.Logger,
+    context: str,
+) -> None:
+    """Validate MuonClip compatibility for the active distributed runtime.
+
+    MuonClip orthogonalizes full 2D tensors. Sharded-parameter modes (notably
+    FSDP and DeepSpeed ZeRO-2/3) violate this assumption because each rank holds
+    only slices of the matrix.
+
+    :param Accelerator accelerator: Active Accelerator runtime.
+    :param str optimizer_name: Configured optimizer name.
+    :param logging.Logger log: Logger for compatibility warnings.
+    :param str context: Human-readable task context for error messages.
+    :raises RuntimeError: If MuonClip is enabled with incompatible sharding.
+    """
+    optimizer_key = str(optimizer_name).strip().lower()
+    if optimizer_key not in {"muonclip", "muon-clip", "muon_clip"}:
+        return
+
+    distributed_type = getattr(accelerator, "distributed_type", None)
+    if distributed_type is DistributedType.FSDP:
+        raise RuntimeError(
+            "MuonClip is not compatible with FSDP sharded parameters in "
+            f"{context}. Use AdamW or disable FSDP for MuonClip runs."
+        )
+
+    if distributed_type is not DistributedType.DEEPSPEED:
+        return
+
+    deepspeed_plugin = getattr(
+        getattr(accelerator, "state", None), "deepspeed_plugin", None
+    )
+    zero_stage = getattr(deepspeed_plugin, "zero_stage", None)
+    if zero_stage is None:
+        log.warning(
+            "MuonClip enabled with DeepSpeed in "
+            f"{context}, but ZeRO stage is unknown. Ensure ZeRO stage < 2."
+        )
+        return
+    if int(zero_stage) >= 2:
+        raise RuntimeError(
+            "MuonClip is not compatible with DeepSpeed ZeRO stage >= 2 in "
+            f"{context} (sharded grads/params). Use ZeRO stage 0/1 or disable MuonClip."
+        )
+
+
 def _maybe_prepare_for_forward(
     optimizer: Any,
     *,

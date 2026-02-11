@@ -49,6 +49,7 @@ from neobert.training_utils import (
     _maybe_prepare_for_forward,
     _unwrap_optimizer,
     create_accelerator,
+    validate_muon_distributed_compatibility,
 )
 from neobert.utils import configure_tf32, format_resolved_config, prepare_wandb_config
 from neobert.validation import ValidationError, validate_glue_config
@@ -369,7 +370,8 @@ def get_evaluation(
     :return dict[str, Any]: Evaluation outputs (metrics, predictions).
     """
     samples_seen = 0
-    # Fix: Use list for efficient accumulation instead of repeated torch.cat
+    # For large GLUE tasks, predictions stay streaming by default; we only
+    # accumulate them when explicitly requested (debug/submission workflows).
     predictions_list = [] if return_predictions else None
     eval_metric = None
     progress_bar = tqdm(range(len(dataloader)), desc="Running evaluation...")
@@ -836,6 +838,12 @@ def trainer(cfg: Config) -> None:
         mixed_precision=mixed_precision,
         project_config=project_config,
         gradient_accumulation_steps=int(cfg.trainer.gradient_accumulation_steps),
+    )
+    validate_muon_distributed_compatibility(
+        accelerator=accelerator,
+        optimizer_name=cfg.optimizer.name,
+        log=logger,
+        context="glue",
     )
 
     tracker_config_dict = prepare_wandb_config(canonical_cfg)
