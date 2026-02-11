@@ -139,9 +139,14 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `tokenizer.padding`    | `str`         | `"max_length"`        | Padding behavior passed to tokenization pipeline.      |
 | `tokenizer.truncation` | `bool`        | `true`                | Truncate to max length during tokenization.            |
 | `tokenizer.vocab_size` | `int \| None` | `null`                | Runtime-synchronized to effective model vocab size.    |
+| `tokenizer.trust_remote_code` | `bool` | `false` | Allow tokenizer remote code execution. |
+| `tokenizer.revision` | `str \| None` | `null` | Optional tokenizer revision/commit pin for reproducibility. |
+| `tokenizer.allow_special_token_rewrite` | `bool` | `false` | Explicit opt-in for fallback special-token rewrite when tokenizer lacks `mask_token`. |
 
 > [!NOTE]
 > Trainer now pads tokenizer length with inert placeholder tokens to keep `len(tokenizer) == model.vocab_size`.
+> If a tokenizer lacks `mask_token`, NeoBERT now requires explicit
+> `tokenizer.allow_special_token_rewrite: true` before mutating special tokens.
 
 ---
 

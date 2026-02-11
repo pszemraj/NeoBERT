@@ -1664,6 +1664,9 @@ def trainer(cfg: Config) -> None:
         tokenizer = get_tokenizer(
             pretrained_model_name_or_path=cfg.tokenizer.path or cfg.tokenizer.name,
             max_length=cfg.tokenizer.max_length,
+            trust_remote_code=cfg.tokenizer.trust_remote_code,
+            revision=cfg.tokenizer.revision,
+            allow_special_token_rewrite=cfg.tokenizer.allow_special_token_rewrite,
         )
 
     prior_model_vocab_size = int(cfg.model.vocab_size)

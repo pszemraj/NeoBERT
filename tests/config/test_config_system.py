@@ -93,6 +93,10 @@ class TestConfigSystem(unittest.TestCase):
             "aot_eager",
             "--trainer.enforce_full_packed_batches",
             "false",
+            "--tokenizer.trust_remote_code",
+            "true",
+            "--tokenizer.allow_special_token_rewrite",
+            "false",
         ]
 
         # Mock sys.argv
@@ -113,6 +117,8 @@ class TestConfigSystem(unittest.TestCase):
             self.assertTrue(config.trainer.torch_compile)
             self.assertEqual(config.trainer.torch_compile_backend, "aot_eager")
             self.assertFalse(config.trainer.enforce_full_packed_batches)
+            self.assertTrue(config.tokenizer.trust_remote_code)
+            self.assertFalse(config.tokenizer.allow_special_token_rewrite)
 
             # Check that non-overridden values remain the same
             self.assertEqual(config.model.num_hidden_layers, 2)

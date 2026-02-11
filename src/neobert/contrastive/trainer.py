@@ -247,6 +247,9 @@ def trainer(cfg: Config) -> None:
     tokenizer = get_tokenizer(
         pretrained_model_name_or_path=cfg.tokenizer.path or cfg.tokenizer.name,
         max_length=cfg.tokenizer.max_length,
+        trust_remote_code=cfg.tokenizer.trust_remote_code,
+        revision=cfg.tokenizer.revision,
+        allow_special_token_rewrite=cfg.tokenizer.allow_special_token_rewrite,
     )
     use_packed = cfg.model.attn_backend != "sdpa"
     if use_packed and tokenizer.padding_side != "right":

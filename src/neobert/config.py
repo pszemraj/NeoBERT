@@ -108,6 +108,9 @@ class TokenizerConfig:
     padding: str = "max_length"
     truncation: bool = True
     vocab_size: Optional[int] = None  # For compatibility with tests
+    trust_remote_code: bool = False
+    revision: Optional[str] = None
+    allow_special_token_rewrite: bool = False
 
 
 @dataclass
@@ -1096,6 +1099,9 @@ class ConfigLoader:
             tokenizer = get_tokenizer(
                 pretrained_model_name_or_path=tokenizer_source,
                 max_length=config.tokenizer.max_length,
+                trust_remote_code=config.tokenizer.trust_remote_code,
+                revision=config.tokenizer.revision,
+                allow_special_token_rewrite=config.tokenizer.allow_special_token_rewrite,
             )
 
             actual_vocab_size = len(tokenizer)
@@ -1281,6 +1287,24 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     # Tokenizer arguments
     parser.add_argument("--tokenizer.name", type=str, help="Tokenizer name")
     parser.add_argument("--tokenizer.path", type=str, help="Tokenizer path")
+    parser.add_argument(
+        "--tokenizer.trust_remote_code",
+        type=_parse_cli_bool,
+        help="Allow tokenizer remote code execution",
+    )
+    parser.add_argument(
+        "--tokenizer.revision",
+        type=str,
+        help="Tokenizer revision/commit to pin for reproducibility",
+    )
+    parser.add_argument(
+        "--tokenizer.allow_special_token_rewrite",
+        type=_parse_cli_bool,
+        help=(
+            "Allow fallback rewrite of special tokens/post-processor when tokenizer "
+            "lacks a mask token"
+        ),
+    )
 
     # Optimizer arguments
     parser.add_argument("--optimizer.name", type=str, help="Optimizer name")

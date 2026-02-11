@@ -18,6 +18,9 @@ def get_tokenizer(
     token: Optional[str] = None,
     vocab_size: Optional[int] = None,
     use_fast: bool = True,
+    trust_remote_code: bool = False,
+    revision: Optional[str] = None,
+    allow_special_token_rewrite: bool = False,
     **kwargs: Any,
 ) -> PreTrainedTokenizer:
     """Load and configure a tokenizer for NeoBERT usage.
@@ -27,6 +30,9 @@ def get_tokenizer(
     :param str | None token: Optional auth token for gated models.
     :param int | None vocab_size: Deprecated; tokenizer vocab size is derived from the model.
     :param bool use_fast: Whether to require a fast tokenizer backend.
+    :param bool trust_remote_code: Allow remote tokenizer code execution.
+    :param str | None revision: Optional tokenizer revision/commit.
+    :param bool allow_special_token_rewrite: Allow fallback special-token mutation.
     :param Any kwargs: Additional kwargs forwarded to ``from_pretrained``.
     :return PreTrainedTokenizer: Configured tokenizer instance.
     """
@@ -37,12 +43,14 @@ def get_tokenizer(
         )
     kwargs.pop("vocab_size", None)
     kwargs.setdefault("use_fast", use_fast)
+    kwargs.setdefault("trust_remote_code", trust_remote_code)
+    if revision is not None:
+        kwargs.setdefault("revision", revision)
 
     # Load Tokenizer and replace/add special tokens
     tokenizer = AutoTokenizer.from_pretrained(
         pretrained_model_name_or_path,
         token=token,
-        trust_remote_code=True,
         **kwargs,
     )
 
@@ -70,6 +78,12 @@ def get_tokenizer(
         should_keep_special_tokens = False
 
     if not should_keep_special_tokens:
+        if not allow_special_token_rewrite:
+            raise ValueError(
+                "Tokenizer is missing a mask token and implicit special-token rewrite "
+                "is disabled. Set tokenizer.allow_special_token_rewrite=true to allow "
+                "NeoBERT fallback special-token injection."
+            )
         if not isinstance(tokenizer, PreTrainedTokenizerFast) or not tokenizer.is_fast:
             raise ValueError(
                 "Tokenizer does not provide a fast backend; cannot override post-processing "
