@@ -10,6 +10,8 @@ def test_prepare_wandb_config_scopes_pretraining_payload():
     cfg.dataset.min_length = 42
     cfg.glue.task_name = "sst2"
     cfg.mteb_batch_size = 64
+    cfg.use_deepspeed = True
+    cfg.trainer.report_to = ["wandb"]
 
     payload = prepare_wandb_config(cfg)
 
@@ -17,8 +19,10 @@ def test_prepare_wandb_config_scopes_pretraining_payload():
     assert "glue" not in payload
     assert "contrastive" not in payload
     assert "mteb_batch_size" not in payload
+    assert "use_deepspeed" not in payload
     assert "dataset" in payload
     assert "min_length" not in payload["dataset"]
+    assert "report_to" not in payload["trainer"]
 
 
 def test_prepare_wandb_config_preserves_raw_model_dict_for_glue():

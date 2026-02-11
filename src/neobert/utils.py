@@ -16,7 +16,6 @@ _TASK_CONFIG_FIELDS: dict[str, tuple[str, ...]] = {
         "debug",
         "config_path",
         "accelerate_config_file",
-        "use_deepspeed",
         "model",
         "dataset",
         "tokenizer",
@@ -51,7 +50,6 @@ _TASK_CONFIG_FIELDS: dict[str, tuple[str, ...]] = {
         "debug",
         "config_path",
         "accelerate_config_file",
-        "use_deepspeed",
         "model",
         "dataset",
         "tokenizer",
@@ -155,6 +153,10 @@ def _task_filter_config(config_dict: Dict[str, Any]) -> Dict[str, Any]:
                 for key, value in dataset_cfg.items()
                 if key not in _PRETRAIN_DATASET_EXCLUDE_FIELDS
             }
+
+    trainer_cfg = filtered.get("trainer")
+    if isinstance(trainer_cfg, dict):
+        trainer_cfg.pop("report_to", None)
 
     return _drop_empty_values(filtered)
 
