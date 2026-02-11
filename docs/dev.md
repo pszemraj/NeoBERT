@@ -198,6 +198,38 @@ These are explicitly tracked for sweep-readiness follow-up work:
   contrastive, and GLUE for easier sweep analysis.
 - Keep metric naming and logging cadence aligned across task trainers.
 
+### Config Loader Architecture TODOs (Separate PR)
+
+These are intentionally deferred because they are higher-risk refactors that
+touch most training/eval entrypoints and config mutation assumptions.
+
+1. Move config dataclasses to immutable/frozen mode end-to-end
+
+- Freeze dataclasses and remove in-place mutation patterns in loaders/trainers.
+- Introduce explicit rebuild/replace helpers where updates are required.
+
+1. Rework overrides onto immutable rebuild semantics
+
+- Apply dot-path overrides by rebuilding the object tree bottom-up instead of
+  mutating fields.
+- Keep strict type-casting and fail-fast behavior unchanged.
+
+1. Centralize config construction around a single strict path
+
+- YAML load -> variable resolution -> dataclass hydration -> dot overrides ->
+  validation should be the only supported flow.
+- Remove duplicate ad-hoc config mutation/parsing paths across scripts.
+
+1. Expand cross-field validation coverage into a dedicated validator module
+
+- Keep one authoritative validation surface for bounds, coupled constraints,
+  and sweep-time comparability requirements.
+
+1. Rationalize serializable config snapshots
+
+- Ensure one canonical `to_dict` representation for logging/checkpoint metadata
+  without task-specific drift.
+
 ## Longer-Term Backlog
 
 1. Chunked/fused cross-entropy for long contexts
