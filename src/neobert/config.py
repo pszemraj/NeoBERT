@@ -1420,9 +1420,9 @@ class ConfigLoader:
             )
 
         if task in {"pretraining", "contrastive"}:
-            if config.tokenizer.max_length != config.dataset.max_seq_length:
+            if config.tokenizer.max_length < config.dataset.max_seq_length:
                 warnings.warn(
-                    "tokenizer.max_length does not match dataset.max_seq_length for "
+                    "tokenizer.max_length is smaller than dataset.max_seq_length for "
                     f"{task}; syncing tokenizer.max_length from "
                     f"{config.tokenizer.max_length} to {config.dataset.max_seq_length}.",
                     UserWarning,

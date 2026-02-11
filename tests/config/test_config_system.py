@@ -686,21 +686,41 @@ optimizer:
         cfg = ConfigLoader.dict_to_config({"trainer": {"save_total_limit": 0}})
         self.assertEqual(cfg.trainer.save_total_limit, 0)
 
-    def test_pretraining_seq_length_syncs_tokenizer_max_length(self):
-        """Ensure tokenizer.max_length is synced to dataset.max_seq_length for pretraining."""
+    def test_pretraining_seq_length_syncs_tokenizer_max_length_when_too_small(self):
+        """Ensure tokenizer.max_length is only synced up when shorter than dataset."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cfg = ConfigLoader.dict_to_config(
+                {
+                    "task": "pretraining",
+                    "dataset": {"max_seq_length": 512},
+                    "tokenizer": {"max_length": 256},
+                }
+            )
+        self.assertEqual(cfg.tokenizer.max_length, 512)
+        self.assertTrue(
+            any(
+                "tokenizer.max_length is smaller than dataset.max_seq_length"
+                in str(w.message)
+                for w in caught
+            )
+        )
+
+    def test_pretraining_allows_tokenizer_max_length_above_dataset_seq_length(self):
+        """Ensure larger tokenizer.max_length is preserved for staged long-context runs."""
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             cfg = ConfigLoader.dict_to_config(
                 {
                     "task": "pretraining",
                     "dataset": {"max_seq_length": 256},
-                    "tokenizer": {"max_length": 512},
+                    "tokenizer": {"max_length": 4096},
                 }
             )
-        self.assertEqual(cfg.tokenizer.max_length, 256)
-        self.assertTrue(
+        self.assertEqual(cfg.tokenizer.max_length, 4096)
+        self.assertFalse(
             any(
-                "tokenizer.max_length does not match dataset.max_seq_length"
+                "tokenizer.max_length is smaller than dataset.max_seq_length"
                 in str(w.message)
                 for w in caught
             )
