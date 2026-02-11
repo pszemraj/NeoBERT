@@ -79,13 +79,16 @@ Runtime behavior:
 - if none exists and `dataset.eval_samples` is set, trainer reserves the first
   `eval_samples` from train for eval and skips them from training to avoid
   leakage;
-- when `trainer.eval_max_batches` is unset, trainer derives a practical default
-  for streaming eval and still allows explicit override.
+- if `trainer.eval_max_batches` is unset, trainer derives the eval budget from
+  `dataset.eval_samples` and `trainer.per_device_eval_batch_size`;
+- if neither `trainer.eval_max_batches` nor `dataset.eval_samples` is set,
+  trainer raises an error (explicit eval budget required for streaming eval).
 - if no eval dataset can be resolved, eval is skipped.
 
 ## Mixed Precision and Compile
 
 - `trainer.mixed_precision`: `no | fp32 | bf16 | fp16` (`fp16` unsupported in pretraining and GLUE)
+- runtime normalization: `fp32 -> no`, `true -> bf16`, `false -> no`
 - `trainer.torch_compile`: enable `torch.compile`
 - `trainer.torch_compile_backend`: `inductor | aot_eager | eager`
 - `trainer.torch_compile_dynamic`: optional override for dynamic-shape compile;
@@ -172,7 +175,9 @@ Ensure `dataset.path` points to output from `scripts/contrastive/preprocess.py`.
 - Use `gradient_checkpointing` for memory headroom on long contexts.
 - Use `gradient_clipping` for stability on deep/long runs.
 - For paper-style NeoBERT masking strategy, set `datacollator.mask_all: true`.
-  Default `false` uses standard 80/10/10 MLM corruption.
+  Default `false` uses sampled-token 80/10/10 corruption.
+  For `p = datacollator.mlm_probability`, global token mix is:
+  `(1 - p)` untouched, `0.8p` `[MASK]`, `0.1p` random-token, `0.1p` original-token.
 - For packed + compile runs, measure `tokens/sec` rather than `steps/sec`.
 
 ## Related Docs

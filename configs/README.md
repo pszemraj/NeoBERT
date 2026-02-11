@@ -16,30 +16,21 @@ configs/
   contrastive/
 ```
 
-## Shared Explicit Defaults
+## Config Authoring Policy
 
-Pretraining and GLUE configs now include a small set of explicit defaults that
-users commonly ask about (instead of relying on implicit schema defaults):
+- Keep semantics/default definitions in
+  [docs/configuration.md](../docs/configuration.md).
+- Keep runtime behavior in [docs/training.md](../docs/training.md) and
+  [docs/evaluation.md](../docs/evaluation.md).
+- Use this directory for runnable recipes, not schema documentation.
 
-- `tokenizer.truncation: true`
-- `wandb.enabled: true|false` (explicit per config)
-- No deprecated `trainer.report_to` fields
+Commonly pinned fields in repo configs (for transparency in experiment YAMLs):
 
-Pretraining configs also make these defaults explicit:
-
-- `datacollator.mask_all: false` (standard sampled-token 80/10/10 corruption)
-- `trainer.masked_logits_only_loss: true`
-- `trainer.log_train_accuracy: true`
-- `trainer.log_grad_norm: true`
-- `trainer.log_weight_norms: true`
-- `trainer.enforce_full_packed_batches: true`
-
-GLUE configs also make these defaults explicit:
-
-- `glue.num_workers: 4`
-- `glue.preprocessing_num_proc: 4`
-- `trainer.save_steps` is set to a positive value (even when `save_strategy: "no"`)
-  so configs pass strict validation
+- `wandb.enabled`
+- `tokenizer.truncation`
+- pretraining: `datacollator.mask_all`, `trainer.masked_logits_only_loss`,
+  `trainer.log_train_accuracy`, `trainer.enforce_full_packed_batches`
+- GLUE: `glue.num_workers`, `glue.preprocessing_num_proc`
 
 ## Pretraining Configs
 

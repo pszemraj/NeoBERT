@@ -1,9 +1,11 @@
 # Configuration Reference
 
 > [!TIP]
-> Example configs are in the [configs/](/configs/) directory, which has subdirs by task, ex: [pretraining/](/configs/pretraining/).
+> Example configs are in [configs/](../configs/) (for production) and
+> [tests/configs/](../tests/configs/) (for tiny smoke/regression runs).
 
-This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) in a practical order.
+This page is the primary source of truth for NeoBERT's YAML config schema
+(`src/neobert/config.py`) and defaults.
 
 ---
 
@@ -50,7 +52,8 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 
 - Treat this as a **config-file reference**, not a CLI-first reference.
 - Start with **High-Impact Settings**, then fill in grouped sections.
-- Defaults shown here are the dataclass defaults.
+- Defaults shown here are dataclass defaults unless noted.
+- High-impact tables are summaries; field semantics are defined in section tables.
 - Unknown keys fail fast during config loading.
 
 ## High-Impact Settings
@@ -71,7 +74,7 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `optimizer.name`                      | `str`         | `"adamw"`       | Optimizer family (`adamw`, `adam`, `muonclip`).               |
 | `optimizer.lr`                        | `float`       | `1e-4`          | Base learning rate.                                           |
 | `scheduler.name`                      | `str`         | `"cosine"`      | LR schedule type.                                             |
-| `datacollator.mask_all`               | `bool`        | `false`         | `false` uses BERT-style 80/10/10 masking.                     |
+| `datacollator.mask_all`               | `bool`        | `false`         | `false` uses sampled-token BERT-style 80/10/10 masking.       |
 | `datacollator.pack_sequences`         | `bool`        | `false`         | Enable packed-sequence collation.                             |
 | `trainer.resume_from_checkpoint`      | `str \| None` | `null`          | Checkpoint to resume from.                                    |
 | `use_deepspeed`                       | `bool`        | `false`         | Legacy hint for loading DeepSpeed-formatted contrastive checkpoints. |
@@ -330,20 +333,28 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `datacollator.max_length`         | `int \| None` | `null`  | Packed target length override.                                 |
 | `datacollator.pad_to_multiple_of` | `int \| None` | `null`  | Pad to multiple for kernel efficiency in non-packed mode.      |
 
+For `p = datacollator.mlm_probability`:
+
+- `mask_all: false` global token mix is `(1 - p)` untouched, `0.8p` `[MASK]`,
+  `0.1p` random-token, `0.1p` original-token.
+- `mask_all: true` global token mix is `(1 - p)` untouched, `p` `[MASK]`.
+
 ---
 
 ## Checkpointing and Resume
 
-| Key                              | Type          | Default    | Description                                        |
-| -------------------------------- | ------------- | ---------- | -------------------------------------------------- |
-| `trainer.save_steps`             | `int`         | `10000`    | Save cadence.                                      |
-| `trainer.save_total_limit`       | `int \| None` | `3`        | Maximum retained `checkpoints/<step>` directories. |
-| `trainer.max_ckpt`               | `int \| None` | `null`     | Deprecated alias for `trainer.save_total_limit`.   |
-| `trainer.resume_from_checkpoint` | `str \| None` | `null`     | Resume source (`latest`, step dir, explicit path). |
-| `pretrained_checkpoint`          | `str`         | `"latest"` | Checkpoint selector for downstream tasks.          |
+Save cadence/retention knobs live under [Training Loop](#training-loop):
+`trainer.save_steps`, `trainer.save_total_limit`, and
+`trainer.resume_from_checkpoint`.
+
+| Key                     | Type  | Default    | Description                               |
+| ----------------------- | ----- | ---------- | ----------------------------------------- |
+| `pretrained_checkpoint` | `str` | `"latest"` | Checkpoint selector for downstream tasks. |
 
 > [!NOTE]
-> DeepSpeed checkpoint saves now preserve canonical root semantics (`latest` indirection is refreshed) while still writing per-step directories.
+> Pretraining checkpoints are written under `output_dir/checkpoints/<step>/`.
+> DeepSpeed checkpoint saves preserve canonical root semantics (`latest`
+> indirection is refreshed) while still writing per-step directories.
 
 ---
 

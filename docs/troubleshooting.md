@@ -57,6 +57,12 @@ Actions:
   `dataset.streaming: true`.
 - Workaround: pre-tokenize data to disk and run with `dataset.streaming: false`.
 
+### Streaming eval budget error
+
+- If streaming eval has no explicit budget, trainer raises:
+  set `trainer.eval_max_batches` or `dataset.eval_samples`.
+- Use fixed values across sweep runs for comparable metrics.
+
 ## Evaluation Issues
 
 ### GLUE backend errors

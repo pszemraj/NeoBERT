@@ -186,16 +186,17 @@ Priority order for next performance PR:
 
 These are explicitly tracked for sweep-readiness follow-up work:
 
-1. Fix contrastive dataloader iterator lifecycle
+1. Unify checkpoint layout across tasks
 
-- The loop currently recreates iterators with `next(iter(dataloader))` patterns
-  that can bias sampling and reduce determinism.
-- Replace with persistent iterators that recycle on `StopIteration`.
+- Pretraining now writes one canonical tree at `checkpoints/<step>/`.
+- Contrastive/GLUE still retain separate model/trainer checkpoint conventions.
+- Move all tasks to one consistent checkpoint structure and retention policy.
 
-1. Unify mixed-precision validation/policy with pretraining
+1. Tighten sweep-time observability parity
 
-- Contrastive accepts a broader/inconsistent precision surface vs pretraining.
-- Add shared validation and consistent fail-fast behavior for unsupported modes.
+- Ensure comparable train/eval metrics are emitted across pretraining,
+  contrastive, and GLUE for easier sweep analysis.
+- Keep metric naming and logging cadence aligned across task trainers.
 
 ## Longer-Term Backlog
 

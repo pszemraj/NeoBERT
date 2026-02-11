@@ -27,6 +27,10 @@ Core docs for training, evaluating, exporting, and maintaining NeoBERT.
 | Failure diagnosis | [troubleshooting.md](troubleshooting.md) | Keep fixes centralized here. |
 | Test process and authoring | [testing.md](testing.md) | `tests/README.md` stays lightweight. |
 
+Directory-level READMEs (`configs/`, `scripts/`, `tests/`, `jobs/`) should stay
+index/usage-focused and link back to these canonical docs instead of
+re-declaring field semantics.
+
 ## Directory READMEs
 
 - [Scripts](../scripts/README.md)
