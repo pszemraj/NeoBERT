@@ -190,9 +190,11 @@ These are explicitly tracked for sweep-readiness follow-up work:
 
 1. Unify checkpoint layout across tasks
 
-- Pretraining now writes one canonical tree at `checkpoints/<step>/`.
-- Contrastive/GLUE still retain separate model/trainer checkpoint conventions.
-- Move all tasks to one consistent checkpoint structure and retention policy.
+- Pretraining and contrastive now write one canonical tree at
+  `checkpoints/<step>/`.
+- GLUE still uses a legacy `model_checkpoints/` layout for fine-tuning saves.
+- Move remaining task paths to one consistent checkpoint structure and retention
+  policy.
 
 1. Tighten sweep-time observability parity
 

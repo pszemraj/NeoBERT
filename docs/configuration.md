@@ -424,8 +424,10 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 
 > [!NOTE]
 > Pretraining checkpoints are written under `output_dir/checkpoints/<step>/`.
-> DeepSpeed checkpoint saves preserve canonical root semantics (`latest`
-> indirection is refreshed) while still writing per-step directories.
+> Resume path resolution uses numeric step directories and picks the highest
+> available step for `resume_from_checkpoint: latest`.
+> DeepSpeed `latest` indirection files are optional legacy metadata and are only
+> consulted by DeepSpeed conversion/loading helpers when present.
 
 ---
 
