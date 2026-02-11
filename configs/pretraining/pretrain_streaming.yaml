@@ -48,6 +48,7 @@ trainer:
   log_grad_norm: true
   log_weight_norms: true
   eval_steps: 10000
+  eval_max_batches: 100  # Explicit budget required for streaming eval comparability
   save_steps: 10000
   mixed_precision: "bf16"
   masked_logits_only_loss: true

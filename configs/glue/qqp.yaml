@@ -13,7 +13,7 @@ glue:
   task_name: qqp
   num_labels: 2
   max_seq_length: 512
-  pretrained_model_path: ./outputs/neobert_100m_100k/model_checkpoints/100000/config.yaml
+  pretrained_model_path: ./outputs/neobert_100m_100k/checkpoints/100000/config.yaml
   pretrained_checkpoint_dir: ./outputs/neobert_100m_100k
   pretrained_checkpoint: 100000
   classifier_dropout: 0.1
