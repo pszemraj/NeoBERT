@@ -1492,6 +1492,20 @@ def _prepare_resume_dataloader(
     return accelerator.skip_first_batches(train_dataloader, resume_step)
 
 
+def _safe_len(dataloader: torch.utils.data.DataLoader) -> Optional[int]:
+    """Return dataloader length when available, else ``None``.
+
+    :param torch.utils.data.DataLoader dataloader: Dataloader object.
+    :return int | None: Length, or ``None`` when not defined.
+    """
+    if not hasattr(dataloader, "__len__"):
+        return None
+    try:
+        return len(dataloader)
+    except TypeError:
+        return None
+
+
 def trainer(cfg: Config) -> None:
     """Run the pretraining loop.
 
@@ -2235,6 +2249,22 @@ def trainer(cfg: Config) -> None:
         accelerator, "prepare_data_loader"
     )
 
+    train_loader_len = _safe_len(train_dataloader)
+    if train_loader_len is not None and train_loader_len == 0:
+        raise ValueError(
+            "Training dataloader resolved to zero batches. Check dataset filtering "
+            "(for example dataset.min_length and split settings) and ensure "
+            "tokenization produced non-empty inputs."
+        )
+    if eval_dataloader is not None:
+        eval_loader_len = _safe_len(eval_dataloader)
+        if eval_loader_len is not None and eval_loader_len == 0:
+            logger.warning(
+                "Eval dataloader resolved to zero batches; disabling evaluation for "
+                "this run."
+            )
+            eval_dataloader = None
+
     if wandb_enabled and accelerator.is_main_process:
         watch_mode, watch_warning = resolve_wandb_watch_mode(
             wandb_mode=cfg.wandb.mode,
@@ -2349,7 +2379,9 @@ def trainer(cfg: Config) -> None:
             if skipped_train_dataloader is None
             else skipped_train_dataloader
         )
+        saw_batch_this_epoch = False
         for batch in dataloader:
+            saw_batch_this_epoch = True
             # Pack or truncate to target per-step batch size. Packed mode can emit
             # variable batch dimensions, so we buffer/merge there too now that
             # packed_seqlens uses fixed-width tensor metadata.
@@ -2802,6 +2834,12 @@ def trainer(cfg: Config) -> None:
                 if metrics["train/steps"] >= cfg.trainer.max_steps:
                     pbar.close()
                     return
+
+        if not saw_batch_this_epoch:
+            raise RuntimeError(
+                "Training dataloader yielded zero batches for an epoch. This usually "
+                "means the active split is empty after preprocessing/filtering."
+            )
 
         if (
             eval_dataloader is not None
