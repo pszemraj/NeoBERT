@@ -4,6 +4,7 @@ from contextlib import nullcontext
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 import warnings
 
 import pytest
@@ -26,6 +27,7 @@ with warnings.catch_warnings():
 TASK_LIST = _RUN_MTEB_MODULE.TASK_LIST
 TASK_TYPE = _RUN_MTEB_MODULE.TASK_TYPE
 _resolve_mteb_tasks = _RUN_MTEB_MODULE._resolve_mteb_tasks
+_resolve_mteb_checkpoint_step = _RUN_MTEB_MODULE._resolve_mteb_checkpoint_step
 
 
 def _make_mteb_cfg(tmp_path: Path, *, use_deepspeed: bool) -> SimpleNamespace:
@@ -36,7 +38,12 @@ def _make_mteb_cfg(tmp_path: Path, *, use_deepspeed: bool) -> SimpleNamespace:
         mteb_overwrite_results=False,
         pretrained_checkpoint="100",
         trainer=SimpleNamespace(output_dir=str(tmp_path)),
-        tokenizer=SimpleNamespace(name="bert-base-uncased", max_length=16),
+        tokenizer=SimpleNamespace(
+            name="bert-base-uncased",
+            max_length=16,
+            trust_remote_code=False,
+            revision=None,
+        ),
         model=SimpleNamespace(
             hidden_size=16,
             num_hidden_layers=2,
@@ -274,6 +281,93 @@ def test_evaluate_mteb_prefers_safetensors_when_available(
     assert calls["safetensors"] == 1
     assert calls["deepspeed"] == 0
     assert strict_flags == [False]
+
+
+def test_resolve_latest_checkpoint_skips_unloadable_highest_step(tmp_path: Path):
+    """Ensure latest resolves to the highest loadable checkpoint step."""
+    checkpoint_root = tmp_path / "checkpoints"
+    (checkpoint_root / "200").mkdir(parents=True, exist_ok=True)
+    loadable_step = checkpoint_root / "100"
+    loadable_step.mkdir(parents=True, exist_ok=True)
+    (loadable_step / _RUN_MTEB_MODULE.MODEL_WEIGHTS_NAME).touch()
+
+    resolved = _resolve_mteb_checkpoint_step(checkpoint_root, "latest")
+
+    assert resolved == "100"
+
+
+def test_evaluate_mteb_passes_tokenizer_trust_and_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Ensure MTEB tokenizer load honors config trust/revision overrides."""
+    checkpoint_dir = tmp_path / "checkpoints" / "100"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    (checkpoint_dir / _RUN_MTEB_MODULE.MODEL_WEIGHTS_NAME).touch()
+    cfg = _make_mteb_cfg(tmp_path, use_deepspeed=False)
+    cfg.tokenizer.trust_remote_code = True
+    cfg.tokenizer.revision = "pinned-revision"
+
+    tokenizer_kwargs: dict[str, Any] = {}
+
+    class _DummyModel:
+        def load_state_dict(self, _state_dict, strict: bool = True):
+            assert strict is False
+            return None
+
+        def to(self, _device: str):
+            return self
+
+        def eval(self):
+            return self
+
+    class _DummyMTEB:
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+        def run(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+    def _capture_tokenizer_kwargs(*args, **kwargs):
+        del args
+        tokenizer_kwargs.update(kwargs)
+        return SimpleNamespace(pad_token_id=0)
+
+    monkeypatch.setattr(
+        _RUN_MTEB_MODULE,
+        "get_tokenizer",
+        _capture_tokenizer_kwargs,
+    )
+    monkeypatch.setattr(
+        _RUN_MTEB_MODULE,
+        "NeoBERTForMTEB",
+        lambda *args, **kwargs: _DummyModel(),
+    )
+    monkeypatch.setattr(
+        _RUN_MTEB_MODULE,
+        "MTEB",
+        _DummyMTEB,
+    )
+    monkeypatch.setattr(
+        _RUN_MTEB_MODULE.torch,
+        "autocast",
+        lambda *args, **kwargs: nullcontext(),
+    )
+    monkeypatch.setattr(
+        _RUN_MTEB_MODULE,
+        "load_model_safetensors",
+        lambda *args, **kwargs: {"model.embeddings.weight": torch.zeros(1)},
+    )
+    monkeypatch.setattr(
+        _RUN_MTEB_MODULE,
+        "load_deepspeed_fp32_state_dict",
+        lambda *args, **kwargs: {"model.embeddings.weight": torch.zeros(1)},
+    )
+
+    _RUN_MTEB_MODULE.evaluate_mteb(cfg)
+
+    assert tokenizer_kwargs["trust_remote_code"] is True
+    assert tokenizer_kwargs["revision"] == "pinned-revision"
 
 
 def test_load_mteb_encoder_weights_raises_on_non_head_mismatch():

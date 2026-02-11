@@ -20,6 +20,9 @@ def preprocess(cfg: Any) -> None:
     tokenizer = get_tokenizer(
         pretrained_model_name_or_path=cfg.tokenizer.name,
         max_length=cfg.tokenizer.max_length,
+        trust_remote_code=cfg.tokenizer.trust_remote_code,
+        revision=cfg.tokenizer.revision,
+        allow_special_token_rewrite=cfg.tokenizer.allow_special_token_rewrite,
     )
     print(tokenizer)
 

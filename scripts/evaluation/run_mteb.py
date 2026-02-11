@@ -13,6 +13,7 @@ from neobert.checkpointing import (
     MODEL_WEIGHTS_NAME,
     load_deepspeed_fp32_state_dict,
     load_model_safetensors,
+    resolve_deepspeed_checkpoint_root_and_tag,
 )
 from neobert.config import ConfigLoader
 from neobert.model import NeoBERTConfig, NeoBERTForMTEB
@@ -245,6 +246,63 @@ def _load_mteb_encoder_weights(
         )
 
 
+def _is_loadable_mteb_step(checkpoint_root: Path, step: int) -> bool:
+    """Return whether a checkpoint step is loadable for MTEB evaluation.
+
+    A step is considered loadable when either a portable safetensors weight file
+    exists at ``checkpoints/<step>/model.safetensors`` or DeepSpeed ZeRO shards
+    can be resolved for the same step.
+
+    :param Path checkpoint_root: ``checkpoints`` root directory.
+    :param int step: Numeric checkpoint step.
+    :return bool: True if MTEB can load weights from this step.
+    """
+    step_dir = checkpoint_root / str(step)
+    if (step_dir / MODEL_WEIGHTS_NAME).exists():
+        return True
+    try:
+        resolve_deepspeed_checkpoint_root_and_tag(checkpoint_root, tag=str(step))
+    except (FileNotFoundError, ValueError):
+        return False
+    return True
+
+
+def _resolve_mteb_checkpoint_step(
+    checkpoint_root: Path,
+    requested: str | int,
+) -> str:
+    """Resolve a concrete checkpoint step/tag for MTEB loading.
+
+    :param Path checkpoint_root: ``checkpoints`` root directory.
+    :param str | int requested: Requested checkpoint selector or ``latest``.
+    :raises ValueError: If no loadable checkpoint step exists.
+    :return str: Concrete checkpoint step/tag.
+    """
+    requested_text = str(requested).strip()
+    if requested_text.lower() != "latest":
+        return requested_text
+
+    candidates = sorted(
+        (
+            int(path.name)
+            for path in checkpoint_root.iterdir()
+            if path.is_dir() and path.name.isdigit()
+        ),
+        reverse=True,
+    )
+    if not candidates:
+        raise ValueError(f"Unable to find numbered checkpoints under {checkpoint_root}")
+
+    for step in candidates:
+        if _is_loadable_mteb_step(checkpoint_root, step):
+            return str(step)
+
+    raise ValueError(
+        "Unable to find a loadable checkpoint under "
+        f"{checkpoint_root}. Checked steps: {', '.join(str(step) for step in candidates)}."
+    )
+
+
 def evaluate_mteb(cfg: Any) -> None:
     """Evaluate a model on the MTEB benchmark.
 
@@ -260,20 +318,8 @@ def evaluate_mteb(cfg: Any) -> None:
     selected_tasks = _resolve_mteb_tasks(cfg)
 
     # Get checkpoint number
-    if pretrained_checkpoint != "latest":
-        ckpt = pretrained_checkpoint
-    else:
-        checkpoint_root = pretrained_checkpoint_dir / "checkpoints"
-        candidates = [
-            int(path.name)
-            for path in checkpoint_root.iterdir()
-            if path.is_dir() and path.name.isdigit()
-        ]
-        if not candidates:
-            raise ValueError(
-                f"Unable to find numbered checkpoints under {checkpoint_root}"
-            )
-        ckpt = str(max(candidates))
+    checkpoint_root = pretrained_checkpoint_dir / "checkpoints"
+    ckpt = _resolve_mteb_checkpoint_step(checkpoint_root, pretrained_checkpoint)
 
     # Define path to store results
     output_folder = (
@@ -287,6 +333,8 @@ def evaluate_mteb(cfg: Any) -> None:
     tokenizer = get_tokenizer(
         pretrained_model_name_or_path=cfg.tokenizer.name,
         max_length=cfg.tokenizer.max_length,
+        trust_remote_code=bool(getattr(cfg.tokenizer, "trust_remote_code", False)),
+        revision=getattr(cfg.tokenizer, "revision", None),
     )
 
     # Instantiate model
@@ -317,7 +365,6 @@ def evaluate_mteb(cfg: Any) -> None:
     )
 
     # Load pretrained weights
-    checkpoint_root = pretrained_checkpoint_dir / "checkpoints"
     checkpoint_step_dir = checkpoint_root / str(ckpt)
     checkpoint_path = checkpoint_step_dir / MODEL_WEIGHTS_NAME
     if use_deepspeed:
