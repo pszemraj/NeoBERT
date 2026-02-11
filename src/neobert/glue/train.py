@@ -777,6 +777,22 @@ def _build_glue_attention_mask(
     )
 
 
+def _create_glue_data_collator(
+    tokenizer: PreTrainedTokenizerBase,
+    cfg: Config,
+) -> DataCollatorWithPadding:
+    """Create the GLUE padding collator from config.
+
+    :param PreTrainedTokenizerBase tokenizer: Tokenizer used for padding.
+    :param Config cfg: Training configuration.
+    :return DataCollatorWithPadding: Configured collator instance.
+    """
+    return DataCollatorWithPadding(
+        tokenizer,
+        pad_to_multiple_of=cfg.datacollator.pad_to_multiple_of,
+    )
+
+
 def trainer(cfg: Config) -> None:
     """Run GLUE/SuperGLUE fine-tuning loop.
 
@@ -1047,10 +1063,7 @@ def trainer(cfg: Config) -> None:
         logger.info(f"Sample {index} of the evaluation set: {eval_dataset[index]}.")
 
     # DataLoaders creation:
-    data_collator = DataCollatorWithPadding(
-        tokenizer,
-        pad_to_multiple_of=cfg.datacollator.pad_to_multiple_of,
-    )
+    data_collator = _create_glue_data_collator(tokenizer, cfg)
 
     # Keep pad masks in float32 for numerical stability (match pretraining).
     dtype_pad_mask = torch.float32
@@ -1782,16 +1795,9 @@ def trainer(cfg: Config) -> None:
 
                         # Only save checkpoint if explicitly enabled
                         save_model = getattr(cfg.trainer, "save_model", True)
-                        save_total_limit = getattr(
-                            cfg.trainer, "save_total_limit", None
-                        )
-
-                        # Save if either save_total_limit>0 or max_ckpt>0 is configured
-                        limit_enabled = (
-                            save_total_limit is not None and save_total_limit > 0
-                        ) or (max_ckpt is not None and max_ckpt > 0)
-
-                        if should_save and save_model and limit_enabled:
+                        # save_total_limit controls pruning only. save_total_limit=0
+                        # means keep all checkpoints while still saving.
+                        if should_save and save_model:
                             save_training_checkpoint(
                                 cfg, model, accelerator, completed_steps
                             )

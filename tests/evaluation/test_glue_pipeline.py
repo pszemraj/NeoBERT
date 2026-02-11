@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 import torch
+from accelerate.utils import DistributedType
 
 from neobert.config import Config, ConfigLoader
 
@@ -278,8 +279,91 @@ class TestGLUETaskSpecific(unittest.TestCase):
             outputs = model(
                 input_ids=input_ids, attention_mask=attention_mask, return_dict=True
             )
-
         self.assertEqual(outputs.logits.shape, (1, 2))
+
+    def test_forward_classifier_logits_passes_token_type_ids_for_hf_models(self):
+        """Ensure HF path forwards token_type_ids when they are present."""
+        from neobert.glue.train import _forward_classifier_logits
+
+        class DummyHFModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.last_kwargs = None
+
+            def forward(self, **kwargs):
+                self.last_kwargs = kwargs
+                return {"logits": torch.zeros((2, 2))}
+
+        model = DummyHFModel()
+        input_ids = torch.ones((2, 4), dtype=torch.long)
+        attention_mask = torch.ones((2, 4), dtype=torch.long)
+        token_type_ids = torch.zeros((2, 4), dtype=torch.long)
+
+        _forward_classifier_logits(
+            model,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            use_hf_signature=True,
+        )
+
+        self.assertIsNotNone(model.last_kwargs)
+        self.assertIn("token_type_ids", model.last_kwargs)
+        self.assertTrue(
+            torch.equal(model.last_kwargs["token_type_ids"], token_type_ids)
+        )
+
+    def test_build_glue_attention_mask_preserves_hf_binary_mask(self):
+        """Ensure HF signature keeps 0/1 attention masks unchanged."""
+        from neobert.glue.train import _build_glue_attention_mask
+
+        binary_mask = torch.tensor([[1, 1, 0], [1, 0, 0]], dtype=torch.long)
+        out = _build_glue_attention_mask(
+            binary_mask,
+            use_hf_signature=True,
+            dtype_pad_mask=torch.float32,
+        )
+        self.assertTrue(torch.equal(out, binary_mask))
+
+    def test_create_glue_data_collator_uses_config_pad_multiple(self):
+        """Ensure GLUE collator honors cfg.datacollator.pad_to_multiple_of."""
+        from neobert.glue.train import _create_glue_data_collator
+
+        cfg = Config()
+        cfg.datacollator.pad_to_multiple_of = 16
+
+        tokenizer = mock.MagicMock()
+        with mock.patch("neobert.glue.train.DataCollatorWithPadding") as collator_ctor:
+            _create_glue_data_collator(tokenizer, cfg)
+
+        collator_ctor.assert_called_once_with(tokenizer, pad_to_multiple_of=16)
+
+    def test_save_training_checkpoint_zero_limit_still_saves(self):
+        """Ensure save_total_limit=0 keeps all GLUE checkpoints while still saving."""
+        from neobert.glue.train import save_training_checkpoint
+
+        class DummyAccelerator:
+            distributed_type = DistributedType.NO
+
+            @staticmethod
+            def unwrap_model(model):
+                return model
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Config()
+            cfg.trainer.output_dir = tmpdir
+            cfg.trainer.save_total_limit = 0
+            cfg.trainer.max_ckpt = None
+
+            model = torch.nn.Linear(8, 2)
+            accelerator = DummyAccelerator()
+
+            save_training_checkpoint(cfg, model, accelerator, completed_steps=10)
+            save_training_checkpoint(cfg, model, accelerator, completed_steps=20)
+
+            ckpt_root = Path(tmpdir) / "model_checkpoints"
+            self.assertTrue((ckpt_root / "10").exists())
+            self.assertTrue((ckpt_root / "20").exists())
 
 
 if __name__ == "__main__":
