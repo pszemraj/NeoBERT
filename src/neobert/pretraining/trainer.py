@@ -160,10 +160,10 @@ def _log_masking_strategy(cfg: Config) -> None:
         "datacollator.mask_all=false with mlm_probability="
         f"{selected_pct_str}%: {selected_pct_str}% of tokens are sampled; sampled "
         "tokens use BERT 80/10/10 ([MASK]/random/original). Global token mix is "
-        f"{untouched_pct_str}% untouched, {mask_pct_str}% [MASK], "
-        f"{random_pct_str}% random-token, {unchanged_labeled_pct_str}% original-token "
-        "(labeled). Set datacollator.mask_all=true for 100% [MASK] replacement on "
-        "sampled tokens."
+        f"{untouched_pct_str}% unsampled (untouched), {mask_pct_str}% [MASK], "
+        f"{random_pct_str}% random-token, {unchanged_labeled_pct_str}% sampled-but-"
+        "unchanged original-token (still labeled). Set datacollator.mask_all=true "
+        "for 100% [MASK] replacement on sampled tokens."
     )
 
 
@@ -833,6 +833,40 @@ def _resolve_eval_max_batches(
     if num_processes <= 1:
         return max_batches
     return max(1, (max_batches + num_processes - 1) // num_processes)
+
+
+def _resolve_streaming_eval_budget(
+    eval_max_batches: Any,
+    eval_samples: Optional[int],
+    per_device_eval_batch_size: int,
+) -> tuple[int, str]:
+    """Resolve explicit streaming eval budget for comparable metrics.
+
+    :param Any eval_max_batches: Optional ``trainer.eval_max_batches`` value.
+    :param int | None eval_samples: Optional ``dataset.eval_samples`` value.
+    :param int per_device_eval_batch_size: Eval batch size for sample->batch conversion.
+    :raises ValueError: If no explicit budget is available for streaming eval.
+    :return tuple[int, str]: Resolved batch cap and source key.
+    """
+    if eval_max_batches is not None:
+        try:
+            resolved_eval_max_batches = int(eval_max_batches)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "trainer.eval_max_batches must be an integer when set, got "
+                f"{eval_max_batches!r}."
+            ) from exc
+        if resolved_eval_max_batches > 0:
+            return resolved_eval_max_batches, "trainer.eval_max_batches"
+
+    if eval_samples is None:
+        raise ValueError(
+            "Streaming eval requires an explicit evaluation budget for reproducible "
+            "metrics. Set trainer.eval_max_batches or dataset.eval_samples."
+        )
+
+    eval_batch_size = max(1, int(per_device_eval_batch_size))
+    return max(1, math.ceil(eval_samples / eval_batch_size)), "dataset.eval_samples"
 
 
 def _run_eval(
@@ -2235,32 +2269,23 @@ def trainer(cfg: Config) -> None:
             "ablation/debug and has higher memory use."
         )
     eval_max_batches = getattr(cfg.trainer, "eval_max_batches", None)
-    if isinstance(eval_max_batches, int) and eval_max_batches <= 0:
-        eval_max_batches = None
     eval_dataset_is_streaming = (
         eval_dataset is not None
         and cfg.dataset.streaming
         and hasattr(eval_dataset, "take")
         and hasattr(eval_dataset, "skip")
     )
-    if eval_max_batches is None and eval_dataset_is_streaming:
-        if eval_samples is not None:
-            per_device_eval_batch_size = max(1, cfg.trainer.per_device_eval_batch_size)
-            eval_max_batches = max(
-                1,
-                math.ceil(eval_samples / per_device_eval_batch_size),
-            )
-            logger.info(
-                "Streaming eval detected with dataset.eval_samples="
-                f"{eval_samples}; defaulting eval_max_batches to {eval_max_batches}. "
-                "Set trainer.eval_max_batches to override."
-            )
-        else:
-            eval_max_batches = 100
-            logger.info(
-                "Streaming eval detected; defaulting eval_max_batches to "
-                f"{eval_max_batches}. Set trainer.eval_max_batches to override."
-            )
+    if eval_dataset_is_streaming:
+        eval_max_batches, eval_budget_source = _resolve_streaming_eval_budget(
+            eval_max_batches=eval_max_batches,
+            eval_samples=eval_samples,
+            per_device_eval_batch_size=cfg.trainer.per_device_eval_batch_size,
+        )
+        logger.info(
+            "Streaming eval budget resolved from "
+            f"{eval_budget_source}: eval_max_batches={eval_max_batches} "
+            "(global batches across all ranks)."
+        )
 
     # Resume from the latest checkpoint
     skipped_train_dataloader = None

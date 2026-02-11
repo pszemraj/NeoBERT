@@ -23,6 +23,7 @@ from neobert.pretraining.trainer import (
     _gather_decoder_weight_for_masked_objective,
     _infer_eval_split_name,
     _resolve_loader_perf_settings,
+    _resolve_streaming_eval_budget,
     _resolve_eval_samples,
     _run_masked_objective_step,
     _split_train_dataset_for_eval_samples,
@@ -1017,6 +1018,35 @@ class TestPretrainComponents(unittest.TestCase):
             _resolve_eval_samples(True)
         with self.assertRaises(ValueError):
             _resolve_eval_samples("not_an_int")
+
+    def test_resolve_streaming_eval_budget_with_explicit_max_batches(self):
+        """Ensure explicit trainer.eval_max_batches is respected."""
+        resolved, source = _resolve_streaming_eval_budget(
+            eval_max_batches=320,
+            eval_samples=None,
+            per_device_eval_batch_size=32,
+        )
+        self.assertEqual(resolved, 320)
+        self.assertEqual(source, "trainer.eval_max_batches")
+
+    def test_resolve_streaming_eval_budget_derived_from_eval_samples(self):
+        """Ensure dataset.eval_samples derives eval batch budget when needed."""
+        resolved, source = _resolve_streaming_eval_budget(
+            eval_max_batches=None,
+            eval_samples=1000,
+            per_device_eval_batch_size=64,
+        )
+        self.assertEqual(resolved, 16)
+        self.assertEqual(source, "dataset.eval_samples")
+
+    def test_resolve_streaming_eval_budget_requires_explicit_budget(self):
+        """Ensure streaming eval fails fast without explicit budget settings."""
+        with self.assertRaises(ValueError):
+            _resolve_streaming_eval_budget(
+                eval_max_batches=None,
+                eval_samples=None,
+                per_device_eval_batch_size=32,
+            )
 
     def test_infer_eval_split_name_prefers_validation(self):
         """Ensure eval split inference chooses validation-style splits."""
