@@ -559,8 +559,6 @@ trainer:
   save_total_limit: 5
   per_device_train_batch_size: 8
   gradient_accumulation_steps: 4
-
-use_deepspeed: true
 ```
 
 ### 4) Full Logging + Frequent Eval
