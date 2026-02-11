@@ -13,28 +13,36 @@ logger = logging.getLogger(__name__)
 
 
 def resolve_wandb_watch_mode(
-    *, wandb_mode: str, env_value: Optional[str]
+    *,
+    wandb_mode: str,
+    config_value: Optional[str],
+    env_value: Optional[str],
 ) -> tuple[Optional[str], Optional[str]]:
     """Resolve effective ``wandb.watch`` mode with sane defaults.
 
     Behavior:
-    - If ``WANDB_WATCH`` is unset, default to ``"gradients"`` for online runs.
-    - If ``WANDB_WATCH`` is set to false-like values, disable watching.
+    - Precedence: ``WANDB_WATCH`` env var > ``wandb.watch`` config > default.
+    - Default is ``"gradients"`` when mode is online.
+    - False-like values disable watching.
     - If set to ``weights``, map to ``parameters`` (W&B API naming).
     - If set to an unsupported value, disable watching and return a warning.
 
     :param str wandb_mode: Effective W&B run mode (online/offline/disabled).
+    :param str | None config_value: Config value from ``wandb.watch``.
     :param str | None env_value: Raw ``WANDB_WATCH`` environment value.
     :return tuple[str | None, str | None]: (watch mode, optional warning message).
     """
     resolved_mode = str(wandb_mode).strip().lower()
-    if env_value is None:
-        if resolved_mode == "online":
-            return "gradients", None
+    if resolved_mode != "online":
         return None, None
 
-    watch_mode = str(env_value).strip().lower()
+    raw_mode = env_value if env_value is not None else config_value
+    if raw_mode is None:
+        raw_mode = "gradients"
+    watch_mode = str(raw_mode).strip().lower()
     if watch_mode in {"", "false", "0", "none", "off"}:
+        return None, None
+    if watch_mode == "disabled":
         return None, None
     if watch_mode == "weights":
         return "parameters", None
@@ -42,7 +50,7 @@ def resolve_wandb_watch_mode(
         return watch_mode, None
     return (
         None,
-        f"Unrecognized WANDB_WATCH value '{env_value}'; skipping wandb.watch().",
+        f"Unrecognized wandb watch mode '{raw_mode}'; skipping wandb.watch().",
     )
 
 

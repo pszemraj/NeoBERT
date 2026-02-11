@@ -52,10 +52,12 @@ def format_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
 class Metrics(defaultdict):
     """Dictionary-like metrics container with distributed aggregation helpers."""
 
+    # Internal counters that should never be emitted to experiment trackers.
     TRACKER_EXCLUDE_KEYS = {
         "train/steps",
         "train/compute_accuracy",
         "train/batches",
+        "train/batches_in_epoch",
         "train/samples",
         "train/masked_tokens",
         "train/epochs",

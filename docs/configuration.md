@@ -441,6 +441,7 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 | `wandb.name`         | `str \| None` | `null`         | Run name override.                                          |
 | `wandb.tags`         | `list[str]`   | `[]`           | Run tags.                                                   |
 | `wandb.mode`         | `str`         | `"online"`     | `online`, `offline`, or `disabled`.                         |
+| `wandb.watch`        | `str`         | `"gradients"`  | Model-watch mode: `gradients`, `parameters`, `all`, or disabled (`off`/`none`/`disabled`). |
 | `wandb.log_interval` | `int`         | `100`          | Legacy field; trainer logging uses `trainer.logging_steps`. |
 | `wandb.resume`       | `str`         | `"never"`      | W&B resume policy.                                          |
 | `wandb.dir`          | `str`         | `"logs/wandb"` | Artifact/run directory.                                     |
@@ -450,9 +451,9 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 > the same task-scoped payload to W&B (irrelevant task sections are excluded).
 > W&B is not auto-enabled by presence of a `wandb` section; set
 > `wandb.enabled: true` explicitly.
-> For pretraining/contrastive, `wandb.watch` defaults to gradient watching in
-> `wandb.mode: online`. Override with `WANDB_WATCH` (`gradients`,
-> `parameters`, `all`, or `off`).
+> For pretraining/contrastive, watch-mode precedence is:
+> `WANDB_WATCH` env var > `wandb.watch` config > default (`gradients` for
+> `wandb.mode: online`).
 
 ### Top-Level Runtime Metadata
 

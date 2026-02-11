@@ -533,6 +533,16 @@ optimizer:
         cfg = ConfigLoader.dict_to_config({"wandb": {"project": "unit-test-project"}})
         self.assertFalse(cfg.wandb.enabled)
 
+    def test_wandb_watch_default_is_gradients(self):
+        """Ensure wandb.watch defaults to gradients."""
+        cfg = ConfigLoader.dict_to_config({})
+        self.assertEqual(cfg.wandb.watch, "gradients")
+
+    def test_wandb_watch_validation_rejects_unknown_mode(self):
+        """Ensure invalid wandb.watch values fail fast."""
+        with self.assertRaises(ValueError):
+            ConfigLoader.dict_to_config({"wandb": {"watch": "mystery_mode"}})
+
     def test_invalid_save_steps_fails_fast(self):
         """Ensure save_steps=0 is rejected at config load time."""
         with self.assertRaises(ValueError):

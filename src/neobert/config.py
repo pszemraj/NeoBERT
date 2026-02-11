@@ -6,7 +6,7 @@ import warnings
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, get_args, get_origin
 
 import yaml
 
@@ -292,6 +292,7 @@ class WandbConfig:
     name: Optional[str] = None
     tags: List[str] = field(default_factory=list)
     mode: str = "online"
+    watch: str = "gradients"
     log_interval: int = 100
     resume: str = "never"
     dir: str = "logs/wandb"
@@ -470,6 +471,11 @@ class ConfigLoader:
                     ) from exc
 
             def _replace_inline(match: re.Match[str]) -> str:
+                """Replace inline variable token with resolved string value.
+
+                :param re.Match[str] match: Inline variable regex match.
+                :return str: Replacement string for interpolation.
+                """
                 var_path = match.group(1) or match.group(2)
                 if var_path is None:
                     return match.group(0)
@@ -584,16 +590,101 @@ class ConfigLoader:
 
     @staticmethod
     def _coerce_dot_override_value(
-        path: str, raw_value: str, current_value: Any
+        path: str,
+        raw_value: str,
+        current_value: Any,
+        expected_type: Any = None,
     ) -> Any:
         """Coerce a dot override token into the existing field type.
 
         :param str path: Dot-path field identifier.
         :param str raw_value: Override value as provided by CLI/list.
         :param Any current_value: Existing in-memory field value.
+        :param Any expected_type: Optional dataclass annotation for target field.
         :raises ValueError: If coercion fails.
         :return Any: Coerced value.
         """
+
+        def _coerce_from_annotation(annotation: Any) -> Any:
+            """Coerce override value using a type annotation.
+
+            :param Any annotation: Field annotation.
+            :raises ValueError: If coercion fails for the annotation.
+            :return Any: Coerced value.
+            """
+            if annotation is Any:
+                return yaml.safe_load(raw_value)
+
+            origin = get_origin(annotation)
+            if origin is Union:
+                args = list(get_args(annotation))
+                allow_none = type(None) in args
+                non_none_args = [arg for arg in args if arg is not type(None)]
+                if allow_none and str(raw_value).strip().lower() in {
+                    "none",
+                    "null",
+                    "~",
+                }:
+                    return None
+                if len(non_none_args) == 1:
+                    return _coerce_from_annotation(non_none_args[0])
+                parsed_union = yaml.safe_load(raw_value)
+                if any(
+                    (
+                        candidate is Any
+                        or (candidate is type(None) and parsed_union is None)
+                        or (
+                            candidate in {int, float, bool, str, list, dict}
+                            and isinstance(parsed_union, candidate)
+                        )
+                    )
+                    for candidate in non_none_args
+                ):
+                    return parsed_union
+                raise ValueError(
+                    f"Invalid override for '{path}': {raw_value!r} does not match "
+                    f"allowed union types {non_none_args}."
+                )
+
+            if annotation is bool:
+                try:
+                    return _parse_cli_bool(raw_value)
+                except argparse.ArgumentTypeError as exc:
+                    raise ValueError(
+                        f"Invalid boolean override for '{path}': {raw_value!r}. "
+                        "Expected true/false, 1/0, yes/no, or on/off."
+                    ) from exc
+            if annotation is int:
+                try:
+                    return int(raw_value)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Invalid integer override for '{path}': {raw_value!r}."
+                    ) from exc
+            if annotation is float:
+                try:
+                    return float(raw_value)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Invalid float override for '{path}': {raw_value!r}."
+                    ) from exc
+            if annotation is str:
+                return raw_value
+
+            if annotation in {list, dict} or origin in {list, dict}:
+                parsed_collection = yaml.safe_load(raw_value)
+                collection_type = (
+                    list if (annotation is list or origin is list) else dict
+                )
+                if not isinstance(parsed_collection, collection_type):
+                    raise ValueError(
+                        f"Invalid override for '{path}': expected {collection_type.__name__}, "
+                        f"got {type(parsed_collection).__name__}."
+                    )
+                return parsed_collection
+
+            return yaml.safe_load(raw_value)
+
         if isinstance(current_value, bool):
             try:
                 return _parse_cli_bool(raw_value)
@@ -621,6 +712,9 @@ class ConfigLoader:
 
         if isinstance(current_value, str):
             return raw_value
+
+        if current_value is None and expected_type is not None:
+            return _coerce_from_annotation(expected_type)
 
         parsed = yaml.safe_load(raw_value)
         if current_value is None:
@@ -716,10 +810,15 @@ class ConfigLoader:
             )
 
         current_value = getattr(current, leaf)
+        expected_type = None
+        if hasattr(current, "__dataclass_fields__"):
+            field_map = {f.name: f.type for f in fields(type(current))}
+            expected_type = field_map.get(leaf)
         coerced_value = ConfigLoader._coerce_dot_override_value(
             path,
             raw_value,
             current_value,
+            expected_type=expected_type,
         )
         setattr(current, leaf, coerced_value)
 
@@ -1364,6 +1463,14 @@ class ConfigLoader:
             )
         else:
             config.trainer.save_strategy = save_strategy
+        if task in {"pretraining", "contrastive"} and save_strategy not in {
+            "steps",
+            "no",
+        }:
+            errors.append(
+                "trainer.save_strategy supports only {'steps','no'} for "
+                f"{task}, got {config.trainer.save_strategy!r}."
+            )
 
         if config.trainer.logging_steps <= 0:
             errors.append(
@@ -1506,6 +1613,24 @@ class ConfigLoader:
             )
         else:
             config.wandb.mode = wandb_mode
+        wandb_watch = str(getattr(config.wandb, "watch", "gradients")).strip().lower()
+        valid_wandb_watch = {
+            "gradients",
+            "parameters",
+            "all",
+            "off",
+            "none",
+            "disabled",
+            "false",
+            "0",
+        }
+        if wandb_watch not in valid_wandb_watch:
+            errors.append(
+                "wandb.watch must be one of "
+                f"{sorted(valid_wandb_watch)}, got {config.wandb.watch!r}."
+            )
+        else:
+            config.wandb.watch = wandb_watch
 
         if task != "contrastive" and config.use_deepspeed:
             warnings.warn(
@@ -1562,13 +1687,17 @@ class ConfigLoader:
         :param dict[str, Any] cfg_dict: Nested configuration mapping.
         :return Config: Fully-populated configuration instance.
         """
+        raw_cfg_dict = deepcopy(cfg_dict or {})
+        raw_model_dict = raw_cfg_dict.get("model")
+
         cfg_dict = ConfigLoader._normalize_legacy_keys(cfg_dict or {})
         ConfigLoader._validate_config_keys(cfg_dict)
 
         config = Config()
 
-        # Store raw model dict for GLUE compatibility
-        config._raw_model_dict = cfg_dict.get("model")
+        # Store legacy raw model dict before normalization for compatibility
+        # readers that still inspect original model-section keys.
+        config._raw_model_dict = deepcopy(raw_model_dict)
 
         # Update model config
         if "model" in cfg_dict:
@@ -2036,6 +2165,13 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     )
     parser.add_argument(
         "--wandb.mode", type=str, help="WandB mode (online/offline/disabled)"
+    )
+    parser.add_argument(
+        "--wandb.watch",
+        type=str,
+        help=(
+            "W&B model watching mode: gradients, parameters, all, or off/none/disabled"
+        ),
     )
 
     # Top-level arguments

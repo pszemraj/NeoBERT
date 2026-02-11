@@ -142,32 +142,67 @@ def test_maybe_compile_model_defaults_dynamic_false_for_packed_flash(
 
 def test_resolve_wandb_watch_mode_defaults_to_gradients_online() -> None:
     """Default to gradient watching when online and WANDB_WATCH is unset."""
-    mode, warning = resolve_wandb_watch_mode(wandb_mode="online", env_value=None)
+    mode, warning = resolve_wandb_watch_mode(
+        wandb_mode="online",
+        config_value="gradients",
+        env_value=None,
+    )
     assert mode == "gradients"
     assert warning is None
 
 
 def test_resolve_wandb_watch_mode_disabled_offline() -> None:
     """Do not watch by default for non-online runs."""
-    mode, warning = resolve_wandb_watch_mode(wandb_mode="offline", env_value=None)
+    mode, warning = resolve_wandb_watch_mode(
+        wandb_mode="offline",
+        config_value="gradients",
+        env_value=None,
+    )
     assert mode is None
     assert warning is None
 
 
 def test_resolve_wandb_watch_mode_env_override_and_validation() -> None:
     """Honor env overrides and return warnings for unsupported values."""
-    mode, warning = resolve_wandb_watch_mode(wandb_mode="online", env_value="all")
+    mode, warning = resolve_wandb_watch_mode(
+        wandb_mode="online",
+        config_value="gradients",
+        env_value="all",
+    )
     assert mode == "all"
     assert warning is None
 
-    mode, warning = resolve_wandb_watch_mode(wandb_mode="online", env_value="weights")
+    mode, warning = resolve_wandb_watch_mode(
+        wandb_mode="online",
+        config_value="gradients",
+        env_value="weights",
+    )
     assert mode == "parameters"
     assert warning is None
 
-    mode, warning = resolve_wandb_watch_mode(wandb_mode="online", env_value="off")
+    mode, warning = resolve_wandb_watch_mode(
+        wandb_mode="online",
+        config_value="gradients",
+        env_value="off",
+    )
     assert mode is None
     assert warning is None
 
-    mode, warning = resolve_wandb_watch_mode(wandb_mode="online", env_value="bad")
+    mode, warning = resolve_wandb_watch_mode(
+        wandb_mode="online",
+        config_value="gradients",
+        env_value="bad",
+    )
     assert mode is None
     assert warning is not None
+
+
+def test_resolve_wandb_watch_mode_uses_config_when_env_missing() -> None:
+    """Use config value when WANDB_WATCH is unset."""
+    mode, warning = resolve_wandb_watch_mode(
+        wandb_mode="online",
+        config_value="parameters",
+        env_value=None,
+    )
+    assert mode == "parameters"
+    assert warning is None

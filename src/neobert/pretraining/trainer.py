@@ -1509,13 +1509,18 @@ def _prepare_resume_dataloader(
                 "starting from the current epoch boundary."
             )
             return None
-        # Streaming fallback: we cannot derive a per-epoch modulo without a
-        # dataloader length, so skip the consumed batch count from stream start.
-        resume_step = completed_batches
+        # Streaming fallback: when epoch has already been restored via
+        # ``set_epoch(train/epochs)``, global consumed-batch counts can over-skip.
+        # Prefer epoch-local progress when available from checkpointed metrics.
+        resume_step = int(metrics.get("train/batches_in_epoch", 0))
+        if resume_step <= 0:
+            # Backward-compatible fallback for older checkpoints.
+            resume_step = completed_batches
         logger.warning(
             "Streaming resume with unknown dataloader length: skipping "
-            f"{resume_step} consumed batch(es) from stream start "
-            "(best-effort position recovery)."
+            f"{resume_step} batch(es) from current epoch "
+            f"(completed_batches={completed_batches}, "
+            f"batches_in_epoch={int(metrics.get('train/batches_in_epoch', 0))})."
         )
 
     if resume_step == 0:
@@ -1764,6 +1769,9 @@ def trainer(cfg: Config) -> None:
     log_train_accuracy = bool(getattr(cfg.trainer, "log_train_accuracy", False))
     log_grad_norm = bool(getattr(cfg.trainer, "log_grad_norm", False))
     metrics["train/compute_accuracy"] = int(log_train_accuracy)
+    # Internal resume cursor only (checkpointed via register_for_checkpointing);
+    # excluded from tracker payloads and console metrics.
+    metrics["train/batches_in_epoch"] = int(metrics.get("train/batches_in_epoch", 0))
 
     is_streaming = cfg.dataset.streaming
 
@@ -2370,6 +2378,7 @@ def trainer(cfg: Config) -> None:
     if wandb_enabled and accelerator.is_main_process:
         watch_mode, watch_warning = resolve_wandb_watch_mode(
             wandb_mode=cfg.wandb.mode,
+            config_value=getattr(cfg.wandb, "watch", "gradients"),
             env_value=os.environ.get("WANDB_WATCH"),
         )
         if watch_warning:
@@ -2530,6 +2539,7 @@ def trainer(cfg: Config) -> None:
 
             # Update number of batches only when we will execute a backward pass.
             metrics["train/batches"] += 1
+            metrics["train/batches_in_epoch"] += 1
 
             num_pred = (batch["labels"] != -100).sum()
             num_tokens = (batch["input_ids"] != model_config.pad_token_id).sum()
@@ -2780,7 +2790,14 @@ def trainer(cfg: Config) -> None:
                     local_loss_path_zero_masked.zero_()
                     local_loss_path_other.zero_()
 
-                if metrics["train/steps"] % cfg.trainer.save_steps == 0:
+                save_strategy = str(getattr(cfg.trainer, "save_strategy", "steps"))
+                save_model = bool(getattr(cfg.trainer, "save_model", True))
+                should_save = (
+                    save_model
+                    and save_strategy == "steps"
+                    and metrics["train/steps"] % cfg.trainer.save_steps == 0
+                )
+                if should_save:
                     step_tag = str(metrics["train/steps"])
                     checkpoint_path = checkpoint_dir / step_tag
                     accelerator.save_state(output_dir=str(checkpoint_path))
@@ -2893,6 +2910,7 @@ def trainer(cfg: Config) -> None:
 
         # Update the number of epochs
         metrics["train/epochs"] += 1
+        metrics["train/batches_in_epoch"] = 0
         skipped_train_dataloader = None
 
         # For streaming datasets, update the epoch to ensure different shuffling

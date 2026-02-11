@@ -268,6 +268,8 @@ def trainer(cfg: Config) -> None:
     metrics = Metrics()
     accelerator.register_for_checkpointing(metrics)
     log_interval = max(1, cfg.trainer.logging_steps)
+    save_strategy = str(getattr(cfg.trainer, "save_strategy", "steps"))
+    save_model = bool(getattr(cfg.trainer, "save_model", True))
 
     # Tokenizer
     tokenizer = get_tokenizer(
@@ -536,6 +538,7 @@ def trainer(cfg: Config) -> None:
     if wandb_enabled and accelerator.is_main_process:
         watch_mode, watch_warning = resolve_wandb_watch_mode(
             wandb_mode=cfg.wandb.mode,
+            config_value=getattr(cfg.wandb, "watch", "gradients"),
             env_value=os.environ.get("WANDB_WATCH"),
         )
         if watch_warning:
@@ -871,12 +874,16 @@ def trainer(cfg: Config) -> None:
                 metrics["train/learning_rate"] = optimizer.param_groups[0]["lr"]
                 metrics.log(accelerator)
 
-            # Save accelerator state
-            if metrics["train/steps"] % cfg.trainer.save_steps == 0:
+            should_save = (
+                save_model
+                and save_strategy == "steps"
+                and metrics["train/steps"] % cfg.trainer.save_steps == 0
+            )
+            if should_save:
+                # Save resumable optimizer/scheduler/metric state.
                 accelerator.save_state()
 
-            # Save model weights checkpoint
-            if metrics["train/steps"] % cfg.trainer.save_steps == 0:
+                # Save model weights checkpoint.
                 limit = _resolve_checkpoint_retention_limit(cfg)
                 if limit > 0:
                     # Delete checkpoints if there are too many
