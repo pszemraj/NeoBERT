@@ -305,7 +305,7 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | `trainer.torch_compile_backend`       | `str`           | `"inductor"` | Compile backend name.                                                                                                                                       |
 | `trainer.enforce_full_packed_batches` | `bool`          | `true`       | Buffer packed fragments to emit full-sized microbatches.                                                                                                    |
 | `trainer.eval_max_batches`            | `int \| None`   | `null`       | Optional eval cap; required for streaming eval when `dataset.eval_samples` is unset.                                                                        |
-| `trainer.log_train_accuracy`          | `bool`          | `true`       | Log MLM masked-token train accuracy (disable only for max-throughput sweeps).                                                                               |
+| `trainer.log_train_accuracy`          | `bool`          | `false`      | Log MLM masked-token train accuracy (enable only for focused diagnostics; disabling improves throughput).                                                   |
 | `trainer.log_grad_norm`               | `bool`          | `true`       | Log grad norm each logging interval.                                                                                                                        |
 | `trainer.log_weight_norms`            | `bool`          | `true`       | Log parameter norms (main-process overhead).                                                                                                                |
 | `trainer.tf32`                        | `bool`          | `true`       | Enable TF32 on supported CUDA GPUs.                                                                                                                         |
@@ -661,7 +661,7 @@ trainer:
   logging_steps: 20
   eval_steps: 1000
   eval_max_batches: 200
-  log_train_accuracy: true
+  log_train_accuracy: false
   log_grad_norm: true
   log_weight_norms: true
 

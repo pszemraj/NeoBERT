@@ -49,7 +49,7 @@ class TestConfigSystem(unittest.TestCase):
         self.assertEqual(config.model.hidden_size, 768)
         self.assertEqual(config.model.num_hidden_layers, 12)
         self.assertEqual(config.trainer.per_device_train_batch_size, 16)
-        self.assertTrue(config.trainer.log_train_accuracy)
+        self.assertFalse(config.trainer.log_train_accuracy)
         self.assertFalse(config.trainer.torch_compile)
         self.assertEqual(config.trainer.torch_compile_backend, "inductor")
         self.assertTrue(config.trainer.enforce_full_packed_batches)

@@ -40,7 +40,7 @@ trainer:
   gradient_accumulation_steps: 1
   enforce_full_packed_batches: true
   logging_steps: 20
-  log_train_accuracy: true
+  log_train_accuracy: false
   log_grad_norm: true
   log_weight_norms: true
   save_steps: 100

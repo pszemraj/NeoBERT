@@ -228,7 +228,7 @@ class TrainerConfig:
     eval_max_batches: Optional[int] = None
     logging_steps: int = 100
     enforce_full_packed_batches: bool = True
-    log_train_accuracy: bool = True
+    log_train_accuracy: bool = False
     log_grad_norm: bool = True
     output_dir: str = "./output"
     overwrite_output_dir: bool = True
