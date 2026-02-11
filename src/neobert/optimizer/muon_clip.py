@@ -874,6 +874,8 @@ class MuonClipOptimizer(Optimizer):
             )
 
             # Orthogonalize 2D gradients using Newton-Schulz
+            # NOTE: this operates on full (non-sharded) parameter tensors.
+            # Training entrypoints enforce distributed-compatibility guards for Muon.
             update = self._orthogonalize_update(state["momentum_buffer"])
 
             # Weight decay
