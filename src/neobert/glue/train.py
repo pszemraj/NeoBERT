@@ -28,6 +28,7 @@ from transformers import (
     AutoConfig,
     AutoModelForSequenceClassification,
     DataCollatorWithPadding,
+    PreTrainedTokenizerBase,
 )
 
 from neobert.checkpointing import (
@@ -220,6 +221,25 @@ def _resolve_glue_task(cfg: Any) -> str:
     :return str: Normalized GLUE task name.
     """
     return str(getattr(cfg.glue, "task_name", getattr(cfg, "task", "glue"))).strip()
+
+
+def _load_from_hub_tokenizer(cfg: Config) -> PreTrainedTokenizerBase:
+    """Load tokenizer for hub sequence-classification models.
+
+    GLUE/SuperGLUE fine-tuning does not require MLM masking semantics, so hub
+    tokenizers without a mask token should be accepted as-is.
+
+    :param Config cfg: Runtime config.
+    :return Any: Loaded tokenizer instance.
+    """
+    return get_tokenizer(
+        pretrained_model_name_or_path=cfg.model.name,
+        max_length=cfg.glue.max_seq_length,
+        trust_remote_code=cfg.tokenizer.trust_remote_code,
+        revision=cfg.tokenizer.revision,
+        allow_special_token_rewrite=cfg.tokenizer.allow_special_token_rewrite,
+        enforce_mlm_special_tokens=False,
+    )
 
 
 def _update_wandb_config(accelerator: Accelerator, cfg: Config) -> None:
@@ -834,13 +854,7 @@ def trainer(cfg: Config) -> None:
         from_hub = cfg.model.from_hub
 
     if from_hub:
-        tokenizer = get_tokenizer(
-            pretrained_model_name_or_path=cfg.model.name,
-            max_length=cfg.glue.max_seq_length,
-            trust_remote_code=cfg.tokenizer.trust_remote_code,
-            revision=cfg.tokenizer.revision,
-            allow_special_token_rewrite=cfg.tokenizer.allow_special_token_rewrite,
-        )
+        tokenizer = _load_from_hub_tokenizer(cfg)
     else:
         # Import our new config system
         from neobert.config import ConfigLoader

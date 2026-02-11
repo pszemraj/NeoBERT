@@ -105,3 +105,21 @@ class TestStreamingTokenize(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 get_tokenizer("dummy-tokenizer", max_length=32)
+
+    def test_get_tokenizer_allows_missing_mask_when_mlm_enforcement_disabled(self):
+        """Ensure non-MLM flows can keep tokenizer special tokens unchanged."""
+        base = self._make_tokenizer()
+        base.mask_token = None
+
+        with patch(
+            "neobert.tokenizer.tokenizer.AutoTokenizer.from_pretrained",
+            return_value=base,
+        ):
+            tokenizer = get_tokenizer(
+                "dummy-tokenizer",
+                max_length=64,
+                enforce_mlm_special_tokens=False,
+            )
+
+        self.assertIsNone(tokenizer.mask_token)
+        self.assertEqual(tokenizer.model_max_length, 64)

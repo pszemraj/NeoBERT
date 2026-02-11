@@ -4,10 +4,11 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import torch
 
-from neobert.config import ConfigLoader
+from neobert.config import Config, ConfigLoader
 
 
 class TestGLUEPipeline(unittest.TestCase):
@@ -229,6 +230,27 @@ class TestGLUETaskSpecific(unittest.TestCase):
             )
 
         self.assertEqual(outputs.logits.shape, (1, 2))
+
+    def test_from_hub_tokenizer_disables_mlm_special_token_enforcement(self):
+        """Ensure hub tokenizer loading does not require MLM mask-token semantics."""
+        from neobert.glue.train import _load_from_hub_tokenizer
+
+        cfg = Config()
+        cfg.task = "glue"
+        cfg.model.name = "dummy/model"
+        cfg.glue.max_seq_length = 128
+        cfg.tokenizer.trust_remote_code = False
+        cfg.tokenizer.revision = "main"
+        cfg.tokenizer.allow_special_token_rewrite = False
+
+        with mock.patch(
+            "neobert.glue.train.get_tokenizer",
+            return_value=object(),
+        ) as mocked_get_tokenizer:
+            _load_from_hub_tokenizer(cfg)
+
+        call_kwargs = mocked_get_tokenizer.call_args.kwargs
+        self.assertFalse(call_kwargs["enforce_mlm_special_tokens"])
 
     def test_sentence_pair_tasks(self):
         """Test sentence pair tasks (like RTE, MRPC)."""

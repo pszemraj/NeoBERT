@@ -21,6 +21,7 @@ def get_tokenizer(
     trust_remote_code: bool = False,
     revision: Optional[str] = None,
     allow_special_token_rewrite: bool = False,
+    enforce_mlm_special_tokens: bool = True,
     **kwargs: Any,
 ) -> PreTrainedTokenizer:
     """Load and configure a tokenizer for NeoBERT usage.
@@ -33,6 +34,7 @@ def get_tokenizer(
     :param bool trust_remote_code: Allow remote tokenizer code execution.
     :param str | None revision: Optional tokenizer revision/commit.
     :param bool allow_special_token_rewrite: Allow fallback special-token mutation.
+    :param bool enforce_mlm_special_tokens: Enforce NeoBERT MLM special-token policy.
     :param Any kwargs: Additional kwargs forwarded to ``from_pretrained``.
     :return PreTrainedTokenizer: Configured tokenizer instance.
     """
@@ -71,11 +73,20 @@ def get_tokenizer(
         logger.info(f"  Special tokens map: {tokenizer.special_tokens_map}")
         should_keep_special_tokens = True
     else:
-        # No mask token defined, this is likely a standard LLM tokenizer
-        logger.info(
-            f"No mask token found for {pretrained_model_name_or_path}, adding RoBERTa-style special tokens"
-        )
-        should_keep_special_tokens = False
+        if not enforce_mlm_special_tokens:
+            logger.info(
+                "No mask token found for "
+                f"{pretrained_model_name_or_path}; leaving special tokens unchanged "
+                "because enforce_mlm_special_tokens=false."
+            )
+            should_keep_special_tokens = True
+        else:
+            # No mask token defined, this is likely a standard LLM tokenizer
+            logger.info(
+                "No mask token found for "
+                f"{pretrained_model_name_or_path}, adding RoBERTa-style special tokens"
+            )
+            should_keep_special_tokens = False
 
     if not should_keep_special_tokens:
         if not allow_special_token_rewrite:
