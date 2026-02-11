@@ -52,7 +52,9 @@ python scripts/evaluation/run_mteb.py \
 
 - Runner loads checkpoints from `<model_name_or_path>/checkpoints/`.
 - Task family selection is read from config field `mteb_task_type`.
-- `--task_types` is currently parsed but not wired into task selection logic.
+- `--task_types` can override config selection at launch time.
+  Accepts categories (`classification`, `retrieval`, `sts`, `all`) and/or
+  explicit task names (comma-separated).
 - Output path is currently derived from run dir + checkpoint + max length:
   `outputs/<run>/mteb/<ckpt>/<max_length>/`.
 - If using a local tokenizer, point `tokenizer.name` to that path.

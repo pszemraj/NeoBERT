@@ -124,23 +124,76 @@ TASK_TYPE = {
 }
 
 
+def _resolve_mteb_tasks(cfg: Any) -> list[str]:
+    """Resolve selected MTEB task names from config and CLI overrides.
+
+    Resolution order:
+    1. ``cfg.task_types`` (CLI ``--task_types``), if provided.
+    2. ``cfg.mteb_task_type`` category.
+
+    ``cfg.task_types`` entries can be either category aliases from ``TASK_TYPE``
+    (for example ``classification`` or ``sts``) or explicit task names.
+
+    :param Any cfg: Configuration object.
+    :raises ValueError: If any requested task/category is unknown.
+    :return list[str]: Ordered deduplicated list of task names.
+    """
+    requested = getattr(cfg, "task_types", None)
+    if requested is None:
+        mteb_task_type = str(getattr(cfg, "mteb_task_type", "all")).strip().lower()
+        if mteb_task_type not in TASK_TYPE:
+            raise ValueError(f"Task type must be one of {sorted(TASK_TYPE.keys())}.")
+        return list(TASK_TYPE[mteb_task_type])
+
+    if isinstance(requested, str):
+        requested_tokens = [token.strip() for token in requested.split(",")]
+    else:
+        requested_tokens = [str(token).strip() for token in requested]
+
+    explicit_lookup = {task.lower(): task for task in TASK_LIST}
+    selected: list[str] = []
+    unknown: list[str] = []
+    for token in requested_tokens:
+        if not token:
+            continue
+        lowered = token.lower()
+        if lowered == "all":
+            selected.extend(TASK_LIST)
+            continue
+        if lowered in TASK_TYPE:
+            selected.extend(TASK_TYPE[lowered])
+            continue
+        explicit_task = explicit_lookup.get(lowered)
+        if explicit_task is not None:
+            selected.append(explicit_task)
+            continue
+        unknown.append(token)
+
+    if unknown:
+        raise ValueError(
+            "Unknown --task_types entries: "
+            + ", ".join(sorted(unknown))
+            + ". Valid categories: "
+            + ", ".join(sorted(TASK_TYPE.keys()))
+        )
+
+    # Stable dedupe to preserve user-specified order.
+    return list(dict.fromkeys(selected))
+
+
 def evaluate_mteb(cfg: Any) -> None:
     """Evaluate a model on the MTEB benchmark.
 
     :param Any cfg: Configuration object with MTEB settings.
     """
-    # Get MTEB-specific config (we'll add these to Config later)
-    mteb_task_type = getattr(cfg, "mteb_task_type", "all")
+    # Get MTEB-specific config (kept at top-level Config for now)
     mteb_batch_size = getattr(cfg, "mteb_batch_size", 32)
     mteb_pooling = getattr(cfg, "mteb_pooling", "mean")
     mteb_overwrite_results = getattr(cfg, "mteb_overwrite_results", False)
     pretrained_checkpoint = getattr(cfg, "pretrained_checkpoint", "latest")
     pretrained_checkpoint_dir = Path(cfg.trainer.output_dir)
-    use_deepspeed = getattr(cfg, "use_deepspeed", True)
-
-    # Check if task type is valid
-    if mteb_task_type not in TASK_TYPE.keys():
-        raise ValueError(f"Task type must be one of {TASK_TYPE.keys()}.")
+    use_deepspeed = getattr(cfg, "use_deepspeed", False)
+    selected_tasks = _resolve_mteb_tasks(cfg)
 
     # Get checkpoint number
     if pretrained_checkpoint != "latest":
@@ -220,7 +273,7 @@ def evaluate_mteb(cfg: Any) -> None:
     model.eval()
 
     # Evaluate
-    for task in TASK_TYPE[mteb_task_type]:
+    for task in selected_tasks:
         logger.info(f"Running task: {task}")
         eval_splits = ["dev"] if task == "MSMARCO" else ["test"]
         evaluation = MTEB(tasks=[task], task_langs=["en"])

@@ -424,6 +424,49 @@ optimizer:
         with self.assertRaises(ValueError):
             ConfigLoader.dict_to_config({"trainer": {"save_steps": 0}})
 
+    def test_glue_save_strategy_no_allows_zero_save_steps(self):
+        """Ensure save_steps=0 is accepted when GLUE save_strategy disables step saves."""
+        cfg = ConfigLoader.dict_to_config(
+            {
+                "task": "glue",
+                "trainer": {
+                    "save_strategy": "no",
+                    "save_steps": 0,
+                },
+            }
+        )
+        self.assertEqual(cfg.task, "glue")
+        self.assertEqual(cfg.trainer.save_strategy, "no")
+        self.assertEqual(cfg.trainer.save_steps, 0)
+
+    def test_glue_eval_strategy_epoch_allows_zero_eval_steps(self):
+        """Ensure eval_steps=0 is accepted for epoch-based GLUE evaluation."""
+        cfg = ConfigLoader.dict_to_config(
+            {
+                "task": "glue",
+                "trainer": {
+                    "eval_strategy": "epoch",
+                    "eval_steps": 0,
+                },
+            }
+        )
+        self.assertEqual(cfg.task, "glue")
+        self.assertEqual(cfg.trainer.eval_strategy, "epoch")
+        self.assertEqual(cfg.trainer.eval_steps, 0)
+
+    def test_pretraining_save_steps_still_required(self):
+        """Ensure pretraining still requires positive save_steps regardless of strategy."""
+        with self.assertRaises(ValueError):
+            ConfigLoader.dict_to_config(
+                {
+                    "task": "pretraining",
+                    "trainer": {
+                        "save_strategy": "no",
+                        "save_steps": 0,
+                    },
+                }
+            )
+
     def test_save_total_limit_zero_is_allowed(self):
         """Ensure save_total_limit=0 remains valid to disable retention."""
         cfg = ConfigLoader.dict_to_config({"trainer": {"save_total_limit": 0}})

@@ -980,17 +980,56 @@ class ConfigLoader:
                 "trainer.gradient_accumulation_steps must be > 0, got "
                 f"{config.trainer.gradient_accumulation_steps}."
             )
+        valid_eval_strategies = {"steps", "epoch"}
+        eval_strategy = str(config.trainer.eval_strategy).strip().lower()
+        if eval_strategy not in valid_eval_strategies:
+            errors.append(
+                "trainer.eval_strategy must be one of "
+                f"{sorted(valid_eval_strategies)}, got "
+                f"{config.trainer.eval_strategy!r}."
+            )
+        else:
+            config.trainer.eval_strategy = eval_strategy
+
+        valid_save_strategies = {"steps", "epoch", "best", "no"}
+        save_strategy = str(config.trainer.save_strategy).strip().lower()
+        if save_strategy not in valid_save_strategies:
+            errors.append(
+                "trainer.save_strategy must be one of "
+                f"{sorted(valid_save_strategies)}, got "
+                f"{config.trainer.save_strategy!r}."
+            )
+        else:
+            config.trainer.save_strategy = save_strategy
+
         if config.trainer.logging_steps <= 0:
             errors.append(
                 f"trainer.logging_steps must be > 0, got {config.trainer.logging_steps}."
             )
-        if config.trainer.save_steps <= 0:
+        if config.trainer.save_steps < 0:
             errors.append(
-                f"trainer.save_steps must be > 0, got {config.trainer.save_steps}."
+                f"trainer.save_steps must be >= 0, got {config.trainer.save_steps}."
             )
-        if config.trainer.eval_steps <= 0:
+        elif task in {"pretraining", "contrastive"} or save_strategy == "steps":
+            if config.trainer.save_steps == 0:
+                if task in {"pretraining", "contrastive"}:
+                    errors.append(
+                        "trainer.save_steps must be > 0 for "
+                        f"{task}, got {config.trainer.save_steps}."
+                    )
+                else:
+                    errors.append(
+                        "trainer.save_steps must be > 0 when "
+                        f"trainer.save_strategy='steps', got {config.trainer.save_steps}."
+                    )
+        if config.trainer.eval_steps < 0:
             errors.append(
-                f"trainer.eval_steps must be > 0, got {config.trainer.eval_steps}."
+                f"trainer.eval_steps must be >= 0, got {config.trainer.eval_steps}."
+            )
+        elif eval_strategy == "steps" and config.trainer.eval_steps == 0:
+            errors.append(
+                "trainer.eval_steps must be > 0 when "
+                f"trainer.eval_strategy='steps', got {config.trainer.eval_steps}."
             )
         if task in {"pretraining", "contrastive"} and config.trainer.max_steps <= 0:
             errors.append(

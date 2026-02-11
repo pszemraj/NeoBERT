@@ -75,11 +75,13 @@ Actions:
 - Ensure GLUE configs point to valid pretrained checkpoints unless intentionally
   using `allow_random_weights: true`.
 
-### MTEB task filtering seems ignored
+### MTEB task filtering is not what you expected
 
-- Set `mteb_task_type` in config.
-- `run_mteb.py --task_types` is currently parsed but not wired into task
-  selection logic.
+- Config-based selection uses `mteb_task_type`.
+- CLI override `run_mteb.py --task_types` is also supported.
+- `--task_types` accepts categories (`classification`, `clustering`,
+  `pair_classification`, `reranking`, `retrieval`, `sts`, `all`) and/or
+  explicit task names (comma-separated).
 
 ## Export Issues
 

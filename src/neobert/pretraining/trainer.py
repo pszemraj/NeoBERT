@@ -2401,7 +2401,7 @@ def trainer(cfg: Config) -> None:
         unit="step",
         initial=metrics["train/steps"],
         total=cfg.trainer.max_steps,
-        disable=(not accelerator.is_main_process),
+        disable=(cfg.trainer.disable_tqdm or not accelerator.is_main_process),
     )
 
     accum_tokens = torch.zeros((), device=accelerator.device, dtype=torch.long)
