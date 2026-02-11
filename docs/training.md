@@ -134,6 +134,64 @@ python scripts/pretraining/pretrain.py \
   --trainer.resume_from_checkpoint latest
 ```
 
+### Crash Recovery Playbook (step 69,420 example)
+
+Scenario:
+
+- you launched `configs/pretraining/pretrain_neobert100m_smollm2data_muonclip.yaml`
+- run crashed around step `69420`
+- target is to continue to `trainer.max_steps: 100000`
+
+1. Find the last saved checkpoint step:
+
+```bash
+find outputs/neobert-100m-wordpc_msp_32k_tok-muonclip/checkpoints \
+  -mindepth 1 -maxdepth 1 -type d -printf "%f\n" | sort -n | tail -n 1
+```
+
+2. Resume from latest checkpoint:
+
+```bash
+python scripts/pretraining/pretrain.py \
+  configs/pretraining/pretrain_neobert100m_smollm2data_muonclip.yaml \
+  --trainer.resume_from_checkpoint latest
+```
+
+3. Confirm resume in logs:
+
+- startup prints checkpoint loading from
+  `outputs/.../checkpoints/<step>/`
+- first train progress resumes from prior global step (not step 0)
+- run continues until `trainer.max_steps` (100000 in this config)
+
+Important for this exact config:
+
+- `pretrain_neobert100m_smollm2data_muonclip.yaml` sets
+  `dataset.streaming: true`
+- pretraining resume is rejected when streaming is enabled
+
+If you started with streaming and must continue from checkpoint, switch to a
+non-streaming tokenized dataset and resume there:
+
+```bash
+# one-time tokenize-to-disk (example path)
+python scripts/pretraining/tokenize_dataset.py \
+  --dataset EleutherAI/SmolLM2-1.7B-stage-4-100B \
+  --output tokenized_data/smollm2_32k \
+  --tokenizer BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp \
+  --max-length 1024
+
+# resume with streaming disabled and local dataset path
+python scripts/pretraining/pretrain.py \
+  configs/pretraining/pretrain_neobert100m_smollm2data_muonclip.yaml \
+  --dataset.streaming false \
+  --dataset.path tokenized_data/smollm2_32k \
+  --trainer.resume_from_checkpoint latest
+```
+
+This resumes model/optimizer/scheduler states, but data order will not exactly
+match the interrupted streaming run.
+
 Notes:
 
 - resume and export both operate from `<output_dir>/checkpoints/`.
