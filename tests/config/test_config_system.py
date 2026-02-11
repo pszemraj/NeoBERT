@@ -601,6 +601,11 @@ optimizer:
         with self.assertRaises(ValueError):
             ConfigLoader.dict_to_config({"wandb": {"watch": "mystery_mode"}})
 
+    def test_wandb_watch_validation_accepts_weights_alias(self):
+        """Ensure legacy wandb.watch=weights alias remains accepted."""
+        cfg = ConfigLoader.dict_to_config({"wandb": {"watch": "weights"}})
+        self.assertEqual(cfg.wandb.watch, "parameters")
+
     def test_invalid_save_steps_fails_fast(self):
         """Ensure save_steps=0 is rejected at config load time."""
         with self.assertRaises(ValueError):

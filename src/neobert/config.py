@@ -1650,6 +1650,7 @@ class ConfigLoader:
         valid_wandb_watch = {
             "gradients",
             "parameters",
+            "weights",
             "all",
             "off",
             "none",
@@ -1663,7 +1664,11 @@ class ConfigLoader:
                 f"{sorted(valid_wandb_watch)}, got {config.wandb.watch!r}."
             )
         else:
-            config.wandb.watch = wandb_watch
+            # Keep backwards compatibility with older configs that used the
+            # pre-W&B API alias ``weights``.
+            config.wandb.watch = (
+                "parameters" if wandb_watch == "weights" else wandb_watch
+            )
 
         if task != "contrastive" and config.use_deepspeed:
             warnings.warn(
