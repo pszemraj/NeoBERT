@@ -104,6 +104,15 @@ def test_resolve_mteb_tasks_rejects_unknown_tokens():
         _resolve_mteb_tasks(cfg)
 
 
+@pytest.mark.parametrize("task_types", ["", ",", ["", "   "]])
+def test_resolve_mteb_tasks_rejects_empty_selection(task_types):
+    """Ensure blank task selections fail fast instead of silently doing nothing."""
+    cfg = SimpleNamespace(task_types=task_types)
+
+    with pytest.raises(ValueError, match="No MTEB tasks selected"):
+        _resolve_mteb_tasks(cfg)
+
+
 def test_evaluate_mteb_falls_back_to_deepspeed_when_safetensors_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -265,3 +274,23 @@ def test_evaluate_mteb_prefers_safetensors_when_available(
     assert calls["safetensors"] == 1
     assert calls["deepspeed"] == 0
     assert strict_flags == [False]
+
+
+def test_load_mteb_encoder_weights_raises_on_non_head_mismatch():
+    """Ensure non-head missing/unexpected keys fail fast for MTEB loads."""
+
+    class _DummyModel:
+        @staticmethod
+        def load_state_dict(_state_dict, strict: bool = True):
+            assert strict is False
+            return SimpleNamespace(
+                unexpected_keys=["decoder.weight", "encoder.bad_prefix.weight"],
+                missing_keys=["model.encoder.weight"],
+            )
+
+    with pytest.raises(ValueError, match="checkpoint/model mismatch"):
+        _RUN_MTEB_MODULE._load_mteb_encoder_weights(
+            _DummyModel(),  # type: ignore[arg-type]
+            {"model.embeddings.weight": torch.zeros(1)},
+            source="unit-test",
+        )

@@ -138,7 +138,7 @@ def _resolve_mteb_tasks(cfg: Any) -> list[str]:
     (for example ``classification`` or ``sts``) or explicit task names.
 
     :param Any cfg: Configuration object.
-    :raises ValueError: If any requested task/category is unknown.
+    :raises ValueError: If any requested task/category is unknown or selection is empty.
     :return list[str]: Ordered deduplicated list of task names.
     """
     requested = getattr(cfg, "task_types", None)
@@ -181,7 +181,13 @@ def _resolve_mteb_tasks(cfg: Any) -> list[str]:
         )
 
     # Stable dedupe to preserve user-specified order.
-    return list(dict.fromkeys(selected))
+    resolved = list(dict.fromkeys(selected))
+    if not resolved:
+        raise ValueError(
+            "No MTEB tasks selected. Provide at least one task/category via "
+            "`--task_types` (for example 'all', 'sts', or 'MSMARCO')."
+        )
+    return resolved
 
 
 def _load_mteb_encoder_weights(
@@ -194,7 +200,9 @@ def _load_mteb_encoder_weights(
 
     Pretraining checkpoints commonly include LM-head parameters (for example
     ``decoder.*``) that are not part of ``NeoBERTForMTEB``. We therefore load with
-    ``strict=False`` and log any unexpected keys that are not known LM-head extras.
+    ``strict=False`` to tolerate known head extras, but still fail fast on any
+    non-head key mismatches so MTEB scores are not computed from partially loaded
+    encoders.
 
     :param NeoBERTForMTEB model: MTEB model instance.
     :param dict[str, torch.Tensor] state_dict: Checkpoint state dict.
@@ -223,17 +231,17 @@ def _load_mteb_encoder_weights(
             len(lm_head_unexpected),
             source,
         )
-    if remaining_unexpected:
-        logger.warning(
-            "Unexpected non-head keys while loading %s for MTEB: %s",
-            source,
-            ", ".join(sorted(remaining_unexpected)),
-        )
-    if missing_keys:
-        logger.warning(
-            "Missing model keys while loading %s for MTEB: %s",
-            source,
-            ", ".join(sorted(missing_keys)),
+    if remaining_unexpected or missing_keys:
+        mismatch_parts: list[str] = []
+        if remaining_unexpected:
+            mismatch_parts.append(
+                "unexpected_non_head_keys=" + ", ".join(sorted(remaining_unexpected))
+            )
+        if missing_keys:
+            mismatch_parts.append("missing_keys=" + ", ".join(sorted(missing_keys)))
+        raise ValueError(
+            "MTEB checkpoint/model mismatch while loading "
+            f"{source}: {'; '.join(mismatch_parts)}"
         )
 
 
