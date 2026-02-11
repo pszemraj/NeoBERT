@@ -1,7 +1,7 @@
 import pytest
 
 from neobert.config import Config
-from neobert.utils import prepare_wandb_config
+from neobert.utils import format_resolved_config, prepare_wandb_config
 
 
 def test_prepare_wandb_config_scopes_pretraining_payload():
@@ -88,3 +88,46 @@ def test_prepare_wandb_config_requires_supported_type():
 
     with pytest.raises(TypeError):
         prepare_wandb_config(dummy)
+
+
+def test_format_resolved_config_compact_and_sectioned():
+    payload = {
+        "task": "pretraining",
+        "seed": 69,
+        "model": {
+            "hidden_size": 768,
+            "num_hidden_layers": 12,
+            "num_attention_heads": 12,
+        },
+        "trainer": {
+            "mixed_precision": "bf16",
+            "max_steps": 100000,
+            "gradient_accumulation_steps": 4,
+        },
+    }
+
+    rendered = format_resolved_config(payload, width=88)
+    lines = rendered.splitlines()
+
+    assert lines[0].startswith("[meta] ")
+    assert any(line.startswith("[model] ") for line in lines)
+    assert any(line.startswith("[trainer] ") for line in lines)
+    assert all(len(line) <= 88 for line in lines)
+
+
+def test_format_resolved_config_flattens_nested_sections():
+    payload = {
+        "optimizer": {
+            "name": "muonclip",
+            "muon_config": {
+                "enable_clipping": False,
+                "ns_steps": 5,
+            },
+        }
+    }
+
+    rendered = format_resolved_config(payload, width=120)
+
+    assert "name=muonclip" in rendered
+    assert "muon_config.enable_clipping=false" in rendered
+    assert "muon_config.ns_steps=5" in rendered

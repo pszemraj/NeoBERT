@@ -1,7 +1,9 @@
 """Utility helpers for logging, TF32 setup, and model summaries."""
 
-import json
 import logging
+import pprint
+import re
+import shutil
 from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -104,6 +106,8 @@ _PRETRAINING_TRAINER_EXCLUDE_FIELDS = {
     "save_model",
 }
 
+_SIMPLE_STRING_TOKEN_RE = re.compile(r"^[A-Za-z0-9_./:=+-]+$")
+
 
 def _serialize_config(cfg: Any) -> Dict[str, Any]:
     """Serialize a config-like object into a dictionary.
@@ -187,13 +191,138 @@ def _task_filter_config(config_dict: Dict[str, Any]) -> Dict[str, Any]:
     return _drop_empty_values(filtered)
 
 
-def format_resolved_config(config_dict: Dict[str, Any]) -> str:
-    """Format a resolved config dictionary for readable logging.
+def _resolve_display_width(width: Optional[int]) -> int:
+    """Resolve display width for compact config rendering.
+
+    :param int | None width: Optional explicit width.
+    :return int: Effective width clamped to a practical terminal range.
+    """
+    if width is None:
+        width = shutil.get_terminal_size(fallback=(120, 24)).columns
+    return max(80, min(int(width), 180))
+
+
+def _render_display_value(value: Any, printer: pprint.PrettyPrinter) -> str:
+    """Render a value as a compact token string for config display.
+
+    :param Any value: Value to render.
+    :param pprint.PrettyPrinter printer: Pretty-printer for complex values.
+    :return str: Compact one-line representation.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    if isinstance(value, str):
+        if value == "":
+            return "''"
+        if _SIMPLE_STRING_TOKEN_RE.fullmatch(value):
+            return value
+        return repr(value)
+    rendered = printer.pformat(value)
+    return " ".join(rendered.splitlines())
+
+
+def _flatten_display_items(
+    value: Dict[str, Any],
+    *,
+    max_depth: int = 2,
+) -> List[Tuple[str, Any]]:
+    """Flatten nested mappings for compact section display.
+
+    :param dict[str, Any] value: Mapping to flatten.
+    :param int max_depth: Maximum nested depth to flatten.
+    :return list[tuple[str, Any]]: Flattened dotted-key items.
+    """
+
+    def _walk(
+        current: Any,
+        *,
+        prefix: str,
+        depth: int,
+        out: List[Tuple[str, Any]],
+    ) -> None:
+        if isinstance(current, dict) and depth < max_depth:
+            for key, inner in current.items():
+                next_prefix = f"{prefix}.{key}" if prefix else str(key)
+                _walk(inner, prefix=next_prefix, depth=depth + 1, out=out)
+            return
+        out.append((prefix, current))
+
+    flattened: List[Tuple[str, Any]] = []
+    for key, inner in value.items():
+        _walk(inner, prefix=str(key), depth=0, out=flattened)
+    return flattened
+
+
+def _wrap_tokens(prefix: str, tokens: List[str], *, width: int) -> List[str]:
+    """Wrap token list to the target width with aligned continuation lines.
+
+    :param str prefix: Prefix to place at the start of the first line.
+    :param list[str] tokens: Tokens to wrap.
+    :param int width: Target display width.
+    :return list[str]: Wrapped display lines.
+    """
+    if not tokens:
+        return [prefix.rstrip()]
+
+    lines: List[str] = []
+    current = prefix
+    continuation_prefix = " " * len(prefix)
+    for token in tokens:
+        candidate = token if current == prefix else f" {token}"
+        if len(current) + len(candidate) <= width or current == prefix:
+            current += candidate
+            continue
+        lines.append(current.rstrip())
+        current = f"{continuation_prefix}{token}"
+    lines.append(current.rstrip())
+    return lines
+
+
+def format_resolved_config(
+    config_dict: Dict[str, Any],
+    *,
+    width: Optional[int] = None,
+) -> str:
+    """Format a resolved config dictionary for readable terminal logging.
 
     :param dict[str, Any] config_dict: Config dictionary to format.
-    :return str: Pretty-printed JSON string.
+    :param int | None width: Optional target width for wrapped output.
+    :return str: Compact sectioned string.
     """
-    return json.dumps(config_dict, indent=2, sort_keys=False)
+    if not config_dict:
+        return "{}"
+
+    resolved_width = _resolve_display_width(width)
+    printer = pprint.PrettyPrinter(
+        compact=True,
+        width=max(40, resolved_width - 16),
+        sort_dicts=False,
+    )
+
+    lines: List[str] = []
+    meta_tokens: List[str] = []
+    section_items: List[Tuple[str, Dict[str, Any]]] = []
+
+    for key, value in config_dict.items():
+        if isinstance(value, dict):
+            section_items.append((key, value))
+            continue
+        rendered = _render_display_value(value, printer)
+        meta_tokens.append(f"{key}={rendered}")
+
+    if meta_tokens:
+        lines.extend(_wrap_tokens("[meta] ", meta_tokens, width=resolved_width))
+
+    for section_name, section_value in section_items:
+        flattened = _flatten_display_items(section_value)
+        tokens = [
+            f"{key}={_render_display_value(value, printer)}" for key, value in flattened
+        ]
+        lines.extend(_wrap_tokens(f"[{section_name}] ", tokens, width=resolved_width))
+
+    return "\n".join(lines)
 
 
 def prepare_wandb_config(cfg: Any) -> Dict[str, Any]:
