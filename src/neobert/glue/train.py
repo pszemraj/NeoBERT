@@ -8,6 +8,7 @@ import random
 import re
 import shutil
 from contextlib import nullcontext
+from copy import deepcopy
 from functools import partial
 from pathlib import Path
 from typing import Any, Optional
@@ -48,7 +49,7 @@ from neobert.training_utils import (
     _maybe_prepare_for_forward,
     _unwrap_optimizer,
 )
-from neobert.utils import configure_tf32
+from neobert.utils import configure_tf32, format_resolved_config, prepare_wandb_config
 from neobert.validation import ValidationError, validate_glue_config
 
 logger = get_logger(__name__)
@@ -727,10 +728,15 @@ def trainer(cfg: Config) -> None:
 
     :param Config cfg: Training configuration.
     """
+    canonical_cfg = deepcopy(cfg)
+
     # Extract task and meta_task from config
-    task = cfg.glue.task_name if hasattr(cfg, "glue") else cfg.task
+    task = canonical_cfg.glue.task_name if hasattr(canonical_cfg, "glue") else cfg.task
     meta_task = "glue"  # Default for GLUE tasks
-    experiment_id = getattr(cfg, "id", "0")
+    experiment_id = getattr(canonical_cfg, "id", "0")
+
+    # Use a mutable runtime copy so canonical config remains task-stable
+    cfg = deepcopy(canonical_cfg)
 
     # Update cfg to have these as direct attributes for compatibility
     cfg.task = task
@@ -760,6 +766,12 @@ def trainer(cfg: Config) -> None:
         gradient_accumulation_steps=int(cfg.trainer.gradient_accumulation_steps),
     )
 
+    tracker_config_dict = prepare_wandb_config(canonical_cfg)
+    if accelerator.is_main_process:
+        accelerator.print(
+            "Resolved task config:\n" + format_resolved_config(tracker_config_dict)
+        )
+
     # Initialise the wandb run and pass wandb parameters
     if wandb_enabled:
         accelerator.init_trackers(
@@ -768,7 +780,7 @@ def trainer(cfg: Config) -> None:
                 "wandb": {
                     "name": cfg.wandb.name,
                     "entity": cfg.wandb.entity,
-                    "config": cfg.__dict__,
+                    "config": tracker_config_dict,
                     "tags": cfg.wandb.tags,
                     "dir": cfg.wandb.dir,
                     "mode": cfg.wandb.mode,

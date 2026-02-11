@@ -32,6 +32,17 @@ def test_prepare_wandb_config_preserves_raw_model_dict_for_glue():
     assert payload["_raw_model_dict"] == cfg._raw_model_dict
 
 
+def test_prepare_wandb_config_keeps_canonical_glue_task():
+    cfg = Config()
+    cfg.task = "glue"
+    cfg.glue.task_name = "mnli"
+
+    payload = prepare_wandb_config(cfg)
+
+    assert payload["task"] == "glue"
+    assert payload["glue"]["task_name"] == "mnli"
+
+
 def test_prepare_wandb_config_keeps_contrastive_pretraining_prob():
     cfg = Config()
     cfg.task = "contrastive"
