@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 
 import yaml
@@ -374,6 +375,49 @@ optimizer:
                     "contrastive": {"pretraining_prob": 0.6},
                 }
             )
+
+    def test_wandb_section_does_not_auto_enable(self):
+        """Ensure wandb.enabled stays explicit even when wandb section is present."""
+        cfg = ConfigLoader.dict_to_config({"wandb": {"project": "unit-test-project"}})
+        self.assertFalse(cfg.wandb.enabled)
+
+    def test_invalid_save_steps_fails_fast(self):
+        """Ensure save_steps=0 is rejected at config load time."""
+        with self.assertRaises(ValueError):
+            ConfigLoader.dict_to_config({"trainer": {"save_steps": 0}})
+
+    def test_pretraining_seq_length_syncs_tokenizer_max_length(self):
+        """Ensure tokenizer.max_length is synced to dataset.max_seq_length for pretraining."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cfg = ConfigLoader.dict_to_config(
+                {
+                    "task": "pretraining",
+                    "dataset": {"max_seq_length": 256},
+                    "tokenizer": {"max_length": 512},
+                }
+            )
+        self.assertEqual(cfg.tokenizer.max_length, 256)
+        self.assertTrue(
+            any(
+                "tokenizer.max_length does not match dataset.max_seq_length"
+                in str(w.message)
+                for w in caught
+            )
+        )
+
+    def test_legacy_report_to_is_ignored(self):
+        """Ensure trainer.report_to is treated as deprecated/ignored."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cfg = ConfigLoader.dict_to_config(
+                {"trainer": {"report_to": ["wandb"]}, "wandb": {"enabled": False}}
+            )
+        self.assertEqual(cfg.trainer.report_to, [])
+        self.assertTrue(
+            any("trainer.report_to" in str(w.message) for w in caught),
+            "Expected deprecation warning for trainer.report_to",
+        )
 
 
 if __name__ == "__main__":

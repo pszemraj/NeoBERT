@@ -217,7 +217,9 @@ class TrainerConfig:
     disable_tqdm: bool = False
     dataloader_num_workers: int = 0
     use_cpu: bool = False
-    report_to: List[str] = field(default_factory=list)
+    report_to: List[str] = field(
+        default_factory=list
+    )  # Deprecated: ignored, use wandb.enabled.
     tf32: bool = True
     max_ckpt: int = 3
     log_weight_norms: bool = True
@@ -319,7 +321,7 @@ class Config:
 
     # Model loading
     pretrained_checkpoint: str = "latest"
-    use_deepspeed: bool = True
+    use_deepspeed: bool = False
 
     # Metadata for downstream evaluations (e.g., GLUE linkage)
     pretraining_metadata: Dict[str, Any] = field(default_factory=dict)
@@ -511,6 +513,15 @@ class ConfigLoader:
                     "Config key 'trainer.remove_unused_columns' is ignored by NeoBERT; "
                     "remove it from your config."
                 )
+
+            # trainer.report_to is not used by NeoBERT; keep wandb enabling explicit.
+            if "report_to" in trainer:
+                report_to = trainer.pop("report_to")
+                if report_to not in (None, [], ()):
+                    ConfigLoader._warn_legacy(
+                        "Config key 'trainer.report_to' is deprecated and ignored by "
+                        "NeoBERT. Set 'wandb.enabled: true' explicitly to enable W&B."
+                    )
 
         # dataset.tokenizer_name -> tokenizer.name
         dataset = normalized.get("dataset", {})
@@ -755,6 +766,187 @@ class ConfigLoader:
             )
 
     @staticmethod
+    def _validate_config_values(config: Config) -> None:
+        """Validate semantic config values after dataclass hydration.
+
+        :param Config config: Configuration instance to validate.
+        :raises ValueError: If semantic constraints are violated.
+        """
+        errors: list[str] = []
+        task = str(config.task).strip().lower()
+        valid_tasks = {"pretraining", "glue", "mteb", "contrastive"}
+        if task not in valid_tasks:
+            errors.append(
+                f"task must be one of {sorted(valid_tasks)}, got {config.task!r}"
+            )
+        else:
+            config.task = task
+
+        if config.dataset.max_seq_length <= 0:
+            errors.append(
+                "dataset.max_seq_length must be > 0, "
+                f"got {config.dataset.max_seq_length}."
+            )
+        if config.dataset.min_length <= 0:
+            errors.append(
+                f"dataset.min_length must be > 0, got {config.dataset.min_length}."
+            )
+        if config.dataset.min_length > config.dataset.max_seq_length:
+            errors.append(
+                "dataset.min_length must be <= dataset.max_seq_length, got "
+                f"{config.dataset.min_length} > {config.dataset.max_seq_length}."
+            )
+
+        if task in {"pretraining", "contrastive"}:
+            if config.tokenizer.max_length != config.dataset.max_seq_length:
+                warnings.warn(
+                    "tokenizer.max_length does not match dataset.max_seq_length for "
+                    f"{task}; syncing tokenizer.max_length from "
+                    f"{config.tokenizer.max_length} to {config.dataset.max_seq_length}.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                config.tokenizer.max_length = config.dataset.max_seq_length
+
+            if config.dataset.max_seq_length > config.model.max_position_embeddings:
+                errors.append(
+                    "dataset.max_seq_length must be <= model.max_position_embeddings "
+                    f"for {task}, got {config.dataset.max_seq_length} > "
+                    f"{config.model.max_position_embeddings}."
+                )
+
+        if not 0.0 <= float(config.datacollator.mlm_probability) <= 1.0:
+            errors.append(
+                "datacollator.mlm_probability must be in [0, 1], got "
+                f"{config.datacollator.mlm_probability}."
+            )
+
+        if config.trainer.per_device_train_batch_size <= 0:
+            errors.append(
+                "trainer.per_device_train_batch_size must be > 0, got "
+                f"{config.trainer.per_device_train_batch_size}."
+            )
+        if config.trainer.per_device_eval_batch_size <= 0:
+            errors.append(
+                "trainer.per_device_eval_batch_size must be > 0, got "
+                f"{config.trainer.per_device_eval_batch_size}."
+            )
+        if config.trainer.gradient_accumulation_steps <= 0:
+            errors.append(
+                "trainer.gradient_accumulation_steps must be > 0, got "
+                f"{config.trainer.gradient_accumulation_steps}."
+            )
+        if config.trainer.logging_steps <= 0:
+            errors.append(
+                f"trainer.logging_steps must be > 0, got {config.trainer.logging_steps}."
+            )
+        if config.trainer.save_steps <= 0:
+            errors.append(
+                f"trainer.save_steps must be > 0, got {config.trainer.save_steps}."
+            )
+        if config.trainer.eval_steps <= 0:
+            errors.append(
+                f"trainer.eval_steps must be > 0, got {config.trainer.eval_steps}."
+            )
+        if task in {"pretraining", "contrastive"} and config.trainer.max_steps <= 0:
+            errors.append(
+                f"trainer.max_steps must be > 0 for {task}, got {config.trainer.max_steps}."
+            )
+
+        if config.scheduler.warmup_steps < 0:
+            errors.append(
+                f"scheduler.warmup_steps must be >= 0, got {config.scheduler.warmup_steps}."
+            )
+        if (
+            config.scheduler.total_steps is not None
+            and config.scheduler.total_steps <= 0
+        ):
+            errors.append(
+                f"scheduler.total_steps must be > 0 when set, got {config.scheduler.total_steps}."
+            )
+        if (
+            config.scheduler.decay_steps is not None
+            and config.scheduler.decay_steps <= 0
+        ):
+            errors.append(
+                f"scheduler.decay_steps must be > 0 when set, got {config.scheduler.decay_steps}."
+            )
+        if config.scheduler.warmup_percent is not None and not (
+            0.0 <= config.scheduler.warmup_percent <= 100.0
+        ):
+            errors.append(
+                "scheduler.warmup_percent must be in [0, 100], got "
+                f"{config.scheduler.warmup_percent}."
+            )
+        if config.scheduler.decay_percent is not None and not (
+            0.0 <= config.scheduler.decay_percent <= 100.0
+        ):
+            errors.append(
+                "scheduler.decay_percent must be in [0, 100], got "
+                f"{config.scheduler.decay_percent}."
+            )
+        if config.scheduler.final_lr_ratio < 0.0:
+            errors.append(
+                "scheduler.final_lr_ratio must be >= 0, got "
+                f"{config.scheduler.final_lr_ratio}."
+            )
+
+        if config.optimizer.lr <= 0:
+            errors.append(f"optimizer.lr must be > 0, got {config.optimizer.lr}.")
+        if config.optimizer.weight_decay < 0:
+            errors.append(
+                f"optimizer.weight_decay must be >= 0, got {config.optimizer.weight_decay}."
+            )
+        if config.optimizer.eps <= 0:
+            errors.append(f"optimizer.eps must be > 0, got {config.optimizer.eps}.")
+        if len(config.optimizer.betas) != 2:
+            errors.append(
+                "optimizer.betas must contain exactly 2 values, got "
+                f"{config.optimizer.betas}."
+            )
+        else:
+            beta1, beta2 = config.optimizer.betas
+            if not (0.0 <= beta1 < 1.0 and 0.0 <= beta2 < 1.0):
+                errors.append(
+                    "optimizer.betas values must be in [0, 1), got "
+                    f"{config.optimizer.betas}."
+                )
+
+        mixed_precision = config.trainer.mixed_precision
+        if isinstance(mixed_precision, bool):
+            mixed_precision = "bf16" if mixed_precision else "no"
+        else:
+            mixed_precision = str(mixed_precision).strip().lower()
+        if mixed_precision == "fp32":
+            mixed_precision = "no"
+        if mixed_precision not in {"no", "bf16", "fp16"}:
+            errors.append(
+                "trainer.mixed_precision must be one of {'no','bf16','fp16','fp32'}, "
+                f"got {config.trainer.mixed_precision!r}."
+            )
+        config.trainer.mixed_precision = mixed_precision
+
+        valid_wandb_modes = {"online", "offline", "disabled"}
+        wandb_mode = str(config.wandb.mode).strip().lower()
+        if wandb_mode not in valid_wandb_modes:
+            errors.append(
+                f"wandb.mode must be one of {sorted(valid_wandb_modes)}, got {config.wandb.mode!r}."
+            )
+        else:
+            config.wandb.mode = wandb_mode
+
+        if task != "contrastive" and config.use_deepspeed:
+            warnings.warn(
+                "Top-level 'use_deepspeed' only affects contrastive checkpoint loading. "
+                "Runtime backend selection is controlled by Accelerate launch config.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        if errors:
+            raise ValueError("Invalid configuration values:\n- " + "\n- ".join(errors))
+
+    @staticmethod
     def dict_to_config(cfg_dict: Dict[str, Any]) -> Config:
         """Convert dictionary to a ``Config`` dataclass.
 
@@ -833,12 +1025,9 @@ class ConfigLoader:
         # Update wandb config
         if "wandb" in cfg_dict:
             wandb_dict = cfg_dict["wandb"]
-            auto_enable = "enabled" not in wandb_dict
             for k, v in wandb_dict.items():
                 if hasattr(config.wandb, k):
                     setattr(config.wandb, k, v)
-            if auto_enable:
-                config.wandb.enabled = True
 
         # Update glue config
         if "glue" in cfg_dict:
@@ -867,6 +1056,8 @@ class ConfigLoader:
                 "contrastive",
             ]:
                 setattr(config, k, v)
+
+        ConfigLoader._validate_config_values(config)
 
         return config
 
@@ -915,11 +1106,9 @@ class ConfigLoader:
 
                 logger = logging.getLogger(__name__)
                 logger.warning(
-                    "Config preprocessing: vocab_size %s rounded to %s for GPU efficiency "
-                    "(original config: %s)",
-                    actual_vocab_size,
-                    rounded_vocab_size,
-                    original_model_vocab_size,
+                    "Config preprocessing: vocab_size "
+                    f"{actual_vocab_size} rounded to {rounded_vocab_size} for GPU "
+                    f"efficiency (original config: {original_model_vocab_size})"
                 )
 
         return config
@@ -1208,7 +1397,14 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     parser.add_argument(
         "--pretrained_checkpoint", type=str, help="Pretrained checkpoint"
     )
-    parser.add_argument("--use_deepspeed", type=_parse_cli_bool, help="Use DeepSpeed")
+    parser.add_argument(
+        "--use_deepspeed",
+        type=_parse_cli_bool,
+        help=(
+            "Legacy toggle for loading DeepSpeed-formatted checkpoints in "
+            "contrastive flows; runtime backend is set by Accelerate launch."
+        ),
+    )
 
     return parser
 
