@@ -648,6 +648,29 @@ def get_best_checkpoint_path(
     )
 
 
+def _normalize_glue_pretrained_checkpoint_root(checkpoint_root: str | Path) -> Path:
+    """Normalize GLUE pretrained-checkpoint root without breaking transfer paths.
+
+    Accepts both modern ``checkpoints/`` and legacy ``model_checkpoints/`` roots.
+    If a run root is provided, prefer ``checkpoints/`` when present and fall back
+    to ``model_checkpoints/`` for older artifacts.
+
+    :param str | Path checkpoint_root: User-provided checkpoint root.
+    :return Path: Normalized checkpoint directory root.
+    """
+    root = Path(checkpoint_root)
+    if root.name in {"checkpoints", "model_checkpoints"}:
+        return root
+
+    modern = root / "checkpoints"
+    legacy = root / "model_checkpoints"
+    if modern.is_dir():
+        return modern
+    if legacy.is_dir():
+        return legacy
+    return modern
+
+
 def load_pretrained_weights(
     model: torch.nn.Module,
     checkpoint_dir: str,
@@ -1236,11 +1259,15 @@ def trainer(cfg: Config) -> None:
             classifier_init_range=cfg.glue.classifier_init_range,
         )
 
+    pretrained_checkpoint_dir: Path | None = None
+    pretrained_checkpoint: int | str | None = None
+    allow_random_weights = cfg.glue.allow_random_weights
+
     if cfg.glue.transfer_from_task:
         task_to_transfer_from = TASK_TO_TRANSFER_FROM.get(glue_task, None)
         if not task_to_transfer_from:
             raise ValueError(f"Task to transfer from for {glue_task} is not set.")
-        cfg.glue.pretrained_checkpoint_dir, checkpoint_list = get_best_checkpoint_path(
+        transfer_checkpoint_dir, checkpoint_list = get_best_checkpoint_path(
             str(
                 Path(cfg.glue.pretrained_checkpoint_dir)
                 / "glue"
@@ -1248,26 +1275,26 @@ def trainer(cfg: Config) -> None:
             ),
             task_to_transfer_from,
         )
-        cfg.glue.pretrained_checkpoint = checkpoint_list[-1]
+        pretrained_checkpoint = checkpoint_list[-1]
         logger.info(
-            f"Transfering from: {cfg.glue.pretrained_checkpoint_dir}, {cfg.glue.pretrained_checkpoint}"
+            f"Transfering from: {transfer_checkpoint_dir}, {pretrained_checkpoint}"
         )
-        if not cfg.glue.pretrained_checkpoint_dir or not cfg.glue.pretrained_checkpoint:
+        if not transfer_checkpoint_dir or pretrained_checkpoint is None:
             raise ValueError("Unable to retrieve checkpoint to transfer from.")
+        pretrained_checkpoint_dir = Path(transfer_checkpoint_dir)
 
     else:
         # Get checkpoint info from raw model dict for GLUE
         logger.info("Looking for pretrained checkpoint info...")
 
         # Prefer GLUEConfig for checkpoint info
-        pretrained_checkpoint_dir = cfg.glue.pretrained_checkpoint_dir
+        pretrained_checkpoint_dir_cfg = cfg.glue.pretrained_checkpoint_dir
         pretrained_checkpoint = cfg.glue.pretrained_checkpoint
-        allow_random_weights = cfg.glue.allow_random_weights
 
         # Fall back to raw model dict for legacy configs
         if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
-            pretrained_checkpoint_dir = cfg._raw_model_dict.get(
-                "pretrained_checkpoint_dir", pretrained_checkpoint_dir
+            pretrained_checkpoint_dir_cfg = cfg._raw_model_dict.get(
+                "pretrained_checkpoint_dir", pretrained_checkpoint_dir_cfg
             )
             pretrained_checkpoint = cfg._raw_model_dict.get(
                 "pretrained_checkpoint", pretrained_checkpoint
@@ -1276,35 +1303,32 @@ def trainer(cfg: Config) -> None:
                 "allow_random_weights", allow_random_weights
             )
 
-        # Validate checkpoint configuration
-        if not pretrained_checkpoint_dir or not pretrained_checkpoint:
-            if allow_random_weights:
-                logger.warning(
-                    "⚠️  Using random weights for testing as allow_random_weights=true"
-                )
-                pretrained_checkpoint = None
-            else:
-                raise ValueError(
-                    "GLUE evaluation requires pretrained weights!\n"
-                    "Please specify either:\n"
-                    "  1. 'glue.pretrained_checkpoint_dir' and 'glue.pretrained_checkpoint' in config\n"
-                    "  2. Set 'glue.allow_random_weights: true' for testing with random weights"
-                )
-        else:
-            # Ensure we have the full path to pretraining checkpoints
-            pretrained_checkpoint_dir = Path(pretrained_checkpoint_dir)
-            if pretrained_checkpoint_dir.name != "checkpoints":
-                pretrained_checkpoint_dir = pretrained_checkpoint_dir / "checkpoints"
-            logger.info(
-                f"Will load checkpoint {pretrained_checkpoint} from {pretrained_checkpoint_dir}"
+        if pretrained_checkpoint_dir_cfg:
+            pretrained_checkpoint_dir = Path(pretrained_checkpoint_dir_cfg)
+
+    if pretrained_checkpoint_dir is None or pretrained_checkpoint is None:
+        if allow_random_weights:
+            logger.warning(
+                "⚠️  Using random weights for testing as allow_random_weights=true"
             )
+            pretrained_checkpoint = None
+        else:
+            raise ValueError(
+                "GLUE evaluation requires pretrained weights!\n"
+                "Please specify either:\n"
+                "  1. 'glue.pretrained_checkpoint_dir' and 'glue.pretrained_checkpoint' in config\n"
+                "  2. Set 'glue.allow_random_weights: true' for testing with random weights"
+            )
+    else:
+        pretrained_checkpoint_dir = _normalize_glue_pretrained_checkpoint_root(
+            pretrained_checkpoint_dir
+        )
+        logger.info(
+            f"Will load checkpoint {pretrained_checkpoint} from {pretrained_checkpoint_dir}"
+        )
 
     # Load pretrained weights if available
-    if (
-        not from_hub
-        and "pretrained_checkpoint" in locals()
-        and pretrained_checkpoint is not None
-    ):
+    if not from_hub and pretrained_checkpoint is not None:
         model = load_pretrained_weights(
             model, str(pretrained_checkpoint_dir), pretrained_checkpoint, logger
         )

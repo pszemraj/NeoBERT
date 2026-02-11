@@ -7,7 +7,10 @@ import pytest
 import torch
 
 from neobert.checkpointing import MODEL_WEIGHTS_NAME
-from neobert.glue.train import load_pretrained_weights
+from neobert.glue.train import (
+    _normalize_glue_pretrained_checkpoint_root,
+    load_pretrained_weights,
+)
 
 
 def test_load_pretrained_weights_prefers_safetensors(
@@ -58,6 +61,18 @@ def test_load_pretrained_weights_prefers_safetensors(
     assert calls["deepspeed"] == 0
     torch.testing.assert_close(model.weight, expected_weight)
     torch.testing.assert_close(model.bias, expected_bias)
+
+
+def test_normalize_glue_pretrained_checkpoint_root_preserves_legacy_transfer_root(
+    tmp_path: Path,
+) -> None:
+    """Ensure transfer flow keeps ``model_checkpoints`` roots unchanged."""
+    legacy_root = tmp_path / "model_checkpoints"
+    legacy_root.mkdir(parents=True, exist_ok=True)
+
+    normalized = _normalize_glue_pretrained_checkpoint_root(legacy_root)
+
+    assert normalized == legacy_root
 
 
 def test_load_pretrained_weights_falls_back_to_deepspeed(
