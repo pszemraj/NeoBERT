@@ -241,6 +241,7 @@ class TestContrastivePipeline(unittest.TestCase):
         config.trainer.output_dir = self.temp_dir
         config.trainer.max_steps = 1
         config.trainer.save_steps = 1
+        config.trainer.save_total_limit = 1
         config.trainer.logging_steps = 1
         config.trainer.save_strategy = "steps"
         config.trainer.save_model = True

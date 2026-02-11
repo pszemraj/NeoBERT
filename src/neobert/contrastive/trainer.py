@@ -1010,7 +1010,7 @@ def trainer(cfg: Config) -> None:
                     iterations.sort()
 
                     # Remove files with the smallest iterations until the limit is met
-                    while iterations and len(iterations) >= limit:
+                    while iterations and len(iterations) > limit:
                         file_to_remove = iterations.pop(0)
                         shutil.rmtree(checkpoint_dir / str(file_to_remove))
                         print(
