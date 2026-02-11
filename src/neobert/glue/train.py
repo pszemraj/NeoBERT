@@ -41,7 +41,7 @@ from neobert.checkpointing import (
 from neobert.model import NeoBERTConfig, NeoBERTForSequenceClassification
 from neobert.tokenizer import get_tokenizer
 
-from neobert.config import Config, resolve_mixed_precision
+from neobert.config import Config, ConfigLoader, resolve_mixed_precision
 from neobert.glue.process import process_function
 from neobert.optimizer import get_optimizer
 from neobert.scheduler import get_scheduler
@@ -364,6 +364,19 @@ def _forward_classifier_logits(
     return _extract_logits(outputs)
 
 
+def _flatten_regression_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    """Flatten regression outputs/labels to a 1D shape-safe tensor.
+
+    ``torch.squeeze()`` can collapse a ``(1, 1)`` batch to a scalar on the
+    final microbatch, which breaks gather/metric pipelines. Flattening to
+    ``(batch,)`` preserves a stable shape for STS-B style regression tasks.
+
+    :param torch.Tensor tensor: Tensor to flatten.
+    :return torch.Tensor: Flattened 1D tensor.
+    """
+    return tensor.view(-1)
+
+
 def get_evaluation(
     model: torch.nn.Module,
     dataloader: DataLoader,
@@ -374,6 +387,7 @@ def get_evaluation(
     return_predictions: bool = False,
     compute_metric: bool = True,
     use_hf_signature: bool = False,
+    disable_tqdm: bool = False,
 ) -> dict[str, Any]:
     """Run evaluation over a dataloader and return metrics/predictions.
 
@@ -386,6 +400,7 @@ def get_evaluation(
     :param bool return_predictions: Whether to return predictions tensor.
     :param bool compute_metric: Whether to compute metric values.
     :param bool use_hf_signature: Whether to call model with HF-style kwargs.
+    :param bool disable_tqdm: Whether to suppress tqdm progress bars.
     :return dict[str, Any]: Evaluation outputs (metrics, predictions).
     """
     samples_seen = 0
@@ -393,8 +408,8 @@ def get_evaluation(
     # accumulate them when explicitly requested (debug/submission workflows).
     predictions_list = [] if return_predictions else None
     eval_metric = None
-    show_progress = not (
-        accelerator is not None and not accelerator.is_local_main_process
+    show_progress = not disable_tqdm and (
+        accelerator is None or accelerator.is_local_main_process
     )
     progress_bar = tqdm(
         enumerate(dataloader),
@@ -424,12 +439,15 @@ def get_evaluation(
             if not is_regression:
                 batch_predictions = logits.argmax(dim=-1)
             else:
-                batch_predictions = logits.squeeze()
+                batch_predictions = _flatten_regression_tensor(logits)
 
             if compute_metric:
                 if accelerator is not None:
+                    references = _flatten_regression_tensor(batch["labels"])
+                    if not is_regression:
+                        references = batch["labels"]
                     batch_predictions, references = accelerator.gather(
-                        (batch_predictions, batch["labels"])
+                        (batch_predictions, references)
                     )
                     # If we are in a multiprocess environment, the last batch has duplicates
                     if accelerator.num_processes > 1:
@@ -446,7 +464,11 @@ def get_evaluation(
                         else:
                             samples_seen += references.shape[0]
                 else:
-                    references = batch["labels"]
+                    references = (
+                        batch["labels"]
+                        if not is_regression
+                        else _flatten_regression_tensor(batch["labels"])
+                    )
 
                 metric.add_batch(
                     predictions=batch_predictions,
@@ -845,6 +867,62 @@ def _create_glue_data_collator(
     )
 
 
+def _sync_runtime_cfg_from_pretraining(
+    cfg: Config,
+    model_pretraining_config: Config,
+) -> None:
+    """Align runtime GLUE model/tokenizer config with loaded pretraining config.
+
+    GLUE fine-tuning from a local pretraining checkpoint uses that checkpoint's
+    architecture/tokenizer settings as the source of truth. Syncing ``cfg`` here
+    keeps resolved-config logging, W&B payloads, and validation consistent with
+    the model that is actually instantiated.
+
+    :param Config cfg: Mutable GLUE runtime config.
+    :param Config model_pretraining_config: Loaded pretraining config.
+    """
+    model_mismatches: list[str] = []
+    for key, pretraining_value in vars(model_pretraining_config.model).items():
+        if key.startswith("_") or not hasattr(cfg.model, key):
+            continue
+        if getattr(cfg.model, key) != pretraining_value:
+            model_mismatches.append(key)
+    if model_mismatches:
+        logging.getLogger(__name__).warning(
+            "GLUE model config differs from pretrained checkpoint config for %s; "
+            "using pretrained values as runtime source of truth.",
+            ", ".join(sorted(model_mismatches)),
+        )
+    cfg.model = deepcopy(model_pretraining_config.model)
+    cfg.model.attn_backend = "sdpa"
+
+    tokenizer_keys = (
+        "name",
+        "path",
+        "max_length",
+        "truncation",
+        "trust_remote_code",
+        "revision",
+        "allow_special_token_rewrite",
+    )
+    tokenizer_mismatches: list[str] = []
+    for key in tokenizer_keys:
+        if not hasattr(cfg.tokenizer, key) or not hasattr(
+            model_pretraining_config.tokenizer, key
+        ):
+            continue
+        pretraining_value = getattr(model_pretraining_config.tokenizer, key)
+        if getattr(cfg.tokenizer, key) != pretraining_value:
+            tokenizer_mismatches.append(key)
+        setattr(cfg.tokenizer, key, pretraining_value)
+    if tokenizer_mismatches:
+        logging.getLogger(__name__).warning(
+            "GLUE tokenizer config differs from pretrained checkpoint config for %s; "
+            "using pretrained values.",
+            ", ".join(sorted(tokenizer_mismatches)),
+        )
+
+
 def trainer(cfg: Config) -> None:
     """Run GLUE/SuperGLUE fine-tuning loop.
 
@@ -896,40 +974,7 @@ def trainer(cfg: Config) -> None:
         context="glue",
     )
 
-    tracker_config_dict = prepare_wandb_config(canonical_cfg)
-    if accelerator.is_main_process:
-        accelerator.print(
-            "Resolved task config:\n" + format_resolved_config(tracker_config_dict)
-        )
-
-    # Initialise the wandb run and pass wandb parameters
-    if wandb_enabled:
-        accelerator.init_trackers(
-            project_name=cfg.wandb.project,
-            init_kwargs={
-                "wandb": {
-                    "name": cfg.wandb.name,
-                    "entity": cfg.wandb.entity,
-                    "config": tracker_config_dict,
-                    "tags": cfg.wandb.tags,
-                    "dir": cfg.wandb.dir,
-                    "mode": cfg.wandb.mode,
-                    "resume": cfg.wandb.resume,
-                }
-            },
-        )
-
-        _configure_wandb_metrics(accelerator)
-        _update_wandb_config(accelerator, cfg)
-
     set_seed(int(cfg.seed))
-
-    # Validate configuration after accelerator is initialized (for logger)
-    try:
-        validate_glue_config(cfg)
-    except ValidationError as e:
-        logger.error(f"Configuration validation failed: {e}")
-        raise
 
     # Configure TF32 precision for GPUs with compute capability >= 8.0
     configure_tf32(enabled=cfg.trainer.tf32, print_fn=accelerator.print)
@@ -958,12 +1003,10 @@ def trainer(cfg: Config) -> None:
     elif hasattr(cfg.model, "from_hub"):
         from_hub = cfg.model.from_hub
 
+    model_pretraining_config: Config | None = None
     if from_hub:
         tokenizer = _load_from_hub_tokenizer(cfg)
     else:
-        # Import our new config system
-        from neobert.config import ConfigLoader
-
         # For GLUE, we MUST have pretrained model info
         # Check if we're allowing random weights for testing
         allow_random_weights = cfg.glue.allow_random_weights
@@ -1012,6 +1055,42 @@ def trainer(cfg: Config) -> None:
                 revision=cfg.tokenizer.revision,
                 allow_special_token_rewrite=cfg.tokenizer.allow_special_token_rewrite,
             )
+
+    if model_pretraining_config is not None:
+        _sync_runtime_cfg_from_pretraining(cfg, model_pretraining_config)
+
+    # Validate configuration after resolving effective model/tokenizer settings.
+    try:
+        validate_glue_config(cfg)
+    except ValidationError as e:
+        logger.error(f"Configuration validation failed: {e}")
+        raise
+
+    tracker_config_dict = prepare_wandb_config(cfg)
+    if accelerator.is_main_process:
+        accelerator.print(
+            "Resolved task config:\n" + format_resolved_config(tracker_config_dict)
+        )
+
+    # Initialise the wandb run and pass wandb parameters
+    if wandb_enabled:
+        accelerator.init_trackers(
+            project_name=cfg.wandb.project,
+            init_kwargs={
+                "wandb": {
+                    "name": cfg.wandb.name,
+                    "entity": cfg.wandb.entity,
+                    "config": tracker_config_dict,
+                    "tags": cfg.wandb.tags,
+                    "dir": cfg.wandb.dir,
+                    "mode": cfg.wandb.mode,
+                    "resume": cfg.wandb.resume,
+                }
+            },
+        )
+
+        _configure_wandb_metrics(accelerator)
+        _update_wandb_config(accelerator, cfg)
 
     accelerator.print("Loading metric...")
     # Keep train/eval metric state separate so eval.compute() does not reset
@@ -1181,42 +1260,25 @@ def trainer(cfg: Config) -> None:
     # Model
     if from_hub:
         trust_remote_code = bool(getattr(cfg.tokenizer, "trust_remote_code", False))
+        model_revision = getattr(cfg.tokenizer, "revision", None)
         config = AutoConfig.from_pretrained(
             cfg.model.name,
             num_labels=num_labels,
             finetuning_task=glue_task,
-            revision="main",
+            revision=model_revision,
             trust_remote_code=trust_remote_code,
         )
-        # if "nomic" in cfg.model.name:
-        #     base_model = AutoModelForMaskedLM.from_pretrained(
-        #         cfg.model.name,
-        #         from_tf=False,
-        #         config=config,
-        #         revision="main",
-        #         trust_remote_code=True,
-        #         ignore_mismatched_sizes=False,
-        #     )
-        #     model = NomicBERTForSequenceClassification(
-        #         config,
-        #         base_model.bert,
-        #         num_labels=num_labels,
-        #         classifier_dropout=cfg.model.classifier_dropout,
-        #         classifier_init_range=cfg.model.classifier_init_range,
-        #     )
-        # else:
-        if True:
-            model = AutoModelForSequenceClassification.from_pretrained(
-                cfg.model.name,
-                from_tf=False,
-                config=config,
-                revision="main",
-                trust_remote_code=trust_remote_code,
-                ignore_mismatched_sizes=False,
-            )
+        model = AutoModelForSequenceClassification.from_pretrained(
+            cfg.model.name,
+            from_tf=False,
+            config=config,
+            revision=model_revision,
+            trust_remote_code=trust_remote_code,
+            ignore_mismatched_sizes=False,
+        )
     else:
         # Convert config objects to dict for unpacking
-        if "model_pretraining_config" in locals() and model_pretraining_config:
+        if model_pretraining_config:
             model_config_dict = (
                 model_pretraining_config.model.__dict__.copy()
                 if hasattr(model_pretraining_config.model, "__dict__")
@@ -1235,7 +1297,7 @@ def trainer(cfg: Config) -> None:
                 "vocab_size": getattr(cfg.model, "vocab_size", 30522),
                 "hidden_act": getattr(cfg.model, "hidden_act", "gelu"),
                 "max_length": getattr(cfg.model, "max_position_embeddings", 512),
-                "layer_norm_eps": getattr(cfg.model, "layer_norm_eps", 1e-12),
+                "norm_eps": getattr(cfg.model, "norm_eps", 1e-5),
             }
 
         # Map dropout_prob to dropout and remove classifier_init_range from model config
@@ -1245,6 +1307,11 @@ def trainer(cfg: Config) -> None:
             model_config_dict["max_length"] = model_config_dict.pop(
                 "max_position_embeddings"
             )
+        if (
+            "layer_norm_eps" in model_config_dict
+            and "norm_eps" not in model_config_dict
+        ):
+            model_config_dict["norm_eps"] = model_config_dict.pop("layer_norm_eps")
         if "classifier_init_range" in model_config_dict:
             model_config_dict.pop("classifier_init_range")
         if "allow_random_weights" in model_config_dict:
@@ -1507,7 +1574,8 @@ def trainer(cfg: Config) -> None:
     logger.info(f"  Early stopping cycles = {early_stopping}")
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(
-        range(total_steps), disable=not accelerator.is_local_main_process
+        range(total_steps),
+        disable=bool(cfg.trainer.disable_tqdm) or not accelerator.is_local_main_process,
     )
     completed_steps = 0
     starting_epoch = 0
@@ -1617,7 +1685,10 @@ def trainer(cfg: Config) -> None:
                         )
                     else:
                         if num_labels == 1:
-                            loss = loss_fct(logits.squeeze(), batch["labels"].squeeze())
+                            loss = loss_fct(
+                                _flatten_regression_tensor(logits),
+                                _flatten_regression_tensor(batch["labels"]),
+                            )
                         else:
                             loss = loss_fct(logits, batch["labels"])
 
@@ -1625,16 +1696,17 @@ def trainer(cfg: Config) -> None:
                     predictions = (
                         logits.argmax(dim=-1)
                         if not is_regression
-                        else (
-                            logits.squeeze()
-                            if logits.size() != torch.Size([1])
-                            else logits
-                        )
+                        else _flatten_regression_tensor(logits)
                     )
                 # Keep local train-metric buffers on CPU to avoid GPU-memory
                 # growth between eval windows.
                 train_predictions_buffer.append(predictions.detach().to("cpu"))
-                train_references_buffer.append(batch["labels"].detach().to("cpu"))
+                train_references = (
+                    batch["labels"]
+                    if not is_regression
+                    else _flatten_regression_tensor(batch["labels"])
+                )
+                train_references_buffer.append(train_references.detach().to("cpu"))
 
                 accelerator.backward(loss)
                 micro_loss_sum += float(loss.item())
@@ -1700,6 +1772,7 @@ def trainer(cfg: Config) -> None:
                             is_regression=is_regression,
                             return_predictions=False,
                             use_hf_signature=from_hub,
+                            disable_tqdm=bool(cfg.trainer.disable_tqdm),
                         )["eval_metric"]
 
                         # Log all metrics properly for STS-B (both Pearson and Spearman)
@@ -1736,6 +1809,7 @@ def trainer(cfg: Config) -> None:
                                 is_regression=is_regression,
                                 return_predictions=False,
                                 use_hf_signature=from_hub,
+                                disable_tqdm=bool(cfg.trainer.disable_tqdm),
                             )["eval_metric"]
                             results["accuracy_mm"] = mm_eval_metric["accuracy"]
 

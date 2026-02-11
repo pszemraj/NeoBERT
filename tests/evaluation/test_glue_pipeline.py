@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 import torch
+from torch.utils.data import DataLoader, Dataset
 
 from neobert.config import Config, ConfigLoader
 
@@ -492,6 +493,20 @@ class TestGLUETaskSpecific(unittest.TestCase):
 
         validate_glue_config(cfg)
 
+    def test_validate_glue_config_allows_zero_checkpoint_id(self):
+        """Ensure integer checkpoint id 0 is treated as a valid explicit value."""
+        from neobert.validation.validators import validate_glue_config
+
+        with tempfile.TemporaryDirectory() as checkpoint_dir:
+            cfg = Config()
+            cfg.glue.task_name = "sst2"
+            cfg.model.from_hub = False
+            cfg.glue.allow_random_weights = False
+            cfg.glue.pretrained_checkpoint_dir = checkpoint_dir
+            cfg.glue.pretrained_checkpoint = 0
+
+            validate_glue_config(cfg)
+
     def test_should_save_glue_checkpoint_respects_strategy_semantics(self):
         """Ensure step/epoch saves are independent of evaluation cadence."""
         from neobert.glue.train import _should_save_glue_checkpoint
@@ -536,6 +551,138 @@ class TestGLUETaskSpecific(unittest.TestCase):
                 metric_improved_this_eval=True,
             )
         )
+
+    def test_sync_runtime_cfg_from_pretraining_uses_pretrained_values(self):
+        """Ensure runtime GLUE config mirrors loaded pretraining architecture/tokenizer."""
+        from neobert.glue.train import _sync_runtime_cfg_from_pretraining
+
+        cfg = Config()
+        cfg.model.hidden_size = 1024
+        cfg.model.attn_backend = "flash_attn_varlen"
+        cfg.tokenizer.max_length = 128
+        cfg.tokenizer.revision = "some-user-rev"
+
+        pretraining_cfg = Config()
+        pretraining_cfg.model.hidden_size = 256
+        pretraining_cfg.model.norm_eps = 2e-5
+        pretraining_cfg.model.attn_backend = "flash_attn_varlen"
+        pretraining_cfg.tokenizer.max_length = 512
+        pretraining_cfg.tokenizer.revision = "checkpoint-rev"
+
+        _sync_runtime_cfg_from_pretraining(cfg, pretraining_cfg)
+
+        self.assertEqual(cfg.model.hidden_size, 256)
+        self.assertEqual(cfg.model.norm_eps, 2e-5)
+        self.assertEqual(cfg.model.attn_backend, "sdpa")
+        self.assertEqual(cfg.tokenizer.max_length, 512)
+        self.assertEqual(cfg.tokenizer.revision, "checkpoint-rev")
+
+    def test_get_evaluation_regression_keeps_vector_shapes(self):
+        """Ensure STS-B style regression keeps predictions/labels 1D for batch=1."""
+        from neobert.glue.train import get_evaluation
+
+        class TinyRegressionDataset(Dataset):
+            def __len__(self):
+                return 1
+
+            def __getitem__(self, idx):
+                del idx
+                return {
+                    "input_ids": torch.tensor([1, 2, 3], dtype=torch.long),
+                    "attention_mask": torch.tensor([1, 1, 1], dtype=torch.long),
+                    "labels": torch.tensor([0.5], dtype=torch.float32),
+                }
+
+        class TinyRegressionModel(torch.nn.Module):
+            def forward(self, src, pad_mask):
+                del pad_mask
+                return {"logits": src[:, :1].to(torch.float32)}
+
+        class ShapeCheckingMetric:
+            def __init__(self):
+                self.pred_shape = None
+                self.ref_shape = None
+
+            def add_batch(self, predictions, references):
+                self.pred_shape = tuple(predictions.shape)
+                self.ref_shape = tuple(references.shape)
+
+            def compute(self):
+                return {"pearson": 1.0}
+
+        def _collate(batch):
+            keys = batch[0].keys()
+            return {
+                key: torch.stack([item[key] for item in batch], dim=0) for key in keys
+            }
+
+        dataloader = DataLoader(
+            TinyRegressionDataset(), batch_size=1, collate_fn=_collate
+        )
+        metric = ShapeCheckingMetric()
+        eval_out = get_evaluation(
+            model=TinyRegressionModel(),
+            dataloader=dataloader,
+            is_regression=True,
+            metric=metric,
+            accelerator=None,
+            dtype_pad_mask=torch.float32,
+            return_predictions=False,
+            compute_metric=True,
+            use_hf_signature=False,
+            disable_tqdm=True,
+        )
+
+        self.assertEqual(metric.pred_shape, (1,))
+        self.assertEqual(metric.ref_shape, (1,))
+        self.assertIn("pearson", eval_out["eval_metric"])
+
+    def test_get_evaluation_respects_disable_tqdm_flag(self):
+        """Ensure evaluation progress bars honor the disable_tqdm runtime flag."""
+        from neobert.glue.train import get_evaluation
+
+        class TinyDataset(Dataset):
+            def __len__(self):
+                return 1
+
+            def __getitem__(self, idx):
+                del idx
+                return {
+                    "input_ids": torch.tensor([1, 2], dtype=torch.long),
+                    "attention_mask": torch.tensor([1, 1], dtype=torch.long),
+                    "labels": torch.tensor(0, dtype=torch.long),
+                }
+
+        class TinyClassifier(torch.nn.Module):
+            def forward(self, src, pad_mask):
+                del pad_mask
+                batch_size = src.shape[0]
+                return {"logits": torch.zeros((batch_size, 2), dtype=torch.float32)}
+
+        def _collate(batch):
+            keys = batch[0].keys()
+            return {
+                key: torch.stack([item[key] for item in batch], dim=0) for key in keys
+            }
+
+        with mock.patch(
+            "neobert.glue.train.tqdm",
+            side_effect=lambda iterable, **kwargs: iterable,
+        ) as mocked_tqdm:
+            get_evaluation(
+                model=TinyClassifier(),
+                dataloader=DataLoader(TinyDataset(), batch_size=1, collate_fn=_collate),
+                is_regression=False,
+                metric=None,
+                accelerator=None,
+                dtype_pad_mask=torch.float32,
+                return_predictions=False,
+                compute_metric=False,
+                use_hf_signature=False,
+                disable_tqdm=True,
+            )
+
+        self.assertTrue(mocked_tqdm.call_args.kwargs["disable"])
 
 
 if __name__ == "__main__":

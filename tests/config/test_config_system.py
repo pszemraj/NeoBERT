@@ -172,6 +172,34 @@ class TestConfigSystem(unittest.TestCase):
         finally:
             sys.argv = original_argv
 
+    def test_cli_store_true_defaults_do_not_override_yaml_truthy_values(self):
+        """Ensure absent store_true flags do not stomp true values from YAML."""
+        config_data = {
+            "task": "pretraining",
+            "debug": True,
+            "mteb_overwrite_results": True,
+            "dataset": {
+                "load_all_from_disk": True,
+                "force_redownload": True,
+            },
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            path = f.name
+            yaml.safe_dump(config_data, f)
+
+        test_args = ["script.py", path]
+        original_argv = sys.argv
+        sys.argv = test_args
+        try:
+            cfg = load_config_from_args()
+            self.assertTrue(cfg.debug)
+            self.assertTrue(cfg.mteb_overwrite_results)
+            self.assertTrue(cfg.dataset.load_all_from_disk)
+            self.assertTrue(cfg.dataset.force_redownload)
+        finally:
+            sys.argv = original_argv
+            os.unlink(path)
+
     def test_cli_dataset_eval_samples_override(self):
         """Ensure CLI parsing accepts dataset.eval_samples integer override."""
         config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"

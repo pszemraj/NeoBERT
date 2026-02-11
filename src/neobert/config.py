@@ -2044,10 +2044,16 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         ),
     )
     parser.add_argument(
-        "--dataset.load_all_from_disk", action="store_true", help="Load all from disk"
+        "--dataset.load_all_from_disk",
+        action="store_true",
+        default=None,
+        help="Load all from disk",
     )
     parser.add_argument(
-        "--dataset.force_redownload", action="store_true", help="Force redownload"
+        "--dataset.force_redownload",
+        action="store_true",
+        default=None,
+        help="Force redownload",
     )
     parser.add_argument(
         "--dataset.pretraining_prob",
@@ -2217,14 +2223,17 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         "--task", type=str, help="Task (pretraining/glue/mteb/contrastive)"
     )
     parser.add_argument("--seed", type=int, help="Global random seed")
-    parser.add_argument("--debug", action="store_true", help="Debug mode")
+    parser.add_argument("--debug", action="store_true", default=None, help="Debug mode")
 
     # MTEB-specific arguments
     parser.add_argument("--mteb_task_type", type=str, help="MTEB task type")
     parser.add_argument("--mteb_batch_size", type=int, help="MTEB batch size")
     parser.add_argument("--mteb_pooling", type=str, help="MTEB pooling method")
     parser.add_argument(
-        "--mteb_overwrite_results", action="store_true", help="Overwrite MTEB results"
+        "--mteb_overwrite_results",
+        action="store_true",
+        default=None,
+        help="Overwrite MTEB results",
     )
 
     # Model loading arguments

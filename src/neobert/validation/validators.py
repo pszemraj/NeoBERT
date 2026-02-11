@@ -48,6 +48,14 @@ def validate_glue_config(cfg: Any) -> None:
     elif task not in valid_tasks:
         errors.append(f"Invalid task: {task}. Must be one of {valid_tasks}")
 
+    def _is_missing(value: Any) -> bool:
+        """Return True when a config value should be treated as unset."""
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return value.strip() == ""
+        return False
+
     if hasattr(cfg, "model"):
         glue_cfg = getattr(cfg, "glue", None)
         allow_random = bool(getattr(glue_cfg, "allow_random_weights", False))
@@ -87,7 +95,7 @@ def validate_glue_config(cfg: Any) -> None:
             from_hub = bool(cfg._raw_model_dict.get("from_hub", from_hub))
 
         if not allow_random and not from_hub:
-            if not checkpoint_dir or not checkpoint:
+            if _is_missing(checkpoint_dir) or _is_missing(checkpoint):
                 errors.append(
                     "GLUE requires pretrained weights. Specify "
                     "'glue.pretrained_checkpoint_dir' and "
@@ -95,7 +103,7 @@ def validate_glue_config(cfg: Any) -> None:
                     "'glue.allow_random_weights: true'. "
                     "Use model.from_hub=true for direct HF model fine-tuning."
                 )
-            elif checkpoint_dir and not Path(checkpoint_dir).exists():
+            elif not Path(str(checkpoint_dir)).exists():
                 errors.append(f"Checkpoint directory not found: {checkpoint_dir}")
 
         if hasattr(cfg.model, "hidden_size") and hasattr(
