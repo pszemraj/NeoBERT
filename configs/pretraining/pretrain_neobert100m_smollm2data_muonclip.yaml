@@ -31,7 +31,7 @@ tokenizer:
   max_length: 1024
 
 datacollator:
-  mlm_probability: 0.2
+  mlm_probability: 0.25
   pad_to_multiple_of: 8
   pack_sequences: true
 
