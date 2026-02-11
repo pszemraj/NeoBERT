@@ -3,7 +3,7 @@
 import logging
 import re
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple
 
 import torch
 from accelerate import Accelerator
@@ -53,6 +53,43 @@ def _unwrap_optimizer(opt: Any) -> Any:
     :return Any: Unwrapped optimizer.
     """
     return getattr(opt, "optimizer", opt)
+
+
+def create_accelerator(
+    *,
+    use_cpu: bool,
+    log: logging.Logger,
+    accelerator_factory: Callable[..., Accelerator] = Accelerator,
+    **kwargs: Any,
+) -> Accelerator:
+    """Create an Accelerator and gracefully handle mixed cpu/cuda test processes.
+
+    When ``use_cpu=True`` is requested after Accelerate has already initialized a
+    CUDA-backed shared state (common in unit-test suites), Accelerate raises a
+    ValueError about changing ``cpu=True``. In that case we warn once and retry
+    without forcing CPU so the existing process state remains usable.
+
+    :param bool use_cpu: Whether to request CPU execution.
+    :param logging.Logger log: Logger for fallback warnings.
+    :param Callable[..., Accelerator] accelerator_factory: Accelerator constructor.
+    :param kwargs: Additional ``Accelerator(...)`` keyword arguments.
+    :return Accelerator: Initialized accelerator.
+    """
+    accelerator_kwargs = dict(kwargs)
+    if use_cpu:
+        accelerator_kwargs["cpu"] = True
+    try:
+        return accelerator_factory(**accelerator_kwargs)
+    except ValueError as exc:
+        if use_cpu and "cpu=True" in str(exc):
+            log.warning(
+                "trainer.use_cpu=true requested but AcceleratorState is already "
+                "initialized on a non-CPU device in this process; continuing with "
+                "the existing Accelerate device state."
+            )
+            accelerator_kwargs.pop("cpu", None)
+            return accelerator_factory(**accelerator_kwargs)
+        raise
 
 
 def _maybe_prepare_for_forward(

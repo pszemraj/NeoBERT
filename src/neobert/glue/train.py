@@ -47,6 +47,7 @@ from neobert.training_utils import (
     _maybe_compile_model,
     _maybe_prepare_for_forward,
     _unwrap_optimizer,
+    create_accelerator,
 )
 from neobert.utils import configure_tf32, format_resolved_config, prepare_wandb_config
 from neobert.validation import ValidationError, validate_glue_config
@@ -758,8 +759,9 @@ def trainer(cfg: Config) -> None:
         mixed_precision = "no"
 
     wandb_enabled = cfg.wandb.enabled and cfg.wandb.mode != "disabled"
-    accelerator = Accelerator(
-        cpu=bool(getattr(cfg.trainer, "use_cpu", False)),
+    accelerator = create_accelerator(
+        use_cpu=bool(getattr(cfg.trainer, "use_cpu", False)),
+        log=logger,
         log_with="wandb" if wandb_enabled else None,
         mixed_precision=mixed_precision,
         project_config=project_config,

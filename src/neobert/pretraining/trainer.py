@@ -55,6 +55,7 @@ from neobert.training_utils import (
     _maybe_compile_model,
     _maybe_prepare_for_forward,
     _resolve_resume_checkpoint,
+    create_accelerator,
     resolve_wandb_watch_mode,
 )
 from neobert.utils import (
@@ -1546,8 +1547,10 @@ def trainer(cfg: Config) -> None:
             "Use 'bf16' or 'no'/'fp32'."
         )
 
-    accelerator = Accelerator(
-        cpu=bool(getattr(cfg.trainer, "use_cpu", False)),
+    accelerator = create_accelerator(
+        use_cpu=bool(getattr(cfg.trainer, "use_cpu", False)),
+        log=logger,
+        accelerator_factory=Accelerator,
         step_scheduler_with_optimizer=False,  # enable manual control of the scheduler
         mixed_precision=mixed_precision,
         gradient_accumulation_steps=cfg.trainer.gradient_accumulation_steps,

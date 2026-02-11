@@ -13,7 +13,6 @@ import numpy
 # PyTorch
 import torch
 import wandb
-from accelerate import Accelerator
 from accelerate.utils import DistributedType, ProjectConfiguration, set_seed
 from datasets import load_from_disk
 
@@ -46,6 +45,7 @@ from neobert.training_utils import (
     _maybe_compile_model,
     _maybe_prepare_for_forward,
     _resolve_resume_checkpoint,
+    create_accelerator,
     resolve_wandb_watch_mode,
 )
 from neobert.contrastive.datasets import get_bsz
@@ -182,8 +182,9 @@ def trainer(cfg: Config) -> None:
         iteration=iteration,
     )
     wandb_enabled = cfg.wandb.enabled and cfg.wandb.mode != "disabled"
-    accelerator = Accelerator(
-        cpu=bool(getattr(cfg.trainer, "use_cpu", False)),
+    accelerator = create_accelerator(
+        use_cpu=bool(getattr(cfg.trainer, "use_cpu", False)),
+        log=logger,
         step_scheduler_with_optimizer=False,  # enable manual control of the scheduler
         mixed_precision=cfg.trainer.mixed_precision,
         gradient_accumulation_steps=cfg.trainer.gradient_accumulation_steps,
