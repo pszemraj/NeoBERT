@@ -22,6 +22,7 @@ from neobert.pretraining.trainer import (
     _ensure_pinned_cpu_batch,
     _gather_decoder_weight_for_masked_objective,
     _infer_eval_split_name,
+    _resolve_checkpoint_retention_limit,
     _resolve_loader_perf_settings,
     _resolve_streaming_eval_budget,
     _resolve_eval_samples,
@@ -368,6 +369,22 @@ class TestPretrainComponents(unittest.TestCase):
             latest_path = root / "latest"
             self.assertTrue(latest_path.exists())
             self.assertEqual(latest_path.read_text(encoding="utf-8"), "12345\n")
+
+    def test_checkpoint_retention_limit_prefers_save_total_limit(self):
+        """Ensure save_total_limit wins over deprecated max_ckpt when both are set."""
+        cfg = Config()
+        cfg.trainer.save_total_limit = 1
+        cfg.trainer.max_ckpt = 7
+
+        self.assertEqual(_resolve_checkpoint_retention_limit(cfg), 1)
+
+    def test_checkpoint_retention_limit_uses_max_ckpt_as_fallback(self):
+        """Ensure max_ckpt is only used when save_total_limit is unset."""
+        cfg = Config()
+        cfg.trainer.save_total_limit = None
+        cfg.trainer.max_ckpt = 3
+
+        self.assertEqual(_resolve_checkpoint_retention_limit(cfg), 3)
 
     def test_gather_decoder_weight_passthrough_outside_deepspeed(self):
         """Ensure decoder weight passthrough when not running DeepSpeed."""

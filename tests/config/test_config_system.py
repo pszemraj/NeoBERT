@@ -87,6 +87,8 @@ class TestConfigSystem(unittest.TestCase):
             "4",
             "--trainer.logging_steps",
             "17",
+            "--trainer.save_total_limit",
+            "1",
             "--dataset.streaming",
             "false",
             "--datacollator.pack_sequences",
@@ -116,6 +118,7 @@ class TestConfigSystem(unittest.TestCase):
             self.assertEqual(
                 config.trainer.per_device_train_batch_size, 4
             )  # Overridden from 2
+            self.assertEqual(config.trainer.save_total_limit, 1)
             self.assertFalse(config.dataset.streaming)
             self.assertTrue(config.datacollator.pack_sequences)
             self.assertEqual(config.trainer.logging_steps, 17)

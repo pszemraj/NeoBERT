@@ -38,7 +38,6 @@ from deepspeed.utils import safe_get_full_fp32_param
 from tqdm import tqdm
 from transformers import BatchEncoding, PreTrainedTokenizerBase
 
-from neobert.checkpointing import save_model_safetensors
 from neobert.config import Config, ConfigLoader, MuonConfig, round_up_to_multiple
 from neobert.dataloader import get_dataloader
 from neobert.kernels.attention import resolve_runtime_attn_backend
@@ -1506,6 +1505,24 @@ def _safe_len(dataloader: torch.utils.data.DataLoader) -> Optional[int]:
         return None
 
 
+def _resolve_checkpoint_retention_limit(cfg: Config) -> int:
+    """Resolve effective checkpoint retention limit from trainer config.
+
+    ``trainer.save_total_limit`` is the canonical knob. Deprecated
+    ``trainer.max_ckpt`` is only used as a fallback when save_total_limit is unset.
+
+    :param Config cfg: Runtime training configuration.
+    :return int: Maximum number of retained checkpoints (0 disables pruning).
+    """
+    save_total_limit = getattr(cfg.trainer, "save_total_limit", None)
+    if save_total_limit is not None:
+        return max(0, int(save_total_limit))
+    max_ckpt = getattr(cfg.trainer, "max_ckpt", None)
+    if max_ckpt is not None:
+        return max(0, int(max_ckpt))
+    return 0
+
+
 def trainer(cfg: Config) -> None:
     """Run the pretraining loop.
 
@@ -1516,21 +1533,22 @@ def trainer(cfg: Config) -> None:
     )
     eval_samples = _resolve_eval_samples(getattr(cfg.dataset, "eval_samples", None))
 
-    # Get the last checkpoint id
+    # Checkpoint layout (BREAKING): all resumable/exportable artifacts are written
+    # under output_dir/checkpoints/<step>/.
     output_dir = Path(cfg.trainer.output_dir)
     checkpoint_dir = output_dir / "checkpoints"
-    model_checkpoint_dir = output_dir / "model_checkpoints"
-    model_checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_retention_limit = _resolve_checkpoint_retention_limit(cfg)
     resume_checkpoint_path, iteration = _resolve_resume_checkpoint(
         cfg.trainer.resume_from_checkpoint,
         str(checkpoint_dir),
         str(output_dir),
     )
 
-    # Accelerator object - disable automatic checkpointing to avoid duplicate checkpoints/ directory
+    # Accelerator object - disable automatic checkpoint naming so the trainer can
+    # control a single checkpoint tree (checkpoints/<step>).
     project_config = ProjectConfiguration(
         str(output_dir),
-        automatic_checkpoint_naming=False,  # We handle checkpointing manually in model_checkpoints/
+        automatic_checkpoint_naming=False,
         iteration=iteration,
     )
     # All parameters participate in the forward graph; keep DDP in fast-path mode.
@@ -1578,6 +1596,18 @@ def trainer(cfg: Config) -> None:
             "Megatron-LM backend is not supported by this training loop. "
             "Use DDP or DeepSpeed instead."
         )
+    if getattr(accelerator, "is_main_process", True):
+        logger.info(
+            "Pretraining checkpoint layout: writing resumable + export artifacts to "
+            f"{checkpoint_dir}/<step>/"
+        )
+        if checkpoint_retention_limit > 0:
+            logger.info(
+                "Checkpoint retention policy: keep "
+                f"{checkpoint_retention_limit} latest checkpoint(s)."
+            )
+        else:
+            logger.info("Checkpoint retention policy: disabled (keep all checkpoints).")
     if accelerator.distributed_type is DistributedType.FSDP:
         fsdp_version = _resolve_fsdp_version(accelerator)
         if fsdp_version < 2:
@@ -2671,76 +2701,17 @@ def trainer(cfg: Config) -> None:
                     local_loss_path_zero_masked.zero_()
                     local_loss_path_other.zero_()
 
-                # Save accelerator state for resumable training
                 if metrics["train/steps"] % cfg.trainer.save_steps == 0:
-                    state_checkpoint_path = checkpoint_dir / str(metrics["train/steps"])
-                    accelerator.save_state(output_dir=str(state_checkpoint_path))
-                    accelerator.wait_for_everyone()
-
-                    # Accelerator checkpoints are the source of truth for resuming.
-                    save_total_limit = getattr(cfg.trainer, "save_total_limit", 0)
-                    max_ckpt = int(getattr(cfg.trainer, "max_ckpt", 0) or 0)
-                    limit = max(save_total_limit, max_ckpt)
-                    if (
-                        limit > 0
-                        and checkpoint_dir.exists()
-                        and accelerator.is_main_process
-                    ):
-                        # Prune accelerator checkpoints to the same retention policy
-                        # as model_checkpoints to avoid unbounded disk growth.
-                        accel_checkpoints = []
-                        for item_path in checkpoint_dir.iterdir():
-                            if item_path.is_dir() and item_path.name.isdigit():
-                                accel_checkpoints.append(int(item_path.name))
-                        if len(accel_checkpoints) > limit:
-                            accel_checkpoints.sort()
-                            for old_ckpt in accel_checkpoints[
-                                : len(accel_checkpoints) - limit
-                            ]:
-                                old_path = checkpoint_dir / str(old_ckpt)
-                                if old_path.exists():
-                                    shutil.rmtree(old_path)
-                                    logger.info(
-                                        "Removed old accelerator checkpoint: "
-                                        f"{old_path} (limit={limit})"
-                                    )
-
-                # Save model weights checkpoint
-                if metrics["train/steps"] % cfg.trainer.save_steps == 0:
-                    # Model checkpoints are used for inference/export and can be pruned independently.
-                    # Save the checkpoint
                     step_tag = str(metrics["train/steps"])
-                    tmp_tag = f"{step_tag}.tmp"
-                    tmp_path = model_checkpoint_dir / tmp_tag
-
-                    # Clean up any stale tmp directory from a previous failed save.
-                    # Use exist_ok pattern to avoid TOCTOU race conditions in distributed setting.
-                    if accelerator.is_main_process:
-                        if tmp_path.exists():
-                            shutil.rmtree(tmp_path)
-                        tmp_path.mkdir(parents=True, exist_ok=True)
+                    checkpoint_path = checkpoint_dir / step_tag
+                    accelerator.save_state(output_dir=str(checkpoint_path))
                     accelerator.wait_for_everyone()
 
-                    checkpoint_path = tmp_path
-                    if accelerator.distributed_type is DistributedType.DEEPSPEED:
-                        # DeepSpeed writes into model_checkpoint_dir/<tag>. We save to a
-                        # temporary tag and atomically promote it to the final numeric tag,
-                        # then refresh root/latest so zero_to_fp32 helpers can still resolve
-                        # canonical (root, tag) checkpoint layout.
-                        model.save_checkpoint(model_checkpoint_dir, tag=tmp_tag)
-                    else:
-                        save_model_safetensors(
-                            accelerator.unwrap_model(model),
-                            checkpoint_path,
-                        )
-
-                    # Save config and tokenizer info (only from main process)
+                    # Save export metadata alongside resumable state.
                     if accelerator.is_main_process:
-                        # Save config as YAML
                         config_path = checkpoint_path / "config.yaml"
                         ConfigLoader.save(cfg, str(config_path))
 
-                        # Save tokenizer info as JSON
                         tokenizer_info = {
                             "tokenizer_name": cfg.tokenizer.path or cfg.tokenizer.name,
                             "vocab_size": cfg.model.vocab_size,
@@ -2752,59 +2723,39 @@ def trainer(cfg: Config) -> None:
                         with tokenizer_info_path.open("w", encoding="utf-8") as f:
                             json.dump(tokenizer_info, f, indent=2)
 
-                        # Save full tokenizer with save_pretrained
                         tokenizer_dir = checkpoint_path / "tokenizer"
                         tokenizer_dir.mkdir(parents=True, exist_ok=True)
-
-                        # Ensure tokenizer.model_max_length matches model's max_position_embeddings
                         tokenizer.model_max_length = cfg.model.max_position_embeddings
                         tokenizer.save_pretrained(tokenizer_dir)
-
-                    accelerator.wait_for_everyone()
-
-                    if accelerator.is_main_process:
-                        final_path = model_checkpoint_dir / step_tag
-                        _promote_tmp_checkpoint_dir(checkpoint_path, final_path)
-                        if accelerator.distributed_type is DistributedType.DEEPSPEED:
-                            # Keep DeepSpeed root semantics valid even though we
-                            # atomically rename tmp tags to final numeric tags.
-                            _write_deepspeed_latest_file(model_checkpoint_dir, step_tag)
-                        checkpoint_path = final_path
-                        # Use logger instead of accelerator.print to avoid progress bar interference
                         logger.info(
-                            "Saved checkpoint with config, tokenizer info, and full "
-                            f"tokenizer to {checkpoint_path}"
+                            "Saved checkpoint to "
+                            f"{checkpoint_path} (includes Accelerate state, model "
+                            "weights, config, and tokenizer artifacts)."
                         )
 
                     accelerator.wait_for_everyone()
 
-                    # Clean up old checkpoints if limit is set (after saving).
-                    save_total_limit = getattr(cfg.trainer, "save_total_limit", 0)
-                    max_ckpt = int(getattr(cfg.trainer, "max_ckpt", 0) or 0)
-                    limit = max(save_total_limit, max_ckpt)  # Use whichever is set
-
                     if (
-                        limit > 0
-                        and model_checkpoint_dir.exists()
+                        checkpoint_retention_limit > 0
+                        and checkpoint_dir.exists()
                         and accelerator.is_main_process
                     ):
-                        # Get all checkpoint directories
                         checkpoints = []
-                        for item_path in model_checkpoint_dir.iterdir():
+                        for item_path in checkpoint_dir.iterdir():
                             if item_path.is_dir() and item_path.name.isdigit():
                                 checkpoints.append(int(item_path.name))
 
-                        # Sort and remove oldest checkpoints if over limit
-                        if len(checkpoints) > limit:
+                        if len(checkpoints) > checkpoint_retention_limit:
                             checkpoints.sort()
-                            # Remove oldest checkpoints
-                            for old_ckpt in checkpoints[: len(checkpoints) - limit]:
-                                old_path = model_checkpoint_dir / str(old_ckpt)
+                            for old_ckpt in checkpoints[
+                                : len(checkpoints) - checkpoint_retention_limit
+                            ]:
+                                old_path = checkpoint_dir / str(old_ckpt)
                                 if old_path.exists():
                                     shutil.rmtree(old_path)
-                                    # Use logger instead of accelerator.print to avoid progress bar interference
                                     logger.info(
-                                        f"Removed old checkpoint: {old_path} (limit={limit})"
+                                        "Removed old checkpoint: "
+                                        f"{old_path} (limit={checkpoint_retention_limit})"
                                     )
 
                 if (

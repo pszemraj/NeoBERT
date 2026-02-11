@@ -1526,6 +1526,11 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     parser.add_argument(
         "--trainer.save_steps", type=int, help="Save checkpoint every N steps"
     )
+    parser.add_argument(
+        "--trainer.save_total_limit",
+        type=int,
+        help="Maximum number of retained checkpoints (0 keeps all)",
+    )
     parser.add_argument("--trainer.eval_steps", type=int, help="Evaluate every N steps")
     parser.add_argument(
         "--trainer.logging_steps", type=int, help="Log metrics every N steps"
