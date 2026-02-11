@@ -15,6 +15,7 @@ from datasets import Dataset, DatasetDict
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 
+from neobert.checkpointing import MODEL_WEIGHTS_NAME, load_model_safetensors
 from neobert.config import Config, ConfigLoader
 from neobert.pretraining.masked_objective import MaskedObjectiveOut
 from neobert.pretraining.trainer import (
@@ -26,6 +27,7 @@ from neobert.pretraining.trainer import (
     _resolve_loader_perf_settings,
     _resolve_streaming_eval_budget,
     _resolve_eval_samples,
+    _save_portable_checkpoint_weights,
     _run_masked_objective_step,
     _split_train_dataset_for_eval_samples,
     _should_backward_inside_gathered_decoder_weight,
@@ -385,6 +387,52 @@ class TestPretrainComponents(unittest.TestCase):
         cfg.trainer.max_ckpt = 3
 
         self.assertEqual(_resolve_checkpoint_retention_limit(cfg), 3)
+
+    def test_save_portable_checkpoint_weights_from_accelerator_state_dict(self):
+        """Ensure portable safetensors is emitted from accelerator state dicts."""
+
+        class _AcceleratorStub:
+            is_main_process = True
+
+            @staticmethod
+            def get_state_dict(model: torch.nn.Module, unwrap: bool = True):
+                assert unwrap is True
+                return model.state_dict()
+
+        model = torch.nn.Linear(4, 3, bias=False)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_path = Path(tmpdir)
+            saved = _save_portable_checkpoint_weights(
+                model,
+                _AcceleratorStub(),
+                checkpoint_path,
+            )
+            self.assertTrue(saved)
+            self.assertTrue((checkpoint_path / MODEL_WEIGHTS_NAME).exists())
+            state_dict = load_model_safetensors(checkpoint_path, map_location="cpu")
+            self.assertIn("weight", state_dict)
+
+    def test_save_portable_checkpoint_weights_handles_export_failure(self):
+        """Ensure portable save failures are non-fatal and return False."""
+
+        class _AcceleratorStub:
+            is_main_process = True
+
+            @staticmethod
+            def get_state_dict(_model: torch.nn.Module, unwrap: bool = True):
+                assert unwrap is True
+                raise ValueError("simulated failure")
+
+        model = torch.nn.Linear(4, 3, bias=False)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_path = Path(tmpdir)
+            saved = _save_portable_checkpoint_weights(
+                model,
+                _AcceleratorStub(),
+                checkpoint_path,
+            )
+            self.assertFalse(saved)
+            self.assertFalse((checkpoint_path / MODEL_WEIGHTS_NAME).exists())
 
     def test_gather_decoder_weight_passthrough_outside_deepspeed(self):
         """Ensure decoder weight passthrough when not running DeepSpeed."""

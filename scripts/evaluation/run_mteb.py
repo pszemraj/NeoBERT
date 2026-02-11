@@ -7,10 +7,13 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
 from mteb import MTEB
 
-from neobert.checkpointing import MODEL_WEIGHTS_NAME, load_model_safetensors
+from neobert.checkpointing import (
+    MODEL_WEIGHTS_NAME,
+    load_deepspeed_fp32_state_dict,
+    load_model_safetensors,
+)
 from neobert.config import ConfigLoader
 from neobert.model import NeoBERTConfig, NeoBERTForMTEB
 from neobert.tokenizer import get_tokenizer
@@ -254,11 +257,11 @@ def evaluate_mteb(cfg: Any) -> None:
 
     # Load pretrained weights
     if use_deepspeed:
-        model = load_state_dict_from_zero_checkpoint(
-            model,
+        state_dict = load_deepspeed_fp32_state_dict(
             pretrained_checkpoint_dir / "checkpoints",
             tag=str(ckpt),
         )
+        model.load_state_dict(state_dict, strict=False)
     else:
         checkpoint_path = (
             pretrained_checkpoint_dir / "checkpoints" / str(ckpt) / MODEL_WEIGHTS_NAME

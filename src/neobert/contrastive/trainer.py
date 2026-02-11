@@ -20,7 +20,6 @@ from datasets import DatasetDict, load_from_disk
 
 # Deepspeed
 from deepspeed.utils import safe_get_full_fp32_param
-from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -30,6 +29,7 @@ from transformers import DataCollatorWithPadding
 # Configuration
 from neobert.checkpointing import (
     MODEL_WEIGHTS_NAME,
+    load_deepspeed_fp32_state_dict,
     load_model_safetensors,
     save_model_safetensors,
 )
@@ -426,20 +426,33 @@ def trainer(cfg: Config) -> None:
             pretrained_checkpoint or cfg.pretrained_checkpoint,
         )
         if use_deepspeed:
-            model = load_state_dict_from_zero_checkpoint(
-                model, pretrained_checkpoint_dir, tag=str(tag)
+            state_dict = load_deepspeed_fp32_state_dict(
+                pretrained_checkpoint_dir,
+                tag=str(tag),
             )
+            model.load_state_dict(state_dict, strict=False)
         else:
             state_dict_path = pretrained_checkpoint_dir / str(tag) / MODEL_WEIGHTS_NAME
             if not state_dict_path.exists():
-                raise ValueError(
-                    f"Expected {MODEL_WEIGHTS_NAME} at {state_dict_path}. "
-                    "Set pretrained_checkpoint_dir or enable DeepSpeed loading."
+                try:
+                    state_dict = load_deepspeed_fp32_state_dict(
+                        pretrained_checkpoint_dir,
+                        tag=str(tag),
+                    )
+                except Exception as exc:
+                    raise ValueError(
+                        f"Expected {MODEL_WEIGHTS_NAME} at {state_dict_path}. "
+                        "Set pretrained_checkpoint_dir or enable DeepSpeed loading."
+                    ) from exc
+                logger.warning(
+                    f"{MODEL_WEIGHTS_NAME} not found at {state_dict_path}; "
+                    "loaded fp32 weights from DeepSpeed checkpoint shards instead."
                 )
-            state_dict = load_model_safetensors(
-                pretrained_checkpoint_dir / str(tag),
-                map_location="cpu",
-            )
+            else:
+                state_dict = load_model_safetensors(
+                    pretrained_checkpoint_dir / str(tag),
+                    map_location="cpu",
+                )
             # NOTE: We allow partial loads for flexibility; checkpoint/config mismatches
             # are not validated beyond this strict=False load.
             model.load_state_dict(state_dict, strict=False)

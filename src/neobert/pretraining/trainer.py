@@ -38,6 +38,7 @@ from deepspeed.utils import safe_get_full_fp32_param
 from tqdm import tqdm
 from transformers import BatchEncoding, PreTrainedTokenizerBase
 
+from neobert.checkpointing import MODEL_WEIGHTS_NAME, save_state_dict_safetensors
 from neobert.config import (
     Config,
     ConfigLoader,
@@ -1555,6 +1556,54 @@ def _resolve_checkpoint_retention_limit(cfg: Config) -> int:
     return 0
 
 
+def _save_portable_checkpoint_weights(
+    model: torch.nn.Module,
+    accelerator: Accelerator,
+    checkpoint_path: Path,
+) -> bool:
+    """Save backend-agnostic ``model.safetensors`` into a step checkpoint.
+
+    The resumable Accelerate state remains the source of truth for restart; this
+    helper adds a portable inference/export payload for downstream consumers.
+
+    :param torch.nn.Module model: Prepared training model.
+    :param Accelerator accelerator: Active accelerator runtime.
+    :param Path checkpoint_path: Step checkpoint directory path.
+    :return bool: True when portable weights were saved.
+    """
+    if not accelerator.is_main_process:
+        return False
+
+    try:
+        state_dict = accelerator.get_state_dict(model, unwrap=True)
+    except Exception as exc:
+        logger.warning(
+            "Unable to export portable checkpoint weights to "
+            f"{checkpoint_path / MODEL_WEIGHTS_NAME}: {exc}. "
+            "Resumable state was still saved. For DeepSpeed ZeRO-3, enable "
+            "`stage3_gather_16bit_weights_on_model_save`/`zero3_save_16bit_model` "
+            "to emit consolidated portable weights automatically."
+        )
+        return False
+
+    try:
+        weights_path = save_state_dict_safetensors(
+            state_dict,
+            checkpoint_path,
+            metadata={"format": "pt", "source": "accelerate.get_state_dict"},
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to persist portable checkpoint weights at "
+            f"{checkpoint_path / MODEL_WEIGHTS_NAME}: {exc}. "
+            "Resumable state was still saved."
+        )
+        return False
+
+    logger.info(f"Saved portable model weights to {weights_path}.")
+    return True
+
+
 def trainer(cfg: Config) -> None:
     """Run the pretraining loop.
 
@@ -2731,6 +2780,10 @@ def trainer(cfg: Config) -> None:
                     step_tag = str(metrics["train/steps"])
                     checkpoint_path = checkpoint_dir / step_tag
                     accelerator.save_state(output_dir=str(checkpoint_path))
+                    accelerator.wait_for_everyone()
+                    _save_portable_checkpoint_weights(
+                        model, accelerator, checkpoint_path
+                    )
                     accelerator.wait_for_everyone()
 
                     # Save export metadata alongside resumable state.

@@ -20,7 +20,6 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import DistributedType, ProjectConfiguration, set_seed
 from datasets import ClassLabel, load_dataset
-from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
 from torch.nn import CrossEntropyLoss, MSELoss
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils.data import DataLoader
@@ -33,6 +32,7 @@ from transformers import (
 
 from neobert.checkpointing import (
     MODEL_WEIGHTS_NAME,
+    load_deepspeed_fp32_state_dict,
     load_model_safetensors,
     save_model_safetensors,
 )
@@ -637,11 +637,10 @@ def load_pretrained_weights(
     if is_deepspeed:
         logger.info(f"Loading DeepSpeed checkpoint from {checkpoint_path}")
         try:
-            model = load_state_dict_from_zero_checkpoint(
-                model,
+            state_dict = load_deepspeed_fp32_state_dict(
                 checkpoint_path,
-                tag="",  # Empty tag since path includes checkpoint number
             )
+            model.load_state_dict(state_dict, strict=False)
             logger.info("Successfully loaded DeepSpeed checkpoint")
         except Exception as e:
             logger.error(f"Failed to load DeepSpeed checkpoint: {e}")
