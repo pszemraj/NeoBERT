@@ -209,7 +209,7 @@ def process_function(
         *sentences,
         padding=False,
         max_length=int(cfg.tokenizer.max_length),
-        truncation=True,
+        truncation=bool(getattr(cfg.tokenizer, "truncation", True)),
     )
     if cfg.mode in ["train", "eval"]:
         result["labels"] = get_labels(

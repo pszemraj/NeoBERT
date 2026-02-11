@@ -1546,6 +1546,7 @@ def trainer(cfg: Config) -> None:
         )
 
     accelerator = Accelerator(
+        cpu=bool(getattr(cfg.trainer, "use_cpu", False)),
         step_scheduler_with_optimizer=False,  # enable manual control of the scheduler
         mixed_precision=mixed_precision,
         gradient_accumulation_steps=cfg.trainer.gradient_accumulation_steps,
@@ -1800,7 +1801,7 @@ def trainer(cfg: Config) -> None:
                         column_name=text_column,
                         max_length=tokenize_max_length,
                         remove_columns=True,
-                        truncation=True,
+                        truncation=cfg.tokenizer.truncation,
                         num_proc=cfg.dataset.num_proc,
                         add_special_tokens=add_special_tokens,
                         return_special_tokens_mask=return_special_tokens_mask,
@@ -1849,7 +1850,7 @@ def trainer(cfg: Config) -> None:
                     column_name=text_column,
                     max_length=tokenize_max_length,
                     remove_columns=True,
-                    truncation=True,
+                    truncation=cfg.tokenizer.truncation,
                     num_proc=tokenize_num_proc,
                     add_special_tokens=add_special_tokens,
                     return_special_tokens_mask=return_special_tokens_mask,
@@ -1980,7 +1981,7 @@ def trainer(cfg: Config) -> None:
                     column_name=text_column,
                     max_length=tokenize_max_length,
                     remove_columns=True,
-                    truncation=True,
+                    truncation=cfg.tokenizer.truncation,
                     num_proc=eval_num_proc,
                     add_special_tokens=add_special_tokens,
                     return_special_tokens_mask=return_special_tokens_mask,
@@ -2646,7 +2647,7 @@ def trainer(cfg: Config) -> None:
 
                     # Accelerator checkpoints are the source of truth for resuming.
                     save_total_limit = getattr(cfg.trainer, "save_total_limit", 0)
-                    max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
+                    max_ckpt = int(getattr(cfg.trainer, "max_ckpt", 0) or 0)
                     limit = max(save_total_limit, max_ckpt)
                     if (
                         limit > 0
@@ -2747,7 +2748,7 @@ def trainer(cfg: Config) -> None:
 
                     # Clean up old checkpoints if limit is set (after saving).
                     save_total_limit = getattr(cfg.trainer, "save_total_limit", 0)
-                    max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
+                    max_ckpt = int(getattr(cfg.trainer, "max_ckpt", 0) or 0)
                     limit = max(save_total_limit, max_ckpt)  # Use whichever is set
 
                     if (

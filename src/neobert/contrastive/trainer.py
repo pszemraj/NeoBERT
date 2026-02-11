@@ -168,8 +168,11 @@ def trainer(cfg: Config) -> None:
         str(output_dir),
     )
 
+    raw_save_total_limit = getattr(cfg.trainer, "save_total_limit", None)
+    raw_max_ckpt = getattr(cfg.trainer, "max_ckpt", None)
     save_total_limit = max(
-        getattr(cfg.trainer, "save_total_limit", 0), getattr(cfg.trainer, "max_ckpt", 0)
+        int(raw_save_total_limit or 0),
+        int(raw_max_ckpt or 0),
     )
     project_config = ProjectConfiguration(
         str(output_dir),
@@ -179,6 +182,7 @@ def trainer(cfg: Config) -> None:
     )
     wandb_enabled = cfg.wandb.enabled and cfg.wandb.mode != "disabled"
     accelerator = Accelerator(
+        cpu=bool(getattr(cfg.trainer, "use_cpu", False)),
         step_scheduler_with_optimizer=False,  # enable manual control of the scheduler
         mixed_precision=cfg.trainer.mixed_precision,
         gradient_accumulation_steps=cfg.trainer.gradient_accumulation_steps,
@@ -754,7 +758,7 @@ def trainer(cfg: Config) -> None:
             # Save model weights checkpoint
             if metrics["train/steps"] % cfg.trainer.save_steps == 0:
                 save_total_limit = getattr(cfg.trainer, "save_total_limit", 0)
-                max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
+                max_ckpt = int(getattr(cfg.trainer, "max_ckpt", 0) or 0)
                 limit = max(save_total_limit, max_ckpt)
                 if limit > 0:
                     # Delete checkpoints if there are too many

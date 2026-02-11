@@ -759,6 +759,7 @@ def trainer(cfg: Config) -> None:
 
     wandb_enabled = cfg.wandb.enabled and cfg.wandb.mode != "disabled"
     accelerator = Accelerator(
+        cpu=bool(getattr(cfg.trainer, "use_cpu", False)),
         log_with="wandb" if wandb_enabled else None,
         mixed_precision=mixed_precision,
         project_config=project_config,
@@ -954,11 +955,14 @@ def trainer(cfg: Config) -> None:
 
     # Preprocessing the datasets
     mapping = partial(process_function, tokenizer=tokenizer, cfg=cfg)
+    glue_num_proc = int(getattr(cfg.glue, "preprocessing_num_proc", 0) or 0)
+    map_num_proc = glue_num_proc if glue_num_proc > 0 else None
     with accelerator.main_process_first():
         processed_datasets = raw_datasets.map(
             mapping,
             batched=True,
             remove_columns=raw_datasets["train"].column_names,
+            num_proc=map_num_proc,
             desc="Preprocessing the dataset",
         )
 
@@ -1019,21 +1023,34 @@ def trainer(cfg: Config) -> None:
     eval_batch_size = (
         cfg.trainer.per_device_eval_batch_size or cfg.trainer.eval_batch_size or 32
     )
+    glue_num_workers = max(0, int(getattr(cfg.glue, "num_workers", 0)))
+    train_loader_kwargs = {
+        "collate_fn": collate_fn,
+        "batch_size": train_batch_size,
+        "num_workers": glue_num_workers,
+    }
+    eval_loader_kwargs = {
+        "collate_fn": collate_fn,
+        "batch_size": eval_batch_size,
+        "num_workers": glue_num_workers,
+    }
+    if glue_num_workers > 0:
+        train_loader_kwargs["persistent_workers"] = True
+        eval_loader_kwargs["persistent_workers"] = True
 
     train_dataloader = DataLoader(
         train_dataset,
         shuffle=True,
-        collate_fn=collate_fn,
-        batch_size=train_batch_size,
+        **train_loader_kwargs,
     )
     eval_dataloader = DataLoader(
-        eval_dataset, collate_fn=collate_fn, batch_size=eval_batch_size
+        eval_dataset,
+        **eval_loader_kwargs,
     )
     if cfg.task == "mnli":
         mm_eval_dataloader = DataLoader(
             mm_eval_dataset,
-            collate_fn=collate_fn,
-            batch_size=eval_batch_size,
+            **eval_loader_kwargs,
         )
 
     # Model
