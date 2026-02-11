@@ -55,6 +55,7 @@ from neobert.training_utils import (
     _maybe_compile_model,
     _maybe_prepare_for_forward,
     _resolve_resume_checkpoint,
+    resolve_wandb_watch_mode,
 )
 from neobert.utils import (
     configure_tf32,
@@ -2232,26 +2233,22 @@ def trainer(cfg: Config) -> None:
     )
 
     if wandb_enabled and accelerator.is_main_process:
-        wandb_watch = os.environ.get("WANDB_WATCH")
-        if wandb_watch is not None:
-            watch_mode = wandb_watch.strip().lower()
-            if watch_mode in {"", "false", "0", "none", "off"}:
-                watch_mode = None
-            elif watch_mode == "weights":
-                watch_mode = "parameters"
-            elif watch_mode not in {"gradients", "parameters", "all"}:
-                logger.warning(
-                    f"Unrecognized WANDB_WATCH value '{wandb_watch}'; "
-                    "skipping wandb.watch()"
-                )
-                watch_mode = None
-
-            if watch_mode:
-                wandb.watch(
-                    accelerator.unwrap_model(model),
-                    log=watch_mode,
-                    log_freq=getattr(cfg.wandb, "log_interval", 100),
-                )
+        watch_mode, watch_warning = resolve_wandb_watch_mode(
+            wandb_mode=cfg.wandb.mode,
+            env_value=os.environ.get("WANDB_WATCH"),
+        )
+        if watch_warning:
+            logger.warning(watch_warning)
+        if watch_mode:
+            watch_log_freq = max(1, int(getattr(cfg.trainer, "logging_steps", 100)))
+            logger.info(
+                f"Enabling wandb.watch(log={watch_mode}, log_freq={watch_log_freq})."
+            )
+            wandb.watch(
+                accelerator.unwrap_model(model),
+                log=watch_mode,
+                log_freq=watch_log_freq,
+            )
 
     train_loss_fn: Optional[torch.nn.Module] = None
     masked_objective: Optional[MaskedPositionsOnlyMLMObjective] = None

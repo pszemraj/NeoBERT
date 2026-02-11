@@ -231,7 +231,7 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `trainer.torch_compile_backend`       | `str`           | `"inductor"` | Compile backend name.                                    |
 | `trainer.enforce_full_packed_batches` | `bool`          | `true`       | Buffer packed fragments to emit full-sized microbatches. |
 | `trainer.eval_max_batches`            | `int \| None`   | `null`       | Optional eval cap; required for streaming eval when `dataset.eval_samples` is unset. |
-| `trainer.log_train_accuracy`          | `bool`          | `false`      | Log MLM token accuracy (extra compute).                  |
+| `trainer.log_train_accuracy`          | `bool`          | `true`       | Log MLM masked-token train accuracy (disable only for max-throughput sweeps). |
 | `trainer.log_grad_norm`               | `bool`          | `true`       | Log grad norm each logging interval.                     |
 | `trainer.log_weight_norms`            | `bool`          | `true`       | Log parameter norms (main-process overhead).             |
 | `trainer.tf32`                        | `bool`          | `true`       | Enable TF32 on supported CUDA GPUs.                      |
@@ -368,6 +368,9 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 > the same task-scoped payload to W&B (irrelevant task sections are excluded).
 > W&B is not auto-enabled by presence of a `wandb` section; set
 > `wandb.enabled: true` explicitly.
+> For pretraining/contrastive, `wandb.watch` defaults to gradient watching in
+> `wandb.mode: online`. Override with `WANDB_WATCH` (`gradients`,
+> `parameters`, `all`, or `off`).
 
 ### Top-Level Runtime Metadata
 
