@@ -218,6 +218,22 @@ class TestContrastivePipeline(unittest.TestCase):
         cfg.trainer.save_total_limit = 2
         self.assertEqual(_resolve_checkpoint_retention_limit(cfg), 2)
 
+    def test_prune_step_checkpoints_keeps_latest_for_limit_one(self):
+        """Ensure pruning keeps the latest checkpoint when limit=1."""
+        from neobert.contrastive.trainer import _prune_step_checkpoints
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_dir = Path(tmpdir)
+            for step in (10, 20):
+                (checkpoint_dir / str(step)).mkdir(parents=True, exist_ok=True)
+            (checkpoint_dir / "notes").mkdir(parents=True, exist_ok=True)
+
+            _prune_step_checkpoints(checkpoint_dir, retention_limit=1)
+
+            self.assertFalse((checkpoint_dir / "10").exists())
+            self.assertTrue((checkpoint_dir / "20").exists())
+            self.assertTrue((checkpoint_dir / "notes").exists())
+
     def test_contrastive_pretrained_checkpoint_root_rejects_legacy_layout(self):
         """Ensure legacy ``model_checkpoints`` roots fail fast for contrastive init."""
         try:

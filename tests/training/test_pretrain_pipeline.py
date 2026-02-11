@@ -404,6 +404,18 @@ class TestPretrainComponents(unittest.TestCase):
             self.assertTrue((checkpoint_dir / "30").exists())
             self.assertTrue((checkpoint_dir / "notes").exists())
 
+    def test_prune_step_checkpoints_limit_one_keeps_latest_only(self):
+        """Ensure retention limit=1 keeps exactly the latest numeric checkpoint."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_dir = Path(tmpdir)
+            for step in (1, 2):
+                (checkpoint_dir / str(step)).mkdir(parents=True, exist_ok=True)
+
+            _prune_step_checkpoints(checkpoint_dir, retention_limit=1)
+
+            self.assertFalse((checkpoint_dir / "1").exists())
+            self.assertTrue((checkpoint_dir / "2").exists())
+
     def test_save_portable_checkpoint_weights_from_accelerator_state_dict(self):
         """Ensure portable safetensors is emitted from accelerator state dicts."""
 

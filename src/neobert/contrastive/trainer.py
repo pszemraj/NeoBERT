@@ -77,6 +77,38 @@ def _resolve_checkpoint_retention_limit(cfg: Config) -> int:
     return 0
 
 
+def _prune_step_checkpoints(checkpoint_dir: Path, retention_limit: int) -> None:
+    """Prune old numeric step checkpoint folders in ``checkpoint_dir``.
+
+    :param Path checkpoint_dir: Root directory containing ``<step>/`` folders.
+    :param int retention_limit: Number of newest numeric checkpoints to keep.
+    """
+    if retention_limit <= 0 or not checkpoint_dir.exists():
+        return
+
+    checkpoints: list[tuple[int, Path]] = []
+    for item_path in checkpoint_dir.iterdir():
+        if not item_path.is_dir():
+            continue
+        try:
+            checkpoints.append((int(item_path.name), item_path))
+        except ValueError:
+            continue
+
+    if len(checkpoints) <= retention_limit:
+        return
+
+    checkpoints.sort(key=lambda item: item[0])
+    for _, old_path in checkpoints[: len(checkpoints) - retention_limit]:
+        try:
+            shutil.rmtree(old_path)
+            logger.info(f"Removed old checkpoint: {old_path} (limit={retention_limit})")
+        except FileNotFoundError:
+            logger.warning(f"Checkpoint already removed before prune: {old_path}")
+        except OSError as exc:
+            logger.warning(f"Failed to remove old checkpoint {old_path}: {exc}")
+
+
 def _normalize_contrastive_pretrained_checkpoint_root(
     checkpoint_root: str | Path,
 ) -> Path:
@@ -997,26 +1029,8 @@ def trainer(cfg: Config) -> None:
                 accelerator.wait_for_everyone()
 
                 limit = _resolve_checkpoint_retention_limit(cfg)
-                if (
-                    limit > 0
-                    and checkpoint_dir.exists()
-                    and accelerator.is_main_process
-                ):
-                    # Delete checkpoints if there are too many
-                    files = list(checkpoint_dir.iterdir())
-                    iterations = [
-                        int(f.name) for f in files if f.is_dir() and f.name.isdigit()
-                    ]
-                    iterations.sort()
-
-                    # Remove files with the smallest iterations until the limit is met
-                    while iterations and len(iterations) > limit:
-                        file_to_remove = iterations.pop(0)
-                        shutil.rmtree(checkpoint_dir / str(file_to_remove))
-                        print(
-                            f"Deleted old checkpoint {file_to_remove} due to limit "
-                            f"(limit = {limit})"
-                        )
+                if limit > 0 and accelerator.is_main_process:
+                    _prune_step_checkpoints(checkpoint_dir, retention_limit=limit)
 
             if metrics["train/steps"] >= cfg.trainer.max_steps:
                 break
