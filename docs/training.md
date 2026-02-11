@@ -111,20 +111,16 @@ ablation against the legacy baseline.
 
 ## Checkpointing and Resume
 
-Model checkpoints (export/inference assets):
-
-```text
-<output_dir>/model_checkpoints/<step>/
-  model.safetensors
-  config.yaml
-  tokenizer_info.json
-  tokenizer/
-```
-
-Accelerator state checkpoints (resume source of truth):
+Unified pretraining checkpoints (resume + export assets):
 
 ```text
 <output_dir>/checkpoints/<step>/
+  model.safetensors
+  optimizer.bin / scheduler.bin / random_states_*.pkl
+  custom_checkpoint_*.pkl
+  config.yaml
+  tokenizer_info.json
+  tokenizer/
 ```
 
 Resume examples:
@@ -137,7 +133,7 @@ python scripts/pretraining/pretrain.py \
 
 Notes:
 
-- resume operates from `<output_dir>/checkpoints/`.
+- resume and export both operate from `<output_dir>/checkpoints/`.
 - pretraining resume with `dataset.streaming: true` is rejected by trainer.
   Use a pre-tokenized non-streaming dataset for resumable runs.
 

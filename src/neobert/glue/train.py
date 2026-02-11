@@ -1216,12 +1216,10 @@ def trainer(cfg: Config) -> None:
                     "  2. Set 'glue.allow_random_weights: true' for testing with random weights"
                 )
         else:
-            # Ensure we have the full path to model_checkpoints
+            # Ensure we have the full path to pretraining checkpoints
             pretrained_checkpoint_dir = Path(pretrained_checkpoint_dir)
-            if pretrained_checkpoint_dir.name != "model_checkpoints":
-                pretrained_checkpoint_dir = (
-                    pretrained_checkpoint_dir / "model_checkpoints"
-                )
+            if pretrained_checkpoint_dir.name != "checkpoints":
+                pretrained_checkpoint_dir = pretrained_checkpoint_dir / "checkpoints"
             logger.info(
                 f"Will load checkpoint {pretrained_checkpoint} from {pretrained_checkpoint_dir}"
             )

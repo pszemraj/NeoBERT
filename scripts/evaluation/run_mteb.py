@@ -146,11 +146,17 @@ def evaluate_mteb(cfg: Any) -> None:
     if pretrained_checkpoint != "latest":
         ckpt = pretrained_checkpoint
     else:
-        latest_path = pretrained_checkpoint_dir / "model_checkpoints" / "latest"
-        if latest_path.is_file():
-            ckpt = latest_path.read_text(encoding="utf-8").strip()
-        else:
-            raise ValueError(f"Unable to find 'latest' file at {latest_path}")
+        checkpoint_root = pretrained_checkpoint_dir / "checkpoints"
+        candidates = [
+            int(path.name)
+            for path in checkpoint_root.iterdir()
+            if path.is_dir() and path.name.isdigit()
+        ]
+        if not candidates:
+            raise ValueError(
+                f"Unable to find numbered checkpoints under {checkpoint_root}"
+            )
+        ckpt = str(max(candidates))
 
     # Define path to store results
     output_folder = (
@@ -197,15 +203,12 @@ def evaluate_mteb(cfg: Any) -> None:
     if use_deepspeed:
         model = load_state_dict_from_zero_checkpoint(
             model,
-            pretrained_checkpoint_dir / "model_checkpoints",
+            pretrained_checkpoint_dir / "checkpoints",
             tag=str(ckpt),
         )
     else:
         checkpoint_path = (
-            pretrained_checkpoint_dir
-            / "model_checkpoints"
-            / str(ckpt)
-            / MODEL_WEIGHTS_NAME
+            pretrained_checkpoint_dir / "checkpoints" / str(ckpt) / MODEL_WEIGHTS_NAME
         )
         state_dict = load_model_safetensors(
             checkpoint_path.parent,

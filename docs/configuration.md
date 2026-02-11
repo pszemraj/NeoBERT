@@ -252,7 +252,7 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `trainer.num_train_epochs`       | `int`         | `3`       | Epoch count fallback when steps are not the only limiter. |
 | `trainer.eval_strategy`          | `str`         | `"steps"` | `steps` or `epoch`.                                       |
 | `trainer.save_strategy`          | `str`         | `"steps"` | `steps`, `epoch`, `best`, or `no`.                        |
-| `trainer.save_total_limit`       | `int \| None` | `3`       | Keep at most this many model checkpoints.                 |
+| `trainer.save_total_limit`       | `int \| None` | `3`       | Keep at most this many `checkpoints/<step>` directories.  |
 | `trainer.max_ckpt`               | `int \| None` | `null`    | Deprecated alias for `trainer.save_total_limit`.          |
 | `trainer.disable_tqdm`           | `bool`        | `false`   | Disable progress bars.                                    |
 | `trainer.dataloader_num_workers` | `int`         | `0`       | Contrastive-only dataloader worker override.              |
@@ -337,7 +337,7 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | Key                              | Type          | Default    | Description                                        |
 | -------------------------------- | ------------- | ---------- | -------------------------------------------------- |
 | `trainer.save_steps`             | `int`         | `10000`    | Save cadence.                                      |
-| `trainer.save_total_limit`       | `int \| None` | `3`        | Maximum retained model checkpoints.                |
+| `trainer.save_total_limit`       | `int \| None` | `3`        | Maximum retained `checkpoints/<step>` directories. |
 | `trainer.max_ckpt`               | `int \| None` | `null`     | Deprecated alias for `trainer.save_total_limit`.   |
 | `trainer.resume_from_checkpoint` | `str \| None` | `null`     | Resume source (`latest`, step dir, explicit path). |
 | `pretrained_checkpoint`          | `str`         | `"latest"` | Checkpoint selector for downstream tasks.          |

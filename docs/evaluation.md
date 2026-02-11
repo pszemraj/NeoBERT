@@ -50,7 +50,7 @@ python scripts/evaluation/run_mteb.py \
 
 ### Important MTEB behavior
 
-- Runner loads checkpoints from `<model_name_or_path>/model_checkpoints/`.
+- Runner loads checkpoints from `<model_name_or_path>/checkpoints/`.
 - Task family selection is read from config field `mteb_task_type`.
 - `--task_types` is currently parsed but not wired into task selection logic.
 - Output path is currently derived from run dir + checkpoint + max length:

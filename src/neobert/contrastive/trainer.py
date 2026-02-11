@@ -421,8 +421,8 @@ def trainer(cfg: Config) -> None:
 
     if pretrained_checkpoint_dir:
         pretrained_checkpoint_dir = Path(pretrained_checkpoint_dir)
-        if pretrained_checkpoint_dir.name != "model_checkpoints":
-            pretrained_checkpoint_dir = pretrained_checkpoint_dir / "model_checkpoints"
+        if pretrained_checkpoint_dir.name != "checkpoints":
+            pretrained_checkpoint_dir = pretrained_checkpoint_dir / "checkpoints"
         tag = _resolve_checkpoint_tag(
             pretrained_checkpoint_dir,
             pretrained_checkpoint or cfg.pretrained_checkpoint,

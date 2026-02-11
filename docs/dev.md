@@ -64,6 +64,10 @@ Status: **standardized**.
 - Training checkpoints have been standardized on `safetensors`.
 - This is compatible with the current pretraining flow and keeps export paths
   straightforward.
+- **Breaking change (2026-02):** pretraining now writes a single checkpoint tree
+  at `output_dir/checkpoints/<step>/` that contains both resumable Accelerate
+  state and export assets (`model.safetensors`, `config.yaml`, tokenizer files).
+  The previous parallel `model_checkpoints/` tree is no longer written.
 
 ## Recently Landed
 

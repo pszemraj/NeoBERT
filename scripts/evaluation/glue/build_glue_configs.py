@@ -223,14 +223,13 @@ def find_checkpoint_step(checkpoint_dir: Path, requested_step: Optional[str]) ->
     if requested_step and requested_step != "latest":
         return requested_step
 
+    checkpoint_root = checkpoint_dir / "checkpoints"
     candidates = [
-        p.name
-        for p in (checkpoint_dir / "model_checkpoints").glob("*")
-        if p.is_dir() and p.name.isdigit()
+        p.name for p in checkpoint_root.glob("*") if p.is_dir() and p.name.isdigit()
     ]
     if not candidates:
         raise FileNotFoundError(
-            f"No numbered checkpoints found under: {checkpoint_dir / 'model_checkpoints'}"
+            f"No numbered checkpoints found under: {checkpoint_root}"
         )
     return max(candidates, key=lambda name: int(name))
 
@@ -459,7 +458,7 @@ def parse_args() -> argparse.Namespace:
         "--checkpoint-dir",
         type=Path,
         required=True,
-        help="Directory containing model_checkpoints/ for the pretrained run",
+        help="Directory containing checkpoints/ for the pretrained run",
     )
     parser.add_argument(
         "--checkpoint-step",
@@ -536,7 +535,7 @@ def main() -> None:
     pretrain_config_path = (
         args.pretrain_config.resolve()
         if args.pretrain_config
-        else checkpoint_dir / "model_checkpoints" / checkpoint_step / "config.yaml"
+        else checkpoint_dir / "checkpoints" / checkpoint_step / "config.yaml"
     )
     if not pretrain_config_path.exists():
         raise FileNotFoundError(

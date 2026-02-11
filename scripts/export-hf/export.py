@@ -6,7 +6,7 @@ This script converts a NeoBERT checkpoint from the training format
 format with all necessary files for loading with transformers library.
 
 Usage:
-    python scripts/export-hf/export.py outputs/neobert_100m_100k/model_checkpoints/100000
+    python scripts/export-hf/export.py outputs/neobert_100m_100k/checkpoints/100000
 
 The script will create an hf/ directory in the parent folder with the exported model.
 """
@@ -895,10 +895,10 @@ def main() -> None:
             """\
             Examples:
             # Export checkpoint 100000 from neobert_100m_100k
-            python %(prog)s outputs/neobert_100m_100k/model_checkpoints/100000
+            python %(prog)s outputs/neobert_100m_100k/checkpoints/100000
 
             # Export to specific directory
-            python %(prog)s outputs/neobert_100m_100k/model_checkpoints/100000 --output my_model
+            python %(prog)s outputs/neobert_100m_100k/checkpoints/100000 --output my_model
         """
         ),
     )
