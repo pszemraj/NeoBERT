@@ -434,6 +434,31 @@ class TestPretrainComponents(unittest.TestCase):
             self.assertFalse(saved)
             self.assertFalse((checkpoint_path / MODEL_WEIGHTS_NAME).exists())
 
+    def test_save_portable_checkpoint_weights_collective_call_non_main(self):
+        """Ensure non-main ranks still participate in state-dict collection."""
+
+        class _AcceleratorStub:
+            is_main_process = False
+            get_state_dict_called = False
+
+            @classmethod
+            def get_state_dict(cls, model: torch.nn.Module, unwrap: bool = True):
+                assert unwrap is True
+                cls.get_state_dict_called = True
+                return model.state_dict()
+
+        model = torch.nn.Linear(4, 3, bias=False)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_path = Path(tmpdir)
+            saved = _save_portable_checkpoint_weights(
+                model,
+                _AcceleratorStub(),
+                checkpoint_path,
+            )
+            self.assertFalse(saved)
+            self.assertTrue(_AcceleratorStub.get_state_dict_called)
+            self.assertFalse((checkpoint_path / MODEL_WEIGHTS_NAME).exists())
+
     def test_gather_decoder_weight_passthrough_outside_deepspeed(self):
         """Ensure decoder weight passthrough when not running DeepSpeed."""
         model = torch.nn.Module()

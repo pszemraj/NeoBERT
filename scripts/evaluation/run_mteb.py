@@ -256,21 +256,32 @@ def evaluate_mteb(cfg: Any) -> None:
     )
 
     # Load pretrained weights
+    checkpoint_root = pretrained_checkpoint_dir / "checkpoints"
+    checkpoint_step_dir = checkpoint_root / str(ckpt)
+    checkpoint_path = checkpoint_step_dir / MODEL_WEIGHTS_NAME
     if use_deepspeed:
         state_dict = load_deepspeed_fp32_state_dict(
-            pretrained_checkpoint_dir / "checkpoints",
+            checkpoint_root,
             tag=str(ckpt),
         )
         model.load_state_dict(state_dict, strict=False)
     else:
-        checkpoint_path = (
-            pretrained_checkpoint_dir / "checkpoints" / str(ckpt) / MODEL_WEIGHTS_NAME
-        )
-        state_dict = load_model_safetensors(
-            checkpoint_path.parent,
-            map_location=device,
-        )
-        model.load_state_dict(state_dict)
+        if checkpoint_path.exists():
+            state_dict = load_model_safetensors(
+                checkpoint_step_dir,
+                map_location=device,
+            )
+            model.load_state_dict(state_dict)
+        else:
+            logger.warning(
+                f"{MODEL_WEIGHTS_NAME} not found at {checkpoint_path}; "
+                "falling back to DeepSpeed fp32 shard conversion."
+            )
+            state_dict = load_deepspeed_fp32_state_dict(
+                checkpoint_root,
+                tag=str(ckpt),
+            )
+            model.load_state_dict(state_dict, strict=False)
 
     model.to(device)
     model.eval()

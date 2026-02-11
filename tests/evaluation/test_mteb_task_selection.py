@@ -1,11 +1,13 @@
 """Unit tests for MTEB task selection resolution."""
 
+from contextlib import nullcontext
 import importlib.util
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 import warnings
 
 import pytest
+import torch
 
 _RUN_MTEB_PATH = (
     Path(__file__).resolve().parents[2] / "scripts" / "evaluation" / "run_mteb.py"
@@ -24,6 +26,36 @@ with warnings.catch_warnings():
 TASK_LIST = _RUN_MTEB_MODULE.TASK_LIST
 TASK_TYPE = _RUN_MTEB_MODULE.TASK_TYPE
 _resolve_mteb_tasks = _RUN_MTEB_MODULE._resolve_mteb_tasks
+
+
+def _make_mteb_cfg(tmp_path: Path, *, use_deepspeed: bool) -> SimpleNamespace:
+    """Build a minimal config object for ``evaluate_mteb`` tests."""
+    return SimpleNamespace(
+        mteb_batch_size=2,
+        mteb_pooling="mean",
+        mteb_overwrite_results=False,
+        pretrained_checkpoint="100",
+        trainer=SimpleNamespace(output_dir=str(tmp_path)),
+        tokenizer=SimpleNamespace(name="bert-base-uncased", max_length=16),
+        model=SimpleNamespace(
+            hidden_size=16,
+            num_hidden_layers=2,
+            num_attention_heads=2,
+            intermediate_size=32,
+            max_position_embeddings=16,
+            vocab_size=32,
+            rope=True,
+            rms_norm=True,
+            hidden_act="gelu",
+            dropout_prob=0.0,
+            norm_eps=1e-5,
+            embedding_init_range=0.02,
+            decoder_init_range=0.02,
+            classifier_init_range=0.02,
+        ),
+        use_deepspeed=use_deepspeed,
+        task_types=["sts"],
+    )
 
 
 def test_resolve_mteb_tasks_uses_config_task_type_by_default():
@@ -70,3 +102,163 @@ def test_resolve_mteb_tasks_rejects_unknown_tokens():
 
     with pytest.raises(ValueError):
         _resolve_mteb_tasks(cfg)
+
+
+def test_evaluate_mteb_falls_back_to_deepspeed_when_safetensors_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Ensure shard conversion is used when portable weights are absent."""
+    (tmp_path / "checkpoints" / "100").mkdir(parents=True, exist_ok=True)
+    cfg = _make_mteb_cfg(tmp_path, use_deepspeed=False)
+
+    calls = {"safetensors": 0, "deepspeed": 0}
+    strict_flags: list[bool] = []
+
+    class _DummyModel:
+        def load_state_dict(self, _state_dict, strict: bool = True):
+            strict_flags.append(strict)
+            return None
+
+        def to(self, _device: str):
+            return self
+
+        def eval(self):
+            return self
+
+    class _DummyMTEB:
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+        def run(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+    monkeypatch.setattr(
+        _RUN_MTEB_MODULE,
+        "get_tokenizer",
+        lambda *args, **kwargs: SimpleNamespace(pad_token_id=0),
+    )
+    monkeypatch.setattr(
+        _RUN_MTEB_MODULE,
+        "NeoBERTForMTEB",
+        lambda *args, **kwargs: _DummyModel(),
+    )
+    monkeypatch.setattr(
+        _RUN_MTEB_MODULE,
+        "MTEB",
+        _DummyMTEB,
+    )
+    monkeypatch.setattr(
+        _RUN_MTEB_MODULE.torch,
+        "autocast",
+        lambda *args, **kwargs: nullcontext(),
+    )
+
+    def _unexpected_safetensors(*args, **kwargs):
+        del args, kwargs
+        calls["safetensors"] += 1
+        raise AssertionError("load_model_safetensors should not be called in fallback")
+
+    monkeypatch.setattr(
+        _RUN_MTEB_MODULE,
+        "load_model_safetensors",
+        _unexpected_safetensors,
+    )
+
+    def _fake_load_deepspeed(*args, **kwargs):
+        del args, kwargs
+        calls["deepspeed"] += 1
+        return {"model.embeddings.weight": torch.zeros(1)}
+
+    monkeypatch.setattr(
+        _RUN_MTEB_MODULE,
+        "load_deepspeed_fp32_state_dict",
+        _fake_load_deepspeed,
+    )
+
+    _RUN_MTEB_MODULE.evaluate_mteb(cfg)
+
+    assert calls["safetensors"] == 0
+    assert calls["deepspeed"] == 1
+    assert strict_flags == [False]
+
+
+def test_evaluate_mteb_prefers_safetensors_when_available(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Ensure portable weights remain the preferred loading path."""
+    checkpoint_dir = tmp_path / "checkpoints" / "100"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    (checkpoint_dir / _RUN_MTEB_MODULE.MODEL_WEIGHTS_NAME).touch()
+    cfg = _make_mteb_cfg(tmp_path, use_deepspeed=False)
+
+    calls = {"safetensors": 0, "deepspeed": 0}
+    strict_flags: list[bool] = []
+
+    class _DummyModel:
+        def load_state_dict(self, _state_dict, strict: bool = True):
+            strict_flags.append(strict)
+            return None
+
+        def to(self, _device: str):
+            return self
+
+        def eval(self):
+            return self
+
+    class _DummyMTEB:
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+        def run(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+    monkeypatch.setattr(
+        _RUN_MTEB_MODULE,
+        "get_tokenizer",
+        lambda *args, **kwargs: SimpleNamespace(pad_token_id=0),
+    )
+    monkeypatch.setattr(
+        _RUN_MTEB_MODULE,
+        "NeoBERTForMTEB",
+        lambda *args, **kwargs: _DummyModel(),
+    )
+    monkeypatch.setattr(
+        _RUN_MTEB_MODULE,
+        "MTEB",
+        _DummyMTEB,
+    )
+    monkeypatch.setattr(
+        _RUN_MTEB_MODULE.torch,
+        "autocast",
+        lambda *args, **kwargs: nullcontext(),
+    )
+
+    def _fake_load_safetensors(*args, **kwargs):
+        del args, kwargs
+        calls["safetensors"] += 1
+        return {"model.embeddings.weight": torch.zeros(1)}
+
+    monkeypatch.setattr(
+        _RUN_MTEB_MODULE,
+        "load_model_safetensors",
+        _fake_load_safetensors,
+    )
+
+    def _fake_load_deepspeed(*args, **kwargs):
+        del args, kwargs
+        calls["deepspeed"] += 1
+        return {"model.embeddings.weight": torch.zeros(1)}
+
+    monkeypatch.setattr(
+        _RUN_MTEB_MODULE,
+        "load_deepspeed_fp32_state_dict",
+        _fake_load_deepspeed,
+    )
+
+    _RUN_MTEB_MODULE.evaluate_mteb(cfg)
+
+    assert calls["safetensors"] == 1
+    assert calls["deepspeed"] == 0
+    assert strict_flags == [True]

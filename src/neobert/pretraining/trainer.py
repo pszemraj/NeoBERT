@@ -1571,19 +1571,23 @@ def _save_portable_checkpoint_weights(
     :param Path checkpoint_path: Step checkpoint directory path.
     :return bool: True when portable weights were saved.
     """
-    if not accelerator.is_main_process:
-        return False
-
     try:
+        # Distributed backends (FSDP/FSDP2/DeepSpeed) may require all ranks to
+        # participate in state-dict collection collectives even when only rank 0
+        # ultimately persists the portable safetensors payload.
         state_dict = accelerator.get_state_dict(model, unwrap=True)
     except Exception as exc:
-        logger.warning(
-            "Unable to export portable checkpoint weights to "
-            f"{checkpoint_path / MODEL_WEIGHTS_NAME}: {exc}. "
-            "Resumable state was still saved. For DeepSpeed ZeRO-3, enable "
-            "`stage3_gather_16bit_weights_on_model_save`/`zero3_save_16bit_model` "
-            "to emit consolidated portable weights automatically."
-        )
+        if accelerator.is_main_process:
+            logger.warning(
+                "Unable to export portable checkpoint weights to "
+                f"{checkpoint_path / MODEL_WEIGHTS_NAME}: {exc}. "
+                "Resumable state was still saved. For DeepSpeed ZeRO-3, enable "
+                "`stage3_gather_16bit_weights_on_model_save`/`zero3_save_16bit_model` "
+                "to emit consolidated portable weights automatically."
+            )
+        return False
+
+    if not accelerator.is_main_process:
         return False
 
     try:
