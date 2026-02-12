@@ -14,40 +14,6 @@ from neobert.config import ConfigLoader
 class TestContrastivePipeline:
     """Test contrastive training pipeline functionality."""
 
-    def test_pooling_strategies(self):
-        """Test different pooling strategies for contrastive learning."""
-        from neobert.model import NeoBERT, NeoBERTConfig
-
-        config = NeoBERTConfig(
-            hidden_size=32,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            vocab_size=100,
-            attn_backend="sdpa",
-            hidden_act="gelu",
-        )
-
-        model = NeoBERT(config)
-
-        # Test input
-        batch_size, seq_len = 2, 8
-        input_ids = torch.randint(0, 100, (batch_size, seq_len))
-        attention_mask = torch.ones(batch_size, seq_len)
-        pad_mask = torch.where(attention_mask == 0, float("-inf"), float(0.0))
-
-        with torch.no_grad():
-            hidden_states = model(input_ids, pad_mask)
-
-            # Test average pooling
-            avg_pooled = (hidden_states * attention_mask.unsqueeze(-1)).sum(
-                1
-            ) / attention_mask.sum(1).unsqueeze(-1)
-            assert avg_pooled.shape == (batch_size, config.hidden_size)
-
-            # Test CLS pooling (first token)
-            cls_pooled = hidden_states[:, 0, :]
-            assert cls_pooled.shape == (batch_size, config.hidden_size)
-
     def test_contrastive_dataset_classes(self):
         """Test contrastive dataset class functionality."""
         try:

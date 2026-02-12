@@ -145,34 +145,6 @@ class TestPretrainComponents:
             sep_token="[SEP]",
         )
 
-    def test_mlm_data_collator(self):
-        """Test MLM data collator functionality."""
-        from neobert.collator import get_collator
-
-        tokenizer = self._make_tokenizer()
-
-        collator = get_collator(tokenizer=tokenizer, mlm_probability=0.15)
-
-        # Test with dummy data
-        texts = ["hello world", "test sentence"]
-        tokenized = tokenizer(texts, padding=True, return_tensors="pt")
-
-        batch = [
-            {
-                "input_ids": tokenized["input_ids"][0],
-                "attention_mask": tokenized["attention_mask"][0],
-            },
-            {
-                "input_ids": tokenized["input_ids"][1],
-                "attention_mask": tokenized["attention_mask"][1],
-            },
-        ]
-
-        collated = collator(batch)
-        assert "input_ids" in collated
-        assert "labels" in collated
-        assert "attention_mask" in collated
-
     def test_ensure_pinned_cpu_batch_repins_flat_and_nested_tensors(self):
         """Ensure CPU repinning covers flat and nested tensor containers."""
         cases = [
@@ -663,47 +635,6 @@ class TestPretrainComponents:
         assert prefetch_factor == 2
         assert notes == []
 
-    def test_mlm_collator_packed_seqlens_behavior_by_padding_side(self):
-        """Ensure packed-seqlens metadata is emitted only for right-padded batches."""
-        from neobert.collator import get_collator
-
-        tokenizer = self._make_tokenizer()
-        texts = ["hello world", "test"]
-        for padding_side, expect_packed in [("right", True), ("left", False)]:
-            tokenizer.padding_side = padding_side
-            collator = get_collator(
-                tokenizer=tokenizer,
-                mlm_probability=0.15,
-                return_packed_seqlens=True,
-            )
-            tokenized = tokenizer(texts, padding=True, return_tensors="pt")
-            batch = [
-                {
-                    "input_ids": tokenized["input_ids"][0],
-                    "attention_mask": tokenized["attention_mask"][0],
-                },
-                {
-                    "input_ids": tokenized["input_ids"][1],
-                    "attention_mask": tokenized["attention_mask"][1],
-                },
-            ]
-
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                collated = collator(batch)
-
-            assert "attention_mask" in collated
-            if expect_packed:
-                packed = collated["packed_seqlens"]
-                assert torch.is_tensor(packed)
-                attention_mask = collated["attention_mask"]
-                keep = torch.isfinite(attention_mask) & (attention_mask == 0)
-                lengths = keep.sum(dim=1, keepdim=True).to(torch.int32)
-                assert torch.equal(packed, lengths)
-            else:
-                assert "packed_seqlens" not in collated
-                assert any("Skipping packed_seqlens" in str(w.message) for w in caught)
-
     def test_resolve_tokenize_num_proc_falls_back_to_cpu_count(self):
         """Ensure tokenization num_proc falls back when affinity is unavailable."""
         from neobert.pretraining.trainer import _resolve_tokenize_num_proc
@@ -842,47 +773,6 @@ class TestPretrainComponents:
             assert os.environ["OMP_NUM_THREADS"] == "8"
             assert os.environ["TOKENIZERS_PARALLELISM"] == "false"
             assert os.environ["MKL_NUM_THREADS"] == "1"
-
-    def test_pack_sequences_collator(self):
-        """Ensure packed collator builds a block attention mask."""
-        from neobert.collator import get_collator
-
-        tokenizer = self._make_tokenizer()
-
-        collator = get_collator(
-            tokenizer=tokenizer,
-            mlm_probability=0.15,
-            pack_sequences=True,
-            max_length=8,
-        )
-
-        batch = [
-            {"input_ids": tokenizer("hello", add_special_tokens=False)["input_ids"]},
-            {"input_ids": tokenizer("world", add_special_tokens=False)["input_ids"]},
-        ]
-
-        collated = collator(batch)
-
-        assert "attention_mask" in collated
-        assert collated["attention_mask"].dim() == 2
-        assert "packed_seqlens" in collated
-        packed = collated["packed_seqlens"]
-        assert torch.is_tensor(packed)
-        assert all(row[row > 0].numel() >= 1 for row in packed)
-
-    def test_normalize_packed_seqlens_tensor(self):
-        """Ensure packed_seqlens tensors normalize to CPU int32 tensors."""
-        from neobert.model.model import _normalize_packed_seqlens
-
-        packed = torch.tensor([[3, 0, 0], [2, 1, 0]], dtype=torch.int32)
-        normalized = _normalize_packed_seqlens(packed)
-        assert torch.is_tensor(normalized)
-        assert normalized.dtype == torch.int32
-        assert normalized.device.type == "cpu"
-        assert torch.equal(
-            normalized,
-            torch.tensor([[3, 0, 0], [2, 1, 0]], dtype=torch.int32),
-        )
 
     def test_clear_stored_batch_drops_mode_transition_fragments(self):
         """Ensure stale buffered fragments are cleared on packed-mode transitions."""

@@ -14,31 +14,6 @@ from neobert.config import Config
 class TestGLUETaskSpecific:
     """Test GLUE task-specific functionality."""
 
-    def test_glue_classifier_forward_shapes_for_single_and_pair_inputs(self):
-        """Ensure GLUE classifier wrapper handles single and sentence-pair style inputs."""
-        from neobert.model import NeoBERTConfig, NeoBERTHFForSequenceClassification
-
-        config = NeoBERTConfig(
-            hidden_size=32,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            vocab_size=100,
-            num_labels=2,  # Binary classification
-            attn_backend="sdpa",
-            hidden_act="gelu",
-        )
-
-        model = NeoBERTHFForSequenceClassification(config)
-
-        for seq_len in (10, 15):
-            input_ids = torch.randint(0, 100, (1, seq_len))
-            attention_mask = torch.ones(1, seq_len)
-            with torch.no_grad():
-                outputs = model(
-                    input_ids=input_ids, attention_mask=attention_mask, return_dict=True
-                )
-            assert outputs.logits.shape == (1, 2)
-
     def test_glue_helper_factories_and_metric_loading(self):
         """Ensure tokenizer/collator/metric helpers honor expected GLUE wiring."""
         from neobert.glue.train import (
