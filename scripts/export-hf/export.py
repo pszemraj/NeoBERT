@@ -809,6 +809,16 @@ This is a NeoBERT model trained with [pszemraj/NeoBERT](https://github.com/pszem
 - **Max Length**: {hf_config["max_length"]}
 - **Dtype**: {hf_config["torch_dtype"]}
 
+## Runtime Dependencies
+
+Exported NeoBERT inference does **not** require Liger kernels, flash-attn, or
+other custom CUDA extensions. The exported `model.py` runs on standard
+PyTorch + Transformers attention paths.
+
+- **torch**: {torch.__version__}
+- **transformers**: {transformers.__version__}
+- **safetensors**: required (weights are exported as `model.safetensors`)
+
 ## Usage
 
 > [!IMPORTANT]
