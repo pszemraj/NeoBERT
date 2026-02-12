@@ -20,31 +20,20 @@ class TestMuonClipConfig:
         assert config.lr > 0
         assert 0 <= config.muon_beta < 1
 
-    def test_invalid_lr(self):
-        """Test invalid learning rate raises error."""
-        with pytest.raises(ValueError):
-            MuonClipConfig(lr=0)
-        with pytest.raises(ValueError):
-            MuonClipConfig(lr=-0.1)
-
-    def test_invalid_threshold(self):
-        """Test invalid clipping threshold raises error."""
-        with pytest.raises(ValueError):
-            MuonClipConfig(clipping_threshold=0)
-        with pytest.raises(ValueError):
-            MuonClipConfig(clipping_threshold=2000)
-
-    def test_invalid_clipping_interval(self):
-        """Test invalid clipping interval raises error."""
-        with pytest.raises(ValueError):
-            MuonClipConfig(clipping_interval=0)
-        with pytest.raises(ValueError):
-            MuonClipConfig(clipping_interval=-3)
-
-    def test_invalid_chunk_size(self):
-        """Test invalid chunk size raises error."""
-        with pytest.raises(ValueError):
-            MuonClipConfig(clipping_qk_chunk_size=0)
+    def test_invalid_numeric_fields_raise(self):
+        """Test invalid numeric config values fail fast."""
+        cases = [
+            {"lr": 0},
+            {"lr": -0.1},
+            {"clipping_threshold": 0},
+            {"clipping_threshold": 2000},
+            {"clipping_interval": 0},
+            {"clipping_interval": -3},
+            {"clipping_qk_chunk_size": 0},
+        ]
+        for kwargs in cases:
+            with pytest.raises(ValueError):
+                MuonClipConfig(**kwargs)
 
     def test_warnings_for_suboptimal(self):
         """Test warnings for suboptimal settings."""
