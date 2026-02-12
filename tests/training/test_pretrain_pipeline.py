@@ -295,12 +295,12 @@ class TestPretrainComponents:
 
         assert _NonMainAccelerator.get_state_dict_called
 
-    def test_gather_decoder_weight_passthrough_outside_deepspeed(self):
-        """Ensure decoder weight passthrough when not running DeepSpeed."""
+    def test_gather_decoder_weight_context_matrix(self):
+        """Ensure decoder-weight gather behavior is correct across distributed modes."""
         model = torch.nn.Module()
         model.decoder = torch.nn.Linear(4, 6, bias=False)
 
-        class _AcceleratorStub:
+        class _NoDistAccelerator:
             distributed_type = DistributedType.NO
 
             @staticmethod
@@ -309,18 +309,14 @@ class TestPretrainComponents:
 
         with patch("deepspeed.zero.GatheredParameters") as gathered:
             with _gather_decoder_weight_for_masked_objective(
-                model, _AcceleratorStub()
+                model, _NoDistAccelerator()
             ) as lm_weight:
                 assert lm_weight is model.decoder.weight
             gathered.assert_not_called()
 
-    def test_gather_decoder_weight_uses_deepspeed_gather_for_zero3_param(self):
-        """Ensure ZeRO-sharded decoder weights are gathered for masked objective."""
-        model = torch.nn.Module()
-        model.decoder = torch.nn.Linear(4, 6, bias=False)
         setattr(model.decoder.weight, "ds_id", 123)
 
-        class _AcceleratorStub:
+        class _DeepSpeedAccelerator:
             distributed_type = DistributedType.DEEPSPEED
 
             @staticmethod
@@ -332,19 +328,13 @@ class TestPretrainComponents:
             side_effect=lambda *_args, **_kwargs: nullcontext(),
         ) as gathered:
             with _gather_decoder_weight_for_masked_objective(
-                model, _AcceleratorStub()
+                model, _DeepSpeedAccelerator()
             ) as lm_weight:
                 assert lm_weight is model.decoder.weight
-
         gathered.assert_called_once()
         assert gathered.call_args.args[0] == [model.decoder.weight]
         assert gathered.call_args.kwargs["modifier_rank"] is None
         assert gathered.call_args.kwargs["fwd_module"] is model
-
-    def test_gather_decoder_weight_rejects_fsdp1(self):
-        """Ensure FSDP1 is rejected for masked-objective decoder-weight access."""
-        model = torch.nn.Module()
-        model.decoder = torch.nn.Linear(4, 6, bias=False)
 
         class _FSDPPluginStub:
             fsdp_version = 1
@@ -352,7 +342,7 @@ class TestPretrainComponents:
         class _StateStub:
             fsdp_plugin = _FSDPPluginStub()
 
-        class _AcceleratorStub:
+        class _FSDP1Accelerator:
             distributed_type = DistributedType.FSDP
             state = _StateStub()
 
@@ -361,11 +351,13 @@ class TestPretrainComponents:
                 return module
 
         with pytest.raises(RuntimeError, match="FSDP v1"):
-            with _gather_decoder_weight_for_masked_objective(model, _AcceleratorStub()):
+            with _gather_decoder_weight_for_masked_objective(
+                model, _FSDP1Accelerator()
+            ):
                 pass
 
-    def test_gather_decoder_weight_uses_fsdp2_unshard_reshard(self):
-        """Ensure FSDP2 unshards and reshards around decoder-weight access."""
+    def test_gather_decoder_weight_fsdp2_unshard_and_owner_search_paths(self):
+        """Ensure FSDP2 gather uses unshard/reshard and owner lookup works when unwrapped."""
 
         class _WaitHandle:
             def __init__(self, calls: list[tuple[str, bool | None]]) -> None:
@@ -387,9 +379,6 @@ class TestPretrainComponents:
             def reshard(self) -> None:
                 self._calls.append(("reshard", None))
 
-        calls: list[tuple[str, bool | None]] = []
-        model = _FSDP2ModelStub(calls)
-
         class _FSDPPluginStub:
             fsdp_version = 2
 
@@ -404,6 +393,8 @@ class TestPretrainComponents:
             def unwrap_model(module: torch.nn.Module) -> torch.nn.Module:
                 return module
 
+        calls: list[tuple[str, bool | None]] = []
+        model = _FSDP2ModelStub(calls)
         with patch(
             "torch.distributed.fsdp.FullyShardedDataParallel.summon_full_params"
         ) as summon_full_params:
@@ -412,22 +403,11 @@ class TestPretrainComponents:
             ) as lm_weight:
                 assert lm_weight is model.decoder.weight
         summon_full_params.assert_not_called()
-
         assert calls == [
             ("unshard", True),
             ("wait", None),
             ("reshard", None),
         ]
-
-    def test_gather_decoder_weight_fsdp2_owner_search_prefers_wrapped_model(self):
-        """Ensure owner search still works when unwrap_model strips FSDP2 hooks."""
-
-        class _WaitHandle:
-            def __init__(self, calls: list[tuple[str, bool | None]]) -> None:
-                self._calls = calls
-
-            def wait(self) -> None:
-                self._calls.append(("wait", None))
 
         class _CoreModel(torch.nn.Module):
             def __init__(self) -> None:
@@ -447,264 +427,28 @@ class TestPretrainComponents:
             def reshard(self) -> None:
                 self._calls.append(("reshard", None))
 
-        calls: list[tuple[str, bool | None]] = []
-        wrapped_model = _WrappedFSDP2Model(calls)
-
-        class _FSDPPluginStub:
-            fsdp_version = 2
-
-        class _StateStub:
-            fsdp_plugin = _FSDPPluginStub()
-
-        class _AcceleratorStub:
+        class _UnwrappedAcceleratorStub:
             distributed_type = DistributedType.FSDP
             state = _StateStub()
 
             @staticmethod
             def unwrap_model(module: torch.nn.Module) -> torch.nn.Module:
-                # Mimic Accelerate unwrapping that removes a top-level wrapper.
                 return module.module
 
+        wrapped_calls: list[tuple[str, bool | None]] = []
+        wrapped_model = _WrappedFSDP2Model(wrapped_calls)
         with _gather_decoder_weight_for_masked_objective(
-            wrapped_model, _AcceleratorStub()
+            wrapped_model, _UnwrappedAcceleratorStub()
         ) as lm_weight:
             assert lm_weight is wrapped_model.module.decoder.weight
-
-        assert calls == [
+        assert wrapped_calls == [
             ("unshard", True),
             ("wait", None),
             ("reshard", None),
         ]
 
-    def test_run_masked_objective_step_backprops_inside_gather_on_zero3(self):
-        """Ensure ZeRO-3 objective step runs backward before gather context exits."""
-
-        class _ModelStub(torch.nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                self.decoder = torch.nn.Linear(2, 3, bias=False)
-
-            def forward(
-                self,
-                src: torch.Tensor,
-                pad_mask: torch.Tensor | None = None,
-                packed_seqlens: torch.Tensor | None = None,
-                *,
-                return_logits: bool = True,
-            ) -> dict[str, torch.Tensor]:
-                _ = pad_mask, packed_seqlens, return_logits
-                hidden = torch.ones(
-                    src.shape[0],
-                    src.shape[1],
-                    2,
-                    dtype=torch.float32,
-                    requires_grad=True,
-                )
-                return {"hidden_representation": hidden}
-
-        class _ObjectiveStub:
-            def __call__(
-                self,
-                hidden_states: torch.Tensor,
-                labels: torch.Tensor,
-                lm_weight: torch.Tensor,
-                *,
-                compute_accuracy: bool = False,
-            ) -> MaskedObjectiveOut:
-                _ = labels, compute_accuracy
-                loss = hidden_states.sum() * 0.0 + lm_weight.sum() * 0.0
-                return MaskedObjectiveOut(
-                    loss_sum_local=loss.float(),
-                    num_masked_local=torch.tensor(0, dtype=torch.long),
-                    used_path="train_checkpointed_masked_ce",
-                    num_correct_local=torch.tensor(0, dtype=torch.long),
-                )
-
-        class _AcceleratorStub:
-            distributed_type = DistributedType.DEEPSPEED
-
-            def __init__(self, marker: dict[str, bool]) -> None:
-                self._marker = marker
-                self.backward_calls = 0
-
-            def backward(self, _loss: torch.Tensor) -> None:
-                self.backward_calls += 1
-                if not self._marker["active"]:
-                    raise AssertionError(
-                        "backward must run while gather context is still active"
-                    )
-
-        class _GatherMarkerContext:
-            def __init__(self, state: dict[str, bool], value: torch.Tensor) -> None:
-                self._state = state
-                self._value = value
-
-            def __enter__(self) -> torch.Tensor:
-                self._state["active"] = True
-                return self._value
-
-            def __exit__(self, exc_type, exc, tb) -> bool:
-                self._state["active"] = False
-                return False
-
-        model = _ModelStub()
-        setattr(model.decoder.weight, "ds_id", 7)
-        marker = {"active": False}
-        accelerator = _AcceleratorStub(marker)
-        batch = {
-            "input_ids": torch.ones((1, 2), dtype=torch.long),
-            "labels": torch.full((1, 2), -100, dtype=torch.long),
-        }
-
-        with patch(
-            "neobert.pretraining.trainer._gather_decoder_weight_for_masked_objective",
-            side_effect=lambda *_args, **_kwargs: _GatherMarkerContext(
-                marker, model.decoder.weight
-            ),
-        ):
-            _objective_out, _loss_sum, backward_done = _run_masked_objective_step(
-                model=model,
-                batch=batch,
-                pad_mask=None,
-                packed_seqlens=None,
-                masked_objective=_ObjectiveStub(),
-                accelerator=accelerator,
-                log_train_accuracy=False,
-            )
-
-        assert backward_done
-        assert accelerator.backward_calls == 1
-
-    def test_run_masked_objective_step_backprops_inside_gather_on_fsdp(self):
-        """Ensure FSDP2 objective step runs backward before gather exits."""
-
-        class _ModelStub(torch.nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                self.decoder = torch.nn.Linear(2, 3, bias=False)
-
-            def forward(
-                self,
-                src: torch.Tensor,
-                pad_mask: torch.Tensor | None = None,
-                packed_seqlens: torch.Tensor | None = None,
-                *,
-                return_logits: bool = True,
-            ) -> dict[str, torch.Tensor]:
-                _ = pad_mask, packed_seqlens, return_logits
-                hidden = torch.ones(
-                    src.shape[0],
-                    src.shape[1],
-                    2,
-                    dtype=torch.float32,
-                    requires_grad=True,
-                )
-                return {"hidden_representation": hidden}
-
-        class _ObjectiveStub:
-            def __call__(
-                self,
-                hidden_states: torch.Tensor,
-                labels: torch.Tensor,
-                lm_weight: torch.Tensor,
-                *,
-                compute_accuracy: bool = False,
-            ) -> MaskedObjectiveOut:
-                _ = labels, compute_accuracy
-                loss = hidden_states.sum() * 0.0 + lm_weight.sum() * 0.0
-                return MaskedObjectiveOut(
-                    loss_sum_local=loss.float(),
-                    num_masked_local=torch.tensor(0, dtype=torch.long),
-                    used_path="train_checkpointed_masked_ce",
-                    num_correct_local=torch.tensor(0, dtype=torch.long),
-                )
-
-        class _AcceleratorStub:
-            distributed_type = DistributedType.FSDP
-            state = type(
-                "_StateStub",
-                (),
-                {"fsdp_plugin": type("_FSDPPluginStub", (), {"fsdp_version": 2})()},
-            )()
-
-            def __init__(self, marker: dict[str, bool]) -> None:
-                self._marker = marker
-                self.backward_calls = 0
-
-            def backward(self, _loss: torch.Tensor) -> None:
-                self.backward_calls += 1
-                if not self._marker["active"]:
-                    raise AssertionError(
-                        "backward must run while gather context is still active"
-                    )
-
-        class _GatherMarkerContext:
-            def __init__(self, state: dict[str, bool], value: torch.Tensor) -> None:
-                self._state = state
-                self._value = value
-
-            def __enter__(self) -> torch.Tensor:
-                self._state["active"] = True
-                return self._value
-
-            def __exit__(self, exc_type, exc, tb) -> bool:
-                self._state["active"] = False
-                return False
-
-        model = _ModelStub()
-        marker = {"active": False}
-        accelerator = _AcceleratorStub(marker)
-        batch = {
-            "input_ids": torch.ones((1, 2), dtype=torch.long),
-            "labels": torch.full((1, 2), -100, dtype=torch.long),
-        }
-
-        with patch(
-            "neobert.pretraining.trainer._gather_decoder_weight_for_masked_objective",
-            side_effect=lambda *_args, **_kwargs: _GatherMarkerContext(
-                marker, model.decoder.weight
-            ),
-        ):
-            _objective_out, _loss_sum, backward_done = _run_masked_objective_step(
-                model=model,
-                batch=batch,
-                pad_mask=None,
-                packed_seqlens=None,
-                masked_objective=_ObjectiveStub(),
-                accelerator=accelerator,
-                log_train_accuracy=False,
-            )
-
-        assert backward_done
-        assert accelerator.backward_calls == 1
-
-    def test_should_backward_inside_gather_fsdp_depends_on_version(self):
-        """Ensure gather-scoped backward policy only applies to FSDP2+."""
-
-        class _FSDP1Accel:
-            distributed_type = DistributedType.FSDP
-            state = type(
-                "_StateStub",
-                (),
-                {"fsdp_plugin": type("_FSDPPluginStub", (), {"fsdp_version": 1})()},
-            )()
-
-        class _FSDP2Accel:
-            distributed_type = DistributedType.FSDP
-            state = type(
-                "_StateStub",
-                (),
-                {"fsdp_plugin": type("_FSDPPluginStub", (), {"fsdp_version": 2})()},
-            )()
-
-        lm_weight = torch.nn.Linear(2, 3, bias=False).weight
-        assert not _should_backward_inside_gathered_decoder_weight(
-            _FSDP1Accel(), lm_weight
-        )
-        assert _should_backward_inside_gathered_decoder_weight(_FSDP2Accel(), lm_weight)
-
-    def test_run_masked_objective_step_defers_backward_when_not_zero3(self):
-        """Ensure non-ZeRO paths defer backward to the outer training loop."""
+    def test_masked_objective_backward_policy_matrix(self):
+        """Ensure masked-objective backward timing matches distributed policy."""
 
         class _ModelStub(torch.nn.Module):
             def __init__(self) -> None:
@@ -737,9 +481,104 @@ class TestPretrainComponents:
                     loss_sum_local=(hidden_states.sum() * 0.0 + lm_weight.sum() * 0.0),
                     num_masked_local=torch.tensor(0, dtype=torch.long),
                     used_path="train_checkpointed_masked_ce",
+                    num_correct_local=torch.tensor(0, dtype=torch.long),
                 )
 
-        class _AcceleratorStub:
+        class _GatherMarkerContext:
+            def __init__(self, state: dict[str, bool], value: torch.Tensor) -> None:
+                self._state = state
+                self._value = value
+
+            def __enter__(self) -> torch.Tensor:
+                self._state["active"] = True
+                return self._value
+
+            def __exit__(self, exc_type, exc, tb) -> bool:
+                self._state["active"] = False
+                return False
+
+        class _FSDP1Accel:
+            distributed_type = DistributedType.FSDP
+            state = type(
+                "_StateStub",
+                (),
+                {"fsdp_plugin": type("_FSDPPluginStub", (), {"fsdp_version": 1})()},
+            )()
+
+        class _FSDP2Accel:
+            distributed_type = DistributedType.FSDP
+            state = type(
+                "_StateStub",
+                (),
+                {"fsdp_plugin": type("_FSDPPluginStub", (), {"fsdp_version": 2})()},
+            )()
+
+        lm_weight = torch.nn.Linear(2, 3, bias=False).weight
+        assert not _should_backward_inside_gathered_decoder_weight(
+            _FSDP1Accel(), lm_weight
+        )
+        assert _should_backward_inside_gathered_decoder_weight(_FSDP2Accel(), lm_weight)
+
+        class _DeepSpeedBackwardAccel:
+            distributed_type = DistributedType.DEEPSPEED
+
+            def __init__(self, marker: dict[str, bool]) -> None:
+                self._marker = marker
+                self.backward_calls = 0
+
+            def backward(self, _loss: torch.Tensor) -> None:
+                self.backward_calls += 1
+                assert self._marker["active"]
+
+        class _FSDP2BackwardAccel:
+            distributed_type = DistributedType.FSDP
+            state = type(
+                "_StateStub",
+                (),
+                {"fsdp_plugin": type("_FSDPPluginStub", (), {"fsdp_version": 2})()},
+            )()
+
+            def __init__(self, marker: dict[str, bool]) -> None:
+                self._marker = marker
+                self.backward_calls = 0
+
+            def backward(self, _loss: torch.Tensor) -> None:
+                self.backward_calls += 1
+                assert self._marker["active"]
+
+        for accelerator_cls, zero3 in [
+            (_DeepSpeedBackwardAccel, True),
+            (_FSDP2BackwardAccel, False),
+        ]:
+            model = _ModelStub()
+            if zero3:
+                setattr(model.decoder.weight, "ds_id", 7)
+            marker = {"active": False}
+            accelerator = accelerator_cls(marker)
+            batch = {
+                "input_ids": torch.ones((1, 2), dtype=torch.long),
+                "labels": torch.full((1, 2), -100, dtype=torch.long),
+            }
+
+            with patch(
+                "neobert.pretraining.trainer._gather_decoder_weight_for_masked_objective",
+                side_effect=lambda *_args, **_kwargs: _GatherMarkerContext(
+                    marker, model.decoder.weight
+                ),
+            ):
+                _objective_out, _loss_sum, backward_done = _run_masked_objective_step(
+                    model=model,
+                    batch=batch,
+                    pad_mask=None,
+                    packed_seqlens=None,
+                    masked_objective=_ObjectiveStub(),
+                    accelerator=accelerator,
+                    log_train_accuracy=False,
+                )
+            assert backward_done
+            assert accelerator.backward_calls == 1
+
+        class _NoDistAccelerator:
             distributed_type = DistributedType.NO
 
             def __init__(self) -> None:
@@ -749,12 +588,11 @@ class TestPretrainComponents:
                 self.backward_calls += 1
 
         model = _ModelStub()
-        accelerator = _AcceleratorStub()
+        accelerator = _NoDistAccelerator()
         batch = {
             "input_ids": torch.ones((1, 2), dtype=torch.long),
             "labels": torch.full((1, 2), -100, dtype=torch.long),
         }
-
         _objective_out, _loss_sum, backward_done = _run_masked_objective_step(
             model=model,
             batch=batch,
@@ -878,8 +716,8 @@ class TestPretrainComponents:
 
         assert resolved == 8
 
-    def test_resolve_eval_max_batches_per_rank(self):
-        """Ensure eval max_batches is split across ranks."""
+    def test_eval_budget_resolution_helpers(self):
+        """Ensure eval max-batch/sample budget helpers normalize consistently."""
         from neobert.pretraining.trainer import _resolve_eval_max_batches
 
         assert _resolve_eval_max_batches(None, num_processes=2) is None
@@ -888,8 +726,6 @@ class TestPretrainComponents:
         assert _resolve_eval_max_batches(10, num_processes=2) == 5
         assert _resolve_eval_max_batches(11, num_processes=2) == 6
 
-    def test_resolve_eval_samples_normalization(self):
-        """Ensure eval_samples resolves to positive integer or None."""
         assert _resolve_eval_samples(128) == 128
         assert _resolve_eval_samples("256") == 256
         assert _resolve_eval_samples(None) is None
@@ -900,8 +736,6 @@ class TestPretrainComponents:
         with pytest.raises(ValueError):
             _resolve_eval_samples("not_an_int")
 
-    def test_resolve_streaming_eval_budget_matrix(self):
-        """Ensure streaming eval budget selection handles valid and invalid inputs."""
         valid_cases = [
             (
                 {"eval_max_batches": 320, "eval_samples": None, "batch_size": 32},
@@ -927,8 +761,9 @@ class TestPretrainComponents:
                 per_device_eval_batch_size=32,
             )
 
-    def test_infer_eval_split_name_prefers_validation(self):
-        """Ensure eval split inference chooses validation-style splits."""
+    def test_eval_split_selection_helpers(self):
+        """Ensure eval split discovery and train/eval partition helpers stay stable."""
+        from neobert.pretraining.trainer import _select_train_split
 
         class _BuilderInfo:
             splits = {"train": object(), "validation": object(), "test": object()}
@@ -945,11 +780,8 @@ class TestPretrainComponents:
                 {},
                 train_split="train",
             )
-
         assert inferred == "validation"
 
-    def test_split_train_dataset_for_eval_samples_streaming_and_non_streaming(self):
-        """Ensure eval split helper behaves correctly for streaming and materialized data."""
         train_dataset = Dataset.from_dict({"text": ["a", "b", "c", "d", "e"]})
         remaining_train, eval_dataset = _split_train_dataset_for_eval_samples(
             train_dataset,
@@ -981,15 +813,9 @@ class TestPretrainComponents:
         assert remaining_train == ("train", 321)
         assert stream_dataset.calls == [("take", 321), ("skip", 321)]
 
-    def test_select_train_split_from_datasetdict(self):
-        """Ensure DatasetDict splits resolve to a Dataset."""
-        from neobert.pretraining.trainer import _select_train_split
-
         dataset = Dataset.from_dict({"text": ["a", "b"]})
         dataset_dict = DatasetDict(train=dataset, validation=dataset)
-
         resolved = _select_train_split(dataset_dict, None)
-
         assert isinstance(resolved, Dataset)
 
     def test_masked_correct_count(self):
@@ -1140,20 +966,21 @@ class TestPretrainComponents:
         }
         assert bias_params.issubset(no_decay_params)
 
-    def test_scheduler_creation(self):
-        """Test scheduler creation from config."""
+    def test_scheduler_creation_and_decay_name_normalization(self):
+        """Ensure scheduler construction works and decay names are case-insensitive."""
         config = ConfigLoader.load(
             Path(__file__).parent.parent
             / "configs"
             / "pretraining"
             / "test_tiny_pretrain.yaml"
         )
+        from torch.optim import AdamW
+        from torch.optim.lr_scheduler import CosineAnnealingLR
 
         from neobert.model import NeoBERT, NeoBERTConfig
         from neobert.optimizer import get_optimizer
         from neobert.scheduler import get_scheduler, resolve_scheduler_steps
 
-        # Create minimal model and optimizer
         model_config = NeoBERTConfig(
             hidden_size=32,
             num_hidden_layers=1,
@@ -1173,7 +1000,6 @@ class TestPretrainComponents:
             lr=config.optimizer.lr,
             weight_decay=config.optimizer.weight_decay,
         )
-
         _, warmup_steps, decay_steps, constant_steps = resolve_scheduler_steps(
             trainer_max_steps=config.trainer.max_steps,
             total_steps=config.scheduler.total_steps,
@@ -1191,30 +1017,12 @@ class TestPretrainComponents:
             decay_steps=decay_steps,
             constant_steps=constant_steps,
         )
-
         assert scheduler is not None
 
-    def test_scheduler_case_insensitive_decay(self):
-        """Scheduler decay selection should be case-insensitive."""
-        from torch.optim import AdamW
-        from torch.optim.lr_scheduler import CosineAnnealingLR
-
-        from neobert.model import NeoBERT, NeoBERTConfig
-        from neobert.scheduler import get_scheduler
-
-        model_config = NeoBERTConfig(
-            hidden_size=32,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            vocab_size=100,
-            attn_backend="sdpa",
-            hidden_act="gelu",
-        )
-        model = NeoBERT(model_config)
-        optimizer = AdamW(model.parameters(), lr=1e-4)
+        mixed_case_optimizer = AdamW(model.parameters(), lr=1e-4)
 
         scheduler = get_scheduler(
-            optimizer=optimizer,
+            optimizer=mixed_case_optimizer,
             lr=1e-4,
             decay="CoSiNe",
             warmup_steps=0,
