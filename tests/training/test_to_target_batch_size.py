@@ -175,3 +175,87 @@ class TestPackedFragmentBuffering(unittest.TestCase):
         self.assertEqual(out["packed_seqlens"].shape[0], 4)
         self.assertIsNotNone(stored["input_ids"])
         self.assertEqual(stored["input_ids"].shape[0], 1)
+
+
+class TestToTargetBatchSizeCPU(unittest.TestCase):
+    """CPU-path regression tests for to_target_batch_size."""
+
+    def test_to_target_batch_size_handles_empty_buffer(self):
+        """Ensure batch packing handles empty buffers without crashing."""
+        batch = {
+            "input_ids": torch.zeros((2, 4), dtype=torch.long),
+            "attention_mask": torch.ones((2, 4), dtype=torch.long),
+            "labels": torch.zeros((2, 4), dtype=torch.long),
+        }
+        stored_batch = {"input_ids": None, "attention_mask": None, "labels": None}
+
+        out, stored = to_target_batch_size(batch, stored_batch, target_size=4)
+        self.assertEqual(out["input_ids"].shape[0], 2)
+        self.assertIsNone(stored["input_ids"])
+
+        stored_batch = {
+            "input_ids": torch.zeros((2, 4), dtype=torch.long),
+            "attention_mask": torch.ones((2, 4), dtype=torch.long),
+            "labels": torch.zeros((2, 4), dtype=torch.long),
+        }
+        out, _stored = to_target_batch_size(batch, stored_batch, target_size=4)
+        self.assertEqual(out["input_ids"].shape[0], 4)
+
+    def test_to_target_batch_size_handles_none_packed_seqlens(self):
+        """Ensure None packed_seqlens are ignored when resizing batches."""
+        batch = {
+            "input_ids": torch.zeros((3, 4), dtype=torch.long),
+            "attention_mask": torch.ones((3, 4), dtype=torch.long),
+            "labels": torch.zeros((3, 4), dtype=torch.long),
+            "packed_seqlens": None,
+        }
+        stored_batch = {
+            "input_ids": None,
+            "attention_mask": None,
+            "labels": None,
+            "packed_seqlens": None,
+        }
+
+        out, stored = to_target_batch_size(batch, stored_batch, target_size=2)
+        self.assertEqual(out["input_ids"].shape[0], 2)
+        self.assertIsNone(out["packed_seqlens"])
+        self.assertIsNone(stored["packed_seqlens"])
+
+    def test_to_target_batch_size_handles_tensor_packed_seqlens(self):
+        """Ensure packed_seqlens tensors split and buffer with batch resizing."""
+        batch = {
+            "input_ids": torch.zeros((3, 4), dtype=torch.long),
+            "attention_mask": torch.ones((3, 4), dtype=torch.long),
+            "labels": torch.zeros((3, 4), dtype=torch.long),
+            "packed_seqlens": torch.tensor(
+                [[2, 2, 0], [3, 1, 0], [4, 0, 0]], dtype=torch.int32
+            ),
+        }
+        stored_batch = {
+            "input_ids": None,
+            "attention_mask": None,
+            "labels": None,
+            "packed_seqlens": None,
+        }
+
+        out, stored = to_target_batch_size(batch, stored_batch, target_size=2)
+        self.assertEqual(out["input_ids"].shape[0], 2)
+        self.assertTrue(torch.is_tensor(out["packed_seqlens"]))
+        self.assertEqual(tuple(out["packed_seqlens"].shape), (2, 3))
+        self.assertTrue(
+            torch.equal(
+                out["packed_seqlens"][0], torch.tensor([2, 2, 0], dtype=torch.int32)
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                out["packed_seqlens"][1], torch.tensor([3, 1, 0], dtype=torch.int32)
+            )
+        )
+        self.assertTrue(torch.is_tensor(stored["packed_seqlens"]))
+        self.assertEqual(tuple(stored["packed_seqlens"].shape), (1, 3))
+        self.assertTrue(
+            torch.equal(
+                stored["packed_seqlens"][0], torch.tensor([4, 0, 0], dtype=torch.int32)
+            )
+        )

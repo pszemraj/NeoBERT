@@ -8,35 +8,43 @@ It is the canonical reference for test process and authoring conventions.
 ### Full suite
 
 ```bash
-pytest -q
+conda run --name neobert pytest -q
 ```
 
 Or via helper:
 
 ```bash
-python tests/run_tests.py
+conda run --name neobert python tests/run_tests.py
 ```
 
 ### Subsets
 
 ```bash
 # One file
-pytest tests/kernels/test_attention.py -q
+conda run --name neobert pytest tests/kernels/test_attention.py -q
 
 # One directory
-pytest tests/model -q
+conda run --name neobert pytest tests/training -q
 
 # Verbose investigation
-pytest tests/model/test_model_forward.py -vv --showlocals
+conda run --name neobert pytest tests/test_model_forward.py -vv --showlocals
 ```
 
 ### Helper flags
 
 ```bash
-python tests/run_tests.py --test-dir training
-python tests/run_tests.py --pattern "test_*compile*.py"
-python tests/run_tests.py --no-pytest
+conda run --name neobert python tests/run_tests.py --test-dir training
+conda run --name neobert python tests/run_tests.py --pattern "test_*compile*.py"
+conda run --name neobert python tests/run_tests.py --no-pytest
 ```
+
+## Manual Validation Scripts
+
+`tests/manual/` contains opt-in validation/benchmark scripts and is excluded from
+default `pytest -q` discovery.
+
+Canonical command list for those scripts is maintained in
+[tests/manual/README.md](../tests/manual/README.md).
 
 ## Test Authoring Guidelines
 

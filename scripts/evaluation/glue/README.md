@@ -18,6 +18,7 @@ Behavior semantics for GLUE evaluation are documented in
 - Invoke from repository root.
 - Generated configs typically land under `configs/glue/generated/`.
 - Execution uses `scripts/evaluation/run_glue.py`.
+- Keep GLUE behavior semantics in [docs/evaluation.md](../../../docs/evaluation.md).
 
 ## Examples
 

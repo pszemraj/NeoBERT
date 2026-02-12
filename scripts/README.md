@@ -20,7 +20,7 @@ See [docs/training.md](../docs/training.md), [docs/evaluation.md](../docs/evalua
 - Evaluation scripts expose their own argparse flags and do not support full
   dot-notation override surface.
 - Export script takes a checkpoint path (not a config path).
-- Keep behavior details in docs; use script READMEs for entry points.
+- Keep behavior details in canonical docs; use script READMEs for entry points.
 
 ## Common Commands
 
@@ -40,6 +40,10 @@ python scripts/export-hf/export.py outputs/<run>/checkpoints/<step>
 
 ## Related Docs
 
+- [Documentation index](../docs/README.md)
 - [Configuration](../docs/configuration.md)
+- [Training](../docs/training.md)
+- [Evaluation](../docs/evaluation.md)
+- [Export](../docs/export.md)
 - [Troubleshooting](../docs/troubleshooting.md)
 - [Jobs launcher examples](../jobs/README.md)
