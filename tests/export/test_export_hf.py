@@ -85,16 +85,46 @@ class TestExportHF(unittest.TestCase):
             target_dir = Path(tmpdir)
             export.copy_hf_modeling_files(target_dir)
 
-            self.assertTrue((target_dir / "model.py").exists())
+            self.assertTrue((target_dir / "modeling_neobert.py").exists())
             self.assertTrue((target_dir / "rotary.py").exists())
             self.assertTrue((target_dir / "modeling_utils.py").exists())
-            model_text = (target_dir / "model.py").read_text()
+            self.assertFalse((target_dir / "model.py").exists())
+            model_text = (target_dir / "modeling_neobert.py").read_text()
             self.assertIn('["neobert.modeling_utils", "modeling_utils"]', model_text)
             self.assertIn(
                 '["neobert.huggingface.rotary", "rotary"]',
                 model_text,
             )
             self.assertNotIn("from ..modeling_utils import", model_text)
+
+    def test_create_hf_config_auto_map_uses_modeling_neobert_module(self):
+        """Ensure exported auto_map points at modeling_neobert.py symbols."""
+        export = self.export
+        neobert_config = {
+            "model": {
+                "hidden_size": 4,
+                "num_hidden_layers": 1,
+                "num_attention_heads": 2,
+                "intermediate_size": 8,
+                "vocab_size": 16,
+                "max_position_embeddings": 32,
+                "norm_eps": 1e-5,
+                "pad_token_id": 0,
+                "rope": True,
+                "rms_norm": True,
+                "hidden_act": "swiglu",
+            }
+        }
+        state_dict = {"model.encoder.weight": torch.zeros(16, 4, dtype=torch.float32)}
+
+        hf_config = export.create_hf_config(neobert_config, state_dict)
+        auto_map = hf_config.get("auto_map", {})
+
+        self.assertEqual(auto_map["AutoConfig"], "modeling_neobert.NeoBERTConfig")
+        self.assertEqual(auto_map["AutoModel"], "modeling_neobert.NeoBERT")
+        self.assertEqual(
+            auto_map["AutoModelForMaskedLM"], "modeling_neobert.NeoBERTLMHead"
+        )
 
     def test_get_torch_dtype_from_state_dict_handles_uncommon_dtypes(self):
         """Ensure dtype export path uses generic torch dtype string names."""

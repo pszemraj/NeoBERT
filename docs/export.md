@@ -43,7 +43,7 @@ Generated folder contains:
 - `config.json`
 - `model.safetensors`
 - `pytorch_model.bin`
-- `model.py`
+- `modeling_neobert.py`
 - `rotary.py`
 - `modeling_utils.py`
 - tokenizer assets (`tokenizer.json`, `special_tokens_map.json`, etc.)

@@ -350,10 +350,12 @@ def create_hf_config(
         "architectures": ["NeoBERTLMHead"],
         "model_type": "neobert",
         "auto_map": {
-            "AutoConfig": "model.NeoBERTConfig",
-            "AutoModel": "model.NeoBERT",
-            "AutoModelForMaskedLM": "model.NeoBERTLMHead",
-            "AutoModelForSequenceClassification": "model.NeoBERTForSequenceClassification",
+            "AutoConfig": "modeling_neobert.NeoBERTConfig",
+            "AutoModel": "modeling_neobert.NeoBERT",
+            "AutoModelForMaskedLM": "modeling_neobert.NeoBERTLMHead",
+            "AutoModelForSequenceClassification": (
+                "modeling_neobert.NeoBERTForSequenceClassification"
+            ),
         },
         "hidden_size": model_config["hidden_size"],
         "num_hidden_layers": model_config["num_hidden_layers"],
@@ -470,7 +472,7 @@ def validate_tokenizer_special_tokens(tokenizer_dir: Path) -> None:
 def _rewrite_export_model_imports(model_path: Path) -> None:
     """Rewrite local imports in exported modeling code for HF dynamic modules.
 
-    :param Path model_path: Path to the exported model.py file.
+    :param Path model_path: Path to the exported modeling module file.
     """
     contents = model_path.read_text()
     # Rewrite all parent-relative modeling_utils imports so flat exported repos
@@ -485,7 +487,7 @@ def _rewrite_export_model_imports(model_path: Path) -> None:
 
 
 def copy_hf_modeling_files(target_dir: Path) -> None:
-    """Copy the Hugging Face modeling files from src/neobert/huggingface/.
+    """Copy Hugging Face modeling files from ``src/neobert/huggingface/``.
 
     :param Path target_dir: Destination directory for modeling files.
     """
@@ -497,22 +499,17 @@ def copy_hf_modeling_files(target_dir: Path) -> None:
     if not src_dir.exists():
         raise ValueError(f"HuggingFace model files not found at {src_dir}")
 
-    # Copy the required files
-    files_to_copy = ["modeling_neobert.py", "rotary.py"]
+    # Copy the required files without renaming so exported code maps directly
+    # to the repository's HF export module layout.
+    files_to_copy = ["modeling_neobert.py", "rotary.py", "modeling_utils.py"]
     for filename in files_to_copy:
         src_file = src_dir / filename
-        dst_name = "model.py" if filename == "modeling_neobert.py" else filename
         if not src_file.exists():
             raise ValueError(f"Required file {src_file} not found")
-        shutil.copy(src_file, target_dir / dst_name)
-        print(f"  Copied {filename} -> {dst_name}")
+        shutil.copy(src_file, target_dir / filename)
+        print(f"  Copied {filename} -> {filename}")
 
-    modeling_utils_src = src_dir.parent / "modeling_utils.py"
-    if modeling_utils_src.exists():
-        shutil.copy(modeling_utils_src, target_dir / "modeling_utils.py")
-        print("  Copied modeling_utils.py -> modeling_utils.py")
-
-    model_path = target_dir / "model.py"
+    model_path = target_dir / "modeling_neobert.py"
     if model_path.exists():
         _rewrite_export_model_imports(model_path)
 
@@ -812,7 +809,7 @@ This is a NeoBERT model trained with [pszemraj/NeoBERT](https://github.com/pszem
 ## Runtime Dependencies
 
 Exported NeoBERT inference does **not** require Liger kernels, flash-attn, or
-other custom CUDA extensions. The exported `model.py` runs on standard
+other custom CUDA extensions. The exported `modeling_neobert.py` runs on standard
 PyTorch + Transformers attention paths.
 
 - **torch**: {torch.__version__}

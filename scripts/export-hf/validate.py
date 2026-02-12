@@ -99,14 +99,15 @@ def validate_model_files(model_path: Path) -> List[str]:
     :return list[str]: Missing file names.
     """
     # Project-specific expectations
-    required_files = [
-        "config.json",
-        "model.py",
-        "rotary.py",
-    ]
+    required_files = ["config.json", "rotary.py"]
     weight_files = ["model.safetensors", "pytorch_model.bin"]
 
     missing = [f for f in required_files if not (model_path / f).exists()]
+    if (
+        not (model_path / "modeling_neobert.py").exists()
+        and not (model_path / "model.py").exists()
+    ):
+        missing.append("modeling_neobert.py (or legacy model.py)")
     if not any((model_path / f).exists() for f in weight_files):
         missing.append("model weights (model.safetensors or pytorch_model.bin)")
     config = _load_config(model_path)
