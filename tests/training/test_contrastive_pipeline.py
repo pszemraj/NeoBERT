@@ -194,49 +194,25 @@ class TestContrastivePipeline:
 class TestContrastiveLoss:
     """Test contrastive loss implementations."""
 
-    def test_supervised_contrastive_loss(self):
-        """Test supervised contrastive loss."""
+    @pytest.mark.parametrize(
+        ("temperature", "num_views"),
+        [
+            (0.1, 1),
+            (0.05, 2),
+        ],
+    )
+    def test_contrastive_loss_variants(self, temperature: float, num_views: int):
+        """Test supervised/self-supervised SupCon loss variants with one matrix."""
         try:
             from neobert.contrastive.loss import SupConLoss
 
-            loss_fn = SupConLoss(temperature=0.1)
-
-            # Test with labels
+            loss_fn = SupConLoss(temperature=temperature)
             batch_size = 4
             hidden_size = 16
-            features = torch.randn(batch_size, 1, hidden_size)  # [N, 1, D]
-            torch.tensor([0, 0, 1, 1])  # Two classes
+            features = torch.randn(batch_size, num_views, hidden_size)
 
-            # SupConLoss expects queries and corpus, not features and labels
-            # For supervised case, we'd need to handle label grouping separately
             queries = features[:, 0, :]
-            corpus = features[:, 0, :]
-            loss = loss_fn(queries, corpus)
-
-            assert isinstance(loss, torch.Tensor)
-            assert not torch.isnan(loss)
-            assert loss.item() >= 0
-
-        except ImportError:
-            pytest.skip("SupConLoss not available")
-
-    def test_self_supervised_contrastive_loss(self):
-        """Test self-supervised contrastive loss (SimCSE style)."""
-        try:
-            from neobert.contrastive.loss import SupConLoss
-
-            loss_fn = SupConLoss(temperature=0.05)
-
-            # Test without labels (self-supervised)
-            batch_size = 4
-            hidden_size = 16
-            features = torch.randn(
-                batch_size, 2, hidden_size
-            )  # [N, 2, D] for two views
-
-            # SupConLoss expects queries and corpus
-            queries = features[:, 0, :]
-            corpus = features[:, 1, :]  # Second view
+            corpus = features[:, 0 if num_views == 1 else 1, :]
             loss = loss_fn(queries, corpus)
 
             assert isinstance(loss, torch.Tensor)

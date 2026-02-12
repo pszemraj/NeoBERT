@@ -46,8 +46,8 @@ class TestStreamingShuffle(unittest.TestCase):
         self.assertIs(out, dataset)
         self.assertEqual(dataset.shuffle_calls, [])
 
-    def test_prepare_resume_dataloader_streaming_best_effort_skip(self):
-        """Ensure streaming resume performs best-effort batch skipping."""
+    def test_prepare_resume_dataloader_streaming_skip_cases(self):
+        """Ensure streaming resume skips using the expected counter per case."""
 
         class DummyDataloader:
             def __init__(self) -> None:
@@ -69,56 +69,29 @@ class TestStreamingShuffle(unittest.TestCase):
                 self.last_skip = num_batches
                 return dataloader
 
-        dataloader = DummyDataloader()
-        accelerator = DummyAccelerator()
-        metrics = {"train/epochs": 1, "train/batches": 5}
+        cases = [
+            ("global_batches", {"train/epochs": 1, "train/batches": 5}, 5),
+            (
+                "epoch_local_batches",
+                {
+                    "train/epochs": 3,
+                    "train/batches": 105,  # Global batches across prior epochs.
+                    "train/batches_in_epoch": 7,  # Epoch-local resume position.
+                },
+                7,
+            ),
+        ]
 
-        skipped = _prepare_resume_dataloader(
-            dataloader, metrics, accelerator, is_streaming=True
-        )
-        self.assertIs(skipped, dataloader)
-        self.assertTrue(dataloader.set_epoch_called)
-        self.assertTrue(accelerator.skip_called)
-        self.assertEqual(accelerator.last_skip, 5)
-
-    def test_prepare_resume_dataloader_streaming_prefers_epoch_local_counter(self):
-        """Ensure unknown-length streaming resume prefers epoch-local progress."""
-
-        class DummyDataloader:
-            def __init__(self) -> None:
-                self.set_epoch_called = False
-
-            def set_epoch(self, epoch: int) -> None:
-                self.set_epoch_called = True
-
-            def __len__(self) -> int:
-                raise TypeError("no length")
-
-        class DummyAccelerator:
-            def __init__(self) -> None:
-                self.skip_called = False
-                self.last_skip = None
-
-            def skip_first_batches(self, dataloader, num_batches: int):
-                self.skip_called = True
-                self.last_skip = num_batches
-                return dataloader
-
-        dataloader = DummyDataloader()
-        accelerator = DummyAccelerator()
-        metrics = {
-            "train/epochs": 3,
-            "train/batches": 105,  # Global batches across prior epochs
-            "train/batches_in_epoch": 7,  # Epoch-local resume position
-        }
-
-        skipped = _prepare_resume_dataloader(
-            dataloader, metrics, accelerator, is_streaming=True
-        )
-        self.assertIs(skipped, dataloader)
-        self.assertTrue(dataloader.set_epoch_called)
-        self.assertTrue(accelerator.skip_called)
-        self.assertEqual(accelerator.last_skip, 7)
+        for _name, metrics, expected_skip in cases:
+            dataloader = DummyDataloader()
+            accelerator = DummyAccelerator()
+            skipped = _prepare_resume_dataloader(
+                dataloader, metrics, accelerator, is_streaming=True
+            )
+            self.assertIs(skipped, dataloader)
+            self.assertTrue(dataloader.set_epoch_called)
+            self.assertTrue(accelerator.skip_called)
+            self.assertEqual(accelerator.last_skip, expected_skip)
 
     def test_prepare_resume_dataloader_uses_len_for_non_streaming(self):
         """Ensure resume skip logic uses len and skip_first_batches when available."""

@@ -807,57 +807,8 @@ class TestPretrainComponents:
             assert (final_ckpt / "model.safetensors").read_text() == "new"
             assert not (root / "100.old").exists()
 
-    def test_optimizer_creation(self):
-        """Test optimizer creation from config."""
-        config = ConfigLoader.load(
-            Path(__file__).parent.parent
-            / "configs"
-            / "pretraining"
-            / "test_tiny_pretrain.yaml"
-        )
-
-        from neobert.model import NeoBERT, NeoBERTConfig
-        from neobert.optimizer import get_optimizer
-
-        # Create tiny model
-        model_config = NeoBERTConfig(
-            hidden_size=32,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            vocab_size=100,
-            attn_backend="sdpa",
-            hidden_act="gelu",
-            rms_norm=False,
-        )
-        model = NeoBERT(model_config)
-
-        from accelerate.utils import DistributedType
-
-        optimizer = get_optimizer(
-            model,
-            DistributedType.NO,
-            name=config.optimizer.name,
-            lr=config.optimizer.lr,
-            weight_decay=config.optimizer.weight_decay,
-        )
-
-        assert optimizer is not None
-        # Should be AdamW
-        assert "AdamW" in str(type(optimizer))
-        assert len(optimizer.param_groups) >= 2
-        no_decay = [
-            group for group in optimizer.param_groups if group["weight_decay"] == 0.0
-        ]
-        assert no_decay
-        no_decay_params = set(no_decay[0]["params"])
-        assert model.encoder.weight in no_decay_params
-        bias_params = {
-            p for n, p in model.named_parameters() if n.lower().endswith(".bias")
-        }
-        assert bias_params.issubset(no_decay_params)
-
-    def test_scheduler_creation_and_decay_name_normalization(self):
-        """Ensure scheduler construction works and decay names are case-insensitive."""
+    def test_optimizer_and_scheduler_creation_with_decay_name_normalization(self):
+        """Ensure optimizer grouping and scheduler decay-name normalization both work."""
         config = ConfigLoader.load(
             Path(__file__).parent.parent
             / "configs"
@@ -890,6 +841,20 @@ class TestPretrainComponents:
             lr=config.optimizer.lr,
             weight_decay=config.optimizer.weight_decay,
         )
+        assert optimizer is not None
+        assert "AdamW" in str(type(optimizer))
+        assert len(optimizer.param_groups) >= 2
+        no_decay = [
+            group for group in optimizer.param_groups if group["weight_decay"] == 0.0
+        ]
+        assert no_decay
+        no_decay_params = set(no_decay[0]["params"])
+        assert model.encoder.weight in no_decay_params
+        bias_params = {
+            p for n, p in model.named_parameters() if n.lower().endswith(".bias")
+        }
+        assert bias_params.issubset(no_decay_params)
+
         _, warmup_steps, decay_steps, constant_steps = resolve_scheduler_steps(
             trainer_max_steps=config.trainer.max_steps,
             total_steps=config.scheduler.total_steps,
