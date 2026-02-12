@@ -811,6 +811,14 @@ PyTorch + Transformers attention paths.
 - **transformers**: {transformers.__version__}
 - **safetensors**: required (weights are exported as `model.safetensors`)
 
+## Exported Artifacts
+
+- `config.json`
+- `model.safetensors`
+- `modeling_neobert.py`
+- `rotary.py`
+- tokenizer files (`tokenizer.json`, `tokenizer_config.json`, `special_tokens_map.json`, ...)
+
 ## Usage
 
 > [!IMPORTANT]
