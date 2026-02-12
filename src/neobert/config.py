@@ -1,11 +1,12 @@
 """Configuration dataclasses and helpers for NeoBERT runs."""
 
 import argparse
+import re
 import warnings
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, get_args, get_origin
 
 import yaml
 
@@ -35,6 +36,45 @@ def _parse_cli_bool(value: str) -> bool:
     raise argparse.ArgumentTypeError(
         "Expected a boolean value (true/false, 1/0, yes/no, on/off)."
     )
+
+
+def resolve_mixed_precision(value: Any, *, task: str) -> str:
+    """Normalize and validate mixed-precision policy for a task.
+
+    Accepted user values:
+    - booleans: ``True`` -> ``"bf16"``, ``False`` -> ``"no"``
+    - strings: ``"bf16"``, ``"fp32"``, ``"no"``
+
+    Runtime policy:
+    - ``fp32`` is normalized to ``no``
+    - ``fp16`` is unsupported and rejected for all tasks
+
+    :param Any value: Raw mixed-precision value from config/CLI.
+    :param str task: Active task name.
+    :raises ValueError: If the value is unsupported for the given task.
+    :return str: Normalized precision mode.
+    """
+    del task  # Mixed-precision policy is task-independent.
+    if isinstance(value, bool):
+        normalized = "bf16" if value else "no"
+    else:
+        normalized = str(value).strip().lower()
+    if normalized == "fp32":
+        normalized = "no"
+
+    if normalized == "fp16":
+        raise ValueError(
+            "trainer.mixed_precision='fp16' is not supported. "
+            "Use 'bf16' (recommended) or 'no'/'fp32'."
+        )
+
+    valid_values = {"no", "bf16"}
+    if normalized not in valid_values:
+        raise ValueError(
+            "trainer.mixed_precision must be one of {'no','bf16','fp32'}, "
+            f"got {value!r}."
+        )
+    return normalized
 
 
 # Note: mutable defaults in dataclasses below use default_factory to avoid shared state.
@@ -95,8 +135,8 @@ class DatasetConfig:
     # Contrastive-specific
     load_all_from_disk: bool = False
     force_redownload: bool = False
-    pretraining_prob: float = 0.3
-    min_length: int = 512
+    min_length: int = 5
+    alpha: float = 1.0
 
 
 @dataclass
@@ -109,6 +149,9 @@ class TokenizerConfig:
     padding: str = "max_length"
     truncation: bool = True
     vocab_size: Optional[int] = None  # For compatibility with tests
+    trust_remote_code: bool = False
+    revision: Optional[str] = None
+    allow_special_token_rewrite: bool = False
 
 
 @dataclass
@@ -166,7 +209,6 @@ class SchedulerConfig:
     name: str = "cosine"
     warmup_steps: int = 10000
     total_steps: Optional[int] = None
-    num_cycles: float = 0.5
     decay_steps: Optional[int] = None  # Optional absolute decay end step
     final_lr_ratio: float = 0.1
     warmup_percent: Optional[float] = None
@@ -218,9 +260,11 @@ class TrainerConfig:
     disable_tqdm: bool = False
     dataloader_num_workers: int = 0
     use_cpu: bool = False
-    report_to: List[str] = field(default_factory=list)
+    report_to: List[str] = field(
+        default_factory=list
+    )  # Deprecated: ignored, use wandb.enabled.
     tf32: bool = True
-    max_ckpt: int = 3
+    max_ckpt: Optional[int] = None  # Deprecated alias for save_total_limit
     log_weight_norms: bool = True
     # Legacy batch size fields (use per_device versions instead)
     train_batch_size: Optional[int] = None
@@ -248,6 +292,7 @@ class WandbConfig:
     name: Optional[str] = None
     tags: List[str] = field(default_factory=list)
     mode: str = "online"
+    watch: str = "gradients"
     log_interval: int = 100
     resume: str = "never"
     dir: str = "logs/wandb"
@@ -288,6 +333,10 @@ class ContrastiveConfig:
     pooling: str = "avg"  # avg, cls, max
     loss_type: str = "simcse"  # simcse, supcon
     hard_negative_weight: float = 0.0
+    pretraining_prob: float = 0.3
+    pretrained_checkpoint_dir: Optional[str] = None
+    pretrained_checkpoint: Optional[Union[str, int]] = None
+    allow_random_weights: bool = False
 
 
 @dataclass
@@ -319,7 +368,7 @@ class Config:
 
     # Model loading
     pretrained_checkpoint: str = "latest"
-    use_deepspeed: bool = True
+    use_deepspeed: bool = False
 
     # Metadata for downstream evaluations (e.g., GLUE linkage)
     pretraining_metadata: Dict[str, Any] = field(default_factory=dict)
@@ -333,6 +382,464 @@ class Config:
 class ConfigLoader:
     """Load and merge configuration from YAML files and command line arguments."""
 
+    _VARIABLE_EXACT_PATTERN = re.compile(r"^\$variables\.([A-Za-z0-9_.-]+)$")
+    _VARIABLE_INLINE_PATTERN = re.compile(
+        r"\{\$variables\.([A-Za-z0-9_.-]+)\}|\$\{variables\.([A-Za-z0-9_.-]+)\}"
+    )
+    _VARIABLE_TOKEN_PATTERN = re.compile(r"\$variables\.([A-Za-z0-9_.-]+)")
+
+    @staticmethod
+    def _resolve_yaml_variables(cfg_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Resolve top-level ``variables`` references in a YAML mapping.
+
+        Supported forms:
+        - ``$variables.foo`` for exact, type-preserving replacement.
+        - ``{$variables.foo}`` and ``${variables.foo}`` for inline interpolation.
+
+        :param dict[str, Any] cfg_dict: Raw YAML mapping.
+        :raises ValueError: If variables section is malformed or references are cyclic.
+        :return dict[str, Any]: Mapping with variables resolved.
+        """
+        if not isinstance(cfg_dict, dict):
+            return cfg_dict
+
+        source = deepcopy(cfg_dict)
+        variables = source.pop("variables", None)
+        if variables is None:
+            return source
+        if not isinstance(variables, dict):
+            raise ValueError("Top-level 'variables' must be a mapping when provided.")
+
+        resolved_variables: Dict[str, Any] = {}
+        resolving_stack: List[str] = []
+        unresolved_refs: Dict[str, set[str]] = {}
+
+        def _lookup_variable(path: str) -> Any:
+            """Lookup a variable value by dot path.
+
+            :param str path: Dot path relative to ``variables``.
+            :raises KeyError: If the variable path does not exist.
+            :return Any: Raw variable value.
+            """
+            current: Any = variables
+            for segment in path.split("."):
+                if not isinstance(current, dict) or segment not in current:
+                    raise KeyError(path)
+                current = current[segment]
+            return current
+
+        def _resolve_variable(path: str) -> Any:
+            """Resolve a single variable path with cycle detection.
+
+            :param str path: Dot path inside ``variables``.
+            :raises ValueError: If a circular reference is detected.
+            :raises KeyError: If the path is unknown.
+            :return Any: Resolved variable value.
+            """
+            if path in resolved_variables:
+                return deepcopy(resolved_variables[path])
+            if path in resolving_stack:
+                cycle = " -> ".join(resolving_stack + [path])
+                raise ValueError(
+                    f"Circular variable reference detected in config variables: {cycle}"
+                )
+
+            raw_value = _lookup_variable(path)
+            resolving_stack.append(path)
+            try:
+                # Nested dict/list values still route variable tokens through
+                # ``_resolve_variable(...)``, so transitive cycles are caught by
+                # ``resolving_stack`` even when references appear deep in objects.
+                resolved_value = _resolve_node(raw_value, f"variables.{path}")
+            finally:
+                resolving_stack.pop()
+
+            resolved_variables[path] = resolved_value
+            return deepcopy(resolved_value)
+
+        def _resolve_string(value: str, location: str) -> Any:
+            """Resolve variable tokens in a string.
+
+            :param str value: String value to resolve.
+            :param str location: Dot path used for diagnostics.
+            :raises ValueError: If an exact variable token points to an unknown path.
+            :return Any: Resolved value.
+            """
+            exact_match = ConfigLoader._VARIABLE_EXACT_PATTERN.fullmatch(value)
+            if exact_match:
+                var_path = exact_match.group(1)
+                try:
+                    return _resolve_variable(var_path)
+                except KeyError as exc:
+                    raise ValueError(
+                        f"Unknown variable reference at '{location}': "
+                        f"$variables.{var_path}"
+                    ) from exc
+
+            def _replace_inline(match: re.Match[str]) -> str:
+                """Replace inline variable token with resolved string value.
+
+                :param re.Match[str] match: Inline variable regex match.
+                :return str: Replacement string for interpolation.
+                """
+                var_path = match.group(1) or match.group(2)
+                if var_path is None:
+                    return match.group(0)
+                try:
+                    replacement = _resolve_variable(var_path)
+                except KeyError:
+                    unresolved_refs.setdefault(location, set()).add(
+                        f"$variables.{var_path}"
+                    )
+                    return match.group(0)
+                return str(replacement)
+
+            resolved = ConfigLoader._VARIABLE_INLINE_PATTERN.sub(
+                _replace_inline,
+                value,
+            )
+
+            for unresolved in ConfigLoader._VARIABLE_TOKEN_PATTERN.findall(resolved):
+                unresolved_refs.setdefault(location, set()).add(
+                    f"$variables.{unresolved}"
+                )
+            return resolved
+
+        def _resolve_node(node: Any, location: str) -> Any:
+            """Resolve variables recursively for nested objects.
+
+            :param Any node: Nested mapping/list/scalar node.
+            :param str location: Dot path used for diagnostics.
+            :return Any: Resolved node.
+            """
+            if isinstance(node, dict):
+                return {
+                    key: _resolve_node(value, f"{location}.{key}")
+                    for key, value in node.items()
+                }
+            if isinstance(node, list):
+                return [
+                    _resolve_node(item, f"{location}[{idx}]")
+                    for idx, item in enumerate(node)
+                ]
+            if isinstance(node, str):
+                return _resolve_string(node, location)
+            return node
+
+        resolved_config = _resolve_node(source, "config")
+
+        for location in sorted(unresolved_refs):
+            tokens = ", ".join(sorted(unresolved_refs[location]))
+            warnings.warn(
+                f"Unresolved variable token(s) at '{location}': {tokens}",
+                UserWarning,
+                stacklevel=3,
+            )
+
+        return resolved_config
+
+    @staticmethod
+    def _normalize_dot_overrides(overrides: List[str]) -> List[tuple[str, str]]:
+        """Normalize dot-path overrides from ``key=value`` or ``--key value`` forms.
+
+        :param list[str] overrides: Raw override tokens.
+        :raises ValueError: If override syntax is malformed.
+        :return list[tuple[str, str]]: Normalized ``(path, raw_value)`` tuples.
+        """
+        parsed: List[tuple[str, str]] = []
+        idx = 0
+        while idx < len(overrides):
+            token = str(overrides[idx]).strip()
+            if not token:
+                idx += 1
+                continue
+
+            if token.startswith("--"):
+                stripped = token[2:].strip()
+                if not stripped:
+                    raise ValueError(
+                        "Invalid override token '--'. Expected '--section.key=value'."
+                    )
+                if "=" in stripped:
+                    key, value = stripped.split("=", 1)
+                    if not key:
+                        raise ValueError(
+                            f"Invalid override '{token}'. Missing override key."
+                        )
+                    parsed.append((key, value))
+                    idx += 1
+                    continue
+                if idx + 1 >= len(overrides):
+                    raise ValueError(
+                        f"Invalid override '{token}': missing value token."
+                    )
+                value = str(overrides[idx + 1])
+                if value.startswith("--"):
+                    raise ValueError(
+                        f"Invalid override '{token}': expected value after key token."
+                    )
+                parsed.append((stripped, value))
+                idx += 2
+                continue
+
+            if "=" not in token:
+                raise ValueError(
+                    f"Invalid override '{token}'. Expected 'section.key=value'."
+                )
+            key, value = token.split("=", 1)
+            if not key:
+                raise ValueError(f"Invalid override '{token}'. Missing override key.")
+            parsed.append((key.strip(), value))
+            idx += 1
+
+        return parsed
+
+    @staticmethod
+    def _coerce_dot_override_value(
+        path: str,
+        raw_value: str,
+        current_value: Any,
+        expected_type: Any = None,
+    ) -> Any:
+        """Coerce a dot override token into the existing field type.
+
+        :param str path: Dot-path field identifier.
+        :param str raw_value: Override value as provided by CLI/list.
+        :param Any current_value: Existing in-memory field value.
+        :param Any expected_type: Optional dataclass annotation for target field.
+        :raises ValueError: If coercion fails.
+        :return Any: Coerced value.
+        """
+
+        def _coerce_from_annotation(annotation: Any) -> Any:
+            """Coerce override value using a type annotation.
+
+            :param Any annotation: Field annotation.
+            :raises ValueError: If coercion fails for the annotation.
+            :return Any: Coerced value.
+            """
+            if annotation is Any:
+                return yaml.safe_load(raw_value)
+
+            origin = get_origin(annotation)
+            if origin is Union:
+                args = list(get_args(annotation))
+                allow_none = type(None) in args
+                non_none_args = [arg for arg in args if arg is not type(None)]
+                if allow_none and str(raw_value).strip().lower() in {
+                    "none",
+                    "null",
+                    "~",
+                }:
+                    return None
+                if len(non_none_args) == 1:
+                    return _coerce_from_annotation(non_none_args[0])
+                parsed_union = yaml.safe_load(raw_value)
+                if any(
+                    (
+                        candidate is Any
+                        or (candidate is type(None) and parsed_union is None)
+                        or (
+                            candidate in {int, float, bool, str, list, dict}
+                            and isinstance(parsed_union, candidate)
+                        )
+                    )
+                    for candidate in non_none_args
+                ):
+                    return parsed_union
+                raise ValueError(
+                    f"Invalid override for '{path}': {raw_value!r} does not match "
+                    f"allowed union types {non_none_args}."
+                )
+
+            if annotation is bool:
+                try:
+                    return _parse_cli_bool(raw_value)
+                except argparse.ArgumentTypeError as exc:
+                    raise ValueError(
+                        f"Invalid boolean override for '{path}': {raw_value!r}. "
+                        "Expected true/false, 1/0, yes/no, or on/off."
+                    ) from exc
+            if annotation is int:
+                try:
+                    return int(raw_value)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Invalid integer override for '{path}': {raw_value!r}."
+                    ) from exc
+            if annotation is float:
+                try:
+                    return float(raw_value)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Invalid float override for '{path}': {raw_value!r}."
+                    ) from exc
+            if annotation is str:
+                return raw_value
+
+            if annotation in {list, dict} or origin in {list, dict}:
+                parsed_collection = yaml.safe_load(raw_value)
+                collection_type = (
+                    list if (annotation is list or origin is list) else dict
+                )
+                if not isinstance(parsed_collection, collection_type):
+                    raise ValueError(
+                        f"Invalid override for '{path}': expected {collection_type.__name__}, "
+                        f"got {type(parsed_collection).__name__}."
+                    )
+                return parsed_collection
+
+            return yaml.safe_load(raw_value)
+
+        if isinstance(current_value, bool):
+            try:
+                return _parse_cli_bool(raw_value)
+            except argparse.ArgumentTypeError as exc:
+                raise ValueError(
+                    f"Invalid boolean override for '{path}': {raw_value!r}. "
+                    "Expected true/false, 1/0, yes/no, or on/off."
+                ) from exc
+
+        if isinstance(current_value, int) and not isinstance(current_value, bool):
+            try:
+                return int(raw_value)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid integer override for '{path}': {raw_value!r}."
+                ) from exc
+
+        if isinstance(current_value, float):
+            try:
+                return float(raw_value)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid float override for '{path}': {raw_value!r}."
+                ) from exc
+
+        if isinstance(current_value, str):
+            return raw_value
+
+        if current_value is None and expected_type is not None:
+            return _coerce_from_annotation(expected_type)
+
+        parsed = yaml.safe_load(raw_value)
+        if current_value is None:
+            return parsed
+
+        if isinstance(current_value, list):
+            if not isinstance(parsed, list):
+                raise ValueError(
+                    f"Invalid list override for '{path}': {raw_value!r}. "
+                    'Use YAML list syntax, e.g. "[a, b]".'
+                )
+            return parsed
+
+        if isinstance(current_value, dict):
+            if not isinstance(parsed, dict):
+                raise ValueError(
+                    f"Invalid mapping override for '{path}': {raw_value!r}. "
+                    'Use YAML mapping syntax, e.g. "{k: v}".'
+                )
+            return parsed
+
+        return parsed
+
+    @staticmethod
+    def _apply_dot_override(config: Config, path: str, raw_value: str) -> None:
+        """Apply one dot-path override directly onto a config object.
+
+        :param Config config: Configuration object to mutate.
+        :param str path: Dot-path override key.
+        :param str raw_value: Raw override value string.
+        :raises ValueError: If path is unknown or value cannot be coerced.
+        """
+        path = str(path).strip()
+        if not path or "." in {path[0], path[-1]}:
+            raise ValueError(
+                f"Invalid override path '{path}'. Expected dotted key path."
+            )
+
+        parts = path.split(".")
+        current: Any = config
+        traversed: List[str] = []
+
+        for part in parts[:-1]:
+            traversed.append(part)
+            if isinstance(current, dict):
+                if part not in current:
+                    available = ", ".join(sorted(current.keys())) or "<empty>"
+                    raise ValueError(
+                        f"Unknown override path '{path}': key '{part}' not found under "
+                        f"'{'.'.join(traversed[:-1]) or '<root>'}'. Available keys: "
+                        f"{available}."
+                    )
+                current = current[part]
+                continue
+
+            if not hasattr(current, part):
+                available_fields = (
+                    ", ".join(sorted(f.name for f in fields(type(current))))
+                    if hasattr(current, "__dataclass_fields__")
+                    else "<none>"
+                )
+                raise ValueError(
+                    f"Unknown override path '{path}': segment '{part}' does not exist "
+                    f"on '{type(current).__name__}'. Available fields: {available_fields}."
+                )
+            current = getattr(current, part)
+
+        leaf = parts[-1]
+        if isinstance(current, dict):
+            if leaf not in current:
+                available = ", ".join(sorted(current.keys())) or "<empty>"
+                raise ValueError(
+                    f"Unknown override path '{path}': key '{leaf}' not found. "
+                    f"Available keys: {available}."
+                )
+            current_value = current[leaf]
+            current[leaf] = ConfigLoader._coerce_dot_override_value(
+                path,
+                raw_value,
+                current_value,
+            )
+            return
+
+        if not hasattr(current, leaf):
+            available_fields = (
+                ", ".join(sorted(f.name for f in fields(type(current))))
+                if hasattr(current, "__dataclass_fields__")
+                else "<none>"
+            )
+            raise ValueError(
+                f"Unknown override path '{path}': field '{leaf}' does not exist on "
+                f"'{type(current).__name__}'. Available fields: {available_fields}."
+            )
+
+        current_value = getattr(current, leaf)
+        expected_type = None
+        if hasattr(current, "__dataclass_fields__"):
+            field_map = {f.name: f.type for f in fields(type(current))}
+            expected_type = field_map.get(leaf)
+        coerced_value = ConfigLoader._coerce_dot_override_value(
+            path,
+            raw_value,
+            current_value,
+            expected_type=expected_type,
+        )
+        setattr(current, leaf, coerced_value)
+
+    @staticmethod
+    def _apply_dot_overrides(config: Config, overrides: List[str]) -> None:
+        """Apply dot-path overrides to an instantiated config.
+
+        :param Config config: Configuration object to mutate.
+        :param list[str] overrides: Dot-path overrides.
+        :raises ValueError: If any override token/path/value is invalid.
+        """
+        for path, raw_value in ConfigLoader._normalize_dot_overrides(overrides):
+            ConfigLoader._apply_dot_override(config, path, raw_value)
+        ConfigLoader._validate_config_values(config)
+
     @staticmethod
     def load_yaml(path: Union[str, Path]) -> Dict[str, Any]:
         """Load a YAML configuration file.
@@ -341,7 +848,12 @@ class ConfigLoader:
         :return dict[str, Any]: Parsed configuration mapping.
         """
         with open(path, "r") as f:
-            return yaml.safe_load(f) or {}
+            raw_cfg = yaml.safe_load(f) or {}
+        if not isinstance(raw_cfg, dict):
+            raise ValueError(
+                f"Config file '{path}' must define a top-level YAML mapping."
+            )
+        return ConfigLoader._resolve_yaml_variables(raw_cfg)
 
     @staticmethod
     def merge_configs(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -512,6 +1024,66 @@ class ConfigLoader:
                     "remove it from your config."
                 )
 
+            # trainer.report_to is not used by NeoBERT; keep wandb enabling explicit.
+            if "report_to" in trainer:
+                report_to = trainer.pop("report_to")
+                if report_to not in (None, [], ()):
+                    ConfigLoader._warn_legacy(
+                        "Config key 'trainer.report_to' is deprecated and ignored by "
+                        "NeoBERT. Set 'wandb.enabled: true' explicitly to enable W&B."
+                    )
+
+            # trainer.train_batch_size -> trainer.per_device_train_batch_size
+            if "train_batch_size" in trainer:
+                train_batch_size = trainer.pop("train_batch_size")
+                if "per_device_train_batch_size" in trainer and trainer[
+                    "per_device_train_batch_size"
+                ] not in (None, train_batch_size):
+                    raise ValueError(
+                        "Both 'trainer.train_batch_size' and "
+                        "'trainer.per_device_train_batch_size' are set with different values."
+                    )
+                if trainer.get("per_device_train_batch_size") is None:
+                    trainer["per_device_train_batch_size"] = train_batch_size
+                ConfigLoader._warn_legacy(
+                    "Config key 'trainer.train_batch_size' is deprecated; use "
+                    "'trainer.per_device_train_batch_size'."
+                )
+
+            # trainer.eval_batch_size -> trainer.per_device_eval_batch_size
+            if "eval_batch_size" in trainer:
+                eval_batch_size = trainer.pop("eval_batch_size")
+                if "per_device_eval_batch_size" in trainer and trainer[
+                    "per_device_eval_batch_size"
+                ] not in (None, eval_batch_size):
+                    raise ValueError(
+                        "Both 'trainer.eval_batch_size' and "
+                        "'trainer.per_device_eval_batch_size' are set with different values."
+                    )
+                if trainer.get("per_device_eval_batch_size") is None:
+                    trainer["per_device_eval_batch_size"] = eval_batch_size
+                ConfigLoader._warn_legacy(
+                    "Config key 'trainer.eval_batch_size' is deprecated; use "
+                    "'trainer.per_device_eval_batch_size'."
+                )
+
+            # trainer.max_ckpt -> trainer.save_total_limit
+            if "max_ckpt" in trainer:
+                max_ckpt = trainer.pop("max_ckpt")
+                if "save_total_limit" in trainer and trainer[
+                    "save_total_limit"
+                ] not in (None, max_ckpt):
+                    raise ValueError(
+                        "Both 'trainer.max_ckpt' and 'trainer.save_total_limit' are set "
+                        "with different values."
+                    )
+                if trainer.get("save_total_limit") is None:
+                    trainer["save_total_limit"] = max_ckpt
+                ConfigLoader._warn_legacy(
+                    "Config key 'trainer.max_ckpt' is deprecated; use "
+                    "'trainer.save_total_limit'."
+                )
+
         # dataset.tokenizer_name -> tokenizer.name
         dataset = normalized.get("dataset", {})
         if isinstance(dataset, dict):
@@ -548,6 +1120,22 @@ class ConfigLoader:
                 dataset.setdefault("path", path_to_disk)
                 ConfigLoader._warn_legacy(
                     "Config key 'dataset.path_to_disk' is deprecated; use 'dataset.path'."
+                )
+            if "pretraining_prob" in dataset:
+                pretraining_prob = dataset.pop("pretraining_prob")
+                contrastive = _section("contrastive")
+                if (
+                    "pretraining_prob" in contrastive
+                    and contrastive["pretraining_prob"] != pretraining_prob
+                ):
+                    raise ValueError(
+                        "Both 'dataset.pretraining_prob' and "
+                        "'contrastive.pretraining_prob' are set with different values."
+                    )
+                contrastive.setdefault("pretraining_prob", pretraining_prob)
+                ConfigLoader._warn_legacy(
+                    "Config key 'dataset.pretraining_prob' is deprecated; "
+                    "use 'contrastive.pretraining_prob'."
                 )
 
         # tokenizer.tokenizer_name_or_path -> tokenizer.name
@@ -600,6 +1188,15 @@ class ConfigLoader:
                 "use 'trainer.logging_steps'."
             )
 
+        # scheduler.num_cycles is unsupported by the current scheduler implementation.
+        scheduler = normalized.get("scheduler", {})
+        if isinstance(scheduler, dict) and "num_cycles" in scheduler:
+            scheduler.pop("num_cycles")
+            ConfigLoader._warn_legacy(
+                "Config key 'scheduler.num_cycles' is deprecated and ignored. "
+                "Use warmup/decay steps or percentages and final_lr_ratio instead."
+            )
+
         # Legacy attention flags -> model.attn_backend
         model = normalized.get("model", {})
         if isinstance(model, dict):
@@ -648,30 +1245,64 @@ class ConfigLoader:
                     "'model.attn_backend' ('sdpa' or 'flash_attn_varlen')."
                 )
 
-            glue = normalized.get("glue", {})
-            if not isinstance(glue, dict):
-                glue = _section("glue")
-            glue_key_map = {
-                "pretrained_config_path": "pretrained_model_path",
-                "pretrained_checkpoint_dir": "pretrained_checkpoint_dir",
-                "pretrained_checkpoint": "pretrained_checkpoint",
-                "allow_random_weights": "allow_random_weights",
-                "classifier_dropout": "classifier_dropout",
-                "classifier_init_range": "classifier_init_range",
-                "transfer_from_task": "transfer_from_task",
-            }
-            for legacy_key, glue_key in glue_key_map.items():
-                if legacy_key in model:
-                    value = model.pop(legacy_key)
-                    if glue_key in glue and glue[glue_key] not in (None, value):
-                        raise ValueError(
-                            f"Both 'model.{legacy_key}' and 'glue.{glue_key}' are set with "
-                            "different values."
+            task = str(normalized.get("task", "")).strip().lower()
+            if task == "contrastive":
+                if "contrastive" not in normalized or not isinstance(
+                    normalized.get("contrastive"), dict
+                ):
+                    contrastive = _section("contrastive")
+                else:
+                    contrastive = normalized["contrastive"]
+                contrastive_key_map = {
+                    "pretrained_checkpoint_dir": "pretrained_checkpoint_dir",
+                    "pretrained_checkpoint": "pretrained_checkpoint",
+                    "allow_random_weights": "allow_random_weights",
+                }
+                for legacy_key, contrastive_key in contrastive_key_map.items():
+                    if legacy_key in model:
+                        value = model.pop(legacy_key)
+                        if contrastive_key in contrastive and contrastive[
+                            contrastive_key
+                        ] not in (None, value):
+                            raise ValueError(
+                                "Both 'model."
+                                f"{legacy_key}' and 'contrastive.{contrastive_key}' "
+                                "are set with different values."
+                            )
+                        contrastive.setdefault(contrastive_key, value)
+                        ConfigLoader._warn_legacy(
+                            "Config key 'model."
+                            f"{legacy_key}' is deprecated; use "
+                            f"'contrastive.{contrastive_key}'."
                         )
-                    glue.setdefault(glue_key, value)
-                    ConfigLoader._warn_legacy(
-                        f"Config key 'model.{legacy_key}' is deprecated; use 'glue.{glue_key}'."
-                    )
+            else:
+                if "glue" not in normalized or not isinstance(
+                    normalized.get("glue"), dict
+                ):
+                    glue = _section("glue")
+                else:
+                    glue = normalized["glue"]
+                glue_key_map = {
+                    "pretrained_config_path": "pretrained_model_path",
+                    "pretrained_checkpoint_dir": "pretrained_checkpoint_dir",
+                    "pretrained_checkpoint": "pretrained_checkpoint",
+                    "allow_random_weights": "allow_random_weights",
+                    "classifier_dropout": "classifier_dropout",
+                    "classifier_init_range": "classifier_init_range",
+                    "transfer_from_task": "transfer_from_task",
+                }
+                for legacy_key, glue_key in glue_key_map.items():
+                    if legacy_key in model:
+                        value = model.pop(legacy_key)
+                        if glue_key in glue and glue[glue_key] not in (None, value):
+                            raise ValueError(
+                                f"Both 'model.{legacy_key}' and 'glue.{glue_key}' are set with "
+                                "different values."
+                            )
+                        glue.setdefault(glue_key, value)
+                        ConfigLoader._warn_legacy(
+                            f"Config key 'model.{legacy_key}' is deprecated; use 'glue.{glue_key}'."
+                        )
 
         return normalized
 
@@ -739,19 +1370,372 @@ class ConfigLoader:
             )
 
     @staticmethod
+    def _validate_config_values(config: Config) -> None:
+        """Validate semantic config values after dataclass hydration.
+
+        :param Config config: Configuration instance to validate.
+        :raises ValueError: If semantic constraints are violated.
+        """
+        errors: list[str] = []
+        task = str(config.task).strip().lower()
+        valid_tasks = {"pretraining", "glue", "mteb", "contrastive"}
+        if task not in valid_tasks:
+            errors.append(
+                f"task must be one of {sorted(valid_tasks)}, got {config.task!r}"
+            )
+        else:
+            config.task = task
+
+        if config.dataset.max_seq_length <= 0:
+            errors.append(
+                "dataset.max_seq_length must be > 0, "
+                f"got {config.dataset.max_seq_length}."
+            )
+        if config.dataset.min_length <= 0:
+            errors.append(
+                f"dataset.min_length must be > 0, got {config.dataset.min_length}."
+            )
+        if config.dataset.min_length > config.dataset.max_seq_length:
+            errors.append(
+                "dataset.min_length must be <= dataset.max_seq_length, got "
+                f"{config.dataset.min_length} > {config.dataset.max_seq_length}."
+            )
+        if config.dataset.alpha <= 0.0:
+            errors.append(f"dataset.alpha must be > 0, got {config.dataset.alpha}.")
+        if config.dataset.num_workers < 0:
+            errors.append(
+                f"dataset.num_workers must be >= 0, got {config.dataset.num_workers}."
+            )
+        if config.dataset.num_proc < 0:
+            errors.append(
+                f"dataset.num_proc must be >= 0, got {config.dataset.num_proc}."
+            )
+        if (
+            config.dataset.eval_samples is not None
+            and int(config.dataset.eval_samples) <= 0
+        ):
+            errors.append(
+                "dataset.eval_samples must be > 0 when set, got "
+                f"{config.dataset.eval_samples}."
+            )
+
+        if task in {"pretraining", "contrastive"}:
+            if config.tokenizer.max_length < config.dataset.max_seq_length:
+                warnings.warn(
+                    "tokenizer.max_length is smaller than dataset.max_seq_length for "
+                    f"{task}; syncing tokenizer.max_length from "
+                    f"{config.tokenizer.max_length} to {config.dataset.max_seq_length}.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                config.tokenizer.max_length = config.dataset.max_seq_length
+
+            if config.dataset.max_seq_length > config.model.max_position_embeddings:
+                errors.append(
+                    "dataset.max_seq_length must be <= model.max_position_embeddings "
+                    f"for {task}, got {config.dataset.max_seq_length} > "
+                    f"{config.model.max_position_embeddings}."
+                )
+        if task == "glue" and config.tokenizer.max_length != config.glue.max_seq_length:
+            warnings.warn(
+                "tokenizer.max_length does not match glue.max_seq_length; syncing "
+                f"tokenizer.max_length from {config.tokenizer.max_length} to "
+                f"{config.glue.max_seq_length}.",
+                UserWarning,
+                stacklevel=2,
+            )
+            config.tokenizer.max_length = config.glue.max_seq_length
+        if task == "glue":
+            if config.glue.max_seq_length <= 0:
+                errors.append(
+                    "glue.max_seq_length must be > 0, got "
+                    f"{config.glue.max_seq_length}."
+                )
+            if config.glue.num_workers < 0:
+                errors.append(
+                    f"glue.num_workers must be >= 0, got {config.glue.num_workers}."
+                )
+            if config.glue.preprocessing_num_proc < 0:
+                errors.append(
+                    "glue.preprocessing_num_proc must be >= 0, got "
+                    f"{config.glue.preprocessing_num_proc}."
+                )
+
+        if not 0.0 <= float(config.datacollator.mlm_probability) <= 1.0:
+            errors.append(
+                "datacollator.mlm_probability must be in [0, 1], got "
+                f"{config.datacollator.mlm_probability}."
+            )
+
+        if config.trainer.per_device_train_batch_size <= 0:
+            errors.append(
+                "trainer.per_device_train_batch_size must be > 0, got "
+                f"{config.trainer.per_device_train_batch_size}."
+            )
+        if config.trainer.per_device_eval_batch_size <= 0:
+            errors.append(
+                "trainer.per_device_eval_batch_size must be > 0, got "
+                f"{config.trainer.per_device_eval_batch_size}."
+            )
+        if config.trainer.gradient_accumulation_steps <= 0:
+            errors.append(
+                "trainer.gradient_accumulation_steps must be > 0, got "
+                f"{config.trainer.gradient_accumulation_steps}."
+            )
+        valid_eval_strategies = {"steps", "epoch"}
+        eval_strategy = str(config.trainer.eval_strategy).strip().lower()
+        if eval_strategy not in valid_eval_strategies:
+            errors.append(
+                "trainer.eval_strategy must be one of "
+                f"{sorted(valid_eval_strategies)}, got "
+                f"{config.trainer.eval_strategy!r}."
+            )
+        else:
+            config.trainer.eval_strategy = eval_strategy
+
+        valid_save_strategies = {"steps", "epoch", "best", "no"}
+        save_strategy = str(config.trainer.save_strategy).strip().lower()
+        if save_strategy not in valid_save_strategies:
+            errors.append(
+                "trainer.save_strategy must be one of "
+                f"{sorted(valid_save_strategies)}, got "
+                f"{config.trainer.save_strategy!r}."
+            )
+        else:
+            config.trainer.save_strategy = save_strategy
+        if task in {"pretraining", "contrastive"} and save_strategy not in {
+            "steps",
+            "no",
+        }:
+            errors.append(
+                "trainer.save_strategy supports only {'steps','no'} for "
+                f"{task}, got {config.trainer.save_strategy!r}."
+            )
+
+        if config.trainer.logging_steps <= 0:
+            errors.append(
+                f"trainer.logging_steps must be > 0, got {config.trainer.logging_steps}."
+            )
+        if config.trainer.save_steps < 0:
+            errors.append(
+                f"trainer.save_steps must be >= 0, got {config.trainer.save_steps}."
+            )
+        elif save_strategy == "steps" and config.trainer.save_steps == 0:
+            errors.append(
+                "trainer.save_steps must be > 0 when "
+                f"trainer.save_strategy='steps', got {config.trainer.save_steps}."
+            )
+        if config.trainer.eval_steps < 0:
+            errors.append(
+                f"trainer.eval_steps must be >= 0, got {config.trainer.eval_steps}."
+            )
+        elif eval_strategy == "steps" and config.trainer.eval_steps == 0:
+            errors.append(
+                "trainer.eval_steps must be > 0 when "
+                f"trainer.eval_strategy='steps', got {config.trainer.eval_steps}."
+            )
+        if task in {"pretraining", "contrastive"} and config.trainer.max_steps <= 0:
+            errors.append(
+                f"trainer.max_steps must be > 0 for {task}, got {config.trainer.max_steps}."
+            )
+        if (
+            config.trainer.save_total_limit is not None
+            and config.trainer.save_total_limit < 0
+        ):
+            errors.append(
+                "trainer.save_total_limit must be >= 0 when set, got "
+                f"{config.trainer.save_total_limit}."
+            )
+        if (
+            config.trainer.eval_max_batches is not None
+            and config.trainer.eval_max_batches <= 0
+        ):
+            errors.append(
+                "trainer.eval_max_batches must be > 0 when set, got "
+                f"{config.trainer.eval_max_batches}."
+            )
+        if config.trainer.dataloader_num_workers < 0:
+            errors.append(
+                "trainer.dataloader_num_workers must be >= 0, got "
+                f"{config.trainer.dataloader_num_workers}."
+            )
+        if config.trainer.max_ckpt is not None:
+            if config.trainer.max_ckpt < 0:
+                errors.append(
+                    "trainer.max_ckpt must be >= 0 when set, got "
+                    f"{config.trainer.max_ckpt}."
+                )
+            warnings.warn(
+                "trainer.max_ckpt is deprecated; use trainer.save_total_limit.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        if config.scheduler.warmup_steps < 0:
+            errors.append(
+                f"scheduler.warmup_steps must be >= 0, got {config.scheduler.warmup_steps}."
+            )
+        if (
+            config.scheduler.total_steps is not None
+            and config.scheduler.total_steps <= 0
+        ):
+            errors.append(
+                f"scheduler.total_steps must be > 0 when set, got {config.scheduler.total_steps}."
+            )
+        if (
+            config.scheduler.decay_steps is not None
+            and config.scheduler.decay_steps <= 0
+        ):
+            errors.append(
+                f"scheduler.decay_steps must be > 0 when set, got {config.scheduler.decay_steps}."
+            )
+        if config.scheduler.warmup_percent is not None and not (
+            0.0 <= config.scheduler.warmup_percent <= 100.0
+        ):
+            errors.append(
+                "scheduler.warmup_percent must be in [0, 100], got "
+                f"{config.scheduler.warmup_percent}."
+            )
+        if config.scheduler.decay_percent is not None and not (
+            0.0 <= config.scheduler.decay_percent <= 100.0
+        ):
+            errors.append(
+                "scheduler.decay_percent must be in [0, 100], got "
+                f"{config.scheduler.decay_percent}."
+            )
+        if config.scheduler.final_lr_ratio < 0.0:
+            errors.append(
+                "scheduler.final_lr_ratio must be >= 0, got "
+                f"{config.scheduler.final_lr_ratio}."
+            )
+
+        if config.optimizer.lr <= 0:
+            errors.append(f"optimizer.lr must be > 0, got {config.optimizer.lr}.")
+        if config.optimizer.weight_decay < 0:
+            errors.append(
+                f"optimizer.weight_decay must be >= 0, got {config.optimizer.weight_decay}."
+            )
+        if config.optimizer.eps <= 0:
+            errors.append(f"optimizer.eps must be > 0, got {config.optimizer.eps}.")
+        if len(config.optimizer.betas) != 2:
+            errors.append(
+                "optimizer.betas must contain exactly 2 values, got "
+                f"{config.optimizer.betas}."
+            )
+        else:
+            beta1, beta2 = config.optimizer.betas
+            if not (0.0 <= beta1 < 1.0 and 0.0 <= beta2 < 1.0):
+                errors.append(
+                    "optimizer.betas values must be in [0, 1), got "
+                    f"{config.optimizer.betas}."
+                )
+
+        try:
+            config.trainer.mixed_precision = resolve_mixed_precision(
+                config.trainer.mixed_precision,
+                task=task,
+            )
+        except ValueError as exc:
+            errors.append(str(exc))
+
+        valid_wandb_modes = {"online", "offline", "disabled"}
+        wandb_mode = str(config.wandb.mode).strip().lower()
+        if wandb_mode not in valid_wandb_modes:
+            errors.append(
+                f"wandb.mode must be one of {sorted(valid_wandb_modes)}, got {config.wandb.mode!r}."
+            )
+        else:
+            config.wandb.mode = wandb_mode
+        wandb_watch = str(getattr(config.wandb, "watch", "gradients")).strip().lower()
+        valid_wandb_watch = {
+            "gradients",
+            "parameters",
+            "weights",
+            "all",
+            "off",
+            "none",
+            "disabled",
+            "false",
+            "0",
+        }
+        if wandb_watch not in valid_wandb_watch:
+            errors.append(
+                "wandb.watch must be one of "
+                f"{sorted(valid_wandb_watch)}, got {config.wandb.watch!r}."
+            )
+        else:
+            # Keep backwards compatibility with older configs that used the
+            # pre-W&B API alias ``weights``.
+            config.wandb.watch = (
+                "parameters" if wandb_watch == "weights" else wandb_watch
+            )
+
+        if task != "contrastive" and config.use_deepspeed:
+            warnings.warn(
+                "Top-level 'use_deepspeed' only affects contrastive checkpoint loading. "
+                "Runtime backend selection is controlled by Accelerate launch config.",
+                UserWarning,
+                stacklevel=2,
+            )
+        if task == "pretraining":
+            if config.trainer.metric_for_best_model is not None:
+                warnings.warn(
+                    "trainer.metric_for_best_model is not implemented for pretraining "
+                    "and is currently ignored.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            if bool(config.trainer.load_best_model_at_end):
+                warnings.warn(
+                    "trainer.load_best_model_at_end is not implemented for "
+                    "pretraining and is currently ignored.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            if config.trainer.greater_is_better is not True:
+                warnings.warn(
+                    "trainer.greater_is_better is not implemented for pretraining "
+                    "and is currently ignored.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        if task == "contrastive":
+            if str(config.contrastive.loss_type).strip().lower() != "simcse":
+                warnings.warn(
+                    "contrastive.loss_type is currently informational and does not "
+                    "change runtime loss implementation; SupConLoss is used.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            if float(config.contrastive.hard_negative_weight) != 0.0:
+                warnings.warn(
+                    "contrastive.hard_negative_weight is currently informational and "
+                    "not applied in loss computation.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
+        if errors:
+            raise ValueError("Invalid configuration values:\n- " + "\n- ".join(errors))
+
+    @staticmethod
     def dict_to_config(cfg_dict: Dict[str, Any]) -> Config:
         """Convert dictionary to a ``Config`` dataclass.
 
         :param dict[str, Any] cfg_dict: Nested configuration mapping.
         :return Config: Fully-populated configuration instance.
         """
+        raw_cfg_dict = deepcopy(cfg_dict or {})
+        raw_model_dict = raw_cfg_dict.get("model")
+
         cfg_dict = ConfigLoader._normalize_legacy_keys(cfg_dict or {})
         ConfigLoader._validate_config_keys(cfg_dict)
 
         config = Config()
 
-        # Store raw model dict for GLUE compatibility
-        config._raw_model_dict = cfg_dict.get("model")
+        # Store legacy raw model dict before normalization for compatibility
+        # readers that still inspect original model-section keys.
+        config._raw_model_dict = deepcopy(raw_model_dict)
 
         # Update model config
         if "model" in cfg_dict:
@@ -817,12 +1801,9 @@ class ConfigLoader:
         # Update wandb config
         if "wandb" in cfg_dict:
             wandb_dict = cfg_dict["wandb"]
-            auto_enable = "enabled" not in wandb_dict
             for k, v in wandb_dict.items():
                 if hasattr(config.wandb, k):
                     setattr(config.wandb, k, v)
-            if auto_enable:
-                config.wandb.enabled = True
 
         # Update glue config
         if "glue" in cfg_dict:
@@ -851,6 +1832,8 @@ class ConfigLoader:
                 "contrastive",
             ]:
                 setattr(config, k, v)
+
+        ConfigLoader._validate_config_values(config)
 
         return config
 
@@ -881,6 +1864,9 @@ class ConfigLoader:
             tokenizer = get_tokenizer(
                 pretrained_model_name_or_path=tokenizer_source,
                 max_length=config.tokenizer.max_length,
+                trust_remote_code=config.tokenizer.trust_remote_code,
+                revision=config.tokenizer.revision,
+                allow_special_token_rewrite=config.tokenizer.allow_special_token_rewrite,
             )
 
             actual_vocab_size = len(tokenizer)
@@ -899,11 +1885,9 @@ class ConfigLoader:
 
                 logger = logging.getLogger(__name__)
                 logger.warning(
-                    "Config preprocessing: vocab_size %s rounded to %s for GPU efficiency "
-                    "(original config: %s)",
-                    actual_vocab_size,
-                    rounded_vocab_size,
-                    original_model_vocab_size,
+                    "Config preprocessing: vocab_size "
+                    f"{actual_vocab_size} rounded to {rounded_vocab_size} for GPU "
+                    f"efficiency (original config: {original_model_vocab_size})"
                 )
 
         return config
@@ -911,13 +1895,15 @@ class ConfigLoader:
     @staticmethod
     def load(
         config_file: Optional[Union[str, Path]] = None,
-        overrides: Optional[Dict[str, Any]] = None,
+        overrides: Optional[Union[Dict[str, Any], List[str]]] = None,
         preprocess: bool = False,
     ) -> Config:
         """Load configuration from file and apply overrides.
 
         :param str | Path | None config_file: Optional YAML configuration path.
-        :param dict[str, Any] | None overrides: Optional override mapping.
+        :param dict[str, Any] | list[str] | None overrides: Optional overrides.
+            - mapping form is merged into YAML before dataclass hydration.
+            - list form accepts ``section.key=value`` and ``--section.key value``.
         :param bool preprocess: Whether to resolve dynamic values (e.g., vocab size).
         :return Config: Loaded configuration.
         """
@@ -928,10 +1914,17 @@ class ConfigLoader:
             config_dict = ConfigLoader.load_yaml(config_file)
 
         # Apply overrides
-        if overrides:
+        if isinstance(overrides, dict) and overrides:
             config_dict = ConfigLoader.merge_configs(config_dict, overrides)
+        elif overrides is not None and not isinstance(overrides, list):
+            raise TypeError(
+                "ConfigLoader.load(..., overrides=...) expects either a mapping "
+                "or a list of dot-path override strings."
+            )
 
         config = ConfigLoader.dict_to_config(config_dict)
+        if isinstance(overrides, list) and overrides:
+            ConfigLoader._apply_dot_overrides(config, overrides)
 
         # Preprocess config to resolve dynamic values
         if preprocess:
@@ -1006,12 +1999,8 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         "--model.max_position_embeddings", type=int, help="Max position embeddings"
     )
     parser.add_argument("--model.vocab_size", type=int, help="Vocabulary size")
-    parser.add_argument(
-        "--model.rope", type=lambda x: x.lower() == "true", help="Use RoPE"
-    )
-    parser.add_argument(
-        "--model.rms_norm", type=lambda x: x.lower() == "true", help="Use RMS norm"
-    )
+    parser.add_argument("--model.rope", type=_parse_cli_bool, help="Use RoPE")
+    parser.add_argument("--model.rms_norm", type=_parse_cli_bool, help="Use RMS norm")
     parser.add_argument(
         "--model.hidden_act", type=str, help="Hidden activation function"
     )
@@ -1036,7 +2025,7 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     )
     parser.add_argument(
         "--dataset.streaming",
-        type=lambda x: x.lower() == "true",
+        type=_parse_cli_bool,
         help="Stream dataset from hub",
     )
     parser.add_argument(
@@ -1055,21 +2044,60 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         ),
     )
     parser.add_argument(
-        "--dataset.load_all_from_disk", action="store_true", help="Load all from disk"
+        "--dataset.load_all_from_disk",
+        action="store_true",
+        default=None,
+        help="Load all from disk",
     )
     parser.add_argument(
-        "--dataset.force_redownload", action="store_true", help="Force redownload"
+        "--dataset.force_redownload",
+        action="store_true",
+        default=None,
+        help="Force redownload",
     )
     parser.add_argument(
-        "--dataset.pretraining_prob", type=float, help="Pretraining probability"
+        "--dataset.pretraining_prob",
+        type=float,
+        help="DEPRECATED: use --contrastive.pretraining_prob",
     )
     parser.add_argument(
         "--dataset.min_length", type=int, help="Minimum sequence length"
+    )
+    parser.add_argument(
+        "--dataset.alpha",
+        type=float,
+        help="Contrastive dataset sampling exponent (1.0 = proportional to size)",
     )
 
     # Tokenizer arguments
     parser.add_argument("--tokenizer.name", type=str, help="Tokenizer name")
     parser.add_argument("--tokenizer.path", type=str, help="Tokenizer path")
+    parser.add_argument(
+        "--tokenizer.max_length", type=int, help="Tokenizer maximum sequence length"
+    )
+    parser.add_argument(
+        "--tokenizer.truncation",
+        type=_parse_cli_bool,
+        help="Whether tokenizer preprocessing should truncate to max_length",
+    )
+    parser.add_argument(
+        "--tokenizer.trust_remote_code",
+        type=_parse_cli_bool,
+        help="Allow tokenizer remote code execution",
+    )
+    parser.add_argument(
+        "--tokenizer.revision",
+        type=str,
+        help="Tokenizer revision/commit to pin for reproducibility",
+    )
+    parser.add_argument(
+        "--tokenizer.allow_special_token_rewrite",
+        type=_parse_cli_bool,
+        help=(
+            "Allow fallback rewrite of special tokens/post-processor when tokenizer "
+            "lacks a mask token"
+        ),
+    )
 
     # Optimizer arguments
     parser.add_argument("--optimizer.name", type=str, help="Optimizer name")
@@ -1096,7 +2124,7 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     parser.add_argument("--trainer.max_steps", type=int, help="Maximum training steps")
     parser.add_argument(
         "--trainer.enforce_full_packed_batches",
-        type=lambda x: x.lower() == "true",
+        type=_parse_cli_bool,
         help=(
             "If true, buffer undersized packed batches to emit full microbatches. "
             "Improves token throughput stability but lowers step/s."
@@ -1104,18 +2132,26 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     )
     parser.add_argument(
         "--trainer.log_train_accuracy",
-        type=lambda x: x.lower() == "true",
+        type=_parse_cli_bool,
         help="Log MLM token accuracy during training (expensive)",
     )
     parser.add_argument(
         "--trainer.log_grad_norm",
-        type=lambda x: x.lower() == "true",
+        type=_parse_cli_bool,
         help="Log gradient norm during training",
     )
     parser.add_argument(
         "--trainer.save_steps", type=int, help="Save checkpoint every N steps"
     )
+    parser.add_argument(
+        "--trainer.save_total_limit",
+        type=int,
+        help="Maximum number of retained checkpoints (0 keeps all)",
+    )
     parser.add_argument("--trainer.eval_steps", type=int, help="Evaluate every N steps")
+    parser.add_argument(
+        "--trainer.logging_steps", type=int, help="Log metrics every N steps"
+    )
     parser.add_argument(
         "--trainer.eval_max_batches",
         type=int,
@@ -1136,7 +2172,7 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     )
     parser.add_argument(
         "--trainer.torch_compile",
-        type=lambda x: x.lower() == "true",
+        type=_parse_cli_bool,
         help="Enable torch.compile for model forward",
     )
     parser.add_argument(
@@ -1151,8 +2187,15 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     )
     parser.add_argument(
         "--datacollator.pack_sequences",
-        type=lambda x: x.lower() == "true",
+        type=_parse_cli_bool,
         help="Pack sequences into fixed-length chunks",
+    )
+
+    # Contrastive arguments
+    parser.add_argument(
+        "--contrastive.pretraining_prob",
+        type=float,
+        help="Probability of drawing a pretraining batch during contrastive training",
     )
 
     # WandB arguments
@@ -1161,11 +2204,18 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     parser.add_argument("--wandb.name", type=str, help="WandB run name")
     parser.add_argument(
         "--wandb.enabled",
-        type=lambda x: x.lower() == "true",
+        type=_parse_cli_bool,
         help="Enable Weights & Biases logging",
     )
     parser.add_argument(
         "--wandb.mode", type=str, help="WandB mode (online/offline/disabled)"
+    )
+    parser.add_argument(
+        "--wandb.watch",
+        type=str,
+        help=(
+            "W&B model watching mode: gradients, parameters, all, or off/none/disabled"
+        ),
     )
 
     # Top-level arguments
@@ -1173,14 +2223,17 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         "--task", type=str, help="Task (pretraining/glue/mteb/contrastive)"
     )
     parser.add_argument("--seed", type=int, help="Global random seed")
-    parser.add_argument("--debug", action="store_true", help="Debug mode")
+    parser.add_argument("--debug", action="store_true", default=None, help="Debug mode")
 
     # MTEB-specific arguments
     parser.add_argument("--mteb_task_type", type=str, help="MTEB task type")
     parser.add_argument("--mteb_batch_size", type=int, help="MTEB batch size")
     parser.add_argument("--mteb_pooling", type=str, help="MTEB pooling method")
     parser.add_argument(
-        "--mteb_overwrite_results", action="store_true", help="Overwrite MTEB results"
+        "--mteb_overwrite_results",
+        action="store_true",
+        default=None,
+        help="Overwrite MTEB results",
     )
 
     # Model loading arguments
@@ -1188,7 +2241,12 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         "--pretrained_checkpoint", type=str, help="Pretrained checkpoint"
     )
     parser.add_argument(
-        "--use_deepspeed", type=lambda x: x.lower() == "true", help="Use DeepSpeed"
+        "--use_deepspeed",
+        type=_parse_cli_bool,
+        help=(
+            "Legacy toggle for loading DeepSpeed-formatted checkpoints in "
+            "contrastive flows; runtime backend is set by Accelerate launch."
+        ),
     )
 
     return parser

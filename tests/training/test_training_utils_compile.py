@@ -10,7 +10,11 @@ import torch
 from accelerate.utils import DistributedType
 
 from neobert.config import Config
-from neobert.training_utils import _maybe_compile_model
+from neobert.training_utils import (
+    _maybe_compile_model,
+    resolve_wandb_watch_mode,
+    validate_muon_distributed_compatibility,
+)
 
 
 def _make_cfg() -> Config:
@@ -138,3 +142,83 @@ def test_maybe_compile_model_defaults_dynamic_false_for_packed_flash(
 
     assert out is model
     assert captured["dynamic"] is False
+
+
+def test_resolve_wandb_watch_mode_defaults_to_gradients_online() -> None:
+    """Default to gradient watching when online and WANDB_WATCH is unset."""
+    mode, warning = resolve_wandb_watch_mode(
+        wandb_mode="online",
+        config_value="gradients",
+        env_value=None,
+    )
+    assert mode == "gradients"
+    assert warning is None
+
+
+def test_resolve_wandb_watch_mode_disabled_offline() -> None:
+    """Do not watch by default for non-online runs."""
+    mode, warning = resolve_wandb_watch_mode(
+        wandb_mode="offline",
+        config_value="gradients",
+        env_value=None,
+    )
+    assert mode is None
+    assert warning is None
+
+
+def test_resolve_wandb_watch_mode_env_override_and_validation() -> None:
+    """Honor env overrides and return warnings for unsupported values."""
+    mode, warning = resolve_wandb_watch_mode(
+        wandb_mode="online",
+        config_value="gradients",
+        env_value="all",
+    )
+    assert mode == "all"
+    assert warning is None
+
+    mode, warning = resolve_wandb_watch_mode(
+        wandb_mode="online",
+        config_value="gradients",
+        env_value="weights",
+    )
+    assert mode == "parameters"
+    assert warning is None
+
+    mode, warning = resolve_wandb_watch_mode(
+        wandb_mode="online",
+        config_value="gradients",
+        env_value="off",
+    )
+    assert mode is None
+    assert warning is None
+
+    mode, warning = resolve_wandb_watch_mode(
+        wandb_mode="online",
+        config_value="gradients",
+        env_value="bad",
+    )
+    assert mode is None
+    assert warning is not None
+
+
+def test_resolve_wandb_watch_mode_uses_config_when_env_missing() -> None:
+    """Use config value when WANDB_WATCH is unset."""
+    mode, warning = resolve_wandb_watch_mode(
+        wandb_mode="online",
+        config_value="parameters",
+        env_value=None,
+    )
+    assert mode == "parameters"
+    assert warning is None
+
+
+def test_validate_muon_distributed_compatibility_rejects_fsdp() -> None:
+    """MuonClip must fail fast under FSDP-sharded training."""
+    accelerator = SimpleNamespace(distributed_type=DistributedType.FSDP)
+    with pytest.raises(RuntimeError, match="not compatible with FSDP"):
+        validate_muon_distributed_compatibility(
+            accelerator=accelerator,
+            optimizer_name="muonclip",
+            log=logging.getLogger("test"),
+            context="unit-test",
+        )

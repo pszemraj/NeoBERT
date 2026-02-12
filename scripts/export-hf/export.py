@@ -6,7 +6,7 @@ This script converts a NeoBERT checkpoint from the training format
 format with all necessary files for loading with transformers library.
 
 Usage:
-    python scripts/export-hf/export.py outputs/neobert_100m_100k/model_checkpoints/100000
+    python scripts/export-hf/export.py outputs/neobert_100m_100k/checkpoints/100000
 
 The script will create an hf/ directory in the parent folder with the exported model.
 """
@@ -23,6 +23,7 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 import transformers
 import yaml
+from neobert.checkpointing import load_deepspeed_fp32_state_dict
 from safetensors.torch import load_file, save_file
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
@@ -53,8 +54,13 @@ def get_torch_dtype_from_state_dict(state_dict: Dict[str, torch.Tensor]) -> str:
         raise ValueError(f"Expected torch.Tensor, got {type(first_weight)}")
 
     dtype = first_weight.dtype
+    if dtype == torch.float16:
+        raise ValueError(
+            "fp16/float16 checkpoints are not supported for NeoBERT export. "
+            "Use bf16 or fp32 checkpoints."
+        )
     dtype_str = str(dtype).split(".")[-1]
-    if dtype_str not in {"float16", "bfloat16", "float32", "float64"}:
+    if dtype_str not in {"bfloat16", "float32", "float64"}:
         print(f"Warning: Found unexpected dtype {dtype}, using '{dtype_str}'")
     return dtype_str
 
@@ -69,22 +75,6 @@ def load_tokenizer_info(tokenizer_info_path: Path) -> Optional[Dict[str, Any]]:
         return None
     with open(tokenizer_info_path, "r") as f:
         return json.load(f)
-
-
-def _is_deepspeed_tag_dir(path: Path) -> bool:
-    """Return True when ``path`` looks like a DeepSpeed ZeRO tag directory.
-
-    :param Path path: Candidate checkpoint directory.
-    :return bool: True when DeepSpeed shard files are present.
-    """
-    if not path.is_dir():
-        return False
-    patterns = (
-        "mp_rank_*_model_states.pt",
-        "zero_pp_rank_*_mp_rank_*_optim_states.pt",
-        "bf16_zero_pp_rank_*_mp_rank_*_optim_states.pt",
-    )
-    return any(any(path.glob(pattern)) for pattern in patterns)
 
 
 def _align_tokenizer_vocab_for_export(
@@ -141,29 +131,13 @@ def load_state_dict_from_checkpoint(checkpoint_path: Path) -> Dict[str, torch.Te
         return state_dict
 
     try:
-        from deepspeed.utils.zero_to_fp32 import (
-            get_fp32_state_dict_from_zero_checkpoint,
-        )
+        state_dict = load_deepspeed_fp32_state_dict(checkpoint_path)
     except Exception as exc:
         raise FileNotFoundError(
             "model.safetensors not found in "
-            f"{checkpoint_path} and DeepSpeed is unavailable."
-        ) from exc
-
-    try:
-        if _is_deepspeed_tag_dir(checkpoint_path):
-            # Trainer checkpoints are step-tag directories (e.g. ".../100000").
-            # zero_to_fp32 expects (root, tag) in this layout.
-            state_dict = get_fp32_state_dict_from_zero_checkpoint(
-                str(checkpoint_path.parent),
-                tag=checkpoint_path.name,
-            )
-        else:
-            state_dict = get_fp32_state_dict_from_zero_checkpoint(str(checkpoint_path))
-    except Exception as exc:
-        raise FileNotFoundError(
-            "model.safetensors not found in "
-            f"{checkpoint_path} and DeepSpeed conversion failed."
+            f"{checkpoint_path} and DeepSpeed conversion failed. "
+            "Expected either a ZeRO tag dir or nested Accelerate layout "
+            "('<step>/pytorch_model')."
         ) from exc
 
     if not state_dict:
@@ -895,10 +869,10 @@ def main() -> None:
             """\
             Examples:
             # Export checkpoint 100000 from neobert_100m_100k
-            python %(prog)s outputs/neobert_100m_100k/model_checkpoints/100000
+            python %(prog)s outputs/neobert_100m_100k/checkpoints/100000
 
             # Export to specific directory
-            python %(prog)s outputs/neobert_100m_100k/model_checkpoints/100000 --output my_model
+            python %(prog)s outputs/neobert_100m_100k/checkpoints/100000 --output my_model
         """
         ),
     )

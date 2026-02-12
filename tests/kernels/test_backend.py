@@ -93,6 +93,13 @@ class TestGetRMSNorm:
         rms = (out**2).mean(dim=-1).sqrt()
         assert rms.mean().item() == pytest.approx(1.0, abs=0.5)
 
+    def test_rmsnorm_rejects_fp16_on_cpu(self):
+        """NeoBERT policy rejects fp16 runtime tensors."""
+        norm = _AdaptiveRMSNorm(64, 1e-5)
+        x = torch.randn(2, 10, 64, dtype=torch.float16)
+        with pytest.raises(RuntimeError, match="fp16/float16"):
+            norm(x)
+
 
 class TestSwiGLUForward:
     """Tests for swiglu_forward() dispatch."""

@@ -77,7 +77,11 @@ class TestStreamingTokenize(unittest.TestCase):
             "neobert.tokenizer.tokenizer.AutoTokenizer.from_pretrained",
             return_value=base,
         ):
-            tokenizer = get_tokenizer("dummy-tokenizer", max_length=32)
+            tokenizer = get_tokenizer(
+                "dummy-tokenizer",
+                max_length=32,
+                allow_special_token_rewrite=True,
+            )
 
         pair_ids = tokenizer("hello", "world", add_special_tokens=True)["input_ids"]
         bos = tokenizer.bos_token_id
@@ -89,3 +93,33 @@ class TestStreamingTokenize(unittest.TestCase):
         self.assertEqual(sum(token_id == bos for token_id in pair_ids), 1)
         first_sep_idx = pair_ids.index(sep)
         self.assertNotEqual(pair_ids[first_sep_idx + 1], bos)
+
+    def test_get_tokenizer_rejects_implicit_special_token_rewrite(self):
+        """Ensure tokenizer fallback rewrite requires explicit opt-in."""
+        base = self._make_tokenizer()
+        base.mask_token = None
+
+        with patch(
+            "neobert.tokenizer.tokenizer.AutoTokenizer.from_pretrained",
+            return_value=base,
+        ):
+            with self.assertRaises(ValueError):
+                get_tokenizer("dummy-tokenizer", max_length=32)
+
+    def test_get_tokenizer_allows_missing_mask_when_mlm_enforcement_disabled(self):
+        """Ensure non-MLM flows can keep tokenizer special tokens unchanged."""
+        base = self._make_tokenizer()
+        base.mask_token = None
+
+        with patch(
+            "neobert.tokenizer.tokenizer.AutoTokenizer.from_pretrained",
+            return_value=base,
+        ):
+            tokenizer = get_tokenizer(
+                "dummy-tokenizer",
+                max_length=64,
+                enforce_mlm_special_tokens=False,
+            )
+
+        self.assertIsNone(tokenizer.mask_token)
+        self.assertEqual(tokenizer.model_max_length, 64)

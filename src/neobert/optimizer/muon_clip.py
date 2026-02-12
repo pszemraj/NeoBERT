@@ -595,10 +595,9 @@ class MuonClipOptimizer(Optimizer):
 
         if int(update_step) != int(self._step):
             logger.warning(
-                "MuonClip step desync: trainer update_step=%s != optimizer._step=%s. "
-                "Clipping/capture schedules may misalign.",
-                int(update_step),
-                int(self._step),
+                "MuonClip step desync: trainer update_step="
+                f"{int(update_step)} != optimizer._step={int(self._step)}. "
+                "Clipping/capture schedules may misalign."
             )
 
         should_clip = self.should_clip_update(int(update_step))
@@ -653,8 +652,7 @@ class MuonClipOptimizer(Optimizer):
                     "EncoderBlock missing required projection(s): " + ", ".join(missing)
                 )
             logger.debug(
-                "Detected separate attention projections using mapping %s",
-                self._layer_mapping,
+                f"Detected separate attention projections using mapping {self._layer_mapping}"
             )
 
         logger.debug("Model architecture validation passed")
@@ -795,10 +793,10 @@ class MuonClipOptimizer(Optimizer):
             if should_clip:
                 if not self.hook_system.has_captured_inputs():
                     logger.warning(
-                        "MuonClip scheduled at update_step=%d but no activations were captured. "
-                        "Clipping will be skipped. This usually means prepare_for_forward() "
-                        "was not called on the correct microbatch (or hooks were disabled/wrapped).",
-                        self._step,
+                        "MuonClip scheduled at update_step="
+                        f"{self._step} but no activations were captured. Clipping will be "
+                        "skipped. This usually means prepare_for_forward() was not called on "
+                        "the correct microbatch (or hooks were disabled/wrapped)."
                     )
                     self._last_metrics.clear()
                 else:
@@ -876,6 +874,8 @@ class MuonClipOptimizer(Optimizer):
             )
 
             # Orthogonalize 2D gradients using Newton-Schulz
+            # NOTE: this operates on full (non-sharded) parameter tensors.
+            # Training entrypoints enforce distributed-compatibility guards for Muon.
             update = self._orthogonalize_update(state["momentum_buffer"])
 
             # Weight decay
@@ -952,7 +952,12 @@ class MuonClipOptimizer(Optimizer):
         working = grad.T if is_transpose else grad
 
         original_dtype = working.dtype
-        if working.dtype in (torch.float16, torch.bfloat16):
+        if working.dtype == torch.float16:
+            raise RuntimeError(
+                "fp16/float16 gradients are not supported by MuonClip "
+                "orthogonalization. Use bf16 or fp32."
+            )
+        if working.dtype == torch.bfloat16:
             working = working.float()
         norm = torch.linalg.norm(working)
         if norm == 0:
@@ -1076,10 +1081,9 @@ class MuonClipOptimizer(Optimizer):
 
         if not getattr(self, "_warned_polar_coeff_extrapolation", False):
             logger.warning(
-                "Polar Express coefficients defined for %s steps; repeating final "
-                "coefficient for steps=%s. Consider lowering ns_steps.",
-                len(coeffs),
-                steps,
+                "Polar Express coefficients defined for "
+                f"{len(coeffs)} steps; repeating final coefficient for steps={steps}. "
+                "Consider lowering ns_steps."
             )
             self._warned_polar_coeff_extrapolation = True
 
@@ -1219,9 +1223,8 @@ class MuonClipOptimizer(Optimizer):
         expected = 3 * self.model_config.hidden_size
         if projections.shape[-1] != expected:
             logger.error(
-                "Unexpected fused QKV projection shape %s (expected last dim %d)",
-                projections.shape,
-                expected,
+                "Unexpected fused QKV projection shape "
+                f"{projections.shape} (expected last dim {expected})"
             )
             return None, None
 

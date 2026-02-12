@@ -35,7 +35,7 @@ python scripts/evaluation/run_glue.py configs/glue/cola.yaml
 python scripts/evaluation/run_mteb.py configs/pretraining/pretrain_neobert.yaml --model_name_or_path outputs/<run>
 
 # HF export
-python scripts/export-hf/export.py outputs/<run>/model_checkpoints/<step>
+python scripts/export-hf/export.py outputs/<run>/checkpoints/<step>
 ```
 
 ## Related Docs

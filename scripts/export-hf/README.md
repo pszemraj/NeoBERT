@@ -10,7 +10,7 @@ Scripts for exporting and validating NeoBERT checkpoints in HF format.
 ## Typical Flow
 
 ```bash
-python scripts/export-hf/export.py outputs/<run>/model_checkpoints/<step>
+python scripts/export-hf/export.py outputs/<run>/checkpoints/<step>
 python scripts/export-hf/validate.py outputs/<run>/hf/<export_name>
 ```
 

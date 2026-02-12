@@ -38,8 +38,14 @@ from deepspeed.utils import safe_get_full_fp32_param
 from tqdm import tqdm
 from transformers import BatchEncoding, PreTrainedTokenizerBase
 
-from neobert.checkpointing import save_model_safetensors
-from neobert.config import Config, ConfigLoader, MuonConfig, round_up_to_multiple
+from neobert.checkpointing import MODEL_WEIGHTS_NAME, save_state_dict_safetensors
+from neobert.config import (
+    Config,
+    ConfigLoader,
+    MuonConfig,
+    resolve_mixed_precision,
+    round_up_to_multiple,
+)
 from neobert.dataloader import get_dataloader
 from neobert.kernels.attention import resolve_runtime_attn_backend
 from neobert.kernels.backend import get_cross_entropy_loss, resolve_kernel_backend
@@ -55,8 +61,16 @@ from neobert.training_utils import (
     _maybe_compile_model,
     _maybe_prepare_for_forward,
     _resolve_resume_checkpoint,
+    create_accelerator,
+    resolve_wandb_watch_mode,
+    validate_muon_distributed_compatibility,
 )
-from neobert.utils import configure_tf32, model_summary, prepare_wandb_config
+from neobert.utils import (
+    configure_tf32,
+    format_resolved_config,
+    model_summary,
+    prepare_wandb_config,
+)
 
 # Our metric object and model
 from neobert.pretraining.metrics import Metrics, format_metrics
@@ -109,6 +123,60 @@ def _resolve_eval_samples(value: Any) -> Optional[int]:
     if resolved <= 0:
         return None
     return resolved
+
+
+def _format_percent(value: float) -> str:
+    """Format a percentage value for log output.
+
+    :param float value: Percentage in the range ``[0, 100]``.
+    :return str: Human-readable percentage string.
+    """
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def _log_masking_strategy(cfg: Config) -> None:
+    """Log the effective MLM corruption policy from runtime config.
+
+    :param Config cfg: Runtime configuration.
+    :raises ValueError: If ``datacollator.mlm_probability`` is out of range.
+    """
+    # Keep MLM probability policy intentionally config-driven; this fork runs
+    # controlled ablations at multiple masking rates, so only range validation is
+    # enforced here (task-level quality checks belong to experiment configs).
+    mlm_probability = float(cfg.datacollator.mlm_probability)
+    if mlm_probability < 0.0 or mlm_probability > 1.0:
+        raise ValueError(
+            f"datacollator.mlm_probability must be in [0, 1], got {mlm_probability}."
+        )
+
+    selected_pct = mlm_probability * 100.0
+    untouched_pct = max(0.0, 100.0 - selected_pct)
+    selected_pct_str = _format_percent(selected_pct)
+    untouched_pct_str = _format_percent(untouched_pct)
+
+    if cfg.datacollator.mask_all:
+        logger.info(
+            "datacollator.mask_all=true with mlm_probability="
+            f"{selected_pct_str}%: {selected_pct_str}% tokens replaced with [MASK], "
+            f"{untouched_pct_str}% untouched."
+        )
+        return
+
+    mask_pct = selected_pct * 0.8
+    random_pct = selected_pct * 0.1
+    unchanged_labeled_pct = selected_pct * 0.1
+    mask_pct_str = _format_percent(mask_pct)
+    random_pct_str = _format_percent(random_pct)
+    unchanged_labeled_pct_str = _format_percent(unchanged_labeled_pct)
+    logger.warning(
+        "datacollator.mask_all=false with mlm_probability="
+        f"{selected_pct_str}%: {selected_pct_str}% of tokens are sampled; sampled "
+        "tokens use BERT 80/10/10 ([MASK]/random/original). Global token mix is "
+        f"{untouched_pct_str}% unsampled (untouched), {mask_pct_str}% [MASK], "
+        f"{random_pct_str}% random-token, {unchanged_labeled_pct_str}% sampled-but-"
+        "unchanged original-token (still labeled). Set datacollator.mask_all=true "
+        "for 100% [MASK] replacement on sampled tokens."
+    )
 
 
 def _resolve_fsdp_version(accelerator: Accelerator) -> int:
@@ -442,6 +510,9 @@ def _promote_tmp_checkpoint_dir(tmp_path: Path, final_path: Path) -> None:
     succeeds. This avoids deleting the prior checkpoint before the new one is in
     place when running on shared filesystems.
 
+    Note: active pretraining writes directly to ``checkpoints/<step>/`` and does
+    not currently call this helper; it is kept for legacy/manual migration paths.
+
     :param Path tmp_path: Newly written temporary checkpoint directory.
     :param Path final_path: Final checkpoint directory path.
     """
@@ -526,6 +597,9 @@ def _sync_tokenizer_derived_config(
         multiple=128,
     )
 
+    # This mutation is intentional and happens before model construction so all
+    # ranks build the same tensor shapes; resolved values are persisted into
+    # checkpoint ``config.yaml`` for deterministic resume/export.
     cfg.model.vocab_size = resolved_vocab_size
     cfg.tokenizer.vocab_size = resolved_vocab_size
     if tokenizer.pad_token_id is None:
@@ -614,10 +688,8 @@ def _load_streaming_split(
                 total_examples = builder.info.splits[base].num_examples
         except Exception as exc:
             logger.warning(
-                "Unable to resolve streaming split size for %s (%s): %s",
-                dataset_name,
-                split,
-                exc,
+                "Unable to resolve streaming split size for "
+                f"{dataset_name} ({split}): {exc}"
             )
 
     if needs_total and total_examples is None:
@@ -636,7 +708,7 @@ def _load_streaming_split(
     if end_idx is not None:
         take_n = end_idx - (start_idx or 0)
         if take_n <= 0:
-            logger.warning("Resolved split %s is empty after slicing.", split)
+            logger.warning(f"Resolved split {split} is empty after slicing.")
             return dataset.take(0)
         dataset = dataset.take(take_n)
 
@@ -662,9 +734,7 @@ def _infer_eval_split_name(
         split_names = list(getattr(builder.info, "splits", {}).keys())
     except Exception as exc:
         logger.warning(
-            "Unable to infer eval split for %s from dataset metadata: %s",
-            dataset_name,
-            exc,
+            f"Unable to infer eval split for {dataset_name} from dataset metadata: {exc}"
         )
         return None
 
@@ -716,11 +786,9 @@ def _split_train_dataset_for_eval_samples(
     eval_count = min(eval_samples, total_samples - 1)
     if eval_count < eval_samples:
         logger.warning(
-            "Requested dataset.eval_samples=%s but dataset has %s rows; "
-            "using eval_samples=%s to keep at least one training sample.",
-            eval_samples,
-            total_samples,
-            eval_count,
+            "Requested dataset.eval_samples="
+            f"{eval_samples} but dataset has {total_samples} rows; using "
+            f"eval_samples={eval_count} to keep at least one training sample."
         )
     eval_dataset = train_dataset.select(range(eval_count))
     remaining_train = train_dataset.select(range(eval_count, total_samples))
@@ -764,8 +832,8 @@ def _set_default_worker_env(num_workers: int) -> None:
             applied[key] = value
     if applied:
         logger.info(
-            "Set default worker env: %s",
-            ", ".join(f"{k}={v}" for k, v in sorted(applied.items())),
+            "Set default worker env: "
+            + ", ".join(f"{k}={v}" for k, v in sorted(applied.items()))
         )
 
 
@@ -783,6 +851,40 @@ def _resolve_eval_max_batches(
     if num_processes <= 1:
         return max_batches
     return max(1, (max_batches + num_processes - 1) // num_processes)
+
+
+def _resolve_streaming_eval_budget(
+    eval_max_batches: Any,
+    eval_samples: Optional[int],
+    per_device_eval_batch_size: int,
+) -> tuple[int, str]:
+    """Resolve explicit streaming eval budget for comparable metrics.
+
+    :param Any eval_max_batches: Optional ``trainer.eval_max_batches`` value.
+    :param int | None eval_samples: Optional ``dataset.eval_samples`` value.
+    :param int per_device_eval_batch_size: Eval batch size for sample->batch conversion.
+    :raises ValueError: If no explicit budget is available for streaming eval.
+    :return tuple[int, str]: Resolved batch cap and source key.
+    """
+    if eval_max_batches is not None:
+        try:
+            resolved_eval_max_batches = int(eval_max_batches)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "trainer.eval_max_batches must be an integer when set, got "
+                f"{eval_max_batches!r}."
+            ) from exc
+        if resolved_eval_max_batches > 0:
+            return resolved_eval_max_batches, "trainer.eval_max_batches"
+
+    if eval_samples is None:
+        raise ValueError(
+            "Streaming eval requires an explicit evaluation budget for reproducible "
+            "metrics. Set trainer.eval_max_batches or dataset.eval_samples."
+        )
+
+    eval_batch_size = max(1, int(per_device_eval_batch_size))
+    return max(1, math.ceil(eval_samples / eval_batch_size)), "dataset.eval_samples"
 
 
 def _run_eval(
@@ -1090,8 +1192,8 @@ def _append_to_stored_batch(
             stored_batch[key] = existing + value
         else:
             raise TypeError(
-                "Stored batch key '%s' has incompatible types: %s vs %s"
-                % (key, type(existing).__name__, type(value).__name__)
+                f"Stored batch key '{key}' has incompatible types: "
+                f"{type(existing).__name__} vs {type(value).__name__}"
             )
     return stored_batch
 
@@ -1374,7 +1476,7 @@ def _prepare_resume_dataloader(
     accelerator: Accelerator,
     is_streaming: bool,
 ) -> torch.utils.data.DataLoader | None:
-    """Prepare a skipped dataloader for resume when possible.
+    """Prepare a skipped dataloader for resume.
 
     :param torch.utils.data.DataLoader train_dataloader: Training dataloader.
     :param Metrics metrics: Metrics tracker with resumed counters.
@@ -1382,28 +1484,178 @@ def _prepare_resume_dataloader(
     :param bool is_streaming: Whether the dataset is streaming.
     :return torch.utils.data.DataLoader | None: Skipped dataloader or ``None``.
     """
-    if is_streaming:
-        raise ValueError(
-            "Cannot resume training with streaming datasets - data position is not "
-            "preserved. For resumable long runs, pre-tokenize your dataset:\n"
-            "  python scripts/pretraining/tokenize_dataset.py --dataset <name> --output <path>"
-        )
-
-    if not hasattr(train_dataloader, "__len__"):
-        logger.warning(
-            "Resume requested but dataloader has no length; "
-            "starting from the current epoch boundary."
-        )
+    completed_batches = int(metrics.get("train/batches", 0))
+    if completed_batches <= 0:
         return None
 
-    if hasattr(train_dataloader, "set_epoch"):
-        train_dataloader.set_epoch(metrics["train/epochs"])
+    loader_len: Optional[int] = None
+    if hasattr(train_dataloader, "__len__"):
+        try:
+            loader_len = len(train_dataloader)
+        except TypeError:
+            loader_len = None
 
-    resume_step = metrics["train/batches"] % len(train_dataloader)
+    if hasattr(train_dataloader, "set_epoch"):
+        train_dataloader.set_epoch(int(metrics.get("train/epochs", 0)))
+
+    if loader_len is not None:
+        if loader_len <= 0:
+            logger.warning(
+                "Resume requested but dataloader length is non-positive; "
+                "starting from the current epoch boundary."
+            )
+            return None
+        resume_step = completed_batches % loader_len
+        if is_streaming:
+            logger.info(
+                "Streaming resume: skipping "
+                f"{resume_step} batch(es) within current epoch "
+                f"(consumed={completed_batches}, loader_len={loader_len})."
+            )
+    else:
+        if not is_streaming:
+            logger.warning(
+                "Resume requested but dataloader has no length; "
+                "starting from the current epoch boundary."
+            )
+            return None
+        # Streaming fallback: when epoch has already been restored via
+        # ``set_epoch(train/epochs)``, global consumed-batch counts can over-skip.
+        # Prefer epoch-local progress when available from checkpointed metrics.
+        resume_step = int(metrics.get("train/batches_in_epoch", 0))
+        if resume_step <= 0:
+            # Backward-compatible fallback for older checkpoints.
+            resume_step = completed_batches
+        logger.warning(
+            "Streaming resume with unknown dataloader length: skipping "
+            f"{resume_step} batch(es) from current epoch "
+            f"(completed_batches={completed_batches}, "
+            f"batches_in_epoch={int(metrics.get('train/batches_in_epoch', 0))})."
+        )
+
     if resume_step == 0:
         return None
 
     return accelerator.skip_first_batches(train_dataloader, resume_step)
+
+
+def _safe_len(dataloader: torch.utils.data.DataLoader) -> Optional[int]:
+    """Return dataloader length when available, else ``None``.
+
+    :param torch.utils.data.DataLoader dataloader: Dataloader object.
+    :return int | None: Length, or ``None`` when not defined.
+    """
+    if not hasattr(dataloader, "__len__"):
+        return None
+    try:
+        return len(dataloader)
+    except TypeError:
+        return None
+
+
+def _resolve_checkpoint_retention_limit(cfg: Config) -> int:
+    """Resolve effective checkpoint retention limit from trainer config.
+
+    ``trainer.save_total_limit`` is the canonical knob. Deprecated
+    ``trainer.max_ckpt`` is only used as a fallback when save_total_limit is unset.
+
+    :param Config cfg: Runtime training configuration.
+    :return int: Maximum number of retained checkpoints (0 disables pruning).
+    """
+    save_total_limit = getattr(cfg.trainer, "save_total_limit", None)
+    if save_total_limit is not None:
+        return max(0, int(save_total_limit))
+    max_ckpt = getattr(cfg.trainer, "max_ckpt", None)
+    if max_ckpt is not None:
+        return max(0, int(max_ckpt))
+    return 0
+
+
+def _prune_step_checkpoints(checkpoint_dir: Path, retention_limit: int) -> None:
+    """Prune old numeric step checkpoint folders in ``checkpoint_dir``.
+
+    This helper is best-effort and resilient to concurrent filesystem mutations.
+    It never raises on a missing/deleted checkpoint directory.
+
+    :param Path checkpoint_dir: Root directory containing ``<step>/`` folders.
+    :param int retention_limit: Number of newest numeric checkpoints to keep.
+    """
+    if retention_limit <= 0 or not checkpoint_dir.exists():
+        return
+
+    checkpoints: list[tuple[int, Path]] = []
+    for item_path in checkpoint_dir.iterdir():
+        if not item_path.is_dir():
+            continue
+        try:
+            checkpoints.append((int(item_path.name), item_path))
+        except ValueError:
+            continue
+
+    if len(checkpoints) <= retention_limit:
+        return
+
+    checkpoints.sort(key=lambda item: item[0])
+    for _, old_path in checkpoints[: len(checkpoints) - retention_limit]:
+        try:
+            shutil.rmtree(old_path)
+            logger.info(f"Removed old checkpoint: {old_path} (limit={retention_limit})")
+        except FileNotFoundError:
+            logger.warning(f"Checkpoint already removed before prune: {old_path}")
+        except OSError as exc:
+            logger.warning(f"Failed to remove old checkpoint {old_path}: {exc}")
+
+
+def _save_portable_checkpoint_weights(
+    model: torch.nn.Module,
+    accelerator: Accelerator,
+    checkpoint_path: Path,
+) -> bool:
+    """Save backend-agnostic ``model.safetensors`` into a step checkpoint.
+
+    The resumable Accelerate state remains the source of truth for restart; this
+    helper adds a portable inference/export payload for downstream consumers.
+
+    :param torch.nn.Module model: Prepared training model.
+    :param Accelerator accelerator: Active accelerator runtime.
+    :param Path checkpoint_path: Step checkpoint directory path.
+    :return bool: True when portable weights were saved.
+    """
+    try:
+        # Distributed backends (FSDP/FSDP2/DeepSpeed) may require all ranks to
+        # participate in state-dict collection collectives even when only rank 0
+        # ultimately persists the portable safetensors payload.
+        state_dict = accelerator.get_state_dict(model, unwrap=True)
+    except Exception as exc:
+        if accelerator.is_main_process:
+            logger.warning(
+                "Unable to export portable checkpoint weights to "
+                f"{checkpoint_path / MODEL_WEIGHTS_NAME}: {exc}. "
+                "Resumable state was still saved. For DeepSpeed ZeRO-3, enable "
+                "`stage3_gather_16bit_weights_on_model_save`/`zero3_save_16bit_model` "
+                "to emit consolidated portable weights automatically."
+            )
+        return False
+
+    if not accelerator.is_main_process:
+        return False
+
+    try:
+        weights_path = save_state_dict_safetensors(
+            state_dict,
+            checkpoint_path,
+            metadata={"format": "pt", "source": "accelerate.get_state_dict"},
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to persist portable checkpoint weights at "
+            f"{checkpoint_path / MODEL_WEIGHTS_NAME}: {exc}. "
+            "Resumable state was still saved."
+        )
+        return False
+
+    logger.info(f"Saved portable model weights to {weights_path}.")
+    return True
 
 
 def trainer(cfg: Config) -> None:
@@ -1416,21 +1668,22 @@ def trainer(cfg: Config) -> None:
     )
     eval_samples = _resolve_eval_samples(getattr(cfg.dataset, "eval_samples", None))
 
-    # Get the last checkpoint id
+    # Checkpoint layout (BREAKING): all resumable/exportable artifacts are written
+    # under output_dir/checkpoints/<step>/.
     output_dir = Path(cfg.trainer.output_dir)
     checkpoint_dir = output_dir / "checkpoints"
-    model_checkpoint_dir = output_dir / "model_checkpoints"
-    model_checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_retention_limit = _resolve_checkpoint_retention_limit(cfg)
     resume_checkpoint_path, iteration = _resolve_resume_checkpoint(
         cfg.trainer.resume_from_checkpoint,
         str(checkpoint_dir),
         str(output_dir),
     )
 
-    # Accelerator object - disable automatic checkpointing to avoid duplicate checkpoints/ directory
+    # Accelerator object - disable automatic checkpoint naming so the trainer can
+    # control a single checkpoint tree (checkpoints/<step>).
     project_config = ProjectConfiguration(
         str(output_dir),
-        automatic_checkpoint_naming=False,  # We handle checkpointing manually in model_checkpoints/
+        automatic_checkpoint_naming=False,
         iteration=iteration,
     )
     # All parameters participate in the forward graph; keep DDP in fast-path mode.
@@ -1448,20 +1701,16 @@ def trainer(cfg: Config) -> None:
         dataloader_config = DataLoaderConfiguration(dispatch_batches=False)
         logger.info("Disabling Accelerate dispatch_batches for packed-sequence mode.")
 
-    mixed_precision = cfg.trainer.mixed_precision
-    if isinstance(mixed_precision, bool):
-        mixed_precision = "bf16" if mixed_precision else "no"
-    else:
-        mixed_precision = str(mixed_precision).strip().lower()
-    if mixed_precision == "fp32":
-        mixed_precision = "no"
-    if mixed_precision == "fp16":
-        raise ValueError(
-            "trainer.mixed_precision='fp16' is not supported for pretraining. "
-            "Use 'bf16' or 'no'/'fp32'."
-        )
+    mixed_precision = resolve_mixed_precision(
+        cfg.trainer.mixed_precision,
+        task="pretraining",
+    )
+    cfg.trainer.mixed_precision = mixed_precision
 
-    accelerator = Accelerator(
+    accelerator = create_accelerator(
+        use_cpu=bool(getattr(cfg.trainer, "use_cpu", False)),
+        log=logger,
+        accelerator_factory=Accelerator,
         step_scheduler_with_optimizer=False,  # enable manual control of the scheduler
         mixed_precision=mixed_precision,
         gradient_accumulation_steps=cfg.trainer.gradient_accumulation_steps,
@@ -1475,6 +1724,18 @@ def trainer(cfg: Config) -> None:
             "Megatron-LM backend is not supported by this training loop. "
             "Use DDP or DeepSpeed instead."
         )
+    if getattr(accelerator, "is_main_process", True):
+        logger.info(
+            "Pretraining checkpoint layout: writing resumable + export artifacts to "
+            f"{checkpoint_dir}/<step>/"
+        )
+        if checkpoint_retention_limit > 0:
+            logger.info(
+                "Checkpoint retention policy: keep "
+                f"{checkpoint_retention_limit} latest checkpoint(s)."
+            )
+        else:
+            logger.info("Checkpoint retention policy: disabled (keep all checkpoints).")
     if accelerator.distributed_type is DistributedType.FSDP:
         fsdp_version = _resolve_fsdp_version(accelerator)
         if fsdp_version < 2:
@@ -1482,34 +1743,25 @@ def trainer(cfg: Config) -> None:
                 "NeoBERT pretraining is FSDP2-first. "
                 "FSDP v1 is unsupported; set Accelerate fsdp_version=2."
             )
-        logger.info("FSDP2 runtime detected (fsdp_version=%s).", fsdp_version)
-    if accelerator.distributed_type is DistributedType.DEEPSPEED:
-        is_muon = cfg.optimizer.name.lower() in {"muonclip", "muon-clip", "muon_clip"}
-        if is_muon:
-            deepspeed_plugin = getattr(accelerator.state, "deepspeed_plugin", None)
-            zero_stage = getattr(deepspeed_plugin, "zero_stage", None)
-            if zero_stage is None:
-                logger.warning(
-                    "MuonClip optimizer enabled with DeepSpeed, but zero stage is unknown. "
-                    "Ensure ZeRO stage < 2 to avoid incorrect sharded updates."
-                )
-            elif zero_stage >= 2:
-                raise RuntimeError(
-                    "MuonClip is not compatible with DeepSpeed ZeRO stage >= 2 "
-                    "(sharded grads/params). Use ZeRO stage 0/1 or disable MuonClip."
-                )
+        logger.info(f"FSDP2 runtime detected (fsdp_version={fsdp_version}).")
+    validate_muon_distributed_compatibility(
+        accelerator=accelerator,
+        optimizer_name=cfg.optimizer.name,
+        log=logger,
+        context="pretraining",
+    )
 
     # Initialise the wandb run and pass wandb parameters
+    tracker_config_dict = prepare_wandb_config(cfg)
     if wandb_enabled:
         Path(cfg.wandb.dir).mkdir(parents=True, exist_ok=True)
-        config_dict = prepare_wandb_config(cfg)
         accelerator.init_trackers(
             project_name=cfg.wandb.project,
             init_kwargs={
                 "wandb": {
                     "name": cfg.wandb.name,
                     "entity": cfg.wandb.entity,
-                    "config": config_dict,
+                    "config": tracker_config_dict,
                     "tags": cfg.wandb.tags,
                     "dir": cfg.wandb.dir,
                     "mode": cfg.wandb.mode,
@@ -1518,7 +1770,7 @@ def trainer(cfg: Config) -> None:
             },
         )
         if accelerator.is_main_process and wandb.run is not None:
-            wandb.run.config.update(config_dict, allow_val_change=True)
+            wandb.run.config.update(tracker_config_dict, allow_val_change=True)
             config_path = getattr(cfg, "config_path", None)
             if config_path:
                 abs_config_path = Path(config_path).expanduser().resolve()
@@ -1532,8 +1784,8 @@ def trainer(cfg: Config) -> None:
                     wandb.run.log_artifact(artifact)
                 else:
                     logger.warning(
-                        "Configured config_path '%s' not found; skipping wandb artifact upload",
-                        config_path,
+                        f"Configured config_path '{config_path}' not found; "
+                        "skipping wandb artifact upload"
                     )
 
     # Set the seed
@@ -1553,14 +1805,11 @@ def trainer(cfg: Config) -> None:
     log_train_accuracy = bool(getattr(cfg.trainer, "log_train_accuracy", False))
     log_grad_norm = bool(getattr(cfg.trainer, "log_grad_norm", False))
     metrics["train/compute_accuracy"] = int(log_train_accuracy)
+    # Internal resume cursor only (checkpointed via register_for_checkpointing);
+    # excluded from tracker payloads and console metrics.
+    metrics["train/batches_in_epoch"] = int(metrics.get("train/batches_in_epoch", 0))
 
     is_streaming = cfg.dataset.streaming
-    if cfg.trainer.resume_from_checkpoint and is_streaming:
-        raise ValueError(
-            "Cannot resume training with streaming datasets - data position is not "
-            "preserved. For resumable long runs, pre-tokenize your dataset:\n"
-            "  python scripts/pretraining/tokenize_dataset.py --dataset <name> --output <path>"
-        )
 
     if cfg.datacollator.pack_sequences:
         logger.info(
@@ -1573,19 +1822,17 @@ def trainer(cfg: Config) -> None:
                 "per-segment SDPA fallback will be used (slow on GPU). "
                 "Set attn_backend=flash_attn_varlen and install flash-attn for production."
             )
-    if not cfg.datacollator.mask_all:
-        # Keep BERT-style 80/10/10 masking as a supported mode, but make the
-        # methodological difference explicit for NeoBERT-style pretraining runs.
-        logger.warning(
-            "datacollator.mask_all=false uses standard 80/10/10 MLM corruption. "
-            "Set datacollator.mask_all=true to use NeoBERT's 100%% [MASK] strategy."
-        )
+    if accelerator.is_main_process:
+        _log_masking_strategy(cfg)
 
     # Tokenizer
     with accelerator.main_process_first():
         tokenizer = get_tokenizer(
             pretrained_model_name_or_path=cfg.tokenizer.path or cfg.tokenizer.name,
             max_length=cfg.tokenizer.max_length,
+            trust_remote_code=cfg.tokenizer.trust_remote_code,
+            revision=cfg.tokenizer.revision,
+            allow_special_token_rewrite=cfg.tokenizer.allow_special_token_rewrite,
         )
 
     prior_model_vocab_size = int(cfg.model.vocab_size)
@@ -1601,17 +1848,23 @@ def trainer(cfg: Config) -> None:
         or prior_tokenizer_vocab_size != resolved_vocab_size
     ):
         logger.warning(
-            "Config vocab_size updated: tokenizer len=%s -> %s (was model=%s).",
-            original_vocab_size,
-            resolved_vocab_size,
-            prior_model_vocab_size,
+            "Config vocab_size updated: tokenizer len="
+            f"{original_vocab_size} -> {resolved_vocab_size} "
+            f"(was model={prior_model_vocab_size})."
         )
     if accelerator.is_main_process and added_tokens > 0:
         logger.info(
-            "Added %s inert tokenizer tokens to align tokenizer/model vocab_size=%s.",
-            added_tokens,
-            resolved_vocab_size,
+            f"Added {added_tokens} inert tokenizer tokens to align "
+            f"tokenizer/model vocab_size={resolved_vocab_size}."
         )
+
+    resolved_config_dict = prepare_wandb_config(cfg)
+    if accelerator.is_main_process:
+        accelerator.print(
+            "Resolved task config:\n" + format_resolved_config(resolved_config_dict)
+        )
+    if accelerator.is_main_process and wandb_enabled and wandb.run is not None:
+        wandb.run.config.update(resolved_config_dict, allow_val_change=True)
 
     # Tokenization strategy for packed sequences: strip special tokens and reinsert
     # boundaries in the collator to avoid duplicate BOS/EOS/SEP tokens.
@@ -1642,8 +1895,7 @@ def trainer(cfg: Config) -> None:
             train_dataset = _select_train_split(train_dataset, cfg.dataset.train_split)
         else:
             logger.warning(
-                "Dataset path %s not found; falling back to load_dataset().",
-                dataset_path,
+                f"Dataset path {dataset_path} not found; falling back to load_dataset()."
             )
 
     if train_dataset is None:
@@ -1714,7 +1966,7 @@ def trainer(cfg: Config) -> None:
                         column_name=text_column,
                         max_length=tokenize_max_length,
                         remove_columns=True,
-                        truncation=True,
+                        truncation=cfg.tokenizer.truncation,
                         num_proc=cfg.dataset.num_proc,
                         add_special_tokens=add_special_tokens,
                         return_special_tokens_mask=return_special_tokens_mask,
@@ -1763,7 +2015,7 @@ def trainer(cfg: Config) -> None:
                     column_name=text_column,
                     max_length=tokenize_max_length,
                     remove_columns=True,
-                    truncation=True,
+                    truncation=cfg.tokenizer.truncation,
                     num_proc=tokenize_num_proc,
                     add_special_tokens=add_special_tokens,
                     return_special_tokens_mask=return_special_tokens_mask,
@@ -1791,9 +2043,8 @@ def trainer(cfg: Config) -> None:
         if inferred_eval_split is not None:
             eval_split = inferred_eval_split
             logger.info(
-                "Auto-detected streaming eval split '%s'. "
-                "Override with dataset.eval_split when needed.",
-                eval_split,
+                "Auto-detected streaming eval split "
+                f"'{eval_split}'. Override with dataset.eval_split when needed."
             )
 
     eval_dataset = None
@@ -1804,9 +2055,8 @@ def trainer(cfg: Config) -> None:
                 eval_dataset = eval_source[eval_split]
             else:
                 logger.warning(
-                    "eval_split=%s requested but dataset path is not a DatasetDict; "
-                    "skipping evaluation.",
-                    eval_split,
+                    f"eval_split={eval_split} requested but dataset path is not a "
+                    "DatasetDict; skipping evaluation."
                 )
         else:
             if cfg.dataset.streaming:
@@ -1842,9 +2092,9 @@ def trainer(cfg: Config) -> None:
             is_streaming=is_streaming,
         )
         logger.info(
-            "dataset.eval_samples=%s with no eval split configured; reserving "
-            "head samples for eval and excluding them from training.",
-            eval_samples,
+            "dataset.eval_samples="
+            f"{eval_samples} with no eval split configured; reserving head samples "
+            "for eval and excluding them from training."
         )
 
     if eval_dataset is not None and eval_samples is not None:
@@ -1896,7 +2146,7 @@ def trainer(cfg: Config) -> None:
                     column_name=text_column,
                     max_length=tokenize_max_length,
                     remove_columns=True,
-                    truncation=True,
+                    truncation=cfg.tokenizer.truncation,
                     num_proc=eval_num_proc,
                     add_special_tokens=add_special_tokens,
                     return_special_tokens_mask=return_special_tokens_mask,
@@ -2146,27 +2396,40 @@ def trainer(cfg: Config) -> None:
         accelerator, "prepare_data_loader"
     )
 
-    if wandb_enabled and accelerator.is_main_process:
-        wandb_watch = os.environ.get("WANDB_WATCH")
-        if wandb_watch is not None:
-            watch_mode = wandb_watch.strip().lower()
-            if watch_mode in {"", "false", "0", "none", "off"}:
-                watch_mode = None
-            elif watch_mode == "weights":
-                watch_mode = "parameters"
-            elif watch_mode not in {"gradients", "parameters", "all"}:
-                logger.warning(
-                    "Unrecognized WANDB_WATCH value '%s'; skipping wandb.watch()",
-                    wandb_watch,
-                )
-                watch_mode = None
+    train_loader_len = _safe_len(train_dataloader)
+    if train_loader_len is not None and train_loader_len == 0:
+        raise ValueError(
+            "Training dataloader resolved to zero batches. Check dataset filtering "
+            "(for example dataset.min_length and split settings) and ensure "
+            "tokenization produced non-empty inputs."
+        )
+    if eval_dataloader is not None:
+        eval_loader_len = _safe_len(eval_dataloader)
+        if eval_loader_len is not None and eval_loader_len == 0:
+            logger.warning(
+                "Eval dataloader resolved to zero batches; disabling evaluation for "
+                "this run."
+            )
+            eval_dataloader = None
 
-            if watch_mode:
-                wandb.watch(
-                    accelerator.unwrap_model(model),
-                    log=watch_mode,
-                    log_freq=getattr(cfg.wandb, "log_interval", 100),
-                )
+    if wandb_enabled and accelerator.is_main_process:
+        watch_mode, watch_warning = resolve_wandb_watch_mode(
+            wandb_mode=cfg.wandb.mode,
+            config_value=getattr(cfg.wandb, "watch", "gradients"),
+            env_value=os.environ.get("WANDB_WATCH"),
+        )
+        if watch_warning:
+            logger.warning(watch_warning)
+        if watch_mode:
+            watch_log_freq = max(1, int(getattr(cfg.trainer, "logging_steps", 100)))
+            logger.info(
+                f"Enabling wandb.watch(log={watch_mode}, log_freq={watch_log_freq})."
+            )
+            wandb.watch(
+                accelerator.unwrap_model(model),
+                log=watch_mode,
+                log_freq=watch_log_freq,
+            )
 
     train_loss_fn: Optional[torch.nn.Module] = None
     masked_objective: Optional[MaskedPositionsOnlyMLMObjective] = None
@@ -2188,35 +2451,23 @@ def trainer(cfg: Config) -> None:
             "ablation/debug and has higher memory use."
         )
     eval_max_batches = getattr(cfg.trainer, "eval_max_batches", None)
-    if isinstance(eval_max_batches, int) and eval_max_batches <= 0:
-        eval_max_batches = None
     eval_dataset_is_streaming = (
         eval_dataset is not None
         and cfg.dataset.streaming
         and hasattr(eval_dataset, "take")
         and hasattr(eval_dataset, "skip")
     )
-    if eval_max_batches is None and eval_dataset_is_streaming:
-        if eval_samples is not None:
-            per_device_eval_batch_size = max(1, cfg.trainer.per_device_eval_batch_size)
-            eval_max_batches = max(
-                1,
-                math.ceil(eval_samples / per_device_eval_batch_size),
-            )
-            logger.info(
-                "Streaming eval detected with dataset.eval_samples=%s; "
-                "defaulting eval_max_batches to %s. "
-                "Set trainer.eval_max_batches to override.",
-                eval_samples,
-                eval_max_batches,
-            )
-        else:
-            eval_max_batches = 100
-            logger.info(
-                "Streaming eval detected; defaulting eval_max_batches to %s. "
-                "Set trainer.eval_max_batches to override.",
-                eval_max_batches,
-            )
+    if eval_dataset_is_streaming:
+        eval_max_batches, eval_budget_source = _resolve_streaming_eval_budget(
+            eval_max_batches=eval_max_batches,
+            eval_samples=eval_samples,
+            per_device_eval_batch_size=cfg.trainer.per_device_eval_batch_size,
+        )
+        logger.info(
+            "Streaming eval budget resolved from "
+            f"{eval_budget_source}: eval_max_batches={eval_max_batches} "
+            "(global batches across all ranks)."
+        )
 
     # Resume from the latest checkpoint
     skipped_train_dataloader = None
@@ -2227,13 +2478,20 @@ def trainer(cfg: Config) -> None:
                 f"resume_from_checkpoint path not found: {resume_checkpoint_path}"
             )
         accelerator.load_state(str(resume_checkpoint))
+        if is_streaming and hasattr(train_dataset, "set_epoch"):
+            resume_epoch = int(metrics.get("train/epochs", 0))
+            train_dataset.set_epoch(resume_epoch)
+            logger.info(
+                "Restored streaming dataset epoch to "
+                f"{resume_epoch} before resume skipping."
+            )
         skipped_train_dataloader = _prepare_resume_dataloader(
             train_dataloader, metrics, accelerator, is_streaming
         )
     elif cfg.trainer.resume_from_checkpoint:
         logger.warning(
-            "resume_from_checkpoint is set but no valid checkpoints were found in %s",
-            checkpoint_dir,
+            "resume_from_checkpoint is set but no valid checkpoints were found in "
+            f"{checkpoint_dir}"
         )
 
     # Progress bar
@@ -2242,7 +2500,7 @@ def trainer(cfg: Config) -> None:
         unit="step",
         initial=metrics["train/steps"],
         total=cfg.trainer.max_steps,
-        disable=(not accelerator.is_main_process),
+        disable=(cfg.trainer.disable_tqdm or not accelerator.is_main_process),
     )
 
     accum_tokens = torch.zeros((), device=accelerator.device, dtype=torch.long)
@@ -2276,7 +2534,9 @@ def trainer(cfg: Config) -> None:
             if skipped_train_dataloader is None
             else skipped_train_dataloader
         )
+        saw_batch_this_epoch = False
         for batch in dataloader:
+            saw_batch_this_epoch = True
             # Pack or truncate to target per-step batch size. Packed mode can emit
             # variable batch dimensions, so we buffer/merge there too now that
             # packed_seqlens uses fixed-width tensor metadata.
@@ -2316,6 +2576,7 @@ def trainer(cfg: Config) -> None:
 
             # Update number of batches only when we will execute a backward pass.
             metrics["train/batches"] += 1
+            metrics["train/batches_in_epoch"] += 1
 
             num_pred = (batch["labels"] != -100).sum()
             num_tokens = (batch["input_ids"] != model_config.pad_token_id).sum()
@@ -2363,8 +2624,8 @@ def trainer(cfg: Config) -> None:
                             and objective_out.used_path != "zero_masked"
                         ):
                             logger.debug(
-                                "Masked-logits loss path active (first non-empty microbatch): %s",
-                                objective_out.used_path,
+                                "Masked-logits loss path active (first non-empty "
+                                f"microbatch): {objective_out.used_path}"
                             )
                             logged_masked_loss_path = True
                     else:
@@ -2426,18 +2687,22 @@ def trainer(cfg: Config) -> None:
                     and bool(clamped.detach().cpu().item())
                 ):
                     warned_low_token_scale = True
+                    min_safe_tokens = (
+                        accelerator.num_processes
+                        * accelerator.gradient_accumulation_steps
+                    )
                     logger.warning(
                         "Masked-token count was below the safe minimum for an update "
-                        "(tokens_global=%s, min=%s); clamped gradient scale to avoid "
-                        "pathological amplification.",
-                        int(tokens_global.item()),
-                        accelerator.num_processes
-                        * accelerator.gradient_accumulation_steps,
+                        f"(tokens_global={int(tokens_global.item())}, "
+                        f"min={min_safe_tokens}); clamped gradient scale to avoid "
+                        "pathological amplification."
                     )
 
                 grad_norm_value = None
 
                 # Optional gradient clipping for stability on deep/long-context runs.
+                # Keep clipping after token-mean scaling so thresholds apply to the
+                # final effective update magnitude.
                 max_grad_norm = cfg.trainer.gradient_clipping
 
                 if max_grad_norm is not None and max_grad_norm > 0:
@@ -2530,16 +2795,14 @@ def trainer(cfg: Config) -> None:
                             if path_total > 0:
                                 logger.debug(
                                     "Masked-loss path window: "
-                                    "liger_flce=%s (%.3f), checkpointed=%s (%.3f), "
-                                    "zero_masked=%s (%.3f), other=%s (%.3f)",
-                                    steps_liger,
-                                    steps_liger / path_total,
-                                    steps_checkpointed,
-                                    steps_checkpointed / path_total,
-                                    steps_zero,
-                                    steps_zero / path_total,
-                                    steps_other,
-                                    steps_other / path_total,
+                                    f"liger_flce={steps_liger} "
+                                    f"({steps_liger / path_total:.3f}), "
+                                    f"checkpointed={steps_checkpointed} "
+                                    f"({steps_checkpointed / path_total:.3f}), "
+                                    f"zero_masked={steps_zero} "
+                                    f"({steps_zero / path_total:.3f}), "
+                                    f"other={steps_other} "
+                                    f"({steps_other / path_total:.3f})"
                                 )
                             else:
                                 logger.debug(
@@ -2566,77 +2829,37 @@ def trainer(cfg: Config) -> None:
                     local_loss_path_zero_masked.zero_()
                     local_loss_path_other.zero_()
 
-                # Save accelerator state for resumable training
-                if metrics["train/steps"] % cfg.trainer.save_steps == 0:
-                    state_checkpoint_path = checkpoint_dir / str(metrics["train/steps"])
-                    accelerator.save_state(output_dir=str(state_checkpoint_path))
-                    accelerator.wait_for_everyone()
-
-                    # Accelerator checkpoints are the source of truth for resuming.
-                    save_total_limit = getattr(cfg.trainer, "save_total_limit", 0)
-                    max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
-                    limit = max(save_total_limit, max_ckpt)
-                    if (
-                        limit > 0
-                        and checkpoint_dir.exists()
-                        and accelerator.is_main_process
-                    ):
-                        # Prune accelerator checkpoints to the same retention policy
-                        # as model_checkpoints to avoid unbounded disk growth.
-                        accel_checkpoints = []
-                        for item_path in checkpoint_dir.iterdir():
-                            if item_path.is_dir() and item_path.name.isdigit():
-                                accel_checkpoints.append(int(item_path.name))
-                        if len(accel_checkpoints) > limit:
-                            accel_checkpoints.sort()
-                            for old_ckpt in accel_checkpoints[
-                                : len(accel_checkpoints) - limit
-                            ]:
-                                old_path = checkpoint_dir / str(old_ckpt)
-                                if old_path.exists():
-                                    shutil.rmtree(old_path)
-                                    logger.info(
-                                        "Removed old accelerator checkpoint: %s (limit=%s)",
-                                        old_path,
-                                        limit,
-                                    )
-
-                # Save model weights checkpoint
-                if metrics["train/steps"] % cfg.trainer.save_steps == 0:
-                    # Model checkpoints are used for inference/export and can be pruned independently.
-                    # Save the checkpoint
+                save_strategy = str(getattr(cfg.trainer, "save_strategy", "steps"))
+                eval_strategy = str(getattr(cfg.trainer, "eval_strategy", "steps"))
+                save_model = bool(getattr(cfg.trainer, "save_model", True))
+                should_save = (
+                    save_model
+                    and save_strategy == "steps"
+                    and metrics["train/steps"] % cfg.trainer.save_steps == 0
+                )
+                # Compute eval trigger from the same post-update step snapshot used
+                # for save logic to keep step-based scheduling deterministic.
+                should_eval = (
+                    eval_dataloader is not None
+                    and eval_strategy == "steps"
+                    and cfg.trainer.eval_steps > 0
+                    and metrics["train/steps"] % cfg.trainer.eval_steps == 0
+                )
+                if should_save:
                     step_tag = str(metrics["train/steps"])
-                    tmp_tag = f"{step_tag}.tmp"
-                    tmp_path = model_checkpoint_dir / tmp_tag
-
-                    # Clean up any stale tmp directory from a previous failed save.
-                    # Use exist_ok pattern to avoid TOCTOU race conditions in distributed setting.
-                    if accelerator.is_main_process:
-                        if tmp_path.exists():
-                            shutil.rmtree(tmp_path)
-                        tmp_path.mkdir(parents=True, exist_ok=True)
+                    checkpoint_path = checkpoint_dir / step_tag
+                    accelerator.save_state(output_dir=str(checkpoint_path))
+                    accelerator.wait_for_everyone()
+                    _save_portable_checkpoint_weights(
+                        model, accelerator, checkpoint_path
+                    )
                     accelerator.wait_for_everyone()
 
-                    checkpoint_path = tmp_path
-                    if accelerator.distributed_type is DistributedType.DEEPSPEED:
-                        # DeepSpeed writes into model_checkpoint_dir/<tag>. We save to a
-                        # temporary tag and atomically promote it to the final numeric tag,
-                        # then refresh root/latest so zero_to_fp32 helpers can still resolve
-                        # canonical (root, tag) checkpoint layout.
-                        model.save_checkpoint(model_checkpoint_dir, tag=tmp_tag)
-                    else:
-                        save_model_safetensors(
-                            accelerator.unwrap_model(model),
-                            checkpoint_path,
-                        )
-
-                    # Save config and tokenizer info (only from main process)
+                    # Save export metadata alongside resumable state.
                     if accelerator.is_main_process:
-                        # Save config as YAML
                         config_path = checkpoint_path / "config.yaml"
                         ConfigLoader.save(cfg, str(config_path))
 
-                        # Save tokenizer info as JSON
                         tokenizer_info = {
                             "tokenizer_name": cfg.tokenizer.path or cfg.tokenizer.name,
                             "vocab_size": cfg.model.vocab_size,
@@ -2648,67 +2871,26 @@ def trainer(cfg: Config) -> None:
                         with tokenizer_info_path.open("w", encoding="utf-8") as f:
                             json.dump(tokenizer_info, f, indent=2)
 
-                        # Save full tokenizer with save_pretrained
                         tokenizer_dir = checkpoint_path / "tokenizer"
                         tokenizer_dir.mkdir(parents=True, exist_ok=True)
-
-                        # Ensure tokenizer.model_max_length matches model's max_position_embeddings
                         tokenizer.model_max_length = cfg.model.max_position_embeddings
                         tokenizer.save_pretrained(tokenizer_dir)
-
-                    accelerator.wait_for_everyone()
-
-                    if accelerator.is_main_process:
-                        final_path = model_checkpoint_dir / step_tag
-                        _promote_tmp_checkpoint_dir(checkpoint_path, final_path)
-                        if accelerator.distributed_type is DistributedType.DEEPSPEED:
-                            # Keep DeepSpeed root semantics valid even though we
-                            # atomically rename tmp tags to final numeric tags.
-                            _write_deepspeed_latest_file(model_checkpoint_dir, step_tag)
-                        checkpoint_path = final_path
-                        # Use logger instead of accelerator.print to avoid progress bar interference
                         logger.info(
-                            "Saved checkpoint with config, tokenizer info, and full tokenizer to %s",
-                            checkpoint_path,
+                            "Saved checkpoint to "
+                            f"{checkpoint_path} (includes Accelerate state, model "
+                            "weights, config, and tokenizer artifacts)."
                         )
 
                     accelerator.wait_for_everyone()
 
-                    # Clean up old checkpoints if limit is set (after saving).
-                    save_total_limit = getattr(cfg.trainer, "save_total_limit", 0)
-                    max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
-                    limit = max(save_total_limit, max_ckpt)  # Use whichever is set
+                    if checkpoint_retention_limit > 0 and accelerator.is_main_process:
+                        _prune_step_checkpoints(
+                            checkpoint_dir,
+                            checkpoint_retention_limit,
+                        )
+                    accelerator.wait_for_everyone()
 
-                    if (
-                        limit > 0
-                        and model_checkpoint_dir.exists()
-                        and accelerator.is_main_process
-                    ):
-                        # Get all checkpoint directories
-                        checkpoints = []
-                        for item_path in model_checkpoint_dir.iterdir():
-                            if item_path.is_dir() and item_path.name.isdigit():
-                                checkpoints.append(int(item_path.name))
-
-                        # Sort and remove oldest checkpoints if over limit
-                        if len(checkpoints) > limit:
-                            checkpoints.sort()
-                            # Remove oldest checkpoints
-                            for old_ckpt in checkpoints[: len(checkpoints) - limit]:
-                                old_path = model_checkpoint_dir / str(old_ckpt)
-                                if old_path.exists():
-                                    shutil.rmtree(old_path)
-                                    # Use logger instead of accelerator.print to avoid progress bar interference
-                                    logger.info(
-                                        f"Removed old checkpoint: {old_path} (limit={limit})"
-                                    )
-
-                if (
-                    eval_dataloader is not None
-                    and getattr(cfg.trainer, "eval_strategy", "steps") == "steps"
-                    and cfg.trainer.eval_steps > 0
-                    and metrics["train/steps"] % cfg.trainer.eval_steps == 0
-                ):
+                if should_eval:
                     eval_metrics = _run_eval(
                         model,
                         eval_dataloader,
@@ -2731,6 +2913,12 @@ def trainer(cfg: Config) -> None:
                     pbar.close()
                     return
 
+        if not saw_batch_this_epoch:
+            raise RuntimeError(
+                "Training dataloader yielded zero batches for an epoch. This usually "
+                "means the active split is empty after preprocessing/filtering."
+            )
+
         if (
             eval_dataloader is not None
             and getattr(cfg.trainer, "eval_strategy", "steps") == "epoch"
@@ -2749,6 +2937,7 @@ def trainer(cfg: Config) -> None:
 
         # Update the number of epochs
         metrics["train/epochs"] += 1
+        metrics["train/batches_in_epoch"] = 0
         skipped_train_dataloader = None
 
         # For streaming datasets, update the epoch to ensure different shuffling

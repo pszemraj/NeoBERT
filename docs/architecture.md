@@ -78,20 +78,15 @@ When `ngpt: true`, `NormNeoBERT` is used:
 
 ## Key Config Knobs
 
-```yaml
-model:
-  hidden_size: 768
-  num_hidden_layers: 12
-  num_attention_heads: 12
-  intermediate_size: 3072
-  max_position_embeddings: 4096
-  hidden_act: swiglu
-  rope: true
-  rms_norm: true
-  attn_backend: sdpa           # or flash_attn_varlen
-  kernel_backend: auto         # auto | liger | torch
-  ngpt: false
-```
+Architecture-relevant fields live under:
+
+- `model.hidden_size`, `model.num_hidden_layers`, `model.num_attention_heads`
+- `model.intermediate_size`, `model.hidden_act`
+- `model.rope`, `model.max_position_embeddings`
+- `model.rms_norm`, `model.ngpt`
+- `model.attn_backend`, `model.kernel_backend`
+
+See [configuration.md](configuration.md) for defaults and constraints.
 
 ## Related Docs
 

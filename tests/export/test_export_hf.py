@@ -105,6 +105,13 @@ class TestExportHF(unittest.TestCase):
             "complex64",
         )
 
+    def test_get_torch_dtype_from_state_dict_rejects_fp16(self):
+        """Ensure export fails fast for unsupported fp16 checkpoints."""
+        export = self.export
+        state_dict = {"model.encoder.weight": torch.zeros(2, 2, dtype=torch.float16)}
+        with self.assertRaisesRegex(ValueError, "fp16/float16"):
+            export.get_torch_dtype_from_state_dict(state_dict)
+
     def test_load_state_dict_from_deepspeed_tag_dir_uses_parent_and_tag(self):
         """Ensure DeepSpeed tag-dir checkpoints call zero_to_fp32 with root+tag."""
         export = self.export

@@ -8,7 +8,7 @@ from unittest import mock
 
 import torch
 
-from neobert.config import ConfigLoader
+from neobert.config import Config, ConfigLoader
 
 
 class TestContrastivePipeline(unittest.TestCase):
@@ -200,6 +200,133 @@ class TestContrastivePipeline(unittest.TestCase):
                 self.skipTest(f"Expected dataset/network error: {e}")
             else:
                 raise e
+
+    def test_checkpoint_retention_limit_resolves_null_and_fallback(self):
+        """Ensure retention limit handles optional fields without TypeError."""
+        from neobert.contrastive.trainer import _resolve_checkpoint_retention_limit
+
+        cfg = Config()
+        cfg.task = "contrastive"
+
+        cfg.trainer.save_total_limit = None
+        cfg.trainer.max_ckpt = None
+        self.assertEqual(_resolve_checkpoint_retention_limit(cfg), 0)
+
+        cfg.trainer.max_ckpt = 5
+        self.assertEqual(_resolve_checkpoint_retention_limit(cfg), 5)
+
+        cfg.trainer.save_total_limit = 2
+        self.assertEqual(_resolve_checkpoint_retention_limit(cfg), 2)
+
+    def test_prune_step_checkpoints_keeps_latest_for_limit_one(self):
+        """Ensure pruning keeps the latest checkpoint when limit=1."""
+        from neobert.contrastive.trainer import _prune_step_checkpoints
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_dir = Path(tmpdir)
+            for step in (10, 20):
+                (checkpoint_dir / str(step)).mkdir(parents=True, exist_ok=True)
+            (checkpoint_dir / "notes").mkdir(parents=True, exist_ok=True)
+
+            _prune_step_checkpoints(checkpoint_dir, retention_limit=1)
+
+            self.assertFalse((checkpoint_dir / "10").exists())
+            self.assertTrue((checkpoint_dir / "20").exists())
+            self.assertTrue((checkpoint_dir / "notes").exists())
+
+    def test_contrastive_pretrained_checkpoint_root_rejects_legacy_layout(self):
+        """Ensure legacy ``model_checkpoints`` roots fail fast for contrastive init."""
+        try:
+            from neobert.contrastive.trainer import (
+                _normalize_contrastive_pretrained_checkpoint_root,
+            )
+        except ImportError as e:
+            self.skipTest(f"Contrastive trainer module not available: {e}")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            legacy_root = Path(tmpdir) / "model_checkpoints"
+            legacy_root.mkdir(parents=True, exist_ok=True)
+
+            with self.assertRaisesRegex(ValueError, "model_checkpoints"):
+                _normalize_contrastive_pretrained_checkpoint_root(legacy_root)
+
+    def test_contrastive_trainer_saves_under_checkpoints_root(self):
+        """Ensure contrastive saves portable weights under ``checkpoints/<step>/``."""
+        config = ConfigLoader.load(str(self.test_config_path))
+        config.dataset.path = self.temp_dir
+        config.trainer.output_dir = self.temp_dir
+        config.trainer.max_steps = 1
+        config.trainer.save_steps = 1
+        config.trainer.save_total_limit = 1
+        config.trainer.logging_steps = 1
+        config.trainer.save_strategy = "steps"
+        config.trainer.save_model = True
+        config.trainer.per_device_train_batch_size = 1
+        config.trainer.use_cpu = True
+        config.trainer.disable_tqdm = True
+        config.wandb.mode = "disabled"
+        config.wandb.enabled = False
+        config.contrastive.pretraining_prob = 0.0
+
+        try:
+            from datasets import Dataset, DatasetDict
+            from tokenizers import Tokenizer, models, pre_tokenizers
+            from transformers import PreTrainedTokenizerFast
+
+            from neobert.contrastive.trainer import trainer
+        except ImportError as e:
+            self.skipTest(f"Contrastive trainer dependencies unavailable: {e}")
+
+        dataset_dict = DatasetDict(
+            {
+                "ALLNLI": Dataset.from_dict(
+                    {
+                        "input_ids_query": [[2, 3, 0]],
+                        "attention_mask_query": [[1, 1, 0]],
+                        "input_ids_corpus": [[2, 4, 0]],
+                        "attention_mask_corpus": [[1, 1, 0]],
+                    }
+                )
+            }
+        )
+        pretraining_dataset = Dataset.from_dict(
+            {
+                "input_ids": [[2, 5, 0]],
+                "attention_mask": [[1, 1, 0]],
+            }
+        )
+
+        def _fake_load_from_disk(path: str):
+            if Path(path).name == "all":
+                return dataset_dict
+            return pretraining_dataset
+
+        def _make_tokenizer() -> PreTrainedTokenizerFast:
+            vocab = {"[PAD]": 0, "[UNK]": 1, "hello": 2, "world": 3, "test": 4, "x": 5}
+            tokenizer = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
+            tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+            return PreTrainedTokenizerFast(
+                tokenizer_object=tokenizer,
+                pad_token="[PAD]",
+                unk_token="[UNK]",
+            )
+
+        with (
+            mock.patch(
+                "neobert.contrastive.trainer.load_from_disk",
+                side_effect=_fake_load_from_disk,
+            ),
+            mock.patch(
+                "neobert.contrastive.trainer.get_tokenizer",
+                return_value=_make_tokenizer(),
+            ),
+        ):
+            trainer(config)
+
+        step_dir = Path(self.temp_dir) / "checkpoints" / "1"
+        self.assertTrue(step_dir.is_dir())
+        self.assertTrue((step_dir / "model.safetensors").is_file())
+        self.assertFalse((Path(self.temp_dir) / "model_checkpoints").exists())
 
     def test_muonclip_trainer_passes_model_config(self):
         """Ensure MuonClip optimizer receives a model config in trainer."""

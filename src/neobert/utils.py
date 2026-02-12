@@ -1,6 +1,9 @@
 """Utility helpers for logging, TF32 setup, and model summaries."""
 
 import logging
+import pprint
+import re
+import shutil
 from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -8,33 +11,350 @@ import torch
 import torch.nn as nn
 
 
-def prepare_wandb_config(cfg: Any) -> Dict[str, Any]:
+_TASK_CONFIG_FIELDS: dict[str, tuple[str, ...]] = {
+    "pretraining": (
+        "task",
+        "seed",
+        "debug",
+        "config_path",
+        "accelerate_config_file",
+        "model",
+        "dataset",
+        "tokenizer",
+        "datacollator",
+        "trainer",
+        "optimizer",
+        "scheduler",
+        "wandb",
+        "pretraining_metadata",
+    ),
+    "contrastive": (
+        "task",
+        "seed",
+        "debug",
+        "config_path",
+        "accelerate_config_file",
+        "use_deepspeed",
+        "model",
+        "dataset",
+        "tokenizer",
+        "datacollator",
+        "trainer",
+        "optimizer",
+        "scheduler",
+        "wandb",
+        "contrastive",
+        "pretraining_metadata",
+    ),
+    "glue": (
+        "task",
+        "seed",
+        "debug",
+        "config_path",
+        "accelerate_config_file",
+        "model",
+        "dataset",
+        "tokenizer",
+        "trainer",
+        "optimizer",
+        "scheduler",
+        "wandb",
+        "glue",
+        "_raw_model_dict",
+        "pretraining_metadata",
+    ),
+    "mteb": (
+        "task",
+        "seed",
+        "debug",
+        "config_path",
+        "accelerate_config_file",
+        "model",
+        "tokenizer",
+        "wandb",
+        "pretrained_checkpoint",
+        "mteb_task_type",
+        "mteb_batch_size",
+        "mteb_pooling",
+        "mteb_overwrite_results",
+        "pretraining_metadata",
+    ),
+}
+
+_NON_CONTRASTIVE_DATASET_EXCLUDE_FIELDS = {
+    "load_all_from_disk",
+    "force_redownload",
+    "min_length",
+    "alpha",
+}
+
+_LEGACY_TRAINER_EXCLUDE_FIELDS = {
+    "report_to",
+    "max_ckpt",
+    "train_batch_size",
+    "eval_batch_size",
+}
+
+_NON_CONTRASTIVE_TRAINER_EXCLUDE_FIELDS = {"dataloader_num_workers"}
+
+_PRETRAINING_TRAINER_EXCLUDE_FIELDS = {
+    "disable_tqdm",
+    "early_stopping",
+    "metric_for_best_model",
+    "greater_is_better",
+    "load_best_model_at_end",
+    "save_model",
+}
+
+_SIMPLE_STRING_TOKEN_RE = re.compile(r"^[A-Za-z0-9_./:=+-]+$")
+
+
+def _serialize_config(cfg: Any) -> Dict[str, Any]:
+    """Serialize a config-like object into a dictionary.
+
+    :param Any cfg: Config object or dataclass.
+    :raises TypeError: If the input cannot be serialized.
+    :return dict[str, Any]: Serialized config dictionary.
     """
-    Flatten config dataclass for logging while preserving dynamically attached fields.
-
-    Parameters
-    ----------
-    cfg:
-        Configuration object (typically a dataclass) to be serialized.
-
-    Returns
-    -------
-    Dict[str, Any]
-        Dictionary ready for tracker ingestion.
-    """
-
     if is_dataclass(cfg):
-        config_dict = asdict(cfg)
-    elif hasattr(cfg, "__dict__"):
-        config_dict = dict(cfg.__dict__)
-    else:
-        raise TypeError("Unsupported config type for wandb logging")
+        return asdict(cfg)
+    if hasattr(cfg, "__dict__"):
+        return dict(cfg.__dict__)
+    raise TypeError("Unsupported config type for wandb logging")
 
-    # Preserve dynamically attached metadata (e.g., original model YAML)
-    if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict is not None:
+
+def _drop_empty_values(value: Any) -> Any:
+    """Drop empty/null values recursively from mappings and sequences.
+
+    :param Any value: Value to clean.
+    :return Any: Cleaned value.
+    """
+    if isinstance(value, dict):
+        cleaned: dict[str, Any] = {}
+        for key, inner in value.items():
+            cleaned_inner = _drop_empty_values(inner)
+            if cleaned_inner is None:
+                continue
+            if isinstance(cleaned_inner, (dict, list)) and not cleaned_inner:
+                continue
+            cleaned[key] = cleaned_inner
+        return cleaned
+    if isinstance(value, list):
+        cleaned_list = []
+        for inner in value:
+            cleaned_inner = _drop_empty_values(inner)
+            if cleaned_inner is None:
+                continue
+            if isinstance(cleaned_inner, (dict, list)) and not cleaned_inner:
+                continue
+            cleaned_list.append(cleaned_inner)
+        return cleaned_list
+    return value
+
+
+def _task_filter_config(config_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Filter a config dictionary to keys relevant for the active task.
+
+    :param dict[str, Any] config_dict: Full serialized config dictionary.
+    :return dict[str, Any]: Task-scoped config dictionary.
+    """
+    task = str(config_dict.get("task", "pretraining")).strip().lower()
+    if task not in _TASK_CONFIG_FIELDS:
+        task = "pretraining"
+
+    allowed_keys = _TASK_CONFIG_FIELDS[task]
+    filtered: dict[str, Any] = {}
+    for key in allowed_keys:
+        if key in config_dict:
+            filtered[key] = config_dict[key]
+
+    if task != "contrastive":
+        dataset_cfg = filtered.get("dataset")
+        if isinstance(dataset_cfg, dict):
+            filtered["dataset"] = {
+                key: value
+                for key, value in dataset_cfg.items()
+                if key not in _NON_CONTRASTIVE_DATASET_EXCLUDE_FIELDS
+            }
+
+    trainer_cfg = filtered.get("trainer")
+    if isinstance(trainer_cfg, dict):
+        for key in _LEGACY_TRAINER_EXCLUDE_FIELDS:
+            trainer_cfg.pop(key, None)
+        if task != "contrastive":
+            for key in _NON_CONTRASTIVE_TRAINER_EXCLUDE_FIELDS:
+                trainer_cfg.pop(key, None)
+        if task == "pretraining":
+            for key in _PRETRAINING_TRAINER_EXCLUDE_FIELDS:
+                trainer_cfg.pop(key, None)
+
+    return _drop_empty_values(filtered)
+
+
+def _resolve_display_width(width: Optional[int]) -> int:
+    """Resolve display width for compact config rendering.
+
+    :param int | None width: Optional explicit width.
+    :return int: Effective width clamped to a practical terminal range.
+    """
+    if width is None:
+        width = shutil.get_terminal_size(fallback=(120, 24)).columns
+    return max(80, min(int(width), 180))
+
+
+def _render_display_value(value: Any, printer: pprint.PrettyPrinter) -> str:
+    """Render a value as a compact token string for config display.
+
+    :param Any value: Value to render.
+    :param pprint.PrettyPrinter printer: Pretty-printer for complex values.
+    :return str: Compact one-line representation.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    if isinstance(value, str):
+        if value == "":
+            return "''"
+        if _SIMPLE_STRING_TOKEN_RE.fullmatch(value):
+            return value
+        return repr(value)
+    rendered = printer.pformat(value)
+    return " ".join(rendered.splitlines())
+
+
+def _flatten_display_items(
+    value: Dict[str, Any],
+    *,
+    max_depth: int = 2,
+) -> List[Tuple[str, Any]]:
+    """Flatten nested mappings for compact section display.
+
+    :param dict[str, Any] value: Mapping to flatten.
+    :param int max_depth: Maximum nested depth to flatten.
+    :return list[tuple[str, Any]]: Flattened dotted-key items.
+    """
+
+    def _walk(
+        current: Any,
+        *,
+        prefix: str,
+        depth: int,
+        out: List[Tuple[str, Any]],
+    ) -> None:
+        if isinstance(current, dict) and depth < max_depth:
+            for key, inner in current.items():
+                next_prefix = f"{prefix}.{key}" if prefix else str(key)
+                _walk(inner, prefix=next_prefix, depth=depth + 1, out=out)
+            return
+        out.append((prefix, current))
+
+    flattened: List[Tuple[str, Any]] = []
+    for key, inner in value.items():
+        _walk(inner, prefix=str(key), depth=0, out=flattened)
+    return flattened
+
+
+def _wrap_tokens(prefix: str, tokens: List[str], *, width: int) -> List[str]:
+    """Wrap token list to the target width with aligned continuation lines.
+
+    :param str prefix: Prefix to place at the start of the first line.
+    :param list[str] tokens: Tokens to wrap.
+    :param int width: Target display width.
+    :return list[str]: Wrapped display lines.
+    """
+    if not tokens:
+        return [prefix.rstrip()]
+
+    lines: List[str] = []
+    current = prefix
+    continuation_prefix = " " * len(prefix)
+    for token in tokens:
+        candidate = token if current == prefix else f" {token}"
+        if len(current) + len(candidate) <= width or current == prefix:
+            current += candidate
+            continue
+        lines.append(current.rstrip())
+        current = f"{continuation_prefix}{token}"
+    lines.append(current.rstrip())
+    return lines
+
+
+def format_resolved_config(
+    config_dict: Dict[str, Any],
+    *,
+    width: Optional[int] = None,
+) -> str:
+    """Format a resolved config dictionary for readable terminal logging.
+
+    :param dict[str, Any] config_dict: Config dictionary to format.
+    :param int | None width: Optional target width for wrapped output.
+    :return str: Compact sectioned string.
+    """
+    if not config_dict:
+        return "{}"
+
+    resolved_width = _resolve_display_width(width)
+    printer = pprint.PrettyPrinter(
+        compact=True,
+        width=max(40, resolved_width - 16),
+        sort_dicts=False,
+    )
+
+    lines: List[str] = []
+    meta_tokens: List[str] = []
+    section_items: List[Tuple[str, Dict[str, Any]]] = []
+
+    for key, value in config_dict.items():
+        if isinstance(value, dict):
+            section_items.append((key, value))
+            continue
+        rendered = _render_display_value(value, printer)
+        meta_tokens.append(f"{key}={rendered}")
+
+    section_labels: List[str] = []
+    if meta_tokens:
+        section_labels.append("[meta]")
+    section_labels.extend(f"[{name}]" for name, _ in section_items)
+    section_label_width = max((len(label) for label in section_labels), default=0)
+
+    def _prefix(label: str) -> str:
+        """Build a padded section prefix with globally aligned continuation column."""
+        return f"{label:<{section_label_width}} "
+
+    if meta_tokens:
+        lines.extend(_wrap_tokens(_prefix("[meta]"), meta_tokens, width=resolved_width))
+
+    for section_name, section_value in section_items:
+        flattened = _flatten_display_items(section_value)
+        tokens = [
+            f"{key}={_render_display_value(value, printer)}" for key, value in flattened
+        ]
+        lines.extend(
+            _wrap_tokens(_prefix(f"[{section_name}]"), tokens, width=resolved_width)
+        )
+
+    return "\n".join(lines)
+
+
+def prepare_wandb_config(cfg: Any) -> Dict[str, Any]:
+    """Prepare task-scoped config payload for tracking backends.
+
+    :param Any cfg: Configuration object (typically a dataclass).
+    :return dict[str, Any]: Task-scoped dictionary ready for tracker ingestion.
+    """
+    config_dict = _serialize_config(cfg)
+
+    # Preserve dynamically attached metadata only for GLUE-oriented runs.
+    task = str(config_dict.get("task", "pretraining")).strip().lower()
+    if (
+        task == "glue"
+        and hasattr(cfg, "_raw_model_dict")
+        and cfg._raw_model_dict is not None
+    ):
         config_dict["_raw_model_dict"] = cfg._raw_model_dict
 
-    return config_dict
+    return _task_filter_config(config_dict)
 
 
 def configure_tf32(

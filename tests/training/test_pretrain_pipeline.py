@@ -15,6 +15,7 @@ from datasets import Dataset, DatasetDict
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 
+from neobert.checkpointing import MODEL_WEIGHTS_NAME, load_model_safetensors
 from neobert.config import Config, ConfigLoader
 from neobert.pretraining.masked_objective import MaskedObjectiveOut
 from neobert.pretraining.trainer import (
@@ -22,8 +23,12 @@ from neobert.pretraining.trainer import (
     _ensure_pinned_cpu_batch,
     _gather_decoder_weight_for_masked_objective,
     _infer_eval_split_name,
+    _prune_step_checkpoints,
+    _resolve_checkpoint_retention_limit,
     _resolve_loader_perf_settings,
+    _resolve_streaming_eval_budget,
     _resolve_eval_samples,
+    _save_portable_checkpoint_weights,
     _run_masked_objective_step,
     _split_train_dataset_for_eval_samples,
     _should_backward_inside_gathered_decoder_weight,
@@ -367,6 +372,120 @@ class TestPretrainComponents(unittest.TestCase):
             latest_path = root / "latest"
             self.assertTrue(latest_path.exists())
             self.assertEqual(latest_path.read_text(encoding="utf-8"), "12345\n")
+
+    def test_checkpoint_retention_limit_prefers_save_total_limit(self):
+        """Ensure save_total_limit wins over deprecated max_ckpt when both are set."""
+        cfg = Config()
+        cfg.trainer.save_total_limit = 1
+        cfg.trainer.max_ckpt = 7
+
+        self.assertEqual(_resolve_checkpoint_retention_limit(cfg), 1)
+
+    def test_checkpoint_retention_limit_uses_max_ckpt_as_fallback(self):
+        """Ensure max_ckpt is only used when save_total_limit is unset."""
+        cfg = Config()
+        cfg.trainer.save_total_limit = None
+        cfg.trainer.max_ckpt = 3
+
+        self.assertEqual(_resolve_checkpoint_retention_limit(cfg), 3)
+
+    def test_prune_step_checkpoints_keeps_latest_numeric_dirs(self):
+        """Ensure checkpoint pruning is resilient and keeps newest numeric dirs."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_dir = Path(tmpdir)
+            for step in (10, 20, 30):
+                (checkpoint_dir / str(step)).mkdir(parents=True, exist_ok=True)
+            (checkpoint_dir / "notes").mkdir(parents=True, exist_ok=True)
+
+            _prune_step_checkpoints(checkpoint_dir, retention_limit=2)
+
+            self.assertFalse((checkpoint_dir / "10").exists())
+            self.assertTrue((checkpoint_dir / "20").exists())
+            self.assertTrue((checkpoint_dir / "30").exists())
+            self.assertTrue((checkpoint_dir / "notes").exists())
+
+    def test_prune_step_checkpoints_limit_one_keeps_latest_only(self):
+        """Ensure retention limit=1 keeps exactly the latest numeric checkpoint."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_dir = Path(tmpdir)
+            for step in (1, 2):
+                (checkpoint_dir / str(step)).mkdir(parents=True, exist_ok=True)
+
+            _prune_step_checkpoints(checkpoint_dir, retention_limit=1)
+
+            self.assertFalse((checkpoint_dir / "1").exists())
+            self.assertTrue((checkpoint_dir / "2").exists())
+
+    def test_save_portable_checkpoint_weights_from_accelerator_state_dict(self):
+        """Ensure portable safetensors is emitted from accelerator state dicts."""
+
+        class _AcceleratorStub:
+            is_main_process = True
+
+            @staticmethod
+            def get_state_dict(model: torch.nn.Module, unwrap: bool = True):
+                assert unwrap is True
+                return model.state_dict()
+
+        model = torch.nn.Linear(4, 3, bias=False)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_path = Path(tmpdir)
+            saved = _save_portable_checkpoint_weights(
+                model,
+                _AcceleratorStub(),
+                checkpoint_path,
+            )
+            self.assertTrue(saved)
+            self.assertTrue((checkpoint_path / MODEL_WEIGHTS_NAME).exists())
+            state_dict = load_model_safetensors(checkpoint_path, map_location="cpu")
+            self.assertIn("weight", state_dict)
+
+    def test_save_portable_checkpoint_weights_handles_export_failure(self):
+        """Ensure portable save failures are non-fatal and return False."""
+
+        class _AcceleratorStub:
+            is_main_process = True
+
+            @staticmethod
+            def get_state_dict(_model: torch.nn.Module, unwrap: bool = True):
+                assert unwrap is True
+                raise ValueError("simulated failure")
+
+        model = torch.nn.Linear(4, 3, bias=False)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_path = Path(tmpdir)
+            saved = _save_portable_checkpoint_weights(
+                model,
+                _AcceleratorStub(),
+                checkpoint_path,
+            )
+            self.assertFalse(saved)
+            self.assertFalse((checkpoint_path / MODEL_WEIGHTS_NAME).exists())
+
+    def test_save_portable_checkpoint_weights_collective_call_non_main(self):
+        """Ensure non-main ranks still participate in state-dict collection."""
+
+        class _AcceleratorStub:
+            is_main_process = False
+            get_state_dict_called = False
+
+            @classmethod
+            def get_state_dict(cls, model: torch.nn.Module, unwrap: bool = True):
+                assert unwrap is True
+                cls.get_state_dict_called = True
+                return model.state_dict()
+
+        model = torch.nn.Linear(4, 3, bias=False)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_path = Path(tmpdir)
+            saved = _save_portable_checkpoint_weights(
+                model,
+                _AcceleratorStub(),
+                checkpoint_path,
+            )
+            self.assertFalse(saved)
+            self.assertTrue(_AcceleratorStub.get_state_dict_called)
+            self.assertFalse((checkpoint_path / MODEL_WEIGHTS_NAME).exists())
 
     def test_gather_decoder_weight_passthrough_outside_deepspeed(self):
         """Ensure decoder weight passthrough when not running DeepSpeed."""
@@ -1017,6 +1136,35 @@ class TestPretrainComponents(unittest.TestCase):
             _resolve_eval_samples(True)
         with self.assertRaises(ValueError):
             _resolve_eval_samples("not_an_int")
+
+    def test_resolve_streaming_eval_budget_with_explicit_max_batches(self):
+        """Ensure explicit trainer.eval_max_batches is respected."""
+        resolved, source = _resolve_streaming_eval_budget(
+            eval_max_batches=320,
+            eval_samples=None,
+            per_device_eval_batch_size=32,
+        )
+        self.assertEqual(resolved, 320)
+        self.assertEqual(source, "trainer.eval_max_batches")
+
+    def test_resolve_streaming_eval_budget_derived_from_eval_samples(self):
+        """Ensure dataset.eval_samples derives eval batch budget when needed."""
+        resolved, source = _resolve_streaming_eval_budget(
+            eval_max_batches=None,
+            eval_samples=1000,
+            per_device_eval_batch_size=64,
+        )
+        self.assertEqual(resolved, 16)
+        self.assertEqual(source, "dataset.eval_samples")
+
+    def test_resolve_streaming_eval_budget_requires_explicit_budget(self):
+        """Ensure streaming eval fails fast without explicit budget settings."""
+        with self.assertRaises(ValueError):
+            _resolve_streaming_eval_budget(
+                eval_max_batches=None,
+                eval_samples=None,
+                per_device_eval_batch_size=32,
+            )
 
     def test_infer_eval_split_name_prefers_validation(self):
         """Ensure eval split inference chooses validation-style splits."""

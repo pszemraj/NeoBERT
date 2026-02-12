@@ -298,17 +298,21 @@ class TestFlashVarlenAttentionInternals:
 
 
 @pytest.mark.skipif(
-    not (FLASH_ATTN_AVAILABLE and torch.cuda.is_available()),
-    reason="flash-attn not installed or no CUDA",
+    not (
+        FLASH_ATTN_AVAILABLE
+        and torch.cuda.is_available()
+        and getattr(torch.cuda, "is_bf16_supported", lambda: False)()
+    ),
+    reason="flash-attn not installed, no CUDA, or no CUDA bf16 support",
 )
 class TestAttentionForwardFlash:
     """Tests for flash_attn_varlen dispatch (GPU only)."""
 
     def test_flash_packed(self):
         B, S, H, D = 2, 16, 2, 32
-        xq = torch.randn(B, S, H, D, device="cuda", dtype=torch.float16)
-        xk = torch.randn(B, S, H, D, device="cuda", dtype=torch.float16)
-        xv = torch.randn(B, S, H, D, device="cuda", dtype=torch.float16)
+        xq = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16)
+        xk = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16)
+        xv = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16)
         packed = [[8, 8], [16]]
         out = attention_forward(
             xq, xk, xv, None, packed, 0.0, None, "flash_attn_varlen"

@@ -69,8 +69,8 @@ echo "Fine-tune outputs will default to ${RESULTS_ROOT}" >&2
 for run_dir in "${CHECKPOINT_ROOT}"/*; do
   [[ -d "${run_dir}" ]] || continue
 
-  if [[ ! -d "${run_dir}/model_checkpoints" ]]; then
-    echo "Skipping $(basename "${run_dir}") (no model_checkpoints directory)" >&2
+  if [[ ! -d "${run_dir}/checkpoints" ]]; then
+    echo "Skipping $(basename "${run_dir}") (no checkpoints directory)" >&2
     continue
   fi
 

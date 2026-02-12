@@ -1201,6 +1201,8 @@ class NeoBERTForSequenceClassification(NeoBERTPreTrainedModel):
         """
         hidden_representation = self.model.forward(src, pad_mask)
 
+        # NeoBERT GLUE path assumes BERT-style special-token placement where the
+        # sequence-summary token is at position 0.
         x = hidden_representation[:, 0, :]
         x = self.dropout(x)
         x = self.dense(x)
@@ -1304,6 +1306,7 @@ class NeoBERTHFForSequenceClassification(NeoBERTPreTrainedModel):
             additive_mask = None
         hidden_representation = self.model.forward(input_ids, additive_mask)
 
+        # Mirror NeoBERT classifier pooling assumption (summary token at index 0).
         x = hidden_representation[:, 0, :]
         x = self.dropout(x)
         x = self.dense(x)

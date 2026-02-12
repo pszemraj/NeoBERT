@@ -7,10 +7,14 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
 from mteb import MTEB
 
-from neobert.checkpointing import MODEL_WEIGHTS_NAME, load_model_safetensors
+from neobert.checkpointing import (
+    MODEL_WEIGHTS_NAME,
+    load_deepspeed_fp32_state_dict,
+    load_model_safetensors,
+    resolve_deepspeed_checkpoint_root_and_tag,
+)
 from neobert.config import ConfigLoader
 from neobert.model import NeoBERTConfig, NeoBERTForMTEB
 from neobert.tokenizer import get_tokenizer
@@ -124,33 +128,198 @@ TASK_TYPE = {
 }
 
 
+def _resolve_mteb_tasks(cfg: Any) -> list[str]:
+    """Resolve selected MTEB task names from config and CLI overrides.
+
+    Resolution order:
+    1. ``cfg.task_types`` (CLI ``--task_types``), if provided.
+    2. ``cfg.mteb_task_type`` category.
+
+    ``cfg.task_types`` entries can be either category aliases from ``TASK_TYPE``
+    (for example ``classification`` or ``sts``) or explicit task names.
+
+    :param Any cfg: Configuration object.
+    :raises ValueError: If any requested task/category is unknown or selection is empty.
+    :return list[str]: Ordered deduplicated list of task names.
+    """
+    requested = getattr(cfg, "task_types", None)
+    if requested is None:
+        mteb_task_type = str(getattr(cfg, "mteb_task_type", "all")).strip().lower()
+        if mteb_task_type not in TASK_TYPE:
+            raise ValueError(f"Task type must be one of {sorted(TASK_TYPE.keys())}.")
+        return list(TASK_TYPE[mteb_task_type])
+
+    if isinstance(requested, str):
+        requested_tokens = [token.strip() for token in requested.split(",")]
+    else:
+        requested_tokens = [str(token).strip() for token in requested]
+
+    explicit_lookup = {task.lower(): task for task in TASK_LIST}
+    selected: list[str] = []
+    unknown: list[str] = []
+    for token in requested_tokens:
+        if not token:
+            continue
+        lowered = token.lower()
+        if lowered == "all":
+            selected.extend(TASK_LIST)
+            continue
+        if lowered in TASK_TYPE:
+            selected.extend(TASK_TYPE[lowered])
+            continue
+        explicit_task = explicit_lookup.get(lowered)
+        if explicit_task is not None:
+            selected.append(explicit_task)
+            continue
+        unknown.append(token)
+
+    if unknown:
+        raise ValueError(
+            "Unknown --task_types entries: "
+            + ", ".join(sorted(unknown))
+            + ". Valid categories: "
+            + ", ".join(sorted(TASK_TYPE.keys()))
+        )
+
+    # Stable dedupe to preserve user-specified order.
+    resolved = list(dict.fromkeys(selected))
+    if not resolved:
+        raise ValueError(
+            "No MTEB tasks selected. Provide at least one task/category via "
+            "`--task_types` (for example 'all', 'sts', or 'MSMARCO')."
+        )
+    return resolved
+
+
+def _load_mteb_encoder_weights(
+    model: NeoBERTForMTEB,
+    state_dict: dict[str, torch.Tensor],
+    *,
+    source: str,
+) -> None:
+    """Load checkpoint weights for MTEB with encoder/head key tolerance.
+
+    Pretraining checkpoints commonly include LM-head parameters (for example
+    ``decoder.*``) that are not part of ``NeoBERTForMTEB``. We therefore load with
+    ``strict=False`` to tolerate known head extras, but still fail fast on any
+    non-head key mismatches so MTEB scores are not computed from partially loaded
+    encoders.
+
+    :param NeoBERTForMTEB model: MTEB model instance.
+    :param dict[str, torch.Tensor] state_dict: Checkpoint state dict.
+    :param str source: Human-readable checkpoint source for logs.
+    """
+    incompatible = model.load_state_dict(state_dict, strict=False)
+    if incompatible is None:
+        # Compatibility for lightweight test doubles that don't return
+        # ``_IncompatibleKeys`` from ``load_state_dict``.
+        return
+
+    unexpected_keys = list(getattr(incompatible, "unexpected_keys", []))
+    missing_keys = list(getattr(incompatible, "missing_keys", []))
+
+    lm_head_prefixes = ("decoder.", "model.decoder.")
+    lm_head_unexpected = [
+        key for key in unexpected_keys if key.startswith(lm_head_prefixes)
+    ]
+    remaining_unexpected = [
+        key for key in unexpected_keys if key not in lm_head_unexpected
+    ]
+
+    if lm_head_unexpected:
+        logger.info(
+            "Ignoring %d LM-head keys while loading %s for MTEB.",
+            len(lm_head_unexpected),
+            source,
+        )
+    if remaining_unexpected or missing_keys:
+        mismatch_parts: list[str] = []
+        if remaining_unexpected:
+            mismatch_parts.append(
+                "unexpected_non_head_keys=" + ", ".join(sorted(remaining_unexpected))
+            )
+        if missing_keys:
+            mismatch_parts.append("missing_keys=" + ", ".join(sorted(missing_keys)))
+        raise ValueError(
+            "MTEB checkpoint/model mismatch while loading "
+            f"{source}: {'; '.join(mismatch_parts)}"
+        )
+
+
+def _is_loadable_mteb_step(checkpoint_root: Path, step: int) -> bool:
+    """Return whether a checkpoint step is loadable for MTEB evaluation.
+
+    A step is considered loadable when either a portable safetensors weight file
+    exists at ``checkpoints/<step>/model.safetensors`` or DeepSpeed ZeRO shards
+    can be resolved for the same step.
+
+    :param Path checkpoint_root: ``checkpoints`` root directory.
+    :param int step: Numeric checkpoint step.
+    :return bool: True if MTEB can load weights from this step.
+    """
+    step_dir = checkpoint_root / str(step)
+    if (step_dir / MODEL_WEIGHTS_NAME).exists():
+        return True
+    try:
+        resolve_deepspeed_checkpoint_root_and_tag(checkpoint_root, tag=str(step))
+    except (FileNotFoundError, ValueError):
+        return False
+    return True
+
+
+def _resolve_mteb_checkpoint_step(
+    checkpoint_root: Path,
+    requested: str | int,
+) -> str:
+    """Resolve a concrete checkpoint step/tag for MTEB loading.
+
+    :param Path checkpoint_root: ``checkpoints`` root directory.
+    :param str | int requested: Requested checkpoint selector or ``latest``.
+    :raises ValueError: If no loadable checkpoint step exists.
+    :return str: Concrete checkpoint step/tag.
+    """
+    requested_text = str(requested).strip()
+    if requested_text.lower() != "latest":
+        return requested_text
+
+    candidates = sorted(
+        (
+            int(path.name)
+            for path in checkpoint_root.iterdir()
+            if path.is_dir() and path.name.isdigit()
+        ),
+        reverse=True,
+    )
+    if not candidates:
+        raise ValueError(f"Unable to find numbered checkpoints under {checkpoint_root}")
+
+    for step in candidates:
+        if _is_loadable_mteb_step(checkpoint_root, step):
+            return str(step)
+
+    raise ValueError(
+        "Unable to find a loadable checkpoint under "
+        f"{checkpoint_root}. Checked steps: {', '.join(str(step) for step in candidates)}."
+    )
+
+
 def evaluate_mteb(cfg: Any) -> None:
     """Evaluate a model on the MTEB benchmark.
 
     :param Any cfg: Configuration object with MTEB settings.
     """
-    # Get MTEB-specific config (we'll add these to Config later)
-    mteb_task_type = getattr(cfg, "mteb_task_type", "all")
+    # Get MTEB-specific config (kept at top-level Config for now)
     mteb_batch_size = getattr(cfg, "mteb_batch_size", 32)
     mteb_pooling = getattr(cfg, "mteb_pooling", "mean")
     mteb_overwrite_results = getattr(cfg, "mteb_overwrite_results", False)
     pretrained_checkpoint = getattr(cfg, "pretrained_checkpoint", "latest")
     pretrained_checkpoint_dir = Path(cfg.trainer.output_dir)
-    use_deepspeed = getattr(cfg, "use_deepspeed", True)
-
-    # Check if task type is valid
-    if mteb_task_type not in TASK_TYPE.keys():
-        raise ValueError(f"Task type must be one of {TASK_TYPE.keys()}.")
+    use_deepspeed = getattr(cfg, "use_deepspeed", False)
+    selected_tasks = _resolve_mteb_tasks(cfg)
 
     # Get checkpoint number
-    if pretrained_checkpoint != "latest":
-        ckpt = pretrained_checkpoint
-    else:
-        latest_path = pretrained_checkpoint_dir / "model_checkpoints" / "latest"
-        if latest_path.is_file():
-            ckpt = latest_path.read_text(encoding="utf-8").strip()
-        else:
-            raise ValueError(f"Unable to find 'latest' file at {latest_path}")
+    checkpoint_root = pretrained_checkpoint_dir / "checkpoints"
+    ckpt = _resolve_mteb_checkpoint_step(checkpoint_root, pretrained_checkpoint)
 
     # Define path to store results
     output_folder = (
@@ -164,6 +333,8 @@ def evaluate_mteb(cfg: Any) -> None:
     tokenizer = get_tokenizer(
         pretrained_model_name_or_path=cfg.tokenizer.name,
         max_length=cfg.tokenizer.max_length,
+        trust_remote_code=bool(getattr(cfg.tokenizer, "trust_remote_code", False)),
+        revision=getattr(cfg.tokenizer, "revision", None),
     )
 
     # Instantiate model
@@ -194,30 +365,49 @@ def evaluate_mteb(cfg: Any) -> None:
     )
 
     # Load pretrained weights
+    checkpoint_step_dir = checkpoint_root / str(ckpt)
+    checkpoint_path = checkpoint_step_dir / MODEL_WEIGHTS_NAME
     if use_deepspeed:
-        model = load_state_dict_from_zero_checkpoint(
-            model,
-            pretrained_checkpoint_dir / "model_checkpoints",
+        state_dict = load_deepspeed_fp32_state_dict(
+            checkpoint_root,
             tag=str(ckpt),
         )
+        _load_mteb_encoder_weights(
+            model,
+            state_dict,
+            source=f"DeepSpeed checkpoint tag={ckpt}",
+        )
     else:
-        checkpoint_path = (
-            pretrained_checkpoint_dir
-            / "model_checkpoints"
-            / str(ckpt)
-            / MODEL_WEIGHTS_NAME
-        )
-        state_dict = load_model_safetensors(
-            checkpoint_path.parent,
-            map_location=device,
-        )
-        model.load_state_dict(state_dict)
+        if checkpoint_path.exists():
+            state_dict = load_model_safetensors(
+                checkpoint_step_dir,
+                map_location=device,
+            )
+            _load_mteb_encoder_weights(
+                model,
+                state_dict,
+                source=f"safetensors checkpoint {checkpoint_path}",
+            )
+        else:
+            logger.warning(
+                f"{MODEL_WEIGHTS_NAME} not found at {checkpoint_path}; "
+                "falling back to DeepSpeed fp32 shard conversion."
+            )
+            state_dict = load_deepspeed_fp32_state_dict(
+                checkpoint_root,
+                tag=str(ckpt),
+            )
+            _load_mteb_encoder_weights(
+                model,
+                state_dict,
+                source=f"DeepSpeed fallback tag={ckpt}",
+            )
 
     model.to(device)
     model.eval()
 
     # Evaluate
-    for task in TASK_TYPE[mteb_task_type]:
+    for task in selected_tasks:
         logger.info(f"Running task: {task}")
         eval_splits = ["dev"] if task == "MSMARCO" else ["test"]
         evaluation = MTEB(tasks=[task], task_langs=["en"])

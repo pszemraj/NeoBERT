@@ -121,9 +121,8 @@ def resolve_runtime_attn_backend(
     except ImportError:
         if fallback_to_sdpa:
             logger.warning(
-                "attn_backend='%s' requested but flash-attn is not available. "
-                "Falling back to attn_backend='sdpa'.",
-                requested,
+                f"attn_backend='{requested}' requested but flash-attn is not available. "
+                "Falling back to attn_backend='sdpa'."
             )
             return "sdpa"
         raise
@@ -138,7 +137,7 @@ def resolve_runtime_attn_backend(
         "but CUDA is not available."
     )
     if fallback_to_sdpa:
-        logger.warning("%s Falling back to attn_backend='sdpa'.", message)
+        logger.warning(f"{message} Falling back to attn_backend='sdpa'.")
         return "sdpa"
     raise RuntimeError(message)
 

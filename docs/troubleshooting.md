@@ -51,11 +51,21 @@ Actions:
 - reduce dynamic control flow and per-step Python-side variability,
 - use `TORCH_LOGS="recompiles"` to inspect root causes.
 
-### Streaming resume rejected for pretraining
+### Streaming resume is slow or not exact
 
-- Pretraining trainer raises if `trainer.resume_from_checkpoint` is set while
-  `dataset.streaming: true`.
-- Workaround: pre-tokenize data to disk and run with `dataset.streaming: false`.
+- Streaming resume is best-effort: trainer restores state and skips consumed
+  batches from stream start/current epoch position.
+- For large consumed-step counts, startup can take a while due to stream
+  advancement.
+- With shuffled streams, exact sample continuity is not guaranteed.
+- If you need deterministic continuation, pre-tokenize to disk and run with
+  `dataset.streaming: false`.
+
+### Streaming eval budget error
+
+- If streaming eval has no explicit budget, trainer raises:
+  set `trainer.eval_max_batches` or `dataset.eval_samples`.
+- Use fixed values across sweep runs for comparable metrics.
 
 ## Evaluation Issues
 
@@ -65,11 +75,13 @@ Actions:
 - Ensure GLUE configs point to valid pretrained checkpoints unless intentionally
   using `allow_random_weights: true`.
 
-### MTEB task filtering seems ignored
+### MTEB task filtering is not what you expected
 
-- Set `mteb_task_type` in config.
-- `run_mteb.py --task_types` is currently parsed but not wired into task
-  selection logic.
+- Config-based selection uses `mteb_task_type`.
+- CLI override `run_mteb.py --task_types` is also supported.
+- `--task_types` accepts categories (`classification`, `clustering`,
+  `pair_classification`, `reranking`, `retrieval`, `sts`, `all`) and/or
+  explicit task names (comma-separated).
 
 ## Export Issues
 

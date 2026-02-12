@@ -136,7 +136,9 @@ def streaming_argmax(
         for vocab_start in range(0, vocab_size, vocab_chunk):
             vocab_end = min(vocab_start + vocab_chunk, vocab_size)
             weight_chunk = weight[vocab_start:vocab_end].to(accum_dtype)
-            logits_chunk = hidden_chunk @ weight_chunk.t()
+            # Under outer autocast contexts, matmul can still return lower-precision
+            # tensors; cast explicitly so indexed updates stay dtype-consistent.
+            logits_chunk = (hidden_chunk @ weight_chunk.t()).to(accum_dtype)
             chunk_values, chunk_argmax = logits_chunk.max(dim=1)
             better = chunk_values > best_values
             if better.any():
@@ -207,7 +209,9 @@ def streaming_ce_sum(
         for vocab_start in range(0, vocab_size, vocab_chunk):
             vocab_end = min(vocab_start + vocab_chunk, vocab_size)
             weight_chunk = weight[vocab_start:vocab_end].to(accum_dtype)
-            logits_chunk = hidden_chunk @ weight_chunk.t()
+            # Keep streaming CE numerics in ``accum_dtype`` even when called under
+            # autocast-enabled training contexts.
+            logits_chunk = (hidden_chunk @ weight_chunk.t()).to(accum_dtype)
 
             in_chunk = (target_chunk >= vocab_start) & (target_chunk < vocab_end)
             if in_chunk.any():

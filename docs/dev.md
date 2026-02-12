@@ -14,6 +14,8 @@ training performance and stability work.
 - [Lessons Learned](#lessons-learned)
 - [Known Gaps](#known-gaps)
 - [Next PR TODOs](#next-pr-todos)
+  - [Contrastive Sweep TODOs](#contrastive-sweep-todos)
+  - [Config Loader Architecture TODOs (Separate PR)](#config-loader-architecture-todos-separate-pr)
 - [Longer-Term Backlog](#longer-term-backlog)
 
 ---
@@ -64,6 +66,10 @@ Status: **standardized**.
 - Training checkpoints have been standardized on `safetensors`.
 - This is compatible with the current pretraining flow and keeps export paths
   straightforward.
+- **Breaking change (2026-02):** pretraining now writes a single checkpoint tree
+  at `output_dir/checkpoints/<step>/` that contains both resumable Accelerate
+  state and export assets (`model.safetensors`, `config.yaml`, tokenizer files).
+  The previous parallel `model_checkpoints/` tree is no longer written.
 
 ## Recently Landed
 
@@ -177,6 +183,56 @@ Priority order for next performance PR:
 
 - Collect recompile reasons under the harness above.
 - Remove avoidable dynamic guards and static-attribute churn in hot modules.
+
+### Contrastive Sweep TODOs
+
+These are explicitly tracked for sweep-readiness follow-up work:
+
+1. Unify checkpoint layout across tasks
+
+- Pretraining and contrastive now write one canonical tree at
+  `checkpoints/<step>/`.
+- GLUE now also writes to the canonical `checkpoints/<step>/` tree.
+- Legacy `model_checkpoints/<step>/` loading support remains for backwards
+  compatibility with older runs.
+
+1. Tighten sweep-time observability parity
+
+- Ensure comparable train/eval metrics are emitted across pretraining,
+  contrastive, and GLUE for easier sweep analysis.
+- Keep metric naming and logging cadence aligned across task trainers.
+
+### Config Loader Architecture TODOs (Separate PR)
+
+These are intentionally deferred because they are higher-risk refactors that
+touch most training/eval entrypoints and config mutation assumptions.
+
+1. Move config dataclasses to immutable/frozen mode end-to-end
+
+- Freeze dataclasses and remove in-place mutation patterns in loaders/trainers.
+- Introduce explicit rebuild/replace helpers where updates are required.
+
+1. Rework overrides onto immutable rebuild semantics
+
+- Apply dot-path overrides by rebuilding the object tree bottom-up instead of
+  mutating fields.
+- Keep strict type-casting and fail-fast behavior unchanged.
+
+1. Centralize config construction around a single strict path
+
+- YAML load -> variable resolution -> dataclass hydration -> dot overrides ->
+  validation should be the only supported flow.
+- Remove duplicate ad-hoc config mutation/parsing paths across scripts.
+
+1. Expand cross-field validation coverage into a dedicated validator module
+
+- Keep one authoritative validation surface for bounds, coupled constraints,
+  and sweep-time comparability requirements.
+
+1. Rationalize serializable config snapshots
+
+- Ensure one canonical `to_dict` representation for logging/checkpoint metadata
+  without task-specific drift.
 
 ## Longer-Term Backlog
 

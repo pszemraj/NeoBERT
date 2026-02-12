@@ -3,13 +3,55 @@
 import logging
 import re
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple
 
 import torch
 from accelerate import Accelerator
 from accelerate.utils import DistributedType
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_wandb_watch_mode(
+    *,
+    wandb_mode: str,
+    config_value: Optional[str],
+    env_value: Optional[str],
+) -> tuple[Optional[str], Optional[str]]:
+    """Resolve effective ``wandb.watch`` mode with sane defaults.
+
+    Behavior:
+    - Precedence: ``WANDB_WATCH`` env var > ``wandb.watch`` config > default.
+    - Default is ``"gradients"`` when mode is online.
+    - False-like values disable watching.
+    - If set to ``weights``, map to ``parameters`` (W&B API naming).
+    - If set to an unsupported value, disable watching and return a warning.
+
+    :param str wandb_mode: Effective W&B run mode (online/offline/disabled).
+    :param str | None config_value: Config value from ``wandb.watch``.
+    :param str | None env_value: Raw ``WANDB_WATCH`` environment value.
+    :return tuple[str | None, str | None]: (watch mode, optional warning message).
+    """
+    resolved_mode = str(wandb_mode).strip().lower()
+    if resolved_mode != "online":
+        return None, None
+
+    raw_mode = env_value if env_value is not None else config_value
+    if raw_mode is None:
+        raw_mode = "gradients"
+    watch_mode = str(raw_mode).strip().lower()
+    if watch_mode in {"", "false", "0", "none", "off"}:
+        return None, None
+    if watch_mode == "disabled":
+        return None, None
+    if watch_mode == "weights":
+        return "parameters", None
+    if watch_mode in {"gradients", "parameters", "all"}:
+        return watch_mode, None
+    return (
+        None,
+        f"Unrecognized wandb watch mode '{raw_mode}'; skipping wandb.watch().",
+    )
 
 
 def _unwrap_optimizer(opt: Any) -> Any:
@@ -19,6 +61,93 @@ def _unwrap_optimizer(opt: Any) -> Any:
     :return Any: Unwrapped optimizer.
     """
     return getattr(opt, "optimizer", opt)
+
+
+def create_accelerator(
+    *,
+    use_cpu: bool,
+    log: logging.Logger,
+    accelerator_factory: Callable[..., Accelerator] = Accelerator,
+    **kwargs: Any,
+) -> Accelerator:
+    """Create an Accelerator and gracefully handle mixed cpu/cuda test processes.
+
+    When ``use_cpu=True`` is requested after Accelerate has already initialized a
+    CUDA-backed shared state (common in unit-test suites), Accelerate raises a
+    ValueError about changing ``cpu=True``. In that case we warn once and retry
+    without forcing CPU so the existing process state remains usable.
+
+    :param bool use_cpu: Whether to request CPU execution.
+    :param logging.Logger log: Logger for fallback warnings.
+    :param Callable[..., Accelerator] accelerator_factory: Accelerator constructor.
+    :param kwargs: Additional ``Accelerator(...)`` keyword arguments.
+    :return Accelerator: Initialized accelerator.
+    """
+    accelerator_kwargs = dict(kwargs)
+    if use_cpu:
+        accelerator_kwargs["cpu"] = True
+    try:
+        return accelerator_factory(**accelerator_kwargs)
+    except ValueError as exc:
+        if use_cpu and "cpu=True" in str(exc):
+            log.warning(
+                "trainer.use_cpu=true requested but AcceleratorState is already "
+                "initialized on a non-CPU device in this process; continuing with "
+                "the existing Accelerate device state."
+            )
+            accelerator_kwargs.pop("cpu", None)
+            return accelerator_factory(**accelerator_kwargs)
+        raise
+
+
+def validate_muon_distributed_compatibility(
+    *,
+    accelerator: Accelerator,
+    optimizer_name: str,
+    log: logging.Logger,
+    context: str,
+) -> None:
+    """Validate MuonClip compatibility for the active distributed runtime.
+
+    MuonClip orthogonalizes full 2D tensors. Sharded-parameter modes (notably
+    FSDP and DeepSpeed ZeRO-2/3) violate this assumption because each rank holds
+    only slices of the matrix.
+
+    :param Accelerator accelerator: Active Accelerator runtime.
+    :param str optimizer_name: Configured optimizer name.
+    :param logging.Logger log: Logger for compatibility warnings.
+    :param str context: Human-readable task context for error messages.
+    :raises RuntimeError: If MuonClip is enabled with incompatible sharding.
+    """
+    optimizer_key = str(optimizer_name).strip().lower()
+    if optimizer_key not in {"muonclip", "muon-clip", "muon_clip"}:
+        return
+
+    distributed_type = getattr(accelerator, "distributed_type", None)
+    if distributed_type is DistributedType.FSDP:
+        raise RuntimeError(
+            "MuonClip is not compatible with FSDP sharded parameters in "
+            f"{context}. Use AdamW or disable FSDP for MuonClip runs."
+        )
+
+    if distributed_type is not DistributedType.DEEPSPEED:
+        return
+
+    deepspeed_plugin = getattr(
+        getattr(accelerator, "state", None), "deepspeed_plugin", None
+    )
+    zero_stage = getattr(deepspeed_plugin, "zero_stage", None)
+    if zero_stage is None:
+        log.warning(
+            "MuonClip enabled with DeepSpeed in "
+            f"{context}, but ZeRO stage is unknown. Ensure ZeRO stage < 2."
+        )
+        return
+    if int(zero_stage) >= 2:
+        raise RuntimeError(
+            "MuonClip is not compatible with DeepSpeed ZeRO stage >= 2 in "
+            f"{context} (sharded grads/params). Use ZeRO stage 0/1 or disable MuonClip."
+        )
 
 
 def _maybe_prepare_for_forward(
@@ -71,8 +200,7 @@ def _maybe_compile_model(
     ).lower()
     if compile_backend not in {"inductor", "aot_eager", "eager"}:
         log.warning(
-            "Unknown trainer.torch_compile_backend='%s'; using 'inductor'.",
-            compile_backend,
+            f"Unknown trainer.torch_compile_backend='{compile_backend}'; using 'inductor'."
         )
         compile_backend = "inductor"
     dynamic_override = getattr(cfg.trainer, "torch_compile_dynamic", None)
@@ -84,9 +212,8 @@ def _maybe_compile_model(
     else:
         use_dynamic = bool(dynamic_override)
     log.info(
-        "Compiling model with torch.compile (backend=%s, dynamic=%s).",
-        compile_backend,
-        use_dynamic,
+        f"Compiling model with torch.compile (backend={compile_backend}, "
+        f"dynamic={use_dynamic})."
     )
     return torch.compile(model, backend=compile_backend, dynamic=use_dynamic)
 

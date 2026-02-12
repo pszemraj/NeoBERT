@@ -112,8 +112,8 @@ def get_optimizer(
             extra_args = {k: v for k, v in kwargs.items()}
             if extra_args:
                 logger.warning(
-                    "Ignoring unused optimizer kwargs for MuonClip: %s",
-                    ", ".join(sorted(extra_args)),
+                    "Ignoring unused optimizer kwargs for MuonClip: "
+                    f"{', '.join(sorted(extra_args))}"
                 )
 
             muon_kwargs: Dict[str, Any] = {}

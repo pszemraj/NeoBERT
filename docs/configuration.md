@@ -1,13 +1,18 @@
 # Configuration Reference
 
 > [!TIP]
-> Example configs are in the [configs/](/configs/) directory, which has subdirs by task, ex: [pretraining/](/configs/pretraining/).
+> Example configs are in [configs/](../configs/) (for production) and
+> [tests/configs/](../tests/configs/) (for tiny smoke/regression runs).
 
-This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) in a practical order.
+This page is the primary source of truth for NeoBERT's YAML config schema
+(`src/neobert/config.py`) and defaults.
 
 ---
 
 - [How To Use This Page](#how-to-use-this-page)
+- [Variables and Dot Overrides](#variables-and-dot-overrides)
+  - [YAML variables](#yaml-variables)
+  - [Dot-path overrides in Python](#dot-path-overrides-in-python)
 - [High-Impact Settings](#high-impact-settings)
 - [Model Architecture](#model-architecture)
   - [Core](#core)
@@ -50,31 +55,100 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 
 - Treat this as a **config-file reference**, not a CLI-first reference.
 - Start with **High-Impact Settings**, then fill in grouped sections.
-- Defaults shown here are the dataclass defaults.
+- Defaults shown here are dataclass defaults unless noted.
+- High-impact tables are summaries; field semantics are defined in section tables.
 - Unknown keys fail fast during config loading.
+
+## Variables and Dot Overrides
+
+`ConfigLoader.load(...)` supports a small YAML variable system and post-load dot
+overrides for sweep-style runs.
+
+### YAML variables
+
+- Define top-level `variables:` in YAML.
+- Use exact replacement for type-preserving values:
+  - `dataset.max_seq_length: $variables.seq_len`
+- Use inline interpolation for strings:
+  - `wandb.name: "run-{$variables.tag}"`
+  - `wandb.name: "run-${variables.tag}"` (alternate form)
+- Nested variable references are supported.
+- Circular variable references fail fast with an explicit error.
+- Unresolved `$variables.*` tokens in strings emit warnings with field location.
+
+Example: one `seq_len` driving multiple runtime fields (without coupling model
+context length yet):
+
+```yaml
+variables:
+  seq_len: 1024
+  run_tag: pretrain-1024
+
+dataset:
+  max_seq_length: $variables.seq_len
+
+tokenizer:
+  max_length: $variables.seq_len
+
+datacollator:
+  max_length: $variables.seq_len
+
+wandb:
+  name: "neobert-{$variables.run_tag}"
+```
+
+Use this pattern for shared run-time sequence settings. Keep
+`model.max_position_embeddings` as an explicit architecture decision.
+
+### Dot-path overrides in Python
+
+When calling `ConfigLoader.load(path, overrides=...)`, overrides can be either:
+
+- a nested mapping (existing behavior), or
+- a list of dot-path strings, for example:
+
+```python
+cfg = ConfigLoader.load(
+    "configs/pretraining/pretrain_neobert100m_smollm2data_muonclip.yaml",
+    overrides=[
+        "trainer.max_steps=2000",
+        "optimizer.lr=2e-4",
+        "dataset.streaming=false",
+    ],
+)
+```
+
+Accepted list token forms:
+
+- `section.key=value`
+- `--section.key=value`
+- `--section.key value`
+
+Unknown paths and invalid value types fail fast with path-specific errors.
+Overrides are validated with the same semantic checks as base YAML configs.
 
 ## High-Impact Settings
 
-| Key                                   | Type          | Default         | Description                                                   |
-| ------------------------------------- | ------------- | --------------- | ------------------------------------------------------------- |
-| `task`                                | `str`         | `"pretraining"` | Run mode: `pretraining`, `glue`, `mteb`, `contrastive`.       |
-| `model.hidden_size`                   | `int`         | `768`           | Main width of the transformer.                                |
-| `model.num_hidden_layers`             | `int`         | `12`            | Depth of the encoder stack.                                   |
-| `model.num_attention_heads`           | `int`         | `12`            | Attention heads per layer.                                    |
-| `model.max_position_embeddings`       | `int`         | `512`           | Maximum sequence length the model is built for.               |
-| `dataset.name`                        | `str`         | `"refinedweb"`  | HF dataset name when loading from hub.                        |
-| `dataset.path`                        | `str`         | `""`            | Local dataset path (preferred when available).                |
-| `dataset.streaming`                   | `bool`        | `true`          | Stream from dataset source instead of materializing all data. |
-| `trainer.per_device_train_batch_size` | `int`         | `16`            | Per-device train microbatch size.                             |
-| `trainer.gradient_accumulation_steps` | `int`         | `1`             | Number of microbatches per optimizer step.                    |
-| `trainer.max_steps`                   | `int`         | `1000000`       | Total training steps.                                         |
-| `optimizer.name`                      | `str`         | `"adamw"`       | Optimizer family (`adamw`, `adam`, `muonclip`).               |
-| `optimizer.lr`                        | `float`       | `1e-4`          | Base learning rate.                                           |
-| `scheduler.name`                      | `str`         | `"cosine"`      | LR schedule type.                                             |
-| `datacollator.mask_all`               | `bool`        | `false`         | `false` uses BERT-style 80/10/10 masking.                     |
-| `datacollator.pack_sequences`         | `bool`        | `false`         | Enable packed-sequence collation.                             |
-| `trainer.resume_from_checkpoint`      | `str \| None` | `null`          | Checkpoint to resume from.                                    |
-| `use_deepspeed`                       | `bool`        | `true`          | Enable DeepSpeed backend when launched accordingly.           |
+| Key                                   | Type          | Default         | Description                                                          |
+| ------------------------------------- | ------------- | --------------- | -------------------------------------------------------------------- |
+| `task`                                | `str`         | `"pretraining"` | Run mode: `pretraining`, `glue`, `mteb`, `contrastive`.              |
+| `model.hidden_size`                   | `int`         | `768`           | Main width of the transformer.                                       |
+| `model.num_hidden_layers`             | `int`         | `12`            | Depth of the encoder stack.                                          |
+| `model.num_attention_heads`           | `int`         | `12`            | Attention heads per layer.                                           |
+| `model.max_position_embeddings`       | `int`         | `512`           | Maximum sequence length the model is built for.                      |
+| `dataset.name`                        | `str`         | `"refinedweb"`  | HF dataset name when loading from hub.                               |
+| `dataset.path`                        | `str`         | `""`            | Local dataset path (preferred when available).                       |
+| `dataset.streaming`                   | `bool`        | `true`          | Stream from dataset source instead of materializing all data.        |
+| `trainer.per_device_train_batch_size` | `int`         | `16`            | Per-device train microbatch size.                                    |
+| `trainer.gradient_accumulation_steps` | `int`         | `1`             | Number of microbatches per optimizer step.                           |
+| `trainer.max_steps`                   | `int`         | `1000000`       | Total training steps.                                                |
+| `optimizer.name`                      | `str`         | `"adamw"`       | Optimizer family (`adamw`, `adam`, `muonclip`).                      |
+| `optimizer.lr`                        | `float`       | `1e-4`          | Base learning rate.                                                  |
+| `scheduler.name`                      | `str`         | `"cosine"`      | LR schedule type.                                                    |
+| `datacollator.mask_all`               | `bool`        | `false`         | `false` uses sampled-token BERT-style 80/10/10 masking.              |
+| `datacollator.pack_sequences`         | `bool`        | `false`         | Enable packed-sequence collation.                                    |
+| `trainer.resume_from_checkpoint`      | `str \| None` | `null`          | Checkpoint to resume from.                                           |
+| `use_deepspeed`                       | `bool`        | `false`         | Legacy hint for loading DeepSpeed-formatted contrastive checkpoints. |
 
 > [!NOTE]
 > Runtime preprocessing synchronizes tokenizer-derived values (including `model.pad_token_id`) and aligns vocab size for model/tokenizer consistency.
@@ -131,17 +205,22 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 
 ## Tokenizer
 
-| Key                    | Type          | Default               | Description                                            |
-| ---------------------- | ------------- | --------------------- | ------------------------------------------------------ |
-| `tokenizer.name`       | `str`         | `"bert-base-uncased"` | Tokenizer name from HF hub.                            |
-| `tokenizer.path`       | `str \| None` | `null`                | Local tokenizer path (takes precedence when provided). |
-| `tokenizer.max_length` | `int`         | `512`                 | Tokenizer max length used during preprocessing.        |
-| `tokenizer.padding`    | `str`         | `"max_length"`        | Padding behavior passed to tokenization pipeline.      |
-| `tokenizer.truncation` | `bool`        | `true`                | Truncate to max length during tokenization.            |
-| `tokenizer.vocab_size` | `int \| None` | `null`                | Runtime-synchronized to effective model vocab size.    |
+| Key                                     | Type          | Default               | Description                                                                           |
+| --------------------------------------- | ------------- | --------------------- | ------------------------------------------------------------------------------------- |
+| `tokenizer.name`                        | `str`         | `"bert-base-uncased"` | Tokenizer name from HF hub.                                                           |
+| `tokenizer.path`                        | `str \| None` | `null`                | Local tokenizer path (takes precedence when provided).                                |
+| `tokenizer.max_length`                  | `int`         | `512`                 | Tokenizer max length used during preprocessing.                                       |
+| `tokenizer.padding`                     | `str`         | `"max_length"`        | Padding behavior passed to tokenization pipeline.                                     |
+| `tokenizer.truncation`                  | `bool`        | `true`                | Truncate to max length during tokenization.                                           |
+| `tokenizer.vocab_size`                  | `int \| None` | `null`                | Runtime-synchronized to effective model vocab size.                                   |
+| `tokenizer.trust_remote_code`           | `bool`        | `false`               | Allow tokenizer remote code execution.                                                |
+| `tokenizer.revision`                    | `str \| None` | `null`                | Optional tokenizer revision/commit pin for reproducibility.                           |
+| `tokenizer.allow_special_token_rewrite` | `bool`        | `false`               | Explicit opt-in for fallback special-token rewrite when tokenizer lacks `mask_token`. |
 
 > [!NOTE]
 > Trainer now pads tokenizer length with inert placeholder tokens to keep `len(tokenizer) == model.vocab_size`.
+> If a tokenizer lacks `mask_token`, NeoBERT now requires explicit
+> `tokenizer.allow_special_token_rewrite: true` before mutating special tokens.
 
 ---
 
@@ -149,18 +228,18 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 
 ### Core
 
-| Key                        | Type            | Default        | Description                                             |
-| -------------------------- | --------------- | -------------- | ------------------------------------------------------- |
-| `dataset.name`             | `str`           | `"refinedweb"` | Dataset name for `load_dataset`.                        |
-| `dataset.config`           | `str \| None`   | `null`         | Dataset config/split variant name.                      |
-| `dataset.path`             | `str`           | `""`           | Local path loaded with `load_from_disk` when present.   |
-| `dataset.streaming`        | `bool`          | `true`         | Streaming mode for large datasets.                      |
-| `dataset.max_seq_length`   | `int`           | `512`          | Target max sequence length for preprocessing/collation. |
-| `dataset.text_column`      | `str \| None`   | `null`         | Text field override for tokenization.                   |
-| `dataset.train_split`      | `str \| None`   | `null`         | Train split (supports slice syntax).                    |
-| `dataset.eval_split`       | `str \| None`   | `null`         | Eval split override.                                    |
+| Key                        | Type            | Default        | Description                                                                                                        |
+| -------------------------- | --------------- | -------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `dataset.name`             | `str`           | `"refinedweb"` | Dataset name for `load_dataset`.                                                                                   |
+| `dataset.config`           | `str \| None`   | `null`         | Dataset config/split variant name.                                                                                 |
+| `dataset.path`             | `str`           | `""`           | Local path loaded with `load_from_disk` when present.                                                              |
+| `dataset.streaming`        | `bool`          | `true`         | Streaming mode for large datasets.                                                                                 |
+| `dataset.max_seq_length`   | `int`           | `512`          | Target max sequence length for preprocessing/collation.                                                            |
+| `dataset.text_column`      | `str \| None`   | `null`         | Text field override for tokenization.                                                                              |
+| `dataset.train_split`      | `str \| None`   | `null`         | Train split (supports slice syntax).                                                                               |
+| `dataset.eval_split`       | `str \| None`   | `null`         | Eval split override.                                                                                               |
 | `dataset.eval_samples`     | `int \| None`   | `null`         | Eval sample cap. If no eval split is configured, trainer can reserve the first `eval_samples` from train for eval. |
-| `dataset.validation_split` | `float \| None` | `null`         | Fraction for random eval split (non-streaming only).    |
+| `dataset.validation_split` | `float \| None` | `null`         | Fraction for random eval split (non-streaming only).                                                               |
 
 > [!NOTE]
 > Streaming pretraining defaults to `dataset.eval_split: null`. When unset, trainer
@@ -186,12 +265,16 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 
 ### Contrastive-Only Data Fields
 
-| Key                          | Type    | Default | Description                                             |
-| ---------------------------- | ------- | ------- | ------------------------------------------------------- |
-| `dataset.load_all_from_disk` | `bool`  | `false` | Load full dataset into memory.                          |
-| `dataset.force_redownload`   | `bool`  | `false` | Force dataset redownload.                               |
-| `dataset.pretraining_prob`   | `float` | `0.3`   | Mixed pretraining probability in contrastive pipelines. |
-| `dataset.min_length`         | `int`   | `512`   | Minimum length filter for contrastive data.             |
+| Key                          | Type    | Default | Description                                                           |
+| ---------------------------- | ------- | ------- | --------------------------------------------------------------------- |
+| `dataset.load_all_from_disk` | `bool`  | `false` | Load full dataset into memory.                                        |
+| `dataset.force_redownload`   | `bool`  | `false` | Force dataset redownload.                                             |
+| `dataset.min_length`         | `int`   | `5`     | Short-text-friendly default for optional length filtering helpers.    |
+| `dataset.alpha`              | `float` | `1.0`   | Contrastive dataset sampling exponent (`1.0` = proportional by size). |
+
+> [!NOTE]
+> `dataset.pretraining_prob` is deprecated and normalized to
+> `contrastive.pretraining_prob`.
 
 ---
 
@@ -199,33 +282,33 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 
 ### Core
 
-| Key                                   | Type  | Default      | Description                                |
-| ------------------------------------- | ----- | ------------ | ------------------------------------------ |
-| `trainer.per_device_train_batch_size` | `int` | `16`         | Train microbatch size per device.          |
-| `trainer.per_device_eval_batch_size`  | `int` | `32`         | Eval microbatch size per device.           |
-| `trainer.gradient_accumulation_steps` | `int` | `1`          | Accumulation steps per optimizer update.   |
-| `trainer.max_steps`                   | `int` | `1000000`    | Max optimizer steps.                       |
-| `trainer.save_steps`                  | `int` | `10000`      | Save interval in steps.                    |
-| `trainer.eval_steps`                  | `int` | `10000`      | Eval interval in steps.                    |
-| `trainer.logging_steps`               | `int` | `100`        | Logging interval in steps.                 |
-| `trainer.output_dir`                  | `str` | `"./output"` | Output root for checkpoints and artifacts. |
-| `trainer.mixed_precision`             | `str` | `"bf16"`     | `no`, `fp32`, or `bf16` (`fp16` unsupported in pretraining). |
+| Key                                   | Type  | Default      | Description                                   |
+| ------------------------------------- | ----- | ------------ | --------------------------------------------- |
+| `trainer.per_device_train_batch_size` | `int` | `16`         | Train microbatch size per device.             |
+| `trainer.per_device_eval_batch_size`  | `int` | `32`         | Eval microbatch size per device.              |
+| `trainer.gradient_accumulation_steps` | `int` | `1`          | Accumulation steps per optimizer update.      |
+| `trainer.max_steps`                   | `int` | `1000000`    | Max optimizer steps.                          |
+| `trainer.save_steps`                  | `int` | `10000`      | Save interval in steps.                       |
+| `trainer.eval_steps`                  | `int` | `10000`      | Eval interval in steps.                       |
+| `trainer.logging_steps`               | `int` | `100`        | Logging interval in steps.                    |
+| `trainer.output_dir`                  | `str` | `"./output"` | Output root for checkpoints and artifacts.    |
+| `trainer.mixed_precision`             | `str` | `"bf16"`     | `no`, `fp32`, or `bf16` (`fp16` unsupported). |
 
 ### Stability and Performance
 
-| Key                                   | Type            | Default      | Description                                              |
-| ------------------------------------- | --------------- | ------------ | -------------------------------------------------------- |
-| `trainer.gradient_checkpointing`      | `bool`          | `false`      | Activation checkpointing for lower memory usage.         |
-| `trainer.gradient_clipping`           | `float \| None` | `null`       | Clip gradient norm when set.                             |
-| `trainer.torch_compile`               | `bool`          | `false`      | Enable `torch.compile`.                                  |
-| `trainer.torch_compile_dynamic`       | `bool \| None`  | `null`       | Dynamic-shape compile toggle when supported.             |
-| `trainer.torch_compile_backend`       | `str`           | `"inductor"` | Compile backend name.                                    |
-| `trainer.enforce_full_packed_batches` | `bool`          | `true`       | Buffer packed fragments to emit full-sized microbatches. |
-| `trainer.eval_max_batches`            | `int \| None`   | `null`       | Optional eval cap (useful for streaming eval).           |
-| `trainer.log_train_accuracy`          | `bool`          | `false`      | Log MLM token accuracy (extra compute).                  |
-| `trainer.log_grad_norm`               | `bool`          | `true`       | Log grad norm each logging interval.                     |
-| `trainer.log_weight_norms`            | `bool`          | `true`       | Log parameter norms (main-process overhead).             |
-| `trainer.tf32`                        | `bool`          | `true`       | Enable TF32 on supported CUDA GPUs.                      |
+| Key                                   | Type            | Default      | Description                                                                                                                                                 |
+| ------------------------------------- | --------------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `trainer.gradient_checkpointing`      | `bool`          | `false`      | Activation checkpointing for lower memory usage.                                                                                                            |
+| `trainer.gradient_clipping`           | `float \| None` | `null`       | Clip gradient norm when set.                                                                                                                                |
+| `trainer.torch_compile`               | `bool`          | `false`      | Enable `torch.compile`.                                                                                                                                     |
+| `trainer.torch_compile_dynamic`       | `bool \| None`  | `null`       | Dynamic-shape compile toggle when supported.                                                                                                                |
+| `trainer.torch_compile_backend`       | `str`           | `"inductor"` | Compile backend name.                                                                                                                                       |
+| `trainer.enforce_full_packed_batches` | `bool`          | `true`       | Buffer packed fragments to emit full-sized microbatches.                                                                                                    |
+| `trainer.eval_max_batches`            | `int \| None`   | `null`       | Optional eval cap; required for streaming eval when `dataset.eval_samples` is unset.                                                                        |
+| `trainer.log_train_accuracy`          | `bool`          | `false`      | Log MLM masked-token train accuracy (enable only for focused diagnostics; disabling improves throughput).                                                   |
+| `trainer.log_grad_norm`               | `bool`          | `true`       | Log grad norm each logging interval.                                                                                                                        |
+| `trainer.log_weight_norms`            | `bool`          | `true`       | Log parameter norms (main-process overhead).                                                                                                                |
+| `trainer.tf32`                        | `bool`          | `true`       | Enable TF32 on supported CUDA GPUs.                                                                                                                         |
 | `trainer.masked_logits_only_loss`     | `bool`          | `true`       | Pretraining MLM loss path selector: `true` = masked-logits-only path (default/recommended), `false` = original full-logits CE path (legacy ablation/debug). |
 
 > [!IMPORTANT]
@@ -243,12 +326,12 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `trainer.num_train_epochs`       | `int`         | `3`       | Epoch count fallback when steps are not the only limiter. |
 | `trainer.eval_strategy`          | `str`         | `"steps"` | `steps` or `epoch`.                                       |
 | `trainer.save_strategy`          | `str`         | `"steps"` | `steps`, `epoch`, `best`, or `no`.                        |
-| `trainer.save_total_limit`       | `int \| None` | `3`       | Keep at most this many model checkpoints.                 |
-| `trainer.max_ckpt`               | `int`         | `3`       | Legacy checkpoint retention cap.                          |
+| `trainer.save_total_limit`       | `int \| None` | `3`       | Keep at most this many `checkpoints/<step>` directories.  |
+| `trainer.max_ckpt`               | `int \| None` | `null`    | Deprecated alias for `trainer.save_total_limit`.          |
 | `trainer.disable_tqdm`           | `bool`        | `false`   | Disable progress bars.                                    |
-| `trainer.dataloader_num_workers` | `int`         | `0`       | Legacy compatibility field.                               |
+| `trainer.dataloader_num_workers` | `int`         | `0`       | Contrastive-only dataloader worker override.              |
 | `trainer.use_cpu`                | `bool`        | `false`   | Force CPU execution.                                      |
-| `trainer.report_to`              | `list[str]`   | `[]`      | Legacy reporting hooks list.                              |
+| `trainer.report_to`              | `list[str]`   | `[]`      | Deprecated and ignored. Use `wandb.enabled` explicitly.   |
 | `trainer.train_batch_size`       | `int \| None` | `null`    | Legacy batch-size alias.                                  |
 | `trainer.eval_batch_size`        | `int \| None` | `null`    | Legacy batch-size alias.                                  |
 | `trainer.early_stopping`         | `int`         | `0`       | Reserved in pretraining path.                             |
@@ -269,7 +352,6 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `scheduler.decay_steps`    | `int \| None`   | `null`     | Absolute decay end step.                 |
 | `scheduler.warmup_percent` | `float \| None` | `null`     | Percentage override for warmup.          |
 | `scheduler.decay_percent`  | `float \| None` | `null`     | Percentage override for decay.           |
-| `scheduler.num_cycles`     | `float`         | `0.5`      | Cosine cycles parameter.                 |
 | `scheduler.final_lr_ratio` | `float`         | `0.1`      | Final LR floor ratio.                    |
 
 > [!IMPORTANT]
@@ -322,20 +404,33 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `datacollator.max_length`         | `int \| None` | `null`  | Packed target length override.                                 |
 | `datacollator.pad_to_multiple_of` | `int \| None` | `null`  | Pad to multiple for kernel efficiency in non-packed mode.      |
 
+For `p = datacollator.mlm_probability`:
+
+- `mask_all: false` global token mix is `(1 - p)` untouched, `0.8p` `[MASK]`,
+  `0.1p` random-token, `0.1p` original-token.
+- `mask_all: true` global token mix is `(1 - p)` untouched, `p` `[MASK]`.
+
 ---
 
 ## Checkpointing and Resume
 
-| Key                              | Type          | Default    | Description                                        |
-| -------------------------------- | ------------- | ---------- | -------------------------------------------------- |
-| `trainer.save_steps`             | `int`         | `10000`    | Save cadence.                                      |
-| `trainer.save_total_limit`       | `int \| None` | `3`        | Maximum retained model checkpoints.                |
-| `trainer.max_ckpt`               | `int`         | `3`        | Legacy retention cap.                              |
-| `trainer.resume_from_checkpoint` | `str \| None` | `null`     | Resume source (`latest`, step dir, explicit path). |
-| `pretrained_checkpoint`          | `str`         | `"latest"` | Checkpoint selector for downstream tasks.          |
+Save cadence/retention knobs live under [Training Loop](#training-loop):
+`trainer.save_steps`, `trainer.save_total_limit`, and
+`trainer.resume_from_checkpoint`.
+
+| Key                     | Type  | Default    | Description                               |
+| ----------------------- | ----- | ---------- | ----------------------------------------- |
+| `pretrained_checkpoint` | `str` | `"latest"` | Checkpoint selector for downstream tasks. |
 
 > [!NOTE]
-> DeepSpeed checkpoint saves now preserve canonical root semantics (`latest` indirection is refreshed) while still writing per-step directories.
+> Pretraining and GLUE resumable state checkpoints are written under
+> `output_dir/checkpoints/<step>/`.
+> GLUE transfer/loading helpers still accept legacy
+> `output_dir/model_checkpoints/<step>/` layouts for older runs.
+> Resume path resolution uses numeric step directories and picks the highest
+> available step for `resume_from_checkpoint: latest`.
+> DeepSpeed `latest` indirection files are optional legacy metadata and are only
+> consulted by DeepSpeed conversion/loading helpers when present.
 
 ---
 
@@ -343,28 +438,38 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 
 ### Weights and Biases
 
-| Key                  | Type          | Default        | Description                                                 |
-| -------------------- | ------------- | -------------- | ----------------------------------------------------------- |
-| `wandb.enabled`      | `bool`        | `false`        | Enable W&B logging.                                         |
-| `wandb.project`      | `str`         | `"neo-bert"`   | W&B project name.                                           |
-| `wandb.entity`       | `str \| None` | `null`         | W&B entity/team.                                            |
-| `wandb.name`         | `str \| None` | `null`         | Run name override.                                          |
-| `wandb.tags`         | `list[str]`   | `[]`           | Run tags.                                                   |
-| `wandb.mode`         | `str`         | `"online"`     | `online`, `offline`, or `disabled`.                         |
-| `wandb.log_interval` | `int`         | `100`          | Legacy field; trainer logging uses `trainer.logging_steps`. |
-| `wandb.resume`       | `str`         | `"never"`      | W&B resume policy.                                          |
-| `wandb.dir`          | `str`         | `"logs/wandb"` | Artifact/run directory.                                     |
+| Key                  | Type          | Default        | Description                                                                                |
+| -------------------- | ------------- | -------------- | ------------------------------------------------------------------------------------------ |
+| `wandb.enabled`      | `bool`        | `false`        | Enable W&B logging.                                                                        |
+| `wandb.project`      | `str`         | `"neo-bert"`   | W&B project name.                                                                          |
+| `wandb.entity`       | `str \| None` | `null`         | W&B entity/team.                                                                           |
+| `wandb.name`         | `str \| None` | `null`         | Run name override.                                                                         |
+| `wandb.tags`         | `list[str]`   | `[]`           | Run tags.                                                                                  |
+| `wandb.mode`         | `str`         | `"online"`     | `online`, `offline`, or `disabled`.                                                        |
+| `wandb.watch`        | `str`         | `"gradients"`  | Model-watch mode: `gradients`, `parameters`, `all`, or disabled (`off`/`none`/`disabled`). |
+| `wandb.log_interval` | `int`         | `100`          | Legacy field; trainer logging uses `trainer.logging_steps`.                                |
+| `wandb.resume`       | `str`         | `"never"`      | W&B resume policy.                                                                         |
+| `wandb.dir`          | `str`         | `"logs/wandb"` | Artifact/run directory.                                                                    |
+
+> [!NOTE]
+> Runtime logging prints a task-scoped resolved config before training and sends
+> the same task-scoped payload to W&B (irrelevant task sections are excluded).
+> W&B is not auto-enabled by presence of a `wandb` section; set
+> `wandb.enabled: true` explicitly.
+> For pretraining/contrastive, watch-mode precedence is:
+> `WANDB_WATCH` env var > `wandb.watch` config > default (`gradients` for
+> `wandb.mode: online`).
 
 ### Top-Level Runtime Metadata
 
-| Key                      | Type             | Default | Description                                      |
-| ------------------------ | ---------------- | ------- | ------------------------------------------------ |
-| `seed`                   | `int`            | `0`     | Global random seed.                              |
-| `debug`                  | `bool`           | `false` | Extra debug logging/prints.                      |
-| `use_deepspeed`          | `bool`           | `true`  | DeepSpeed toggle for launch/runtime integration. |
-| `accelerate_config_file` | `str \| None`    | `null`  | Accelerate launch config path.                   |
-| `pretraining_metadata`   | `dict[str, Any]` | `{}`    | Metadata passed to downstream evaluations.       |
-| `config_path`            | `str \| None`    | `null`  | Source config path metadata.                     |
+| Key                      | Type             | Default | Description                                                              |
+| ------------------------ | ---------------- | ------- | ------------------------------------------------------------------------ |
+| `seed`                   | `int`            | `0`     | Global random seed.                                                      |
+| `debug`                  | `bool`           | `false` | Extra debug logging/prints.                                              |
+| `use_deepspeed`          | `bool`           | `false` | Legacy hint for DeepSpeed-formatted contrastive checkpoint loading only. |
+| `accelerate_config_file` | `str \| None`    | `null`  | Accelerate launch config path.                                           |
+| `pretraining_metadata`   | `dict[str, Any]` | `{}`    | Metadata passed to downstream evaluations.                               |
+| `config_path`            | `str \| None`    | `null`  | Source config path metadata.                                             |
 
 ---
 
@@ -387,14 +492,23 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 | `glue.num_workers`               | `int`                | `4`      | Data worker count for GLUE pipeline.                     |
 | `glue.preprocessing_num_proc`    | `int`                | `4`      | Multiprocessing workers for GLUE preprocessing.          |
 
+> [!NOTE]
+> Worker-count knobs are task-scoped in the current runtime:
+> pretraining uses `dataset.num_workers`, GLUE uses `glue.num_workers`, and
+> contrastive uses `trainer.dataloader_num_workers`.
+
 ### Contrastive (`contrastive`)
 
-| Key                                | Type    | Default    | Description                         |
-| ---------------------------------- | ------- | ---------- | ----------------------------------- |
-| `contrastive.temperature`          | `float` | `0.05`     | Contrastive temperature.            |
-| `contrastive.pooling`              | `str`   | `"avg"`    | Pooling mode: `avg`, `cls`, `max`.  |
-| `contrastive.loss_type`            | `str`   | `"simcse"` | Loss variant: `simcse`, `supcon`.   |
-| `contrastive.hard_negative_weight` | `float` | `0.0`      | Additional hard-negative weighting. |
+| Key                                     | Type                 | Default    | Description                                                                 |
+| --------------------------------------- | -------------------- | ---------- | --------------------------------------------------------------------------- |
+| `contrastive.temperature`               | `float`              | `0.05`     | Contrastive temperature.                                                    |
+| `contrastive.pooling`                   | `str`                | `"avg"`    | Pooling mode: `avg`, `cls`, `max`.                                          |
+| `contrastive.loss_type`                 | `str`                | `"simcse"` | Loss variant: `simcse`, `supcon`.                                           |
+| `contrastive.hard_negative_weight`      | `float`              | `0.0`      | Additional hard-negative weighting.                                         |
+| `contrastive.pretraining_prob`          | `float`              | `0.3`      | Fraction of steps that draw the pretraining branch in contrastive training. |
+| `contrastive.pretrained_checkpoint_dir` | `str \| None`        | `null`     | Optional pretraining checkpoint root used to initialize contrastive runs.   |
+| `contrastive.pretrained_checkpoint`     | `str \| int \| None` | `null`     | Optional checkpoint tag/step selector for contrastive initialization.       |
+| `contrastive.allow_random_weights`      | `bool`               | `false`    | Allow random initialization when no pretrained checkpoint is configured.    |
 
 ### MTEB Top-Level Keys
 
@@ -409,38 +523,40 @@ This page documents NeoBERT's **YAML config schema** (`src/neobert/config.py`) i
 
 ## Constraints, Requirements, and Gotchas
 
-| Rule                                                              | Type               | Details                                                                                    |
-| ----------------------------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------ |
-| `trainer.resume_from_checkpoint` with `dataset.streaming=true`    | **ERROR**          | Streaming resume is disallowed because data position cannot be restored.                   |
-| `dataset.validation_split` with `dataset.streaming=true`          | **WARNING / SKIP** | Validation split creation is skipped for streaming datasets.                               |
-| `scheduler.warmup_percent` and `scheduler.warmup_steps`           | **PRECEDENCE**     | `warmup_percent` overrides absolute warmup steps.                                          |
-| `scheduler.decay_percent` and `scheduler.decay_steps`             | **PRECEDENCE**     | `decay_percent` overrides absolute decay steps.                                            |
-| `optimizer.name=muonclip` with DeepSpeed ZeRO stage >= 2          | **ERROR**          | MuonClip is incompatible with sharded grads/params at ZeRO stage >= 2.                     |
-| `datacollator.pack_sequences=true` with `model.attn_backend=sdpa` | **WARNING**        | Works, but slower than `flash_attn_varlen`; SDPA uses fallback path.                       |
-| `dataset.path` and `dataset.name` both set                        | **PRECEDENCE**     | Existing local `dataset.path` is used first; hub dataset acts as fallback.                 |
-| Tokenizer/model vocab sizes                                       | **IMPORTANT**      | Runtime now pads tokenizer with inert tokens so tokenizer length matches model vocab size. |
-| `model.pad_token_id`                                              | **IMPORTANT**      | Runtime syncs this from tokenizer before model init/checkpoint save.                       |
+| Rule                                                                              | Type               | Details                                                                                                             |
+| --------------------------------------------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| `trainer.resume_from_checkpoint` with `dataset.streaming=true`                    | **BEST-EFFORT**    | Streaming resume restores state and advances stream by consumed batches; exact sample continuity is not guaranteed. |
+| Streaming eval with neither `trainer.eval_max_batches` nor `dataset.eval_samples` | **ERROR**          | Set an explicit eval budget for reproducible streaming metrics.                                                     |
+| `dataset.validation_split` with `dataset.streaming=true`                          | **WARNING / SKIP** | Validation split creation is skipped for streaming datasets.                                                        |
+| `scheduler.warmup_percent` and `scheduler.warmup_steps`                           | **PRECEDENCE**     | `warmup_percent` overrides absolute warmup steps.                                                                   |
+| `scheduler.decay_percent` and `scheduler.decay_steps`                             | **PRECEDENCE**     | `decay_percent` overrides absolute decay steps.                                                                     |
+| `optimizer.name=muonclip` with DeepSpeed ZeRO stage >= 2                          | **ERROR**          | MuonClip is incompatible with sharded grads/params at ZeRO stage >= 2.                                              |
+| `datacollator.pack_sequences=true` with `model.attn_backend=sdpa`                 | **WARNING**        | Works, but slower than `flash_attn_varlen`; SDPA uses fallback path.                                                |
+| `dataset.path` and `dataset.name` both set                                        | **PRECEDENCE**     | Existing local `dataset.path` is used first; hub dataset acts as fallback.                                          |
+| Tokenizer/model vocab sizes                                                       | **IMPORTANT**      | Runtime now pads tokenizer with inert tokens so tokenizer length matches model vocab size.                          |
+| `model.pad_token_id`                                                              | **IMPORTANT**      | Runtime syncs this from tokenizer before model init/checkpoint save.                                                |
 
 ---
 
 ## Legacy Key Mapping (Still Normalized)
 
-| Legacy Key                         | Canonical Key               | Behavior                                     |
-| ---------------------------------- | --------------------------- | -------------------------------------------- |
-| top-level `mixed_precision`        | `trainer.mixed_precision`   | Deprecated alias; normalized with warning.   |
-| `trainer.bf16`                     | `trainer.mixed_precision`   | Deprecated alias; normalized with warning.   |
-| `trainer.seed`                     | top-level `seed`            | Deprecated alias; normalized with warning.   |
-| `trainer.run_name`                 | `wandb.name`                | Deprecated alias; normalized with warning.   |
-| `trainer.learning_rate`            | `optimizer.lr`              | Deprecated alias; normalized with warning.   |
-| `trainer.warmup_steps`             | `scheduler.warmup_steps`    | Deprecated alias; normalized with warning.   |
-| `trainer.max_grad_norm`            | `trainer.gradient_clipping` | Deprecated alias; normalized with warning.   |
-| `trainer.dir`                      | `trainer.output_dir`        | Deprecated alias; normalized with warning.   |
-| `dataset.tokenizer_name`           | `tokenizer.name`            | Deprecated alias; normalized with warning.   |
-| `dataset.column`                   | `dataset.text_column`       | Deprecated alias; normalized with warning.   |
-| `dataset.path_to_disk`             | `dataset.path`              | Deprecated alias; normalized with warning.   |
-| `tokenizer.tokenizer_name_or_path` | `tokenizer.name`            | Deprecated alias; normalized with warning.   |
-| `optimizer.hparams.*`              | `optimizer.*`               | Deprecated block; flattened with warning.    |
-| legacy attention booleans          | `model.attn_backend`        | Deprecated aliases; normalized with warning. |
+| Legacy Key                         | Canonical Key                  | Behavior                                     |
+| ---------------------------------- | ------------------------------ | -------------------------------------------- |
+| top-level `mixed_precision`        | `trainer.mixed_precision`      | Deprecated alias; normalized with warning.   |
+| `trainer.bf16`                     | `trainer.mixed_precision`      | Deprecated alias; normalized with warning.   |
+| `trainer.seed`                     | top-level `seed`               | Deprecated alias; normalized with warning.   |
+| `trainer.run_name`                 | `wandb.name`                   | Deprecated alias; normalized with warning.   |
+| `trainer.learning_rate`            | `optimizer.lr`                 | Deprecated alias; normalized with warning.   |
+| `trainer.warmup_steps`             | `scheduler.warmup_steps`       | Deprecated alias; normalized with warning.   |
+| `trainer.max_grad_norm`            | `trainer.gradient_clipping`    | Deprecated alias; normalized with warning.   |
+| `trainer.dir`                      | `trainer.output_dir`           | Deprecated alias; normalized with warning.   |
+| `dataset.tokenizer_name`           | `tokenizer.name`               | Deprecated alias; normalized with warning.   |
+| `dataset.column`                   | `dataset.text_column`          | Deprecated alias; normalized with warning.   |
+| `dataset.path_to_disk`             | `dataset.path`                 | Deprecated alias; normalized with warning.   |
+| `dataset.pretraining_prob`         | `contrastive.pretraining_prob` | Deprecated alias; normalized with warning.   |
+| `tokenizer.tokenizer_name_or_path` | `tokenizer.name`               | Deprecated alias; normalized with warning.   |
+| `optimizer.hparams.*`              | `optimizer.*`                  | Deprecated block; flattened with warning.    |
+| legacy attention booleans          | `model.attn_backend`           | Deprecated aliases; normalized with warning. |
 
 ---
 
@@ -543,8 +659,6 @@ trainer:
   save_total_limit: 5
   per_device_train_batch_size: 8
   gradient_accumulation_steps: 4
-
-use_deepspeed: true
 ```
 
 ### 4) Full Logging + Frequent Eval
@@ -561,7 +675,7 @@ trainer:
   logging_steps: 20
   eval_steps: 1000
   eval_max_batches: 200
-  log_train_accuracy: true
+  log_train_accuracy: false
   log_grad_norm: true
   log_weight_norms: true
 

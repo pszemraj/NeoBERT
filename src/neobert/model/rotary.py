@@ -51,7 +51,9 @@ def apply_rotary_emb(
     :param torch.Tensor freqs_cis: Stacked cos/sin ``(S, D//2, 2)``.
     :return tuple[torch.Tensor, torch.Tensor]: Rotary-embedded (xq, xk).
     """
-    # Split head_dim into pairs: (B, S, H, D) -> (B, S, H, D//2, 2)
+    # Split head_dim into pairs: (B, S, H, D) -> (B, S, H, D//2, 2).
+    # We upcast to fp32 for numerically stable trig rotation in eager/compile
+    # paths; downstream fused attention kernels can still optimize this path.
     xq_pairs = rearrange(xq.float(), "... (d two) -> ... d two", two=2)
     xk_pairs = rearrange(xk.float(), "... (d two) -> ... d two", two=2)
 

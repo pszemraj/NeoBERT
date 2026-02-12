@@ -17,14 +17,14 @@ Point export to a checkpoint directory containing:
 
 ```bash
 python scripts/export-hf/export.py \
-  outputs/<run>/model_checkpoints/<step>
+  outputs/<run>/checkpoints/<step>
 ```
 
 Optional output override:
 
 ```bash
 python scripts/export-hf/export.py \
-  outputs/<run>/model_checkpoints/<step> \
+  outputs/<run>/checkpoints/<step> \
   --output outputs/<run>/hf/my_export
 ```
 
@@ -32,7 +32,7 @@ Legacy checkpoints with a decoder bias must opt in to dropping that bias:
 
 ```bash
 python scripts/export-hf/export.py \
-  outputs/<run>/model_checkpoints/<step> \
+  outputs/<run>/checkpoints/<step> \
   --allow-decoder-bias-drop
 ```
 

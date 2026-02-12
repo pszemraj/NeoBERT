@@ -45,6 +45,7 @@ class TestPretrainingMetrics(unittest.TestCase):
         """Do not emit disabled-accuracy/internal keys to tracker payloads."""
         metrics = Metrics()
         metrics["train/steps"] = 11
+        metrics["train/batches"] = 44
         metrics["train/compute_accuracy"] = 0
         metrics["train/local_samples"] = 2
         metrics["train/local_tokens"] = 8
@@ -59,8 +60,15 @@ class TestPretrainingMetrics(unittest.TestCase):
         payload, step = accelerator.logged[0]
         self.assertEqual(step, 11)
         self.assertNotIn("train/steps", payload)
+        self.assertNotIn("train/batches", payload)
+        self.assertNotIn("train/samples", payload)
+        self.assertNotIn("train/masked_tokens", payload)
         self.assertNotIn("train/compute_accuracy", payload)
         self.assertNotIn("train/local_num_correct", payload)
+        self.assertNotIn("train/local_samples", payload)
+        self.assertNotIn("train/local_tokens", payload)
+        self.assertNotIn("train/local_num_pred", payload)
+        self.assertNotIn("train/local_sum_loss", payload)
         self.assertNotIn("train/accuracy", payload)
         self.assertEqual(payload["train/loss"], 1.5)
         self.assertAlmostEqual(payload["train/perplexity"], round(math.exp(1.5), 4))
@@ -84,9 +92,8 @@ class TestPretrainingMetrics(unittest.TestCase):
         self.assertEqual(step, 25)
         self.assertNotIn("train/steps", payload)
         self.assertNotIn("train/compute_accuracy", payload)
-        self.assertIn("train/local_num_correct", payload)
+        self.assertNotIn("train/local_num_correct", payload)
         self.assertIn("train/accuracy", payload)
-        self.assertEqual(payload["train/local_num_correct"], 6)
         self.assertEqual(payload["train/accuracy"], 0.75)
 
     def test_tracker_payload_strips_loss_path_debug_metrics(self):

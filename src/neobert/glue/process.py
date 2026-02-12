@@ -197,10 +197,13 @@ def process_function(
     :param Any tokenizer: Tokenizer with GLUE-compatible special tokens.
     :return dict[str, Any]: Tokenized batch with labels when applicable.
     """
+    glue_task = str(
+        getattr(cfg.glue, "task_name", getattr(cfg, "task", "glue"))
+    ).strip()
     sentences = get_sentences(
         examples=examples,
         meta_task=cfg.meta_task,
-        task=cfg.task,
+        task=glue_task,
         bos_token=tokenizer.bos_token,
         eos_token=tokenizer.eos_token,
         sep_token=tokenizer.sep_token,
@@ -209,12 +212,12 @@ def process_function(
         *sentences,
         padding=False,
         max_length=int(cfg.tokenizer.max_length),
-        truncation=True,
+        truncation=bool(getattr(cfg.tokenizer, "truncation", True)),
     )
     if cfg.mode in ["train", "eval"]:
         result["labels"] = get_labels(
             examples=examples,
             meta_task=cfg.meta_task,
-            task=cfg.task,
+            task=glue_task,
         )
     return result

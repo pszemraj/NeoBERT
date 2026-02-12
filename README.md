@@ -59,7 +59,7 @@ python tests/run_tests.py
 | Pretrain  | `python scripts/pretraining/pretrain.py configs/pretraining/pretrain_neobert.yaml`                                   |
 | GLUE eval | `python scripts/evaluation/run_glue.py configs/glue/cola.yaml`                                                       |
 | MTEB eval | `python scripts/evaluation/run_mteb.py configs/pretraining/pretrain_neobert.yaml --model_name_or_path outputs/<run>` |
-| Export HF | `python scripts/export-hf/export.py outputs/<run>/model_checkpoints/<step>`                                          |
+| Export HF | `python scripts/export-hf/export.py outputs/<run>/checkpoints/<step>`                                                |
 | Tests     | `python tests/run_tests.py`                                                                                          |
 
 ## Documentation

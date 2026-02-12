@@ -16,6 +16,22 @@ configs/
   contrastive/
 ```
 
+## Config Authoring Policy
+
+- Keep semantics/default definitions in
+  [docs/configuration.md](../docs/configuration.md).
+- Keep runtime behavior in [docs/training.md](../docs/training.md) and
+  [docs/evaluation.md](../docs/evaluation.md).
+- Use this directory for runnable recipes, not schema documentation.
+
+Commonly pinned fields in repo configs (for transparency in experiment YAMLs):
+
+- `wandb.enabled`
+- `tokenizer.truncation`
+- pretraining: `datacollator.mask_all`, `trainer.masked_logits_only_loss`,
+  `trainer.log_train_accuracy`, `trainer.enforce_full_packed_batches`
+- GLUE: `glue.num_workers`, `glue.preprocessing_num_proc`
+
 ## Pretraining Configs
 
 - `pretrain_neobert.yaml` - baseline recipe
@@ -30,6 +46,7 @@ configs/
 ## GLUE Configs
 
 Task configs under `configs/glue/`:
+
 - `cola.yaml`, `sst2.yaml`, `mrpc.yaml`, `stsb.yaml`, `qqp.yaml`,
   `mnli.yaml`, `qnli.yaml`, `rte.yaml`, `wnli.yaml`
 
