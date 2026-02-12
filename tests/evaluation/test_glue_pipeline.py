@@ -14,9 +14,8 @@ from neobert.config import Config
 class TestGLUETaskSpecific:
     """Test GLUE task-specific functionality."""
 
-    def test_cola_specifics(self):
-        """Test CoLA task specifics (grammar acceptability)."""
-        # CoLA is a single sentence task with binary classification
+    def test_glue_classifier_forward_shapes_for_single_and_pair_inputs(self):
+        """Ensure GLUE classifier wrapper handles single and sentence-pair style inputs."""
         from neobert.model import NeoBERTConfig, NeoBERTHFForSequenceClassification
 
         config = NeoBERTConfig(
@@ -31,16 +30,14 @@ class TestGLUETaskSpecific:
 
         model = NeoBERTHFForSequenceClassification(config)
 
-        # Test single sentence input
-        input_ids = torch.randint(0, 100, (1, 10))
-        attention_mask = torch.ones(1, 10)
-
-        with torch.no_grad():
-            outputs = model(
-                input_ids=input_ids, attention_mask=attention_mask, return_dict=True
-            )
-
-        assert outputs.logits.shape == (1, 2)
+        for seq_len in (10, 15):
+            input_ids = torch.randint(0, 100, (1, seq_len))
+            attention_mask = torch.ones(1, seq_len)
+            with torch.no_grad():
+                outputs = model(
+                    input_ids=input_ids, attention_mask=attention_mask, return_dict=True
+                )
+            assert outputs.logits.shape == (1, 2)
 
     def test_from_hub_tokenizer_disables_mlm_special_token_enforcement(self):
         """Ensure hub tokenizer loading does not require MLM mask-token semantics."""
@@ -62,34 +59,6 @@ class TestGLUETaskSpecific:
 
         call_kwargs = mocked_get_tokenizer.call_args.kwargs
         assert not call_kwargs["enforce_mlm_special_tokens"]
-
-    def test_sentence_pair_tasks(self):
-        """Test sentence pair tasks (like RTE, MRPC)."""
-        # These tasks typically use [CLS] token_type_ids [SEP] setup
-        from neobert.model import NeoBERTConfig, NeoBERTHFForSequenceClassification
-
-        config = NeoBERTConfig(
-            hidden_size=32,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            vocab_size=100,
-            num_labels=2,
-            attn_backend="sdpa",
-            hidden_act="gelu",
-        )
-
-        model = NeoBERTHFForSequenceClassification(config)
-
-        # Simulate sentence pair: [CLS] sent1 [SEP] sent2 [SEP]
-        input_ids = torch.randint(0, 100, (1, 15))
-        attention_mask = torch.ones(1, 15)
-
-        # Note: NeoBERT doesn't use token_type_ids, but should still work
-        with torch.no_grad():
-            outputs = model(
-                input_ids=input_ids, attention_mask=attention_mask, return_dict=True
-            )
-        assert outputs.logits.shape == (1, 2)
 
     def test_forward_classifier_logits_passes_token_type_ids_for_hf_models(self):
         """Ensure HF path forwards token_type_ids when they are present."""
@@ -146,8 +115,8 @@ class TestGLUETaskSpecific:
 
         collator_ctor.assert_called_once_with(tokenizer, pad_to_multiple_of=16)
 
-    def test_load_glue_metric_uses_expected_mapping(self):
-        """Ensure helper maps task aliases to the intended evaluate metric."""
+    def test_load_glue_metric_mapping_and_instance_isolation(self):
+        """Ensure metric helper maps aliases and returns independent trackers."""
         from neobert.glue.train import _load_glue_metric
 
         with mock.patch("neobert.glue.train.evaluate.load") as load_fn:
@@ -157,10 +126,6 @@ class TestGLUETaskSpecific:
         with mock.patch("neobert.glue.train.evaluate.load") as load_fn:
             _load_glue_metric("snli", "glue", "exp")
         load_fn.assert_called_once_with("glue", "mnli", experiment_id="exp")
-
-    def test_load_glue_metric_returns_independent_instances(self):
-        """Ensure train/eval trackers can hold separate evaluate state."""
-        from neobert.glue.train import _load_glue_metric
 
         created = []
 
@@ -179,8 +144,8 @@ class TestGLUETaskSpecific:
         assert eval_tracker is created[1]
         assert train_tracker is not eval_tracker
 
-    def test_save_training_checkpoint_zero_limit_still_saves(self):
-        """Ensure save_total_limit=0 keeps all GLUE checkpoints while still saving."""
+    def test_save_training_checkpoint_retention_behaviors(self):
+        """Ensure GLUE checkpoint retention handles keep-all and prune modes."""
         from neobert.glue.train import save_training_checkpoint
         from neobert.checkpointing import MODEL_WEIGHTS_NAME
 
@@ -204,66 +169,35 @@ class TestGLUETaskSpecific:
                 del unwrap
                 return model.state_dict()
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cfg = Config()
-            cfg.trainer.output_dir = tmpdir
-            cfg.trainer.save_total_limit = 0
-            cfg.trainer.max_ckpt = None
+        cases = [
+            (0, {"10": True, "20": True}),
+            (1, {"10": False, "20": True}),
+        ]
+        for save_total_limit, existence in cases:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                cfg = Config()
+                cfg.trainer.output_dir = tmpdir
+                cfg.trainer.save_total_limit = save_total_limit
+                cfg.trainer.max_ckpt = None
 
-            model = torch.nn.Linear(8, 2)
-            accelerator = DummyAccelerator()
+                model = torch.nn.Linear(8, 2)
+                accelerator = DummyAccelerator()
 
-            save_training_checkpoint(cfg, model, accelerator, completed_steps=10)
-            save_training_checkpoint(cfg, model, accelerator, completed_steps=20)
+                with mock.patch("neobert.glue.train.logger.info"):
+                    save_training_checkpoint(
+                        cfg, model, accelerator, completed_steps=10
+                    )
+                    save_training_checkpoint(
+                        cfg, model, accelerator, completed_steps=20
+                    )
 
-            checkpoint_root = Path(tmpdir) / "checkpoints"
-            assert (checkpoint_root / "10").exists()
-            assert (checkpoint_root / "20").exists()
-            assert (checkpoint_root / "10" / MODEL_WEIGHTS_NAME).exists()
-            assert (checkpoint_root / "20" / MODEL_WEIGHTS_NAME).exists()
-            assert not (Path(tmpdir) / "model_checkpoints").exists()
-
-    def test_save_training_checkpoint_prunes_only_above_limit(self):
-        """Ensure retention keeps exactly N checkpoints after each save."""
-        from neobert.glue.train import save_training_checkpoint
-
-        class DummyAccelerator:
-            is_main_process = True
-
-            @staticmethod
-            def save_state(output_dir):
-                Path(output_dir).mkdir(parents=True, exist_ok=True)
-
-            @staticmethod
-            def wait_for_everyone():
-                return None
-
-            @staticmethod
-            def unwrap_model(model):
-                return model
-
-            @staticmethod
-            def get_state_dict(model, unwrap=True):
-                del unwrap
-                return model.state_dict()
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cfg = Config()
-            cfg.trainer.output_dir = tmpdir
-            cfg.trainer.save_total_limit = 1
-            cfg.trainer.max_ckpt = None
-
-            model = torch.nn.Linear(8, 2)
-            accelerator = DummyAccelerator()
-
-            with mock.patch("neobert.glue.train.logger.info"):
-                save_training_checkpoint(cfg, model, accelerator, completed_steps=10)
-                save_training_checkpoint(cfg, model, accelerator, completed_steps=20)
-
-            checkpoint_root = Path(tmpdir) / "checkpoints"
-            assert not (checkpoint_root / "10").exists()
-            assert (checkpoint_root / "20").exists()
-            assert not (Path(tmpdir) / "model_checkpoints").exists()
+                checkpoint_root = Path(tmpdir) / "checkpoints"
+                for step, should_exist in existence.items():
+                    step_dir = checkpoint_root / step
+                    assert step_dir.exists() is should_exist
+                    if should_exist:
+                        assert (step_dir / MODEL_WEIGHTS_NAME).exists()
+                assert not (Path(tmpdir) / "model_checkpoints").exists()
 
     def test_resolve_glue_training_schedule_handles_epoch_and_step_modes(self):
         """Ensure schedule helper computes steps/epochs from prepared loader length."""
@@ -289,8 +223,8 @@ class TestGLUETaskSpecific:
         assert max_steps == 11
         assert epochs == 3
 
-    def test_validate_glue_config_allows_from_hub_without_pretrained_checkpoints(self):
-        """Ensure from-hub fine-tuning bypasses local checkpoint requirements."""
+    def test_validate_glue_config_accepts_from_hub_and_zero_checkpoint(self):
+        """Ensure GLUE validation accepts from-hub and explicit checkpoint zero."""
         from neobert.validation.validators import validate_glue_config
 
         cfg = Config()
@@ -298,12 +232,7 @@ class TestGLUETaskSpecific:
         cfg.model.from_hub = True
         cfg.glue.pretrained_checkpoint_dir = None
         cfg.glue.pretrained_checkpoint = None
-
         validate_glue_config(cfg)
-
-    def test_validate_glue_config_allows_zero_checkpoint_id(self):
-        """Ensure integer checkpoint id 0 is treated as a valid explicit value."""
-        from neobert.validation.validators import validate_glue_config
 
         with tempfile.TemporaryDirectory() as checkpoint_dir:
             cfg = Config()

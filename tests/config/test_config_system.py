@@ -134,43 +134,35 @@ class TestConfigSystem(unittest.TestCase):
         finally:
             sys.argv = original_argv
 
-    def test_cli_masked_logits_only_loss_strict_bool(self):
-        """Ensure CLI parsing accepts explicit boolean tokens for loss path."""
+    def test_cli_masked_logits_only_loss_tokens(self):
+        """Ensure CLI boolean parsing for loss-path selection is strict."""
         config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"
-
-        test_args = [
-            "script.py",
-            str(config_path),
-            "--trainer.masked_logits_only_loss",
-            "off",
+        cases = [
+            ("off", False, None),
+            ("ture", None, SystemExit),
         ]
 
-        original_argv = sys.argv
-        sys.argv = test_args
-        try:
-            config = load_config_from_args()
-            self.assertFalse(config.trainer.masked_logits_only_loss)
-        finally:
-            sys.argv = original_argv
-
-    def test_cli_masked_logits_only_loss_rejects_typos(self):
-        """Ensure invalid CLI boolean tokens fail fast for loss-path selection."""
-        config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"
-
-        test_args = [
-            "script.py",
-            str(config_path),
-            "--trainer.masked_logits_only_loss",
-            "ture",
-        ]
-
-        original_argv = sys.argv
-        sys.argv = test_args
-        try:
-            with self.assertRaises(SystemExit):
-                load_config_from_args()
-        finally:
-            sys.argv = original_argv
+        for token, expected, expected_exc in cases:
+            with self.subTest(token=token):
+                test_args = [
+                    "script.py",
+                    str(config_path),
+                    "--trainer.masked_logits_only_loss",
+                    token,
+                ]
+                original_argv = sys.argv
+                sys.argv = test_args
+                try:
+                    if expected_exc is not None:
+                        with self.assertRaises(expected_exc):
+                            load_config_from_args()
+                    else:
+                        config = load_config_from_args()
+                        self.assertEqual(
+                            config.trainer.masked_logits_only_loss, expected
+                        )
+                finally:
+                    sys.argv = original_argv
 
     def test_cli_store_true_defaults_do_not_override_yaml_truthy_values(self):
         """Ensure absent store_true flags do not stomp true values from YAML."""
@@ -315,46 +307,39 @@ optimizer:
         finally:
             os.unlink(path)
 
-    def test_yaml_variables_circular_reference_raises(self):
-        """Ensure circular variable references fail fast."""
-        config_data = {
-            "variables": {
-                "a": "$variables.b",
-                "b": "$variables.c",
-                "c": "$variables.a",
+    def test_yaml_variables_circular_references_raise(self):
+        """Ensure direct and nested variable cycles fail fast."""
+        cases = [
+            {
+                "variables": {
+                    "a": "$variables.b",
+                    "b": "$variables.c",
+                    "c": "$variables.a",
+                },
+                "dataset": {"max_seq_length": "$variables.a"},
             },
-            "dataset": {"max_seq_length": "$variables.a"},
-        }
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            path = f.name
-            yaml.safe_dump(config_data, f)
-
-        try:
-            with self.assertRaises(ValueError):
-                ConfigLoader.load(path)
-        finally:
-            os.unlink(path)
-
-    def test_yaml_variables_nested_circular_reference_raises(self):
-        """Ensure nested object variable cycles are detected."""
-        config_data = {
-            "variables": {
-                "a": {"nested": "$variables.b"},
-                "b": {"nested": "$variables.a"},
+            {
+                "variables": {
+                    "a": {"nested": "$variables.b"},
+                    "b": {"nested": "$variables.a"},
+                },
+                "dataset": {"max_seq_length": "$variables.a.nested.nested"},
             },
-            "dataset": {"max_seq_length": "$variables.a.nested.nested"},
-        }
+        ]
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            path = f.name
-            yaml.safe_dump(config_data, f)
+        for config_data in cases:
+            with self.subTest(case=config_data["variables"]):
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".yaml", delete=False
+                ) as f:
+                    path = f.name
+                    yaml.safe_dump(config_data, f)
 
-        try:
-            with self.assertRaises(ValueError):
-                ConfigLoader.load(path)
-        finally:
-            os.unlink(path)
+                try:
+                    with self.assertRaises(ValueError):
+                        ConfigLoader.load(path)
+                finally:
+                    os.unlink(path)
 
     def test_yaml_unresolved_variable_tokens_warn(self):
         """Ensure unresolved inline variable tokens warn with location."""
@@ -378,34 +363,46 @@ optimizer:
         finally:
             os.unlink(path)
 
-    def test_load_dot_overrides_list_key_value_form(self):
-        """Ensure ``ConfigLoader.load`` supports key=value dot overrides."""
+    def test_load_dot_overrides_list_forms(self):
+        """Ensure ``ConfigLoader.load`` supports both dot-override token forms."""
         config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"
-        cfg = ConfigLoader.load(
-            str(config_path),
-            overrides=[
-                "trainer.max_steps=77",
-                "dataset.streaming=false",
-                "optimizer.lr=3e-4",
-            ],
-        )
-        self.assertEqual(cfg.trainer.max_steps, 77)
-        self.assertFalse(cfg.dataset.streaming)
-        self.assertEqual(cfg.optimizer.lr, 3e-4)
-
-    def test_load_dot_overrides_list_cli_style_form(self):
-        """Ensure ``ConfigLoader.load`` supports --key value override tokens."""
-        config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"
-        cfg = ConfigLoader.load(
-            str(config_path),
-            overrides=[
-                "--trainer.max_steps",
-                "42",
-                "--wandb.name=test-run",
-            ],
-        )
-        self.assertEqual(cfg.trainer.max_steps, 42)
-        self.assertEqual(cfg.wandb.name, "test-run")
+        cases = [
+            (
+                [
+                    "trainer.max_steps=77",
+                    "dataset.streaming=false",
+                    "optimizer.lr=3e-4",
+                ],
+                {
+                    "trainer.max_steps": 77,
+                    "dataset.streaming": False,
+                    "optimizer.lr": 3e-4,
+                },
+            ),
+            (
+                [
+                    "--trainer.max_steps",
+                    "42",
+                    "--wandb.name=test-run",
+                ],
+                {"trainer.max_steps": 42, "wandb.name": "test-run"},
+            ),
+        ]
+        for overrides, expected in cases:
+            with self.subTest(overrides=overrides):
+                cfg = ConfigLoader.load(str(config_path), overrides=overrides)
+                if "trainer.max_steps" in expected:
+                    self.assertEqual(
+                        cfg.trainer.max_steps, expected["trainer.max_steps"]
+                    )
+                if "dataset.streaming" in expected:
+                    self.assertEqual(
+                        cfg.dataset.streaming, expected["dataset.streaming"]
+                    )
+                if "optimizer.lr" in expected:
+                    self.assertEqual(cfg.optimizer.lr, expected["optimizer.lr"])
+                if "wandb.name" in expected:
+                    self.assertEqual(cfg.wandb.name, expected["wandb.name"])
 
     def test_load_dot_overrides_unknown_path_raises(self):
         """Ensure unknown dot-path overrides fail with clear diagnostics."""
@@ -421,16 +418,6 @@ optimizer:
                 str(config_path),
                 overrides=["dataset.streaming=truthy-but-invalid"],
             )
-
-    def test_config_validation(self):
-        """Test configuration validation."""
-        # Test invalid hidden_size (not divisible by num_attention_heads)
-        config = Config()
-        config.model.hidden_size = 65  # Not divisible by 12
-        config.model.num_attention_heads = 12
-
-        # This should be caught when creating the model, not the config
-        # The config itself should allow invalid combinations for flexibility
 
     def test_all_test_configs_load(self):
         """Test that all test configuration files load without errors."""
@@ -535,28 +522,21 @@ optimizer:
         with self.assertRaises(FileNotFoundError):
             ConfigLoader.load("nonexistent_config.yaml")
 
-    def test_glue_config_specifics(self):
-        """Test GLUE-specific configuration."""
-        config_path = self.test_config_dir / "evaluation" / "test_tiny_glue.yaml"
-        config = ConfigLoader.load(str(config_path))
+    def test_task_specific_test_configs_load_expected_task_and_dataset(self):
+        """Ensure tiny task-specific configs resolve the expected task and dataset."""
+        cases = [
+            ("evaluation/test_tiny_glue.yaml", "glue", "cola"),
+            ("contrastive/test_tiny_contrastive.yaml", "contrastive", "ALLNLI"),
+        ]
+        for rel_path, expected_task, expected_dataset in cases:
+            with self.subTest(config=rel_path):
+                config_path = self.test_config_dir / rel_path
+                config = ConfigLoader.load(str(config_path))
+                self.assertEqual(config.task, expected_task)
+                self.assertEqual(config.dataset.name, expected_dataset)
 
-        # GLUE config should be part of the main config, not separate
-        self.assertEqual(config.task, "glue")  # Should be set in YAML
-        self.assertEqual(config.dataset.name, "cola")
-
-    def test_contrastive_config_specifics(self):
-        """Test contrastive-specific configuration."""
-        config_path = (
-            self.test_config_dir / "contrastive" / "test_tiny_contrastive.yaml"
-        )
-        config = ConfigLoader.load(str(config_path))
-
-        # Contrastive config should be part of the main config
-        self.assertEqual(config.task, "contrastive")  # Should be set in YAML
-        self.assertEqual(config.dataset.name, "ALLNLI")
-
-    def test_legacy_dataset_pretraining_prob_maps_to_contrastive(self):
-        """Ensure legacy dataset.pretraining_prob maps to contrastive section."""
+    def test_legacy_contrastive_key_migrations(self):
+        """Ensure legacy contrastive fields map cleanly and reject conflicts."""
         cfg = ConfigLoader.dict_to_config(
             {
                 "task": "contrastive",
@@ -565,8 +545,6 @@ optimizer:
         )
         self.assertEqual(cfg.contrastive.pretraining_prob, 0.45)
 
-    def test_legacy_dataset_pretraining_prob_conflict_raises(self):
-        """Ensure conflicting legacy and canonical pretraining_prob values fail fast."""
         with self.assertRaises(ValueError):
             ConfigLoader.dict_to_config(
                 {
@@ -576,8 +554,6 @@ optimizer:
                 }
             )
 
-    def test_legacy_model_checkpoint_keys_map_to_contrastive(self):
-        """Ensure contrastive legacy model checkpoint keys map to contrastive section."""
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             cfg = ConfigLoader.dict_to_config(
@@ -601,8 +577,6 @@ optimizer:
             )
         )
 
-    def test_legacy_model_checkpoint_keys_conflict_for_contrastive(self):
-        """Ensure conflicting model/contrastive checkpoint keys fail fast."""
         with self.assertRaises(ValueError):
             ConfigLoader.dict_to_config(
                 {
@@ -614,95 +588,25 @@ optimizer:
                 }
             )
 
-    def test_wandb_section_does_not_auto_enable(self):
-        """Ensure wandb.enabled stays explicit even when wandb section is present."""
+    def test_wandb_defaults_and_watch_validation(self):
+        """Ensure W&B enablement and watch-mode validation semantics remain stable."""
         cfg = ConfigLoader.dict_to_config({"wandb": {"project": "unit-test-project"}})
         self.assertFalse(cfg.wandb.enabled)
 
-    def test_wandb_watch_default_is_gradients(self):
-        """Ensure wandb.watch defaults to gradients."""
         cfg = ConfigLoader.dict_to_config({})
         self.assertEqual(cfg.wandb.watch, "gradients")
 
-    def test_wandb_watch_validation_rejects_unknown_mode(self):
-        """Ensure invalid wandb.watch values fail fast."""
-        with self.assertRaises(ValueError):
-            ConfigLoader.dict_to_config({"wandb": {"watch": "mystery_mode"}})
-
-    def test_wandb_watch_validation_accepts_weights_alias(self):
-        """Ensure legacy wandb.watch=weights alias remains accepted."""
         cfg = ConfigLoader.dict_to_config({"wandb": {"watch": "weights"}})
         self.assertEqual(cfg.wandb.watch, "parameters")
 
-    def test_invalid_save_steps_fails_fast(self):
-        """Ensure save_steps=0 is rejected at config load time."""
+        with self.assertRaises(ValueError):
+            ConfigLoader.dict_to_config({"wandb": {"watch": "mystery_mode"}})
+
+    def test_save_step_and_retention_validation_matrix(self):
+        """Ensure save/eval schedule validation behaves consistently across tasks."""
         with self.assertRaises(ValueError):
             ConfigLoader.dict_to_config({"trainer": {"save_steps": 0}})
 
-    def test_glue_save_strategy_no_allows_zero_save_steps(self):
-        """Ensure save_steps=0 is accepted when GLUE save_strategy disables step saves."""
-        cfg = ConfigLoader.dict_to_config(
-            {
-                "task": "glue",
-                "trainer": {
-                    "save_strategy": "no",
-                    "save_steps": 0,
-                },
-            }
-        )
-        self.assertEqual(cfg.task, "glue")
-        self.assertEqual(cfg.trainer.save_strategy, "no")
-        self.assertEqual(cfg.trainer.save_steps, 0)
-
-    def test_glue_eval_strategy_epoch_allows_zero_eval_steps(self):
-        """Ensure eval_steps=0 is accepted for epoch-based GLUE evaluation."""
-        cfg = ConfigLoader.dict_to_config(
-            {
-                "task": "glue",
-                "trainer": {
-                    "eval_strategy": "epoch",
-                    "eval_steps": 0,
-                },
-            }
-        )
-        self.assertEqual(cfg.task, "glue")
-        self.assertEqual(cfg.trainer.eval_strategy, "epoch")
-        self.assertEqual(cfg.trainer.eval_steps, 0)
-
-    def test_pretraining_save_strategy_no_allows_zero_save_steps(self):
-        """Ensure pretraining accepts save_steps=0 when step-based saves are disabled."""
-        cfg = ConfigLoader.dict_to_config(
-            {
-                "task": "pretraining",
-                "trainer": {
-                    "save_strategy": "no",
-                    "save_steps": 0,
-                    "max_steps": 1,
-                },
-            }
-        )
-        self.assertEqual(cfg.task, "pretraining")
-        self.assertEqual(cfg.trainer.save_strategy, "no")
-        self.assertEqual(cfg.trainer.save_steps, 0)
-
-    def test_contrastive_save_strategy_no_allows_zero_save_steps(self):
-        """Ensure contrastive accepts save_steps=0 when step-based saves are disabled."""
-        cfg = ConfigLoader.dict_to_config(
-            {
-                "task": "contrastive",
-                "trainer": {
-                    "save_strategy": "no",
-                    "save_steps": 0,
-                    "max_steps": 1,
-                },
-            }
-        )
-        self.assertEqual(cfg.task, "contrastive")
-        self.assertEqual(cfg.trainer.save_strategy, "no")
-        self.assertEqual(cfg.trainer.save_steps, 0)
-
-    def test_pretraining_save_strategy_steps_requires_positive_save_steps(self):
-        """Ensure pretraining still requires positive save_steps for step-based saves."""
         with self.assertRaises(ValueError):
             ConfigLoader.dict_to_config(
                 {
@@ -714,50 +618,80 @@ optimizer:
                 }
             )
 
-    def test_save_total_limit_zero_is_allowed(self):
-        """Ensure save_total_limit=0 remains valid to disable retention."""
-        cfg = ConfigLoader.dict_to_config({"trainer": {"save_total_limit": 0}})
-        self.assertEqual(cfg.trainer.save_total_limit, 0)
-
-    def test_pretraining_seq_length_syncs_tokenizer_max_length_when_too_small(self):
-        """Ensure tokenizer.max_length is only synced up when shorter than dataset."""
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            cfg = ConfigLoader.dict_to_config(
+        valid_save_cases = [
+            (
+                "glue",
+                {
+                    "task": "glue",
+                    "trainer": {"save_strategy": "no", "save_steps": 0},
+                },
+            ),
+            (
+                "pretraining",
                 {
                     "task": "pretraining",
-                    "dataset": {"max_seq_length": 512},
-                    "tokenizer": {"max_length": 256},
-                }
-            )
-        self.assertEqual(cfg.tokenizer.max_length, 512)
-        self.assertTrue(
-            any(
-                "tokenizer.max_length is smaller than dataset.max_seq_length"
-                in str(w.message)
-                for w in caught
-            )
-        )
-
-    def test_pretraining_allows_tokenizer_max_length_above_dataset_seq_length(self):
-        """Ensure larger tokenizer.max_length is preserved for staged long-context runs."""
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            cfg = ConfigLoader.dict_to_config(
+                    "trainer": {"save_strategy": "no", "save_steps": 0, "max_steps": 1},
+                },
+            ),
+            (
+                "contrastive",
                 {
-                    "task": "pretraining",
-                    "dataset": {"max_seq_length": 256},
-                    "tokenizer": {"max_length": 4096},
-                }
-            )
-        self.assertEqual(cfg.tokenizer.max_length, 4096)
-        self.assertFalse(
-            any(
-                "tokenizer.max_length is smaller than dataset.max_seq_length"
-                in str(w.message)
-                for w in caught
-            )
+                    "task": "contrastive",
+                    "trainer": {"save_strategy": "no", "save_steps": 0, "max_steps": 1},
+                },
+            ),
+        ]
+        for task_name, config_dict in valid_save_cases:
+            with self.subTest(task=task_name):
+                cfg = ConfigLoader.dict_to_config(config_dict)
+                self.assertEqual(cfg.task, task_name)
+                self.assertEqual(cfg.trainer.save_strategy, "no")
+                self.assertEqual(cfg.trainer.save_steps, 0)
+
+        glue_epoch_cfg = ConfigLoader.dict_to_config(
+            {
+                "task": "glue",
+                "trainer": {
+                    "eval_strategy": "epoch",
+                    "eval_steps": 0,
+                },
+            }
         )
+        self.assertEqual(glue_epoch_cfg.task, "glue")
+        self.assertEqual(glue_epoch_cfg.trainer.eval_strategy, "epoch")
+        self.assertEqual(glue_epoch_cfg.trainer.eval_steps, 0)
+
+        retention_cfg = ConfigLoader.dict_to_config(
+            {"trainer": {"save_total_limit": 0}}
+        )
+        self.assertEqual(retention_cfg.trainer.save_total_limit, 0)
+
+    def test_pretraining_tokenizer_max_length_sync_behavior(self):
+        """Ensure tokenizer max-length sync warns only when tokenizer is shorter."""
+        cases = [
+            (512, 256, 512, True),
+            (256, 4096, 4096, False),
+        ]
+        for dataset_max_len, tokenizer_max_len, expected_len, expect_warning in cases:
+            with self.subTest(
+                dataset_max_len=dataset_max_len, tokenizer_max_len=tokenizer_max_len
+            ):
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    cfg = ConfigLoader.dict_to_config(
+                        {
+                            "task": "pretraining",
+                            "dataset": {"max_seq_length": dataset_max_len},
+                            "tokenizer": {"max_length": tokenizer_max_len},
+                        }
+                    )
+                self.assertEqual(cfg.tokenizer.max_length, expected_len)
+                found = any(
+                    "tokenizer.max_length is smaller than dataset.max_seq_length"
+                    in str(w.message)
+                    for w in caught
+                )
+                self.assertEqual(found, expect_warning)
 
     def test_legacy_report_to_is_ignored(self):
         """Ensure trainer.report_to is treated as deprecated/ignored."""

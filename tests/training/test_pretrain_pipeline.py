@@ -89,10 +89,10 @@ class TestPretrainPipeline:
                     trainer(config)
                 mocked_tokenizer.assert_not_called()
 
-    def test_pretraining_setup_without_execution(
+    def test_pretraining_setup_smoke_without_full_execution(
         self, tiny_pretrain_config_path: Path, temp_output_dir: str
     ):
-        """Test pretraining setup path without requiring full training success."""
+        """Exercise trainer setup path without requiring a full successful run."""
         config = ConfigLoader.load(str(tiny_pretrain_config_path))
         config.trainer.output_dir = temp_output_dir
         config.trainer.num_train_epochs = 0
@@ -109,18 +109,18 @@ class TestPretrainPipeline:
                 trainer(config)
             except Exception as exc:
                 expected_errors = [
-                    "HfApi",
-                    "Connection",
+                    "hfapi",
+                    "connection",
                     "disk",
-                    "CUDA",
+                    "cuda",
                     "404",
                     "sentencepiece",
-                    "Repository Not Found",
+                    "repository not found",
                     "input_ids",
-                    "ValueError",
+                    "valueerror",
                 ]
                 error_str = str(exc).lower()
-                if not any(err.lower() in error_str for err in expected_errors):
+                if not any(err in error_str for err in expected_errors):
                     raise
 
 
@@ -180,44 +180,48 @@ class TestPretrainComponents:
         assert "labels" in collated
         assert "attention_mask" in collated
 
-    def test_ensure_pinned_cpu_batch_repins_unpinned_tensors(self):
-        """Ensure trainer repins stitched CPU batches before async H2D transfer."""
-        batch = {
-            "input_ids": torch.randint(0, 10, (2, 4), dtype=torch.long),
-            "labels": torch.randint(0, 10, (2, 4), dtype=torch.long),
-            "meta": ["a", "b"],
-        }
-        try:
-            out = _ensure_pinned_cpu_batch(batch)
-        except RuntimeError as exc:
-            pytest.skip(f"pin_memory not supported in this environment: {exc}")
-            return
-
-        assert out["input_ids"].is_pinned()
-        assert out["labels"].is_pinned()
-        assert out["meta"] == batch["meta"]
-
-        out_again = _ensure_pinned_cpu_batch(out)
-        assert out_again is out
-
-    def test_ensure_pinned_cpu_batch_handles_nested_structures(self):
-        """Ensure nested tensor containers are repinned recursively."""
-        batch = {
-            "input_ids": torch.randint(0, 10, (2, 4), dtype=torch.long),
-            "nested": {
-                "labels": torch.randint(0, 10, (2, 4), dtype=torch.long),
-                "meta": ("a", torch.randint(0, 10, (1,), dtype=torch.long)),
+    def test_ensure_pinned_cpu_batch_repins_flat_and_nested_tensors(self):
+        """Ensure CPU repinning covers flat and nested tensor containers."""
+        cases = [
+            {
+                "batch": {
+                    "input_ids": torch.randint(0, 10, (2, 4), dtype=torch.long),
+                    "labels": torch.randint(0, 10, (2, 4), dtype=torch.long),
+                    "meta": ["a", "b"],
+                },
+                "checks": [
+                    lambda out: out["input_ids"].is_pinned(),
+                    lambda out: out["labels"].is_pinned(),
+                    lambda out: out["meta"] == ["a", "b"],
+                ],
             },
-        }
-        try:
-            out = _ensure_pinned_cpu_batch(batch)
-        except RuntimeError as exc:
-            pytest.skip(f"pin_memory not supported in this environment: {exc}")
-            return
+            {
+                "batch": {
+                    "input_ids": torch.randint(0, 10, (2, 4), dtype=torch.long),
+                    "nested": {
+                        "labels": torch.randint(0, 10, (2, 4), dtype=torch.long),
+                        "meta": ("a", torch.randint(0, 10, (1,), dtype=torch.long)),
+                    },
+                },
+                "checks": [
+                    lambda out: out["input_ids"].is_pinned(),
+                    lambda out: out["nested"]["labels"].is_pinned(),
+                    lambda out: out["nested"]["meta"][1].is_pinned(),
+                ],
+            },
+        ]
+        for case in cases:
+            try:
+                out = _ensure_pinned_cpu_batch(case["batch"])
+            except RuntimeError as exc:
+                pytest.skip(f"pin_memory not supported in this environment: {exc}")
+                return
 
-        assert out["input_ids"].is_pinned()
-        assert out["nested"]["labels"].is_pinned()
-        assert out["nested"]["meta"][1].is_pinned()
+            for check in case["checks"]:
+                assert check(out)
+
+            out_again = _ensure_pinned_cpu_batch(out)
+            assert out_again is out
 
     def test_sync_tokenizer_derived_config_pads_vocab_and_pad_id(self):
         """Ensure config is synchronized with tokenizer-derived vocab/pad fields."""
@@ -245,10 +249,10 @@ class TestPretrainComponents:
             assert latest_path.exists()
             assert latest_path.read_text(encoding="utf-8") == "12345\n"
 
-    def test_save_portable_checkpoint_weights_from_accelerator_state_dict(self):
-        """Ensure portable safetensors is emitted from accelerator state dicts."""
+    def test_save_portable_checkpoint_weights_paths(self):
+        """Ensure portable checkpoint save behavior for success/failure/rank paths."""
 
-        class _AcceleratorStub:
+        class _MainSuccessAccelerator:
             is_main_process = True
 
             @staticmethod
@@ -256,23 +260,7 @@ class TestPretrainComponents:
                 assert unwrap is True
                 return model.state_dict()
 
-        model = torch.nn.Linear(4, 3, bias=False)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            checkpoint_path = Path(tmpdir)
-            saved = _save_portable_checkpoint_weights(
-                model,
-                _AcceleratorStub(),
-                checkpoint_path,
-            )
-            assert saved
-            assert (checkpoint_path / MODEL_WEIGHTS_NAME).exists()
-            state_dict = load_model_safetensors(checkpoint_path, map_location="cpu")
-            assert "weight" in state_dict
-
-    def test_save_portable_checkpoint_weights_handles_export_failure(self):
-        """Ensure portable save failures are non-fatal and return False."""
-
-        class _AcceleratorStub:
+        class _MainFailureAccelerator:
             is_main_process = True
 
             @staticmethod
@@ -280,21 +268,7 @@ class TestPretrainComponents:
                 assert unwrap is True
                 raise ValueError("simulated failure")
 
-        model = torch.nn.Linear(4, 3, bias=False)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            checkpoint_path = Path(tmpdir)
-            saved = _save_portable_checkpoint_weights(
-                model,
-                _AcceleratorStub(),
-                checkpoint_path,
-            )
-            assert not saved
-            assert not (checkpoint_path / MODEL_WEIGHTS_NAME).exists()
-
-    def test_save_portable_checkpoint_weights_collective_call_non_main(self):
-        """Ensure non-main ranks still participate in state-dict collection."""
-
-        class _AcceleratorStub:
+        class _NonMainAccelerator:
             is_main_process = False
             get_state_dict_called = False
 
@@ -304,17 +278,29 @@ class TestPretrainComponents:
                 cls.get_state_dict_called = True
                 return model.state_dict()
 
-        model = torch.nn.Linear(4, 3, bias=False)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            checkpoint_path = Path(tmpdir)
-            saved = _save_portable_checkpoint_weights(
-                model,
-                _AcceleratorStub(),
-                checkpoint_path,
-            )
-            assert not saved
-            assert _AcceleratorStub.get_state_dict_called
-            assert not (checkpoint_path / MODEL_WEIGHTS_NAME).exists()
+        cases = [
+            (_MainSuccessAccelerator(), True, True),
+            (_MainFailureAccelerator(), False, False),
+            (_NonMainAccelerator(), False, False),
+        ]
+        for accelerator, expected_saved, expected_file in cases:
+            model = torch.nn.Linear(4, 3, bias=False)
+            with tempfile.TemporaryDirectory() as tmpdir:
+                checkpoint_path = Path(tmpdir)
+                saved = _save_portable_checkpoint_weights(
+                    model,
+                    accelerator,
+                    checkpoint_path,
+                )
+                assert saved is expected_saved
+                assert (checkpoint_path / MODEL_WEIGHTS_NAME).exists() is expected_file
+                if expected_file:
+                    state_dict = load_model_safetensors(
+                        checkpoint_path, map_location="cpu"
+                    )
+                    assert "weight" in state_dict
+
+        assert _NonMainAccelerator.get_state_dict_called
 
     def test_gather_decoder_weight_passthrough_outside_deepspeed(self):
         """Ensure decoder weight passthrough when not running DeepSpeed."""
@@ -829,98 +815,74 @@ class TestPretrainComponents:
 
         assert norm is None
 
-    def test_resolve_loader_perf_settings_cuda_defaults(self):
-        """Ensure CUDA runs get throughput-friendly loader defaults."""
-        cfg = Config()
-        cfg.dataset.num_workers = 4
-        cfg.dataset.pin_memory = False
-        cfg.dataset.persistent_workers = True
-        cfg.dataset.prefetch_factor = None
-
+    def test_resolve_loader_perf_settings_cuda_and_cpu(self):
+        """Ensure loader perf settings differ appropriately across CUDA and CPU."""
+        cuda_cfg = Config()
+        cuda_cfg.dataset.num_workers = 4
+        cuda_cfg.dataset.pin_memory = False
+        cuda_cfg.dataset.persistent_workers = True
+        cuda_cfg.dataset.prefetch_factor = None
         pin_memory, persistent_workers, prefetch_factor, notes = (
-            _resolve_loader_perf_settings(cfg, device=torch.device("cuda"))
+            _resolve_loader_perf_settings(cuda_cfg, device=torch.device("cuda"))
         )
         assert pin_memory
         assert persistent_workers
         assert prefetch_factor == 4
         assert len(notes) > 0
 
-    def test_resolve_loader_perf_settings_cpu_respects_config(self):
-        """Ensure CPU runs keep user-configured loader values."""
-        cfg = Config()
-        cfg.dataset.num_workers = 3
-        cfg.dataset.pin_memory = False
-        cfg.dataset.persistent_workers = True
-        cfg.dataset.prefetch_factor = 2
-
+        cpu_cfg = Config()
+        cpu_cfg.dataset.num_workers = 3
+        cpu_cfg.dataset.pin_memory = False
+        cpu_cfg.dataset.persistent_workers = True
+        cpu_cfg.dataset.prefetch_factor = 2
         pin_memory, persistent_workers, prefetch_factor, notes = (
-            _resolve_loader_perf_settings(cfg, device=torch.device("cpu"))
+            _resolve_loader_perf_settings(cpu_cfg, device=torch.device("cpu"))
         )
         assert not pin_memory
         assert persistent_workers
         assert prefetch_factor == 2
         assert notes == []
 
-    def test_mlm_collator_returns_packed_seqlens_metadata(self):
-        """Ensure non-packed collator can emit packed_seqlens metadata."""
+    def test_mlm_collator_packed_seqlens_behavior_by_padding_side(self):
+        """Ensure packed-seqlens metadata is emitted only for right-padded batches."""
         from neobert.collator import get_collator
 
         tokenizer = self._make_tokenizer()
-        collator = get_collator(
-            tokenizer=tokenizer, mlm_probability=0.15, return_packed_seqlens=True
-        )
-
         texts = ["hello world", "test"]
-        tokenized = tokenizer(texts, padding=True, return_tensors="pt")
-        batch = [
-            {
-                "input_ids": tokenized["input_ids"][0],
-                "attention_mask": tokenized["attention_mask"][0],
-            },
-            {
-                "input_ids": tokenized["input_ids"][1],
-                "attention_mask": tokenized["attention_mask"][1],
-            },
-        ]
+        for padding_side, expect_packed in [("right", True), ("left", False)]:
+            tokenizer.padding_side = padding_side
+            collator = get_collator(
+                tokenizer=tokenizer,
+                mlm_probability=0.15,
+                return_packed_seqlens=True,
+            )
+            tokenized = tokenizer(texts, padding=True, return_tensors="pt")
+            batch = [
+                {
+                    "input_ids": tokenized["input_ids"][0],
+                    "attention_mask": tokenized["attention_mask"][0],
+                },
+                {
+                    "input_ids": tokenized["input_ids"][1],
+                    "attention_mask": tokenized["attention_mask"][1],
+                },
+            ]
 
-        collated = collator(batch)
-        packed = collated["packed_seqlens"]
-        assert torch.is_tensor(packed)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                collated = collator(batch)
 
-        attention_mask = collated["attention_mask"]
-        keep = torch.isfinite(attention_mask) & (attention_mask == 0)
-        lengths = keep.sum(dim=1, keepdim=True).to(torch.int32)
-        assert torch.equal(packed, lengths)
-
-    def test_mlm_collator_skips_packed_seqlens_for_left_padding(self):
-        """Ensure left-padded batches do not emit packed_seqlens metadata."""
-        from neobert.collator import get_collator
-
-        tokenizer = self._make_tokenizer()
-        tokenizer.padding_side = "left"
-        collator = get_collator(
-            tokenizer=tokenizer, mlm_probability=0.15, return_packed_seqlens=True
-        )
-
-        texts = ["hello world", "test"]
-        tokenized = tokenizer(texts, padding=True, return_tensors="pt")
-        batch = [
-            {
-                "input_ids": tokenized["input_ids"][0],
-                "attention_mask": tokenized["attention_mask"][0],
-            },
-            {
-                "input_ids": tokenized["input_ids"][1],
-                "attention_mask": tokenized["attention_mask"][1],
-            },
-        ]
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            collated = collator(batch)
-        assert any("Skipping packed_seqlens" in str(w.message) for w in caught)
-        assert "attention_mask" in collated
-        assert "packed_seqlens" not in collated
+            assert "attention_mask" in collated
+            if expect_packed:
+                packed = collated["packed_seqlens"]
+                assert torch.is_tensor(packed)
+                attention_mask = collated["attention_mask"]
+                keep = torch.isfinite(attention_mask) & (attention_mask == 0)
+                lengths = keep.sum(dim=1, keepdim=True).to(torch.int32)
+                assert torch.equal(packed, lengths)
+            else:
+                assert "packed_seqlens" not in collated
+                assert any("Skipping packed_seqlens" in str(w.message) for w in caught)
 
     def test_resolve_tokenize_num_proc_falls_back_to_cpu_count(self):
         """Ensure tokenization num_proc falls back when affinity is unavailable."""
@@ -956,28 +918,26 @@ class TestPretrainComponents:
         with pytest.raises(ValueError):
             _resolve_eval_samples("not_an_int")
 
-    def test_resolve_streaming_eval_budget_with_explicit_max_batches(self):
-        """Ensure explicit trainer.eval_max_batches is respected."""
-        resolved, source = _resolve_streaming_eval_budget(
-            eval_max_batches=320,
-            eval_samples=None,
-            per_device_eval_batch_size=32,
-        )
-        assert resolved == 320
-        assert source == "trainer.eval_max_batches"
+    def test_resolve_streaming_eval_budget_matrix(self):
+        """Ensure streaming eval budget selection handles valid and invalid inputs."""
+        valid_cases = [
+            (
+                {"eval_max_batches": 320, "eval_samples": None, "batch_size": 32},
+                (320, "trainer.eval_max_batches"),
+            ),
+            (
+                {"eval_max_batches": None, "eval_samples": 1000, "batch_size": 64},
+                (16, "dataset.eval_samples"),
+            ),
+        ]
+        for case, expected in valid_cases:
+            resolved, source = _resolve_streaming_eval_budget(
+                eval_max_batches=case["eval_max_batches"],
+                eval_samples=case["eval_samples"],
+                per_device_eval_batch_size=case["batch_size"],
+            )
+            assert (resolved, source) == expected
 
-    def test_resolve_streaming_eval_budget_derived_from_eval_samples(self):
-        """Ensure dataset.eval_samples derives eval batch budget when needed."""
-        resolved, source = _resolve_streaming_eval_budget(
-            eval_max_batches=None,
-            eval_samples=1000,
-            per_device_eval_batch_size=64,
-        )
-        assert resolved == 16
-        assert source == "dataset.eval_samples"
-
-    def test_resolve_streaming_eval_budget_requires_explicit_budget(self):
-        """Ensure streaming eval fails fast without explicit budget settings."""
         with pytest.raises(ValueError):
             _resolve_streaming_eval_budget(
                 eval_max_batches=None,
@@ -1006,23 +966,18 @@ class TestPretrainComponents:
 
         assert inferred == "validation"
 
-    def test_split_train_dataset_for_eval_samples_non_streaming(self):
-        """Ensure eval samples are carved out from non-streaming train dataset."""
+    def test_split_train_dataset_for_eval_samples_streaming_and_non_streaming(self):
+        """Ensure eval split helper behaves correctly for streaming and materialized data."""
         train_dataset = Dataset.from_dict({"text": ["a", "b", "c", "d", "e"]})
-
         remaining_train, eval_dataset = _split_train_dataset_for_eval_samples(
             train_dataset,
             eval_samples=2,
             is_streaming=False,
         )
-
         assert len(eval_dataset) == 2
         assert len(remaining_train) == 3
         assert eval_dataset["text"] == ["a", "b"]
         assert remaining_train["text"] == ["c", "d", "e"]
-
-    def test_split_train_dataset_for_eval_samples_streaming(self):
-        """Ensure streaming split helper uses take/skip without materialization."""
 
         class _StreamingStub:
             def __init__(self) -> None:
@@ -1036,14 +991,13 @@ class TestPretrainComponents:
                 self.calls.append(("skip", n))
                 return ("train", n)
 
-        train_dataset = _StreamingStub()
+        stream_dataset = _StreamingStub()
         remaining_train, eval_dataset = _split_train_dataset_for_eval_samples(
-            train_dataset, eval_samples=321, is_streaming=True
+            stream_dataset, eval_samples=321, is_streaming=True
         )
-
         assert eval_dataset == ("eval", 321)
         assert remaining_train == ("train", 321)
-        assert train_dataset.calls == [("take", 321), ("skip", 321)]
+        assert stream_dataset.calls == [("take", 321), ("skip", 321)]
 
     def test_select_train_split_from_datasetdict(self):
         """Ensure DatasetDict splits resolve to a Dataset."""
@@ -1057,20 +1011,17 @@ class TestPretrainComponents:
         assert isinstance(resolved, Dataset)
 
     def test_masked_correct_count(self):
-        """Test masked accuracy counting ignores -100 labels."""
+        """Test masked accuracy count with mixed and all-ignored labels."""
         from neobert.pretraining.trainer import _count_masked_correct
 
         logits = torch.tensor([[[0.1, 0.2, 0.7], [0.9, 0.1, 0.0]]])
-        labels = torch.tensor([[2, -100]])
-        assert _count_masked_correct(logits, labels).item() == 1
-
-    def test_masked_correct_count_all_ignored(self):
-        """Test masked accuracy count returns zero when all labels are ignored."""
-        from neobert.pretraining.trainer import _count_masked_correct
-
-        logits = torch.tensor([[[0.1, 0.2, 0.7], [0.9, 0.1, 0.0]]])
-        labels = torch.full((1, 2), -100, dtype=torch.long)
-        assert _count_masked_correct(logits, labels).item() == 0
+        assert _count_masked_correct(logits, torch.tensor([[2, -100]])).item() == 1
+        assert (
+            _count_masked_correct(
+                logits, torch.full((1, 2), -100, dtype=torch.long)
+            ).item()
+            == 0
+        )
 
     def test_set_default_worker_env_respects_user_overrides(self):
         """Ensure worker env defaults only apply when vars are unset."""
