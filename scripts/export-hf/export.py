@@ -509,6 +509,11 @@ def copy_hf_modeling_files(target_dir: Path) -> None:
         shutil.copy(src_file, target_dir / filename)
         print(f"  Copied {filename} -> {filename}")
 
+    legacy_model_path = target_dir / "model.py"
+    if legacy_model_path.exists():
+        legacy_model_path.unlink()
+        print("  Removed legacy model.py")
+
     model_path = target_dir / "modeling_neobert.py"
     if model_path.exists():
         _rewrite_export_model_imports(model_path)

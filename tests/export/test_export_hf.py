@@ -97,6 +97,20 @@ class TestExportHF(unittest.TestCase):
             )
             self.assertNotIn("from ..modeling_utils import", model_text)
 
+    def test_copy_hf_modeling_files_removes_legacy_model_py(self):
+        """Ensure copy step removes stale legacy model.py artifacts."""
+        export = self.export
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target_dir = Path(tmpdir)
+            legacy_path = target_dir / "model.py"
+            legacy_path.write_text("# stale legacy file\n")
+            self.assertTrue(legacy_path.exists())
+
+            export.copy_hf_modeling_files(target_dir)
+
+            self.assertFalse(legacy_path.exists())
+            self.assertTrue((target_dir / "modeling_neobert.py").exists())
+
     def test_create_hf_config_auto_map_uses_modeling_neobert_module(self):
         """Ensure exported auto_map points at modeling_neobert.py symbols."""
         export = self.export
