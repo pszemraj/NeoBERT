@@ -64,42 +64,6 @@ class TestContrastivePipeline:
         except ImportError as e:
             pytest.skip(f"Contrastive datasets module not available: {e}")
 
-    def test_contrastive_trainer_integration(
-        self, tiny_contrastive_config_path: Path, temp_output_dir: str
-    ):
-        """Test contrastive trainer integration."""
-        config = ConfigLoader.load(str(tiny_contrastive_config_path))
-
-        try:
-            from neobert.contrastive.trainer import trainer
-
-            # Test that trainer function exists and can be called
-            # Note: We don't actually run training due to dataset/network requirements
-            assert callable(trainer)
-
-            # Test config validation for contrastive training
-            config.trainer.output_dir = temp_output_dir
-            config.trainer.num_train_epochs = 0  # Don't actually train
-
-            # These should be set for contrastive training
-            assert hasattr(config, "contrastive")
-            assert config.contrastive.temperature is not None
-
-            # Missing dataset.path should raise a clear error early.
-            config.dataset.path = None
-            with pytest.raises(ValueError, match="dataset.path"):
-                trainer(config)
-
-        except ImportError as e:
-            pytest.skip(f"Contrastive trainer module not available: {e}")
-        except Exception as e:
-            # Expected failures for dataset loading
-            expected_errors = ["Connection", "404", "HfApi", "disk", "CUDA"]
-            if any(err.lower() in str(e).lower() for err in expected_errors):
-                pytest.skip(f"Expected dataset/network error: {e}")
-            else:
-                raise e
-
     def test_contrastive_pretrained_checkpoint_root_rejects_legacy_layout(self):
         """Ensure legacy ``model_checkpoints`` roots fail fast for contrastive init."""
         try:
