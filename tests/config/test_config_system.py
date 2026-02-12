@@ -485,19 +485,22 @@ optimizer:
         with self.assertRaises(FileNotFoundError):
             ConfigLoader.load("nonexistent_config.yaml")
 
-        config_data = {
-            "model": {"hidden_size": 32, "unknown_key": 123},
-            "trainer": {"output_dir": "./tmp"},
-        }
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            path = f.name
-            yaml.safe_dump(config_data, f)
+        with tempfile.TemporaryDirectory() as tmp_output_dir:
+            config_data = {
+                "model": {"hidden_size": 32, "unknown_key": 123},
+                "trainer": {"output_dir": tmp_output_dir},
+            }
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".yaml", delete=False
+            ) as f:
+                path = f.name
+                yaml.safe_dump(config_data, f)
 
-        try:
-            with self.assertRaises(ValueError):
-                ConfigLoader.load(path)
-        finally:
-            os.unlink(path)
+            try:
+                with self.assertRaises(ValueError):
+                    ConfigLoader.load(path)
+            finally:
+                os.unlink(path)
 
     def test_legacy_contrastive_key_migrations(self):
         """Ensure legacy contrastive fields map cleanly and reject conflicts."""
@@ -518,39 +521,47 @@ optimizer:
                 }
             )
 
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            cfg = ConfigLoader.dict_to_config(
-                {
-                    "task": "contrastive",
-                    "model": {
-                        "pretrained_checkpoint_dir": "/tmp/pre_ckpts",
-                        "pretrained_checkpoint": "1234",
-                        "allow_random_weights": True,
-                    },
-                }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pre_ckpt_dir = str(Path(tmpdir) / "pre_ckpts")
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                cfg = ConfigLoader.dict_to_config(
+                    {
+                        "task": "contrastive",
+                        "model": {
+                            "pretrained_checkpoint_dir": pre_ckpt_dir,
+                            "pretrained_checkpoint": "1234",
+                            "allow_random_weights": True,
+                        },
+                    }
+                )
+            self.assertEqual(cfg.contrastive.pretrained_checkpoint_dir, pre_ckpt_dir)
+            self.assertEqual(cfg.contrastive.pretrained_checkpoint, "1234")
+            self.assertTrue(cfg.contrastive.allow_random_weights)
+            self.assertTrue(
+                any(
+                    "model.pretrained_checkpoint_dir" in str(w.message)
+                    and "contrastive.pretrained_checkpoint_dir" in str(w.message)
+                    for w in caught
+                )
             )
-        self.assertEqual(cfg.contrastive.pretrained_checkpoint_dir, "/tmp/pre_ckpts")
-        self.assertEqual(cfg.contrastive.pretrained_checkpoint, "1234")
-        self.assertTrue(cfg.contrastive.allow_random_weights)
-        self.assertTrue(
-            any(
-                "model.pretrained_checkpoint_dir" in str(w.message)
-                and "contrastive.pretrained_checkpoint_dir" in str(w.message)
-                for w in caught
-            )
-        )
 
-        with self.assertRaises(ValueError):
-            ConfigLoader.dict_to_config(
-                {
-                    "task": "contrastive",
-                    "model": {"pretrained_checkpoint_dir": "/tmp/model_ckpts"},
-                    "contrastive": {
-                        "pretrained_checkpoint_dir": "/tmp/contrastive_ckpts"
-                    },
-                }
-            )
+            with self.assertRaises(ValueError):
+                ConfigLoader.dict_to_config(
+                    {
+                        "task": "contrastive",
+                        "model": {
+                            "pretrained_checkpoint_dir": str(
+                                Path(tmpdir) / "model_ckpts"
+                            )
+                        },
+                        "contrastive": {
+                            "pretrained_checkpoint_dir": str(
+                                Path(tmpdir) / "contrastive_ckpts"
+                            )
+                        },
+                    }
+                )
 
     def test_wandb_defaults_and_watch_validation(self):
         """Ensure W&B enablement and watch-mode validation semantics remain stable."""
