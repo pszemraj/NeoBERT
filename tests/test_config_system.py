@@ -31,7 +31,7 @@ class TestConfigSystem(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        self.test_config_dir = Path(__file__).parent.parent / "configs"
+        self.test_config_dir = Path(__file__).parent / "configs"
 
     def test_default_config_creation(self):
         """Test creating default config objects."""

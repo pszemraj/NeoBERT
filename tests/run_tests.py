@@ -6,18 +6,32 @@ import sys
 import unittest
 from pathlib import Path
 
+LEGACY_TEST_TARGETS = {
+    "config": "test_config_system.py",
+    "model": "test_model_forward.py",
+    "integration": "test_task_smoke.py",
+    "tokenizer": "test_tokenize_streaming.py",
+    "collator": "test_collator_packing.py",
+}
+
+
+def _resolve_test_target(test_dir: str | None, test_root: Path) -> Path:
+    """Resolve user-provided test target, including legacy aliases."""
+    if test_dir is None:
+        return test_root
+
+    candidate = LEGACY_TEST_TARGETS.get(test_dir, test_dir)
+    return test_root / candidate
+
 
 def _run_unittest_discovery(test_dir: str | None, pattern: str, verbosity: int) -> bool:
     """Run unittest discovery for legacy tests."""
     test_root = Path(__file__).parent
 
-    if test_dir:
-        test_path = test_root / test_dir
-        if not test_path.exists():
-            print(f"Test directory not found: {test_path}")
-            return False
-    else:
-        test_path = test_root
+    test_path = _resolve_test_target(test_dir, test_root)
+    if not test_path.exists():
+        print(f"Test target not found: {test_path}")
+        return False
 
     loader = unittest.TestLoader()
     suite = loader.discover(str(test_path), pattern=pattern)
@@ -38,9 +52,10 @@ def _pytest_args(
     elif verbose:
         args.append("-vv")
 
-    root = Path(__file__).parent
-    if test_dir:
-        root = root / test_dir
+    root = _resolve_test_target(test_dir, Path(__file__).parent)
+    if not root.exists():
+        print(f"Test target not found: {root}")
+        return args, False
 
     if pattern != "test_*.py":
         matched = sorted(root.rglob(pattern))
@@ -48,7 +63,7 @@ def _pytest_args(
             print(f"No tests matched pattern: {pattern}")
             return args, False
         args.extend(str(path) for path in matched)
-    elif test_dir:
+    elif test_dir is not None:
         args.append(str(root))
 
     return args, True
@@ -85,8 +100,11 @@ def main():
     parser = argparse.ArgumentParser(description="Run NeoBERT tests")
     parser.add_argument(
         "--test-dir",
-        choices=["config", "model", "training", "evaluation", "integration"],
-        help="Run tests from specific directory",
+        help=(
+            "Run tests from a specific tests/ subpath (directory or file). "
+            "Legacy aliases remain supported: config, model, integration, "
+            "tokenizer, collator."
+        ),
     )
     parser.add_argument(
         "--pattern", default="test_*.py", help="Test file pattern (default: test_*.py)"
@@ -112,7 +130,7 @@ def main():
     print("=" * 60)
 
     if args.test_dir:
-        print(f"Running tests from: {args.test_dir}/")
+        print(f"Running tests from: {args.test_dir}")
     else:
         print("Running all tests")
 

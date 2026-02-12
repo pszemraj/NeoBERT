@@ -16,6 +16,9 @@ conda run --name neobert python tests/run_tests.py
 
 ## Suite Layout
 
+- Core regression files live directly under `tests/` (flat layout).
+- Multi-file domains stay grouped under:
+  `tests/training/`, `tests/evaluation/`, and `tests/kernels/`.
 - `tests/configs/` - tiny smoke-test configs used by tests.
 - `tests/manual/` - opt-in manual validation/benchmark scripts, excluded from
   default discovery.

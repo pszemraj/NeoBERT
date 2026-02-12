@@ -122,5 +122,5 @@ python scripts/export-hf/validate.py /path/to/exported/model
 python scripts/pretraining/pretrain.py tests/configs/pretraining/test_tiny_pretrain.yaml
 
 # Focused tests for packed attention path
-pytest tests/kernels/test_attention.py tests/model/test_model_forward.py -q
+pytest tests/kernels/test_attention.py tests/test_model_forward.py -q
 ```

@@ -24,10 +24,10 @@ conda run --name neobert python tests/run_tests.py
 conda run --name neobert pytest tests/kernels/test_attention.py -q
 
 # One directory
-conda run --name neobert pytest tests/model -q
+conda run --name neobert pytest tests/training -q
 
 # Verbose investigation
-conda run --name neobert pytest tests/model/test_model_forward.py -vv --showlocals
+conda run --name neobert pytest tests/test_model_forward.py -vv --showlocals
 ```
 
 ### Helper flags
