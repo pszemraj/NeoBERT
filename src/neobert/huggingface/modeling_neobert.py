@@ -569,9 +569,12 @@ class NeoBERT(NeoBERTPreTrainedModel):
         if attention_mask.dtype is torch.bool:
             # HF convention for bool masks: True=keep, False=mask.
             return attention_mask
-        # Float/int: HF uses 1=keep, 0=mask; additive uses 0=keep, -inf=mask.
-        if attention_mask.is_floating_point() and attention_mask.min() < 0:
-            return attention_mask >= 0
+        # Float masks are ambiguous between binary (1/0) and additive (0/-inf).
+        # Treat all-nonpositive float masks (including all-zero) as additive so
+        # 0/-inf callers on unpadded inputs keep all keys.
+        if attention_mask.is_floating_point():
+            if attention_mask.min() < 0 or attention_mask.max() <= 0:
+                return attention_mask >= 0
         return attention_mask != 0
 
     def forward(

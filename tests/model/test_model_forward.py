@@ -465,6 +465,41 @@ class TestModelForward(unittest.TestCase):
             )
         )
 
+    def test_hf_zero_only_additive_mask_treated_as_keep_all(self):
+        """Ensure all-zero additive masks are treated as keep-all."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=16,
+            flash_attention=False,
+        )
+        model = NeoBERT(config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
+        zero_additive_mask = torch.zeros_like(input_ids, dtype=torch.float32)
+
+        with torch.no_grad():
+            outputs_none = model(input_ids=input_ids, attention_mask=None)
+            outputs_zero = model(
+                input_ids=input_ids,
+                attention_mask=zero_additive_mask,
+            )
+
+        self.assertTrue(
+            torch.allclose(
+                outputs_none.last_hidden_state,
+                outputs_zero.last_hidden_state,
+                atol=1e-6,
+                rtol=1e-5,
+            )
+        )
+
     def test_hf_sdpa_bool_mask_without_padding(self):
         """Ensure HF-style bool masks work when there is no padding."""
         from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
