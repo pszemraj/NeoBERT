@@ -504,22 +504,33 @@ optimizer:
 
     def test_legacy_contrastive_key_migrations(self):
         """Ensure legacy contrastive fields map cleanly and reject conflicts."""
-        cfg = ConfigLoader.dict_to_config(
-            {
-                "task": "contrastive",
-                "dataset": {"pretraining_prob": 0.45},
-            }
-        )
-        self.assertEqual(cfg.contrastive.pretraining_prob, 0.45)
-
-        with self.assertRaises(ValueError):
-            ConfigLoader.dict_to_config(
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cfg = ConfigLoader.dict_to_config(
                 {
                     "task": "contrastive",
-                    "dataset": {"pretraining_prob": 0.4},
-                    "contrastive": {"pretraining_prob": 0.6},
+                    "dataset": {"pretraining_prob": 0.45},
                 }
             )
+        self.assertEqual(cfg.contrastive.pretraining_prob, 0.45)
+        self.assertTrue(
+            any(
+                "dataset.pretraining_prob" in str(w.message)
+                and "contrastive.pretraining_prob" in str(w.message)
+                for w in caught
+            )
+        )
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with self.assertRaises(ValueError):
+                ConfigLoader.dict_to_config(
+                    {
+                        "task": "contrastive",
+                        "dataset": {"pretraining_prob": 0.4},
+                        "contrastive": {"pretraining_prob": 0.6},
+                    }
+                )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             pre_ckpt_dir = str(Path(tmpdir) / "pre_ckpts")
@@ -598,6 +609,7 @@ optimizer:
                 "glue",
                 {
                     "task": "glue",
+                    "tokenizer": {"max_length": 128},
                     "trainer": {"save_strategy": "no", "save_steps": 0},
                 },
             ),
@@ -626,6 +638,7 @@ optimizer:
         glue_epoch_cfg = ConfigLoader.dict_to_config(
             {
                 "task": "glue",
+                "tokenizer": {"max_length": 128},
                 "trainer": {
                     "eval_strategy": "epoch",
                     "eval_steps": 0,
@@ -697,7 +710,11 @@ optimizer:
             )
         with self.assertRaises(ValueError):
             ConfigLoader.dict_to_config(
-                {"task": "glue", "glue": {"preprocessing_num_proc": -1}}
+                {
+                    "task": "glue",
+                    "tokenizer": {"max_length": 128},
+                    "glue": {"preprocessing_num_proc": -1},
+                }
             )
 
     def test_legacy_trainer_aliases_map_to_canonical_fields(self):
