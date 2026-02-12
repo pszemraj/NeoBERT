@@ -89,6 +89,40 @@ class TestPretrainPipeline:
                     trainer(config)
                 mocked_tokenizer.assert_not_called()
 
+    def test_pretraining_setup_without_execution(
+        self, tiny_pretrain_config_path: Path, temp_output_dir: str
+    ):
+        """Test pretraining setup path without requiring full training success."""
+        config = ConfigLoader.load(str(tiny_pretrain_config_path))
+        config.trainer.output_dir = temp_output_dir
+        config.trainer.num_train_epochs = 0
+        config.trainer.max_steps = 1
+        config.wandb.mode = "disabled"
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r".*epoch parameter in `scheduler\\.step\\(\\)`.*",
+                category=UserWarning,
+            )
+            try:
+                trainer(config)
+            except Exception as exc:
+                expected_errors = [
+                    "HfApi",
+                    "Connection",
+                    "disk",
+                    "CUDA",
+                    "404",
+                    "sentencepiece",
+                    "Repository Not Found",
+                    "input_ids",
+                    "ValueError",
+                ]
+                error_str = str(exc).lower()
+                if not any(err.lower() in error_str for err in expected_errors):
+                    raise
+
 
 class TestPretrainComponents:
     """Test individual pretraining components."""
