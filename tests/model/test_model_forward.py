@@ -79,8 +79,8 @@ class TestModelForward(unittest.TestCase):
         self.assertFalse(torch.isnan(outputs).any())
         self.assertFalse(torch.isinf(outputs).any())
 
-    def test_config_canonicalizes_attn_backend_alias(self):
-        """Ensure attention backend aliases are canonicalized."""
+    def test_config_backend_validation_and_defaults(self):
+        """Ensure backend aliases, defaults, and invalid values are validated."""
         config = NeoBERTConfig(
             hidden_size=32,
             num_hidden_layers=1,
@@ -92,9 +92,8 @@ class TestModelForward(unittest.TestCase):
             hidden_act="gelu",
         )
         self.assertEqual(config.attn_backend, "flash_attn_varlen")
+        self.assertEqual(NeoBERTConfig().vocab_size, 30522)
 
-    def test_config_rejects_invalid_backends(self):
-        """Ensure invalid backend values fail fast for attention and kernel backends."""
         with self.assertRaisesRegex(ValueError, "Unknown attn_backend"):
             NeoBERTConfig(attn_backend="bad_backend")
         with self.assertRaisesRegex(ValueError, "Unknown kernel_backend"):
@@ -313,34 +312,22 @@ class TestModelForward(unittest.TestCase):
         )
         self.assertIsNone(model.decoder.bias)
 
-    def test_neobert_sequence_classification(self):
-        """Test NeoBERT for sequence classification."""
-        num_labels = 3
-        model = NeoBERTForSequenceClassification(
-            self.tiny_config, num_labels=num_labels
-        )
-        model.eval()
-
-        with torch.no_grad():
-            outputs = model(self.input_ids, self.pad_mask)
-
-        self.assertIn("hidden_representation", outputs)
-        self.assertIn("logits", outputs)
-
-        # Classification logits should be [batch_size, num_labels]
-        expected_logits_shape = (self.batch_size, num_labels)
-        self.assertEqual(outputs["logits"].shape, expected_logits_shape)
-
-    def test_sequence_classification_accepts_additive_mask(self):
-        """Ensure additive attention masks are preserved for classification."""
+    def test_sequence_classification_wrappers_and_masks(self):
+        """Ensure train/HF wrappers produce logits and preserve additive masks."""
         import types
 
-        num_labels = 2
-        model = NeoBERTForSequenceClassification(
-            self.tiny_config, num_labels=num_labels
-        )
+        model = NeoBERTForSequenceClassification(self.tiny_config, num_labels=3)
         model.eval()
+        with torch.no_grad():
+            outputs = model(self.input_ids, self.pad_mask)
+        self.assertIn("hidden_representation", outputs)
+        self.assertIn("logits", outputs)
+        self.assertEqual(outputs["logits"].shape, (self.batch_size, 3))
 
+        additive_model = NeoBERTForSequenceClassification(
+            self.tiny_config, num_labels=2
+        )
+        additive_model.eval()
         attention_mask = torch.tensor(
             [
                 [1, 1, 1, 0, 0, 1, 1, 1, 1, 1],
@@ -349,7 +336,6 @@ class TestModelForward(unittest.TestCase):
             dtype=torch.long,
         )
         additive_mask = torch.where(attention_mask == 1, float(0.0), float("-inf"))
-
         captured = {}
 
         def _fake_forward(self, src, pad_mask=None, packed_seqlens=None):
@@ -359,46 +345,39 @@ class TestModelForward(unittest.TestCase):
                 device=src.device,
             )
 
-        model.model.forward = types.MethodType(_fake_forward, model.model)
-
+        additive_model.model.forward = types.MethodType(
+            _fake_forward, additive_model.model
+        )
         with torch.no_grad():
-            outputs = model(self.input_ids, additive_mask)
-
-        self.assertIn("logits", outputs)
+            masked_outputs = additive_model(self.input_ids, additive_mask)
+        self.assertIn("logits", masked_outputs)
         self.assertTrue(torch.equal(captured["mask"], additive_mask.to(torch.float32)))
 
-    def test_neobert_hf_sequence_classification(self):
-        """Test HuggingFace-compatible sequence classification."""
-        hf_config = NeoBERTConfig(
-            hidden_size=64,
-            num_hidden_layers=2,
-            num_attention_heads=2,
-            intermediate_size=128,
-            dropout=0.1,
-            vocab_size=1000,
-            max_length=128,
-            attn_backend="sdpa",
-            ngpt=False,
-            num_labels=2,
-            hidden_act="gelu",
+        hf_model = NeoBERTHFForSequenceClassification(
+            NeoBERTConfig(
+                hidden_size=64,
+                num_hidden_layers=2,
+                num_attention_heads=2,
+                intermediate_size=128,
+                dropout=0.1,
+                vocab_size=1000,
+                max_length=128,
+                attn_backend="sdpa",
+                ngpt=False,
+                num_labels=2,
+                hidden_act="gelu",
+            )
         )
-
-        model = NeoBERTHFForSequenceClassification(hf_config)
-        model.eval()
-
+        hf_model.eval()
         with torch.no_grad():
-            outputs = model(
+            hf_outputs = hf_model(
                 input_ids=self.input_ids,
                 attention_mask=self.attention_mask,
                 return_dict=True,
             )
-
-        # Should return SequenceClassifierOutput
-        self.assertTrue(hasattr(outputs, "logits"))
-        self.assertTrue(hasattr(outputs, "hidden_states"))
-
-        expected_logits_shape = (self.batch_size, 2)  # num_labels=2
-        self.assertEqual(outputs.logits.shape, expected_logits_shape)
+        self.assertTrue(hasattr(hf_outputs, "logits"))
+        self.assertTrue(hasattr(hf_outputs, "hidden_states"))
+        self.assertEqual(hf_outputs.logits.shape, (self.batch_size, 2))
 
     def test_hf_attention_mask_semantics_and_mode_equivalence(self):
         """Ensure HF mask normalization and SDPA/eager paths stay equivalent."""
@@ -663,11 +642,13 @@ class TestModelForward(unittest.TestCase):
         self.assertEqual(len(captured_queries), 2)
         self.assertFalse(torch.allclose(captured_queries[0], captured_queries[1]))
 
-    def test_hf_sequence_classification_respects_return_dict_default(self):
-        """Ensure return_dict=None follows config.use_return_dict in HF classifier."""
+    def test_hf_return_dict_contracts(self):
+        """Ensure HF base/classifier/lm-head return_dict contracts stay stable."""
         from neobert.huggingface.modeling_neobert import (
+            NeoBERT,
             NeoBERTConfig,
             NeoBERTForSequenceClassification,
+            NeoBERTLMHead,
         )
 
         config = NeoBERTConfig(
@@ -681,90 +662,65 @@ class TestModelForward(unittest.TestCase):
             num_labels=2,
         )
         self.assertTrue(config.use_return_dict)
-
-        model = NeoBERTForSequenceClassification(config)
-        model.eval()
         input_ids = torch.tensor([[1, 2, 3, 4]])
         attention_mask = torch.ones_like(input_ids)
 
+        classifier = NeoBERTForSequenceClassification(config)
+        classifier.eval()
         with torch.no_grad():
-            outputs_default = model(input_ids=input_ids, attention_mask=attention_mask)
-            outputs_tuple = model(
+            outputs_default = classifier(
+                input_ids=input_ids, attention_mask=attention_mask
+            )
+            outputs_tuple = classifier(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 return_dict=False,
             )
-
         self.assertFalse(isinstance(outputs_default, tuple))
         self.assertTrue(hasattr(outputs_default, "logits"))
         self.assertIsInstance(outputs_tuple, tuple)
 
-    def test_hf_base_model_respects_return_dict_flag(self):
-        """Ensure NeoBERT forward supports return_dict=False tuple outputs."""
-        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
-
-        config = NeoBERTConfig(
-            hidden_size=32,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            intermediate_size=64,
-            vocab_size=100,
-            max_length=16,
-            flash_attention=False,
-        )
-        model = NeoBERT(config)
-        model.eval()
-
-        input_ids = torch.tensor([[1, 2, 3, 4]])
-        attention_mask = torch.ones_like(input_ids)
-
+        base_model = NeoBERT(config)
+        base_model.eval()
         with torch.no_grad():
-            outputs = model(
+            base_outputs = base_model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 output_hidden_states=True,
                 output_attentions=True,
                 return_dict=False,
             )
+        self.assertIsInstance(base_outputs, tuple)
+        self.assertEqual(len(base_outputs), 3)
+        self.assertEqual(base_outputs[0].shape, (1, 4, 32))
+        self.assertIsInstance(base_outputs[1], tuple)
+        self.assertIsInstance(base_outputs[2], tuple)
 
-        self.assertIsInstance(outputs, tuple)
-        self.assertEqual(len(outputs), 3)
-        self.assertEqual(outputs[0].shape, (1, 4, 32))
-        self.assertIsInstance(outputs[1], tuple)
-        self.assertIsInstance(outputs[2], tuple)
-
-    def test_hf_lm_head_respects_return_dict_and_labels(self):
-        """Ensure MLM head supports loss labels and tuple outputs."""
-        from neobert.huggingface.modeling_neobert import NeoBERTConfig, NeoBERTLMHead
-
-        config = NeoBERTConfig(
-            hidden_size=32,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            intermediate_size=64,
-            vocab_size=50,
-            max_length=16,
-            flash_attention=False,
+        lm_head = NeoBERTLMHead(
+            NeoBERTConfig(
+                hidden_size=32,
+                num_hidden_layers=1,
+                num_attention_heads=2,
+                intermediate_size=64,
+                vocab_size=50,
+                max_length=16,
+                flash_attention=False,
+            )
         )
-        model = NeoBERTLMHead(config)
-        model.eval()
-
-        input_ids = torch.tensor([[1, 2, 3, 4]])
+        lm_head.eval()
         labels = torch.tensor([[1, 2, -100, 4]])
-
         with torch.no_grad():
-            outputs = model(input_ids=input_ids, labels=labels, return_dict=True)
-            outputs_tuple = model(
+            lm_outputs = lm_head(input_ids=input_ids, labels=labels, return_dict=True)
+            lm_outputs_tuple = lm_head(
                 input_ids=input_ids,
                 labels=labels,
                 output_hidden_states=True,
                 return_dict=False,
             )
-
-        self.assertIsNotNone(outputs.loss)
-        self.assertEqual(outputs.logits.shape, (1, 4, 50))
-        self.assertIsInstance(outputs_tuple, tuple)
-        self.assertEqual(len(outputs_tuple), 3)  # loss, logits, hidden_states
+        self.assertIsNotNone(lm_outputs.loss)
+        self.assertEqual(lm_outputs.logits.shape, (1, 4, 50))
+        self.assertIsInstance(lm_outputs_tuple, tuple)
+        self.assertEqual(len(lm_outputs_tuple), 3)
 
     def test_hf_input_validation_errors(self):
         """Ensure HF model fails fast for invalid tensor and position inputs."""
@@ -837,66 +793,70 @@ class TestModelForward(unittest.TestCase):
             outputs = model(input_ids=input_ids)
         self.assertEqual(outputs.last_hidden_state.shape, (1, 4, 32))
 
-    def test_lm_head_ties_word_embeddings(self):
-        """Ensure LM heads tie input/output embeddings by default."""
+    def test_lm_head_tying_and_bias_behavior(self):
+        """Ensure LM heads apply expected embedding tying and decoder-bias rules."""
         from neobert.huggingface.modeling_neobert import (
             NeoBERTConfig as HFNeoBERTConfig,
             NeoBERTLMHead as HFNeoBERTLMHead,
         )
         from neobert.model import NeoBERTConfig, NeoBERTLMHead
 
-        config = NeoBERTConfig(
-            hidden_size=32,
-            num_hidden_layers=1,
-            num_attention_heads=4,
-            intermediate_size=64,
-            vocab_size=16,
-            max_length=8,
-            attn_backend="sdpa",
-            ngpt=False,
-            hidden_act="gelu",
-            tie_word_embeddings=True,
+        train_tied = NeoBERTLMHead(
+            NeoBERTConfig(
+                hidden_size=32,
+                num_hidden_layers=1,
+                num_attention_heads=4,
+                intermediate_size=64,
+                vocab_size=16,
+                max_length=8,
+                attn_backend="sdpa",
+                ngpt=False,
+                hidden_act="gelu",
+                tie_word_embeddings=True,
+            )
         )
-        model = NeoBERTLMHead(config)
         self.assertEqual(
-            model.decoder.weight.data_ptr(), model.model.encoder.weight.data_ptr()
+            train_tied.decoder.weight.data_ptr(),
+            train_tied.model.encoder.weight.data_ptr(),
         )
 
-        hf_config = HFNeoBERTConfig(
-            hidden_size=32,
-            num_hidden_layers=1,
-            num_attention_heads=4,
-            intermediate_size=64,
-            vocab_size=16,
-            max_length=8,
-            flash_attention=False,
-            hidden_act="gelu",
-            tie_word_embeddings=True,
+        train_ngpt = NeoBERTLMHead(
+            NeoBERTConfig(
+                hidden_size=32,
+                num_hidden_layers=1,
+                num_attention_heads=4,
+                intermediate_size=64,
+                vocab_size=16,
+                max_length=8,
+                attn_backend="sdpa",
+                ngpt=True,
+                hidden_act="gelu",
+                tie_word_embeddings=True,
+            )
         )
-        hf_model = HFNeoBERTLMHead(hf_config)
+        self.assertNotEqual(
+            train_ngpt.decoder.weight.data_ptr(),
+            train_ngpt.model.encoder.weight.data_ptr(),
+        )
+        self.assertFalse(train_ngpt.config.tie_word_embeddings)
+
+        hf_model = HFNeoBERTLMHead(
+            HFNeoBERTConfig(
+                hidden_size=32,
+                num_hidden_layers=1,
+                num_attention_heads=4,
+                intermediate_size=64,
+                vocab_size=16,
+                max_length=8,
+                flash_attention=False,
+                hidden_act="gelu",
+                tie_word_embeddings=True,
+            )
+        )
         self.assertEqual(
             hf_model.decoder.weight.data_ptr(), hf_model.model.encoder.weight.data_ptr()
         )
-
-    def test_lm_head_ngpt_does_not_tie_embeddings(self):
-        """Ensure ngpt LM head does not tie token embeddings to decoder weights."""
-        config = NeoBERTConfig(
-            hidden_size=32,
-            num_hidden_layers=1,
-            num_attention_heads=4,
-            intermediate_size=64,
-            vocab_size=16,
-            max_length=8,
-            attn_backend="sdpa",
-            ngpt=True,
-            hidden_act="gelu",
-            tie_word_embeddings=True,
-        )
-        model = NeoBERTLMHead(config)
-        self.assertNotEqual(
-            model.decoder.weight.data_ptr(), model.model.encoder.weight.data_ptr()
-        )
-        self.assertFalse(model.config.tie_word_embeddings)
+        self.assertIsNone(hf_model.decoder.bias)
 
     def test_packed_seqlens_cuda_is_supported(self):
         """Ensure CUDA packed_seqlens metadata is accepted."""
@@ -1128,79 +1088,34 @@ class TestModelForward(unittest.TestCase):
         torch.testing.assert_close(train_q, hf_q, atol=1e-5, rtol=1e-5)
         torch.testing.assert_close(train_k, hf_k, atol=1e-5, rtol=1e-5)
 
-    def test_activation_functions(self):
-        """Test different activation functions."""
-        # Test SwiGLU
-        swiglu_config = NeoBERTConfig(
-            hidden_size=64,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            hidden_act="swiglu",
-            attn_backend="sdpa",
-            vocab_size=1000,
+    def test_activation_configuration_matrix(self):
+        """Ensure supported activations run and unsupported values fail fast."""
+        swiglu_model = NeoBERT(
+            NeoBERTConfig(
+                hidden_size=64,
+                num_hidden_layers=1,
+                num_attention_heads=2,
+                hidden_act="swiglu",
+                attn_backend="sdpa",
+                vocab_size=1000,
+            )
         )
-        swiglu_model = NeoBERT(swiglu_config)
-
-        # Test GELU
-        gelu_config = NeoBERTConfig(
-            hidden_size=64,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            hidden_act="GELU",
-            attn_backend="sdpa",
-            vocab_size=1000,
+        gelu_model = NeoBERT(
+            NeoBERTConfig(
+                hidden_size=64,
+                num_hidden_layers=1,
+                num_attention_heads=2,
+                hidden_act="GELU",
+                attn_backend="sdpa",
+                vocab_size=1000,
+            )
         )
-        gelu_model = NeoBERT(gelu_config)
-
         with torch.no_grad():
             swiglu_outputs = swiglu_model(self.input_ids, self.pad_mask)
             gelu_outputs = gelu_model(self.input_ids, self.pad_mask)
+        self.assertEqual(swiglu_outputs.shape, (self.batch_size, self.seq_length, 64))
+        self.assertEqual(gelu_outputs.shape, (self.batch_size, self.seq_length, 64))
 
-        # Both should produce valid outputs
-        expected_shape = (self.batch_size, self.seq_length, 64)
-        self.assertEqual(swiglu_outputs.shape, expected_shape)
-        self.assertEqual(gelu_outputs.shape, expected_shape)
-
-    def test_hf_swiglu_uses_unpacked_weights(self):
-        """Ensure HF SwiGLU uses unpacked w1/w2/w3 weights."""
-        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
-
-        hf_config = NeoBERTConfig(
-            hidden_size=64,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            intermediate_size=128,
-            vocab_size=1000,
-            max_length=32,
-            hidden_act="swiglu",
-            flash_attention=False,
-        )
-        model = NeoBERT(hf_config)
-        state = model.state_dict()
-        self.assertTrue(any(".ffn.w1.weight" in key for key in state))
-        self.assertTrue(any(".ffn.w2.weight" in key for key in state))
-        self.assertTrue(any(".ffn.w3.weight" in key for key in state))
-        self.assertFalse(any(".ffn.w12.weight" in key for key in state))
-
-    def test_hf_lm_head_is_biasless(self):
-        """Ensure HF LM head decoder uses a biasless projection."""
-        from neobert.huggingface.modeling_neobert import NeoBERTConfig, NeoBERTLMHead
-
-        hf_config = NeoBERTConfig(
-            hidden_size=32,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            intermediate_size=64,
-            vocab_size=128,
-            max_length=16,
-            hidden_act="gelu",
-            flash_attention=False,
-        )
-        model = NeoBERTLMHead(hf_config)
-        self.assertIsNone(model.decoder.bias)
-
-    def test_invalid_activation_raises(self):
-        """Ensure unsupported activations fail fast."""
         with self.assertRaises(ValueError):
             NeoBERTConfig(
                 hidden_size=64,
@@ -1211,39 +1126,42 @@ class TestModelForward(unittest.TestCase):
                 vocab_size=1000,
             )
 
-    def test_attention_mask_handling(self):
-        """Test proper attention mask handling."""
-        model = NeoBERT(self.tiny_config)
-        model.eval()
-
-        # Create input with padding
-        padded_input = torch.tensor(
-            [
-                [1, 2, 3, 0, 0],  # Padded sequence
-                [4, 5, 6, 7, 8],  # Full sequence
-            ]
+        from neobert.huggingface.modeling_neobert import (
+            NeoBERT as HFNeoBERT,
+            NeoBERTConfig as HFNeoBERTConfig,
         )
 
-        # Create attention mask (1 = attend, 0 = don't attend)
-        attention_mask = torch.tensor([[1, 1, 1, 0, 0], [1, 1, 1, 1, 1]]).float()
+        hf_swiglu = HFNeoBERT(
+            HFNeoBERTConfig(
+                hidden_size=64,
+                num_hidden_layers=1,
+                num_attention_heads=2,
+                intermediate_size=128,
+                vocab_size=1000,
+                max_length=32,
+                hidden_act="swiglu",
+                flash_attention=False,
+            )
+        )
+        state = hf_swiglu.state_dict()
+        self.assertTrue(any(".ffn.w1.weight" in key for key in state))
+        self.assertTrue(any(".ffn.w2.weight" in key for key in state))
+        self.assertTrue(any(".ffn.w3.weight" in key for key in state))
+        self.assertFalse(any(".ffn.w12.weight" in key for key in state))
 
-        # Convert to additive mask for NeoBERT
-        pad_mask = torch.where(attention_mask == 0, float("-inf"), float(0.0))
-
-        with torch.no_grad():
-            outputs = model(padded_input, pad_mask)
-
-        # Check that outputs are valid
-        self.assertFalse(torch.isnan(outputs).any())
-        self.assertFalse(torch.isinf(outputs).any())
-
-        # Padded positions should still have valid outputs (model handles internally)
-        self.assertEqual(outputs.shape, (2, 5, self.tiny_config.hidden_size))
-
-    def test_block_attention_mask(self):
-        """Test 3D block attention masks are accepted."""
+    def test_attention_mask_variants(self):
+        """Ensure core model accepts 2D additive and 3D block masks."""
         model = NeoBERT(self.tiny_config)
         model.eval()
+
+        padded_input = torch.tensor(
+            [
+                [1, 2, 3, 0, 0],
+                [4, 5, 6, 7, 8],
+            ]
+        )
+        attention_mask = torch.tensor([[1, 1, 1, 0, 0], [1, 1, 1, 1, 1]]).float()
+        pad_mask = torch.where(attention_mask == 0, float("-inf"), float(0.0))
 
         block_mask = torch.full(
             (self.batch_size, self.seq_length, self.seq_length),
@@ -1253,48 +1171,35 @@ class TestModelForward(unittest.TestCase):
         block_mask = torch.where(eye == 1, float(0.0), block_mask)
 
         with torch.no_grad():
-            outputs = model(self.input_ids, block_mask)
+            additive_outputs = model(padded_input, pad_mask)
+            block_outputs = model(self.input_ids, block_mask)
 
-        expected_shape = (
-            self.batch_size,
-            self.seq_length,
-            self.tiny_config.hidden_size,
+        self.assertFalse(torch.isnan(additive_outputs).any())
+        self.assertFalse(torch.isinf(additive_outputs).any())
+        self.assertEqual(additive_outputs.shape, (2, 5, self.tiny_config.hidden_size))
+        self.assertEqual(
+            block_outputs.shape,
+            (self.batch_size, self.seq_length, self.tiny_config.hidden_size),
         )
-        self.assertEqual(outputs.shape, expected_shape)
 
-    def test_gradient_flow(self):
-        """Test that gradients flow properly through the model."""
+    def test_gradient_flow_and_seeded_determinism(self):
+        """Ensure backward path works and initialization is deterministic with seeds."""
         model = NeoBERT(self.tiny_config)
         model.train()
-
         outputs = model(self.input_ids, self.pad_mask)
-
-        # Create dummy loss
-        loss = outputs.mean()
-        loss.backward()
-
-        # Check that gradients exist for key parameters
+        outputs.mean().backward()
         self.assertIsNotNone(model.encoder.weight.grad)
-
-        # Check that gradients are not zero
         self.assertNotEqual(model.encoder.weight.grad.sum().item(), 0.0)
 
-    def test_model_determinism(self):
-        """Test that model outputs are deterministic given same inputs."""
         torch.manual_seed(42)
         model1 = NeoBERT(self.tiny_config)
-
         torch.manual_seed(42)
         model2 = NeoBERT(self.tiny_config)
-
         model1.eval()
         model2.eval()
-
         with torch.no_grad():
             outputs1 = model1(self.input_ids, self.pad_mask)
             outputs2 = model2(self.input_ids, self.pad_mask)
-
-        # Outputs should be identical for same random seed
         self.assertTrue(torch.allclose(outputs1, outputs2, atol=1e-6))
 
     def test_seq_class_init_preserves_backbone_weights(self):
@@ -1403,11 +1308,6 @@ class TestModelForward(unittest.TestCase):
             model = model_cls(config, **kwargs)
             self.assertEqual(model.model.config.attn_backend, "sdpa")
             self.assertIsInstance(model.model, expected_backbone)
-
-    def test_training_config_default_vocab_matches_repo_defaults(self):
-        """Ensure training config default vocab matches YAML/HF defaults."""
-        config = NeoBERTConfig()
-        self.assertEqual(config.vocab_size, 30522)
 
     def test_mteb_encode_with_sdpa_backend(self):
         """Ensure SDPA MTEB encode honors model device even when CUDA is available."""
