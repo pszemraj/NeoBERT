@@ -47,7 +47,7 @@ def _run_unittest_discovery(test_dir: str | None, pattern: str, verbosity: int) 
         suite = loader.discover(
             str(test_path.parent),
             pattern=test_path.name,
-            top_level_dir=str(test_root),
+            top_level_dir=str(test_path.parent),
         )
     else:
         suite = loader.discover(str(test_path), pattern=pattern)
