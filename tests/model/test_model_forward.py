@@ -864,6 +864,142 @@ class TestModelForward(unittest.TestCase):
         self.assertTrue(hasattr(outputs_default, "logits"))
         self.assertIsInstance(outputs_tuple, tuple)
 
+    def test_hf_base_model_respects_return_dict_flag(self):
+        """Ensure NeoBERT forward supports return_dict=False tuple outputs."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=16,
+            flash_attention=False,
+        )
+        model = NeoBERT(config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 4]])
+        attention_mask = torch.ones_like(input_ids)
+
+        with torch.no_grad():
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+                output_attentions=True,
+                return_dict=False,
+            )
+
+        self.assertIsInstance(outputs, tuple)
+        self.assertEqual(len(outputs), 3)
+        self.assertEqual(outputs[0].shape, (1, 4, 32))
+        self.assertIsInstance(outputs[1], tuple)
+        self.assertIsInstance(outputs[2], tuple)
+
+    def test_hf_lm_head_respects_return_dict_and_labels(self):
+        """Ensure MLM head supports loss labels and tuple outputs."""
+        from neobert.huggingface.modeling_neobert import NeoBERTConfig, NeoBERTLMHead
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=50,
+            max_length=16,
+            flash_attention=False,
+        )
+        model = NeoBERTLMHead(config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 4]])
+        labels = torch.tensor([[1, 2, -100, 4]])
+
+        with torch.no_grad():
+            outputs = model(input_ids=input_ids, labels=labels, return_dict=True)
+            outputs_tuple = model(
+                input_ids=input_ids,
+                labels=labels,
+                output_hidden_states=True,
+                return_dict=False,
+            )
+
+        self.assertIsNotNone(outputs.loss)
+        self.assertEqual(outputs.logits.shape, (1, 4, 50))
+        self.assertIsInstance(outputs_tuple, tuple)
+        self.assertEqual(len(outputs_tuple), 3)  # loss, logits, hidden_states
+
+    def test_hf_rejects_non_integer_input_ids(self):
+        """Ensure base model fails fast for non-integer input_ids."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=16,
+            flash_attention=False,
+        )
+        model = NeoBERT(config)
+        model.eval()
+
+        with self.assertRaisesRegex(TypeError, "input_ids must be an integer tensor"):
+            with torch.no_grad():
+                model(input_ids=torch.randn(1, 4))
+
+    def test_hf_rejects_nan_attention_mask(self):
+        """Ensure NaN values in attention_mask fail fast."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=16,
+            flash_attention=False,
+        )
+        model = NeoBERT(config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 4]])
+        bad_mask = torch.tensor([[1.0, float("nan"), 1.0, 1.0]])
+
+        with self.assertRaisesRegex(ValueError, "must not contain NaN"):
+            with torch.no_grad():
+                model(input_ids=input_ids, attention_mask=bad_mask)
+
+    def test_hf_non_rope_position_ids_out_of_range_fails_fast(self):
+        """Ensure learned positional embeddings check max position IDs."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=4,
+            rope=False,
+            flash_attention=False,
+        )
+        model = NeoBERT(config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 4]])
+        position_ids = torch.tensor([[1, 2, 3, 5]])
+
+        with self.assertRaisesRegex(
+            ValueError, "position_ids exceed configured max_length"
+        ):
+            with torch.no_grad():
+                model(input_ids=input_ids, position_ids=position_ids)
+
     def test_hf_flash_attention_silently_ignored(self):
         """Ensure flash_attention=True is silently accepted for HF config compat."""
         from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig

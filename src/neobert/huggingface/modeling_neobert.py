@@ -593,6 +593,8 @@ class NeoBERT(NeoBERTPreTrainedModel):
         # Treat all-nonpositive float masks (including all-zero) as additive so
         # 0/-inf callers on unpadded inputs keep all keys.
         if attention_mask.is_floating_point():
+            if torch.isnan(attention_mask).any():
+                raise ValueError("attention_mask must not contain NaN values.")
             if attention_mask.min() < 0 or attention_mask.max() <= 0:
                 return attention_mask >= 0
         return attention_mask != 0
@@ -604,8 +606,9 @@ class NeoBERT(NeoBERTPreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         output_hidden_states: bool = False,
         output_attentions: bool = False,
+        return_dict: Optional[bool] = None,
         **kwargs: Any,
-    ) -> BaseModelOutput:
+    ) -> BaseModelOutput | tuple:
         """Forward pass through the NeoBERT model.
 
         Args:
@@ -616,28 +619,40 @@ class NeoBERT(NeoBERTPreTrainedModel):
                 HF convention: 1=keep, 0=mask. Also accepts additive masks (0/-inf).
             output_hidden_states: Whether to return hidden states from all layers.
             output_attentions: Whether to return attention weights.
+            return_dict: Whether to return a BaseModelOutput or tuple.
             **kwargs: Additional keyword arguments (for compatibility).
 
         Returns:
-            BaseModelOutput containing:
+            BaseModelOutput or tuple containing:
                 - last_hidden_state: Final layer hidden states
                 - hidden_states: Hidden states from all layers (if requested)
                 - attentions: Attention weights from all layers (if requested)
 
         """
+        integer_dtypes = (
+            torch.uint8,
+            torch.int8,
+            torch.int16,
+            torch.int32,
+            torch.int64,
+        )
+        if input_ids.dim() != 2:
+            raise ValueError(
+                "input_ids must be a 2D tensor of shape (batch, seq_len) "
+                f"(got {input_ids.shape})."
+            )
+        if input_ids.dtype not in integer_dtypes:
+            raise TypeError("input_ids must be an integer tensor.")
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
         if position_ids is not None:
             if position_ids.shape != input_ids.shape:
                 raise ValueError(
                     "position_ids must match input_ids shape for HF export "
                     f"(got {position_ids.shape} vs {input_ids.shape})."
                 )
-            if position_ids.dtype not in (
-                torch.uint8,
-                torch.int8,
-                torch.int16,
-                torch.int32,
-                torch.int64,
-            ):
+            if position_ids.dtype not in integer_dtypes:
                 raise TypeError("position_ids must be an integer tensor.")
             position_ids = position_ids.to(device=input_ids.device, dtype=torch.long)
             if torch.any(position_ids < 0):
@@ -703,6 +718,14 @@ class NeoBERT(NeoBERTPreTrainedModel):
                     mask = input_ids.ne(self.config.pad_token_id).int()
                 incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask)) * mask
                 pos_ids = incremental_indices.long()
+            if pos_ids.numel() > 0:
+                max_supported_pos = self.positional_embedding.num_embeddings - 1
+                max_pos_id = int(pos_ids.max().item())
+                if max_pos_id > max_supported_pos:
+                    raise ValueError(
+                        "position_ids exceed configured max_length for learned "
+                        f"positional embeddings ({max_pos_id} > {max_supported_pos})."
+                    )
             x = x + self.positional_embedding(pos_ids)
 
         if output_hidden_states:
@@ -721,12 +744,21 @@ class NeoBERT(NeoBERTPreTrainedModel):
         if output_hidden_states:
             # HF convention: final hidden state is the last entry.
             hidden_states[-1] = x
+        hidden_states_tuple = tuple(hidden_states) if output_hidden_states else None
+        attentions_tuple = tuple(attentions) if output_attentions else None
 
-        # Return outputs in HuggingFace format
+        if not return_dict:
+            result = (x,)
+            if output_hidden_states:
+                result = result + (hidden_states_tuple,)
+            if output_attentions:
+                result = result + (attentions_tuple,)
+            return result
+
         return BaseModelOutput(
             last_hidden_state=x,
-            hidden_states=tuple(hidden_states) if output_hidden_states else None,
-            attentions=tuple(attentions) if output_attentions else None,
+            hidden_states=hidden_states_tuple,
+            attentions=attentions_tuple,
         )
 
 
@@ -791,8 +823,10 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         output_hidden_states: bool = False,
         output_attentions: bool = False,
+        labels: Optional[torch.Tensor] = None,
+        return_dict: Optional[bool] = None,
         **kwargs: Any,
-    ) -> MaskedLMOutput:
+    ) -> MaskedLMOutput | tuple:
         """Forward pass for masked language modeling.
 
         Args:
@@ -802,30 +836,56 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
                 HF convention: 1=keep, 0=mask. Also accepts additive masks (0/-inf).
             output_hidden_states: Whether to return hidden states from all layers.
             output_attentions: Whether to return attention weights.
+            labels: Optional MLM labels of shape (batch_size, seq_len).
+            return_dict: Whether to return a MaskedLMOutput or tuple.
             **kwargs: Additional keyword arguments.
 
         Returns:
-            MaskedLMOutput containing:
+            MaskedLMOutput or tuple containing:
+                - loss: Cross-entropy loss (if labels provided)
                 - logits: Prediction scores of shape (batch_size, seq_len, vocab_size)
                 - hidden_states: Hidden states from all layers (if requested)
                 - attentions: Attention weights from all layers (if requested)
         """
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
+
         # Get base model outputs
         output = self.model.forward(
-            input_ids,
-            position_ids,
-            attention_mask,
-            output_hidden_states,
-            output_attentions,
+            input_ids=input_ids,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=output_hidden_states,
+            output_attentions=output_attentions,
+            return_dict=True,
         )
 
         # Apply language modeling head
         logits = self.decoder(output.last_hidden_state)
+        loss = None
+        if labels is not None:
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(
+                logits.view(-1, self.config.vocab_size),
+                labels.view(-1),
+            )
+        hidden_states = tuple(output.hidden_states) if output_hidden_states else None
+        attentions = tuple(output.attentions) if output_attentions else None
+
+        if not return_dict:
+            result = (logits,)
+            if output_hidden_states:
+                result = result + (hidden_states,)
+            if output_attentions:
+                result = result + (attentions,)
+            return ((loss,) + result) if loss is not None else result
 
         return MaskedLMOutput(
+            loss=loss,
             logits=logits,
-            hidden_states=tuple(output.hidden_states) if output_hidden_states else None,
-            attentions=tuple(output.attentions) if output_attentions else None,
+            hidden_states=hidden_states,
+            attentions=attentions,
         )
 
 
@@ -919,11 +979,12 @@ class NeoBERTForSequenceClassification(NeoBERTPreTrainedModel):
 
         # Get base model outputs
         output = self.model.forward(
-            input_ids,
-            position_ids,
-            attention_mask,
-            output_hidden_states,
-            output_attentions,
+            input_ids=input_ids,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=output_hidden_states,
+            output_attentions=output_attentions,
+            return_dict=True,
         )
         hidden_states = output.last_hidden_state
 
