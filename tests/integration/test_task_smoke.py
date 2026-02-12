@@ -1,22 +1,17 @@
 #!/usr/bin/env python3
 """Compact cross-task smoke coverage for core config->runtime flows."""
 
-from pathlib import Path
-
 import pytest
 import torch
 
 from neobert.config import ConfigLoader
 
 
-CONFIG_DIR = Path(__file__).resolve().parents[1] / "configs"
-
-
-def test_pretraining_config_to_lm_forward_smoke() -> None:
+def test_pretraining_config_to_lm_forward_smoke(tiny_pretrain_config_path) -> None:
     """Pretraining config should build LM head and run a tiny forward pass."""
     from neobert.model import NeoBERTConfig, NeoBERTLMHead
 
-    cfg = ConfigLoader.load(str(CONFIG_DIR / "pretraining" / "test_tiny_pretrain.yaml"))
+    cfg = ConfigLoader.load(str(tiny_pretrain_config_path))
 
     model_cfg = NeoBERTConfig(
         hidden_size=cfg.model.hidden_size,
@@ -41,11 +36,11 @@ def test_pretraining_config_to_lm_forward_smoke() -> None:
     assert tuple(out["logits"].shape) == (2, 8, cfg.model.vocab_size)
 
 
-def test_glue_config_to_classifier_logits_and_loss_smoke() -> None:
+def test_glue_config_to_classifier_logits_and_loss_smoke(tiny_glue_config_path) -> None:
     """GLUE config should build classifier and compute logits/loss shapes."""
     from neobert.model import NeoBERTConfig, NeoBERTHFForSequenceClassification
 
-    cfg = ConfigLoader.load(str(CONFIG_DIR / "evaluation" / "test_tiny_glue.yaml"))
+    cfg = ConfigLoader.load(str(tiny_glue_config_path))
 
     model_cfg = NeoBERTConfig(
         hidden_size=cfg.model.hidden_size,
@@ -77,11 +72,13 @@ def test_glue_config_to_classifier_logits_and_loss_smoke() -> None:
     assert tuple(out.logits.shape) == (2, cfg.glue.num_labels)
 
 
-def test_contrastive_trainer_preflight_fails_fast_without_dataset_path() -> None:
+def test_contrastive_trainer_preflight_fails_fast_without_dataset_path(
+    tiny_contrastive_config_path,
+) -> None:
     """Contrastive trainer should fail before dataset/network setup when path is missing."""
     from neobert.contrastive.trainer import trainer
 
-    cfg = ConfigLoader.load(str(CONFIG_DIR / "contrastive" / "test_tiny_contrastive.yaml"))
+    cfg = ConfigLoader.load(str(tiny_contrastive_config_path))
     cfg.dataset.path = None
 
     with pytest.raises(ValueError, match="dataset.path"):
