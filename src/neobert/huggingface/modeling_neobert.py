@@ -87,7 +87,7 @@ def scaled_dot_product_attention_compat(
     :param bool is_causal: Whether to apply causal mask.
     :return torch.Tensor: Attention output.
     """
-    if scale is None or _SDPA_SUPPORTS_SCALE:
+    if scale is None:
         return scaled_dot_product_attention(
             query=query,
             key=key,
@@ -95,7 +95,17 @@ def scaled_dot_product_attention_compat(
             attn_mask=attn_mask,
             dropout_p=dropout_p,
             is_causal=is_causal,
-            scale=scale if _SDPA_SUPPORTS_SCALE else None,
+        )
+
+    if _SDPA_SUPPORTS_SCALE:
+        return scaled_dot_product_attention(
+            query=query,
+            key=key,
+            value=value,
+            attn_mask=attn_mask,
+            dropout_p=dropout_p,
+            is_causal=is_causal,
+            scale=scale,
         )
 
     head_dim = query.size(-1)
@@ -426,12 +436,20 @@ class EncoderBlock(nn.Module):
 
         # Eager attention if attention weights are needed
         if output_attentions:
-            attn_weights = (
+            attn_scores = (
                 xq.permute(0, 2, 1, 3) @ xk.permute(0, 2, 3, 1) / (xq.size(-1) ** 0.5)
             )
             if attention_mask is not None:
-                attn_weights = attn_weights.masked_fill(~attention_mask, float("-inf"))
-            attn_weights = attn_weights.softmax(-1)
+                # Use a finite floor for softmax stability on low-precision dtypes.
+                min_value = torch.finfo(attn_scores.dtype).min
+                attn_scores = attn_scores.masked_fill(~attention_mask, min_value)
+            attn_weights = attn_scores.softmax(-1)
+            if attention_mask is not None:
+                # Rows with no valid keys should produce zeros (not NaNs).
+                keep_any = attention_mask.any(dim=-1, keepdim=True)
+                attn_weights = torch.where(
+                    keep_any, attn_weights, torch.zeros_like(attn_weights)
+                )
             # Apply attention dropout to match SDPA path.
             if self.training and self.config.dropout > 0:
                 attn_weights = torch.nn.functional.dropout(
@@ -566,9 +584,11 @@ class NeoBERT(NeoBERTPreTrainedModel):
                 "NeoBERT HF export expects a 2D attention_mask of shape "
                 "(batch, seq_len). Pre-expanded masks are not supported."
             )
-        if attention_mask.dtype is torch.bool:
+        if attention_mask.dtype == torch.bool:
             # HF convention for bool masks: True=keep, False=mask.
             return attention_mask
+        if attention_mask.numel() == 0:
+            return attention_mask.to(torch.bool)
         # Float masks are ambiguous between binary (1/0) and additive (0/-inf).
         # Treat all-nonpositive float masks (including all-zero) as additive so
         # 0/-inf callers on unpadded inputs keep all keys.
@@ -605,6 +625,24 @@ class NeoBERT(NeoBERTPreTrainedModel):
                 - attentions: Attention weights from all layers (if requested)
 
         """
+        if position_ids is not None:
+            if position_ids.shape != input_ids.shape:
+                raise ValueError(
+                    "position_ids must match input_ids shape for HF export "
+                    f"(got {position_ids.shape} vs {input_ids.shape})."
+                )
+            if position_ids.dtype not in (
+                torch.uint8,
+                torch.int8,
+                torch.int16,
+                torch.int32,
+                torch.int64,
+            ):
+                raise TypeError("position_ids must be an integer tensor.")
+            position_ids = position_ids.to(device=input_ids.device, dtype=torch.long)
+            if torch.any(position_ids < 0):
+                raise ValueError("position_ids must be non-negative.")
+
         # Initialize containers for outputs (HF contract, populated only if requested).
         hidden_states, attentions = [], []
 
@@ -620,6 +658,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
                 )
             # Encoder-only key padding mask, broadcast across query positions.
             # Keep mask in (B, 1, 1, S) form to avoid O(S^2) materialization.
+            attention_mask = attention_mask.to(device=input_ids.device)
             attention_mask = attention_mask[:, None, None, :]
 
         # Get rotary position embeddings
@@ -630,6 +669,8 @@ class NeoBERT(NeoBERTPreTrainedModel):
             if config_max is None:
                 config_max = getattr(self.config, "max_position_embeddings", None)
             max_pos = max(seq_len, int(config_max)) if config_max else seq_len
+            if position_ids is not None and position_ids.numel() > 0:
+                max_pos = max(max_pos, int(position_ids.max().item()) + 1)
             # Reuse cached RoPE frequencies; only grow/reallocate if len/device changes.
             # Inputs are expected to be on the same device as model parameters.
             if (
@@ -656,10 +697,16 @@ class NeoBERT(NeoBERTPreTrainedModel):
             else:
                 # Content-based positions: padding stays at index 0, and left-padding
                 # does not shift token positions (padding-invariant positional IDs).
-                mask = input_ids.ne(self.config.pad_token_id).int()
+                if self.config.pad_token_id is None:
+                    mask = torch.ones_like(input_ids, dtype=torch.int32)
+                else:
+                    mask = input_ids.ne(self.config.pad_token_id).int()
                 incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask)) * mask
                 pos_ids = incremental_indices.long()
             x = x + self.positional_embedding(pos_ids)
+
+        if output_hidden_states:
+            hidden_states.append(x)
 
         # Pass through transformer encoder blocks
         for layer in self.transformer_encoder:
@@ -671,12 +718,15 @@ class NeoBERT(NeoBERTPreTrainedModel):
 
         # Apply final layer normalization
         x = self.layer_norm(x)
+        if output_hidden_states:
+            # HF convention: final hidden state is the last entry.
+            hidden_states[-1] = x
 
         # Return outputs in HuggingFace format
         return BaseModelOutput(
             last_hidden_state=x,
-            hidden_states=hidden_states if output_hidden_states else None,
-            attentions=attentions if output_attentions else None,
+            hidden_states=tuple(hidden_states) if output_hidden_states else None,
+            attentions=tuple(attentions) if output_attentions else None,
         )
 
 
@@ -774,8 +824,8 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
 
         return MaskedLMOutput(
             logits=logits,
-            hidden_states=output.hidden_states if output_hidden_states else None,
-            attentions=output.attentions if output_attentions else None,
+            hidden_states=tuple(output.hidden_states) if output_hidden_states else None,
+            attentions=tuple(output.attentions) if output_attentions else None,
         )
 
 
@@ -863,6 +913,10 @@ class NeoBERTForSequenceClassification(NeoBERTPreTrainedModel):
                 - hidden_states: Hidden states from all layers (if requested)
                 - attentions: Attention weights from all layers (if requested)
         """
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
+
         # Get base model outputs
         output = self.model.forward(
             input_ids,
@@ -921,6 +975,6 @@ class NeoBERTForSequenceClassification(NeoBERTPreTrainedModel):
         return SequenceClassifierOutput(
             loss=loss,
             logits=logits,
-            hidden_states=output.hidden_states if output_hidden_states else None,
-            attentions=output.attentions if output_attentions else None,
+            hidden_states=tuple(output.hidden_states) if output_hidden_states else None,
+            attentions=tuple(output.attentions) if output_attentions else None,
         )
