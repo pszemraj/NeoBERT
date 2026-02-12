@@ -2,6 +2,7 @@
 """Test runner for NeoBERT test suite."""
 
 import argparse
+import fnmatch
 import sys
 import unittest
 from pathlib import Path
@@ -24,6 +25,11 @@ def _resolve_test_target(test_dir: str | None, test_root: Path) -> Path:
     return test_root / candidate
 
 
+def _matches_pattern(path: Path, pattern: str) -> bool:
+    """Return whether a file path matches a test glob pattern."""
+    return fnmatch.fnmatch(path.name, pattern)
+
+
 def _run_unittest_discovery(test_dir: str | None, pattern: str, verbosity: int) -> bool:
     """Run unittest discovery for legacy tests."""
     test_root = Path(__file__).parent
@@ -34,7 +40,17 @@ def _run_unittest_discovery(test_dir: str | None, pattern: str, verbosity: int) 
         return False
 
     loader = unittest.TestLoader()
-    suite = loader.discover(str(test_path), pattern=pattern)
+    if test_path.is_file():
+        if not _matches_pattern(test_path, pattern):
+            print(f"No tests matched pattern: {pattern}")
+            return False
+        suite = loader.discover(
+            str(test_path.parent),
+            pattern=test_path.name,
+            top_level_dir=str(test_root),
+        )
+    else:
+        suite = loader.discover(str(test_path), pattern=pattern)
 
     runner = unittest.TextTestRunner(verbosity=verbosity)
     result = runner.run(suite)
@@ -58,11 +74,17 @@ def _pytest_args(
         return args, False
 
     if pattern != "test_*.py":
-        matched = sorted(root.rglob(pattern))
-        if not matched:
-            print(f"No tests matched pattern: {pattern}")
-            return args, False
-        args.extend(str(path) for path in matched)
+        if root.is_file():
+            if not _matches_pattern(root, pattern):
+                print(f"No tests matched pattern: {pattern}")
+                return args, False
+            args.append(str(root))
+        else:
+            matched = sorted(root.rglob(pattern))
+            if not matched:
+                print(f"No tests matched pattern: {pattern}")
+                return args, False
+            args.extend(str(path) for path in matched)
     elif test_dir is not None:
         args.append(str(root))
 
