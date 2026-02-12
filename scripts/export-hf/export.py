@@ -13,7 +13,6 @@ The script will create an hf/ directory in the parent folder with the exported m
 
 import argparse
 import json
-import re
 import shutil
 import textwrap
 import warnings
@@ -469,23 +468,6 @@ def validate_tokenizer_special_tokens(tokenizer_dir: Path) -> None:
         )
 
 
-def _rewrite_export_model_imports(model_path: Path) -> None:
-    """Rewrite local imports in exported modeling code for HF dynamic modules.
-
-    :param Path model_path: Path to the exported modeling module file.
-    """
-    contents = model_path.read_text()
-    # Rewrite all parent-relative modeling_utils imports so flat exported repos
-    # can rely on a consistent local ``.modeling_utils`` module path.
-    updated = re.sub(
-        r"from \.\.modeling_utils import ([A-Za-z0-9_, ]+)",
-        r"from .modeling_utils import \1",
-        contents,
-    )
-    if updated != contents:
-        model_path.write_text(updated)
-
-
 def copy_hf_modeling_files(target_dir: Path) -> None:
     """Copy Hugging Face modeling files from ``src/neobert/huggingface/``.
 
@@ -501,7 +483,7 @@ def copy_hf_modeling_files(target_dir: Path) -> None:
 
     # Copy the required files without renaming so exported code maps directly
     # to the repository's HF export module layout.
-    files_to_copy = ["modeling_neobert.py", "rotary.py", "modeling_utils.py"]
+    files_to_copy = ["modeling_neobert.py", "rotary.py"]
     for filename in files_to_copy:
         src_file = src_dir / filename
         if not src_file.exists():
@@ -514,9 +496,10 @@ def copy_hf_modeling_files(target_dir: Path) -> None:
         legacy_model_path.unlink()
         print("  Removed legacy model.py")
 
-    model_path = target_dir / "modeling_neobert.py"
-    if model_path.exists():
-        _rewrite_export_model_imports(model_path)
+    legacy_modeling_utils_path = target_dir / "modeling_utils.py"
+    if legacy_modeling_utils_path.exists():
+        legacy_modeling_utils_path.unlink()
+        print("  Removed legacy modeling_utils.py")
 
 
 def export_checkpoint(
@@ -524,6 +507,7 @@ def export_checkpoint(
     output_dir: Path | None = None,
     *,
     allow_decoder_bias_drop: bool = False,
+    include_pytorch_bin: bool = False,
 ) -> Path:
     """Export a NeoBERT checkpoint to HuggingFace format.
 
@@ -531,6 +515,7 @@ def export_checkpoint(
     :param Path | None output_dir: Optional output directory.
     :param bool allow_decoder_bias_drop: Whether to allow dropping a legacy decoder
         bias term during export to the current biasless HF LM head.
+    :param bool include_pytorch_bin: Whether to additionally export pytorch_model.bin.
     :return Path: Output directory containing exported files.
     """
     checkpoint_path = Path(checkpoint_path).resolve()
@@ -622,14 +607,19 @@ def export_checkpoint(
         json.dump(hf_config, f, indent=2)
     print("  Saved config.json")
 
-    # Save as safetensors (preferred) and pytorch formats
+    # Save safetensors (preferred, default).
     save_file(
         mapped_state_dict, output_dir / "model.safetensors", metadata={"format": "pt"}
     )
     print("  Saved model.safetensors")
 
-    torch.save(mapped_state_dict, output_dir / "pytorch_model.bin")
-    print("  Saved pytorch_model.bin")
+    pytorch_bin_path = output_dir / "pytorch_model.bin"
+    if include_pytorch_bin:
+        torch.save(mapped_state_dict, pytorch_bin_path)
+        print("  Saved pytorch_model.bin")
+    elif pytorch_bin_path.exists():
+        pytorch_bin_path.unlink()
+        print("  Removed legacy pytorch_model.bin")
 
     # 4. Load tokenizer, validate special tokens, fix model_max_length, and save
     print("Loading and validating tokenizer...")
@@ -885,6 +875,9 @@ def main() -> None:
 
             # Export to specific directory
             python %(prog)s outputs/neobert_100m_100k/checkpoints/100000 --output my_model
+
+            # Also write pytorch_model.bin (off by default)
+            python %(prog)s outputs/neobert_100m_100k/checkpoints/100000 --include-pytorch-bin
         """
         ),
     )
@@ -912,6 +905,14 @@ def main() -> None:
             "weights. This changes logits compared with the original checkpoint."
         ),
     )
+    parser.add_argument(
+        "--include-pytorch-bin",
+        action="store_true",
+        help=(
+            "Also export pytorch_model.bin. By default, export writes only "
+            "model.safetensors."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -920,6 +921,7 @@ def main() -> None:
             checkpoint_path=Path(args.checkpoint_path),
             output_dir=Path(args.output) if args.output else None,
             allow_decoder_bias_drop=args.allow_decoder_bias_drop,
+            include_pytorch_bin=args.include_pytorch_bin,
         )
     except Exception as e:
         print(f"❌ Export failed: {e}")

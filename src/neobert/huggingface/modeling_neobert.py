@@ -1,15 +1,19 @@
 """NeoBERT model implementation for HuggingFace Transformers.
 
 This is the export/inference variant. The training-time model lives in
-``src/neobert/model/model.py`` and uses SDPA/flash-attn + Liger kernels; keep math consistent across
-implementations. Packed/varlen sequences are intentionally unsupported here.
+``src/neobert/model/model.py`` and uses SDPA/flash-attn + Liger kernels; keep
+math consistent across implementations. Packed/varlen sequences are
+intentionally unsupported here.
 """
 
+import inspect
+import math
 from importlib import import_module
 from typing import Any, Optional, Union
 
 import torch
 from torch import nn
+from torch.nn.functional import scaled_dot_product_attention
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers import PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import (
@@ -44,31 +48,77 @@ def _import_symbol(candidates: tuple[str, ...], symbol: str) -> Any:
     raise last_exc
 
 
+def swiglu_intermediate_size(intermediate_size: int, multiple_of: int = 8) -> int:
+    """Compute reduced SwiGLU hidden size rounded to alignment multiple.
+
+    :param int intermediate_size: Base MLP hidden size.
+    :param int multiple_of: Alignment multiple.
+    :return int: Rounded reduced hidden size.
+    """
+    reduced = int(2 * intermediate_size / 3)
+    return multiple_of * ((reduced + multiple_of - 1) // multiple_of)
+
+
+try:
+    _SDPA_SUPPORTS_SCALE = (
+        "scale" in inspect.signature(scaled_dot_product_attention).parameters
+    )
+except (TypeError, ValueError):  # pragma: no cover - defensive fallback.
+    _SDPA_SUPPORTS_SCALE = False
+
+
+def scaled_dot_product_attention_compat(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attn_mask: Optional[torch.Tensor] = None,
+    dropout_p: float = 0.0,
+    scale: Optional[float] = None,
+    is_causal: bool = False,
+) -> torch.Tensor:
+    """Run SDPA with backward-compatible ``scale`` handling.
+
+    :param torch.Tensor query: Query tensor of shape (B, H, M, K).
+    :param torch.Tensor key: Key tensor of shape (B, H, N, K).
+    :param torch.Tensor value: Value tensor of shape (B, H, N, K).
+    :param torch.Tensor | None attn_mask: Optional attention mask.
+    :param float dropout_p: Attention dropout probability.
+    :param float | None scale: Optional scaling factor for QK^T.
+    :param bool is_causal: Whether to apply causal mask.
+    :return torch.Tensor: Attention output.
+    """
+    if scale is None or _SDPA_SUPPORTS_SCALE:
+        return scaled_dot_product_attention(
+            query=query,
+            key=key,
+            value=value,
+            attn_mask=attn_mask,
+            dropout_p=dropout_p,
+            is_causal=is_causal,
+            scale=scale if _SDPA_SUPPORTS_SCALE else None,
+        )
+
+    head_dim = query.size(-1)
+    default_scale = 1.0 / math.sqrt(head_dim)
+    query = query * (scale / default_scale)
+    return scaled_dot_product_attention(
+        query=query,
+        key=key,
+        value=value,
+        attn_mask=attn_mask,
+        dropout_p=dropout_p,
+        is_causal=is_causal,
+    )
+
+
 _PACKAGE = __package__ or ""
 _PARENT = _PACKAGE.rsplit(".", maxsplit=1)[0] if "." in _PACKAGE else ""
-
-_modeling_utils_candidates = []
-if _PACKAGE:
-    _modeling_utils_candidates.append(f"{_PACKAGE}.modeling_utils")
-if _PARENT:
-    _modeling_utils_candidates.append(f"{_PARENT}.modeling_utils")
-# HF export copies modeling_utils.py alongside model.py, so keep a bare-module
-# fallback for trust_remote_code loads where ``neobert`` is not installed.
-_modeling_utils_candidates.extend(["neobert.modeling_utils", "modeling_utils"])
-
-scaled_dot_product_attention_compat = _import_symbol(
-    tuple(dict.fromkeys(_modeling_utils_candidates)),
-    "scaled_dot_product_attention_compat",
-)
-swiglu_intermediate_size = _import_symbol(
-    tuple(dict.fromkeys(_modeling_utils_candidates)),
-    "swiglu_intermediate_size",
-)
 
 _rotary_candidates = []
 if _PACKAGE:
     _rotary_candidates.append(f"{_PACKAGE}.rotary")
-# Same rationale as modeling_utils: exported repos include a local rotary.py.
+# Exported repos include a local rotary.py; keep local fallback for
+# trust_remote_code usage where ``neobert`` is not installed.
 _rotary_candidates.extend(["neobert.huggingface.rotary", "rotary"])
 
 apply_rotary_emb = _import_symbol(

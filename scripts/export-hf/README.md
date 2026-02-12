@@ -14,6 +14,12 @@ python scripts/export-hf/export.py outputs/<run>/checkpoints/<step>
 python scripts/export-hf/validate.py outputs/<run>/hf/<export_name>
 ```
 
+Optional legacy PyTorch bin export:
+
+```bash
+python scripts/export-hf/export.py outputs/<run>/checkpoints/<step> --include-pytorch-bin
+```
+
 ## Notes
 
 - Detailed export constraints and compatibility notes live in

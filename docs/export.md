@@ -28,6 +28,14 @@ python scripts/export-hf/export.py \
   --output outputs/<run>/hf/my_export
 ```
 
+Optional legacy PyTorch checkpoint file:
+
+```bash
+python scripts/export-hf/export.py \
+  outputs/<run>/checkpoints/<step> \
+  --include-pytorch-bin
+```
+
 Legacy checkpoints with a decoder bias must opt in to dropping that bias:
 
 ```bash
@@ -42,12 +50,12 @@ Generated folder contains:
 
 - `config.json`
 - `model.safetensors`
-- `pytorch_model.bin`
 - `modeling_neobert.py`
 - `rotary.py`
-- `modeling_utils.py`
 - tokenizer assets (`tokenizer.json`, `special_tokens_map.json`, etc.)
 - `README.md`
+
+`pytorch_model.bin` is only written when `--include-pytorch-bin` is passed.
 
 ## Validation
 
