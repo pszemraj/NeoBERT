@@ -400,38 +400,8 @@ class TestModelForward(unittest.TestCase):
         expected_logits_shape = (self.batch_size, 2)  # num_labels=2
         self.assertEqual(outputs.logits.shape, expected_logits_shape)
 
-    def test_hf_attention_mask_blocks_padding(self):
-        """Ensure HF attention masks properly zero out padding attention."""
-        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
-
-        config = NeoBERTConfig(
-            hidden_size=32,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            intermediate_size=64,
-            vocab_size=100,
-            max_length=16,
-        )
-        model = NeoBERT(config)
-        model.eval()
-
-        input_ids = torch.tensor([[1, 2, 3, 0, 0], [4, 5, 6, 7, 8]])
-        attention_mask = torch.tensor([[1, 1, 1, 0, 0], [1, 1, 1, 1, 1]])
-
-        with torch.no_grad():
-            outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                output_attentions=True,
-            )
-
-        attn_weights = outputs.attentions[0]
-        pad_mask = attention_mask == 0
-        pad_mask = pad_mask.unsqueeze(1).unsqueeze(2).expand_as(attn_weights)
-        self.assertLess(attn_weights.masked_select(pad_mask).max().item(), 1e-6)
-
-    def test_hf_additive_attention_mask_supported(self):
-        """Ensure additive 0/-inf masks are accepted in HF model."""
+    def test_hf_attention_mask_semantics_and_mode_equivalence(self):
+        """Ensure HF mask normalization and SDPA/eager paths stay equivalent."""
         from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
 
         config = NeoBERTConfig(
@@ -446,157 +416,76 @@ class TestModelForward(unittest.TestCase):
         model = NeoBERT(config)
         model.eval()
 
-        input_ids = torch.tensor([[1, 2, 3, 0, 0], [4, 5, 6, 7, 8]])
+        padded_input_ids = torch.tensor([[1, 2, 3, 0, 0], [4, 5, 6, 7, 8]])
         attention_mask = torch.tensor([[1, 1, 1, 0, 0], [1, 1, 1, 1, 1]])
+        bool_mask = attention_mask == 1
         additive_mask = torch.where(attention_mask == 1, float(0.0), float("-inf"))
 
         with torch.no_grad():
-            outputs_bool = model(input_ids=input_ids, attention_mask=attention_mask)
-            outputs_add = model(input_ids=input_ids, attention_mask=additive_mask)
-
-        self.assertTrue(
-            torch.allclose(
-                outputs_bool.last_hidden_state,
-                outputs_add.last_hidden_state,
-                atol=1e-6,
+            outputs_int = model(
+                input_ids=padded_input_ids,
+                attention_mask=attention_mask,
+                output_attentions=True,
             )
-        )
-
-    def test_hf_zero_only_additive_mask_treated_as_keep_all(self):
-        """Ensure all-zero additive masks are treated as keep-all."""
-        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
-
-        config = NeoBERTConfig(
-            hidden_size=32,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            intermediate_size=64,
-            vocab_size=100,
-            max_length=16,
-            flash_attention=False,
-        )
-        model = NeoBERT(config)
-        model.eval()
-
-        input_ids = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
-        zero_additive_mask = torch.zeros_like(input_ids, dtype=torch.float32)
-
-        with torch.no_grad():
-            outputs_none = model(input_ids=input_ids, attention_mask=None)
-            outputs_zero = model(
-                input_ids=input_ids,
-                attention_mask=zero_additive_mask,
+            outputs_bool = model(
+                input_ids=padded_input_ids,
+                attention_mask=bool_mask,
+                output_attentions=True,
             )
-
-        self.assertTrue(
-            torch.allclose(
-                outputs_none.last_hidden_state,
-                outputs_zero.last_hidden_state,
-                atol=1e-6,
-                rtol=1e-5,
+            outputs_add = model(
+                input_ids=padded_input_ids,
+                attention_mask=additive_mask,
+                output_attentions=True,
             )
+            outputs_sdpa = model(
+                input_ids=padded_input_ids,
+                attention_mask=attention_mask,
+                output_attentions=False,
+            )
+        attn_weights = outputs_int.attentions[0]
+        pad_positions = (
+            (attention_mask == 0).unsqueeze(1).unsqueeze(2).expand_as(attn_weights)
         )
+        self.assertLess(attn_weights.masked_select(pad_positions).max().item(), 1e-6)
 
-    def test_hf_sdpa_bool_mask_without_padding(self):
-        """Ensure HF-style bool masks work when there is no padding."""
-        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
-
-        config = NeoBERTConfig(
-            hidden_size=32,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            intermediate_size=64,
-            vocab_size=100,
-            max_length=16,
-            flash_attention=False,
-        )
-        model = NeoBERT(config)
-        model.eval()
-
-        input_ids = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
-
-        # All-False bool mask means keep nothing.
-        all_false = torch.zeros_like(input_ids, dtype=torch.bool)
-        normalized = model._normalize_attention_mask(all_false)
-        self.assertFalse(normalized.any().item())  # Keep none
-
-        # All-True bool mask means keep all.
-        keep_all = torch.ones_like(input_ids, dtype=torch.bool)
-        normalized_keep_all = model._normalize_attention_mask(keep_all)
-        self.assertTrue(normalized_keep_all.all().item())  # Keep all
-
-        # Mixed mask should preserve HF semantics directly.
-        mixed_mask = torch.tensor(
-            [[True, False, True, False], [False, True, False, True]]
-        )
-        normalized_mixed = model._normalize_attention_mask(mixed_mask)
-        self.assertTrue(torch.equal(normalized_mixed, mixed_mask))
-
-    def test_hf_bool_attention_mask_supported(self):
-        """Ensure HF-style bool masks (True=keep) are accepted."""
-        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
-
-        config = NeoBERTConfig(
-            hidden_size=32,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            intermediate_size=64,
-            vocab_size=100,
-            max_length=16,
-            flash_attention=False,
-        )
-        model = NeoBERT(config)
-        model.eval()
-
-        input_ids = torch.tensor([[1, 2, 3, 0, 0], [4, 5, 6, 7, 8]])
-        attention_mask = torch.tensor([[1, 1, 1, 0, 0], [1, 1, 1, 1, 1]])
-        bool_mask = attention_mask == 1
-
-        with torch.no_grad():
-            outputs_int = model(input_ids=input_ids, attention_mask=attention_mask)
-            outputs_bool = model(input_ids=input_ids, attention_mask=bool_mask)
-
+        for other in (outputs_bool, outputs_add):
+            self.assertTrue(
+                torch.allclose(
+                    outputs_int.last_hidden_state,
+                    other.last_hidden_state,
+                    atol=1e-6,
+                    rtol=1e-5,
+                )
+            )
         self.assertTrue(
             torch.allclose(
                 outputs_int.last_hidden_state,
-                outputs_bool.last_hidden_state,
+                outputs_sdpa.last_hidden_state,
                 atol=1e-6,
                 rtol=1e-5,
             )
         )
 
-    def test_hf_all_ones_mask_matches_none_across_attention_modes(self):
-        """Ensure all-ones masks are equivalent to omitted masks in HF model paths."""
-        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
-
-        config = NeoBERTConfig(
-            hidden_size=32,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            intermediate_size=64,
-            vocab_size=100,
-            max_length=16,
-            flash_attention=False,
-        )
-        model = NeoBERT(config)
-        model.eval()
-
-        input_ids = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
-        all_ones = torch.ones_like(input_ids)
-
+        no_pad_ids = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
+        all_ones = torch.ones_like(no_pad_ids)
+        zero_additive = torch.zeros_like(no_pad_ids, dtype=torch.float32)
         for output_attentions in (False, True):
             with torch.no_grad():
                 outputs_none = model(
-                    input_ids=input_ids,
+                    input_ids=no_pad_ids,
                     attention_mask=None,
                     output_attentions=output_attentions,
                 )
                 outputs_ones = model(
-                    input_ids=input_ids,
+                    input_ids=no_pad_ids,
                     attention_mask=all_ones,
                     output_attentions=output_attentions,
                 )
-
+                outputs_zero = model(
+                    input_ids=no_pad_ids,
+                    attention_mask=zero_additive,
+                    output_attentions=output_attentions,
+                )
             self.assertTrue(
                 torch.allclose(
                     outputs_none.last_hidden_state,
@@ -605,46 +494,26 @@ class TestModelForward(unittest.TestCase):
                     rtol=1e-5,
                 )
             )
+            self.assertTrue(
+                torch.allclose(
+                    outputs_none.last_hidden_state,
+                    outputs_zero.last_hidden_state,
+                    atol=1e-6,
+                    rtol=1e-5,
+                )
+            )
 
-    def test_hf_eager_and_sdpa_match_with_padding_mask(self):
-        """Ensure eager and SDPA paths agree under the same key mask."""
-        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
-
-        config = NeoBERTConfig(
-            hidden_size=32,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            intermediate_size=64,
-            vocab_size=100,
-            max_length=16,
-            flash_attention=False,
+        all_false = torch.zeros_like(no_pad_ids, dtype=torch.bool)
+        normalized = model._normalize_attention_mask(all_false)
+        self.assertFalse(normalized.any().item())
+        keep_all = torch.ones_like(no_pad_ids, dtype=torch.bool)
+        normalized_keep_all = model._normalize_attention_mask(keep_all)
+        self.assertTrue(normalized_keep_all.all().item())
+        mixed_mask = torch.tensor(
+            [[True, False, True, False], [False, True, False, True]]
         )
-        model = NeoBERT(config)
-        model.eval()
-
-        input_ids = torch.tensor([[1, 2, 3, 0, 0], [4, 5, 6, 7, 8]])
-        attention_mask = torch.tensor([[1, 1, 1, 0, 0], [1, 1, 1, 1, 1]])
-
-        with torch.no_grad():
-            outputs_sdpa = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                output_attentions=False,
-            )
-            outputs_eager = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                output_attentions=True,
-            )
-
-        self.assertTrue(
-            torch.allclose(
-                outputs_sdpa.last_hidden_state,
-                outputs_eager.last_hidden_state,
-                atol=1e-6,
-                rtol=1e-5,
-            )
-        )
+        normalized_mixed = model._normalize_attention_mask(mixed_mask)
+        self.assertTrue(torch.equal(normalized_mixed, mixed_mask))
 
     def test_hf_eager_all_masked_rows_are_finite_and_match_sdpa(self):
         """Ensure fully-masked rows do not produce NaNs in eager attention."""
@@ -897,11 +766,11 @@ class TestModelForward(unittest.TestCase):
         self.assertIsInstance(outputs_tuple, tuple)
         self.assertEqual(len(outputs_tuple), 3)  # loss, logits, hidden_states
 
-    def test_hf_rejects_non_integer_input_ids(self):
-        """Ensure base model fails fast for non-integer input_ids."""
+    def test_hf_input_validation_errors(self):
+        """Ensure HF model fails fast for invalid tensor and position inputs."""
         from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
 
-        config = NeoBERTConfig(
+        base_config = NeoBERTConfig(
             hidden_size=32,
             num_hidden_layers=1,
             num_attention_heads=2,
@@ -910,41 +779,20 @@ class TestModelForward(unittest.TestCase):
             max_length=16,
             flash_attention=False,
         )
-        model = NeoBERT(config)
+        model = NeoBERT(base_config)
         model.eval()
 
         with self.assertRaisesRegex(TypeError, "input_ids must be an integer tensor"):
             with torch.no_grad():
                 model(input_ids=torch.randn(1, 4))
 
-    def test_hf_rejects_nan_attention_mask(self):
-        """Ensure NaN values in attention_mask fail fast."""
-        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
-
-        config = NeoBERTConfig(
-            hidden_size=32,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            intermediate_size=64,
-            vocab_size=100,
-            max_length=16,
-            flash_attention=False,
-        )
-        model = NeoBERT(config)
-        model.eval()
-
         input_ids = torch.tensor([[1, 2, 3, 4]])
         bad_mask = torch.tensor([[1.0, float("nan"), 1.0, 1.0]])
-
         with self.assertRaisesRegex(ValueError, "must not contain NaN"):
             with torch.no_grad():
                 model(input_ids=input_ids, attention_mask=bad_mask)
 
-    def test_hf_non_rope_position_ids_out_of_range_fails_fast(self):
-        """Ensure learned positional embeddings check max position IDs."""
-        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
-
-        config = NeoBERTConfig(
+        non_rope_config = NeoBERTConfig(
             hidden_size=32,
             num_hidden_layers=1,
             num_attention_heads=2,
@@ -954,9 +802,8 @@ class TestModelForward(unittest.TestCase):
             rope=False,
             flash_attention=False,
         )
-        model = NeoBERT(config)
-        model.eval()
-
+        non_rope_model = NeoBERT(non_rope_config)
+        non_rope_model.eval()
         input_ids = torch.tensor([[1, 2, 3, 4]])
         position_ids = torch.tensor([[1, 2, 3, 5]])
 
@@ -964,7 +811,7 @@ class TestModelForward(unittest.TestCase):
             ValueError, "position_ids exceed configured max_length"
         ):
             with torch.no_grad():
-                model(input_ids=input_ids, position_ids=position_ids)
+                non_rope_model(input_ids=input_ids, position_ids=position_ids)
 
     def test_hf_flash_attention_silently_ignored(self):
         """Ensure flash_attention=True is silently accepted for HF config compat."""
@@ -989,36 +836,6 @@ class TestModelForward(unittest.TestCase):
         with torch.no_grad():
             outputs = model(input_ids=input_ids)
         self.assertEqual(outputs.last_hidden_state.shape, (1, 4, 32))
-
-    def test_mteb_encode_respects_model_device(self):
-        """Ensure MTEB encoder uses the model device over CUDA availability."""
-        from neobert.model import NeoBERTConfig, NeoBERTForMTEB
-
-        tokenizer = self._make_tokenizer()
-        config = NeoBERTConfig(
-            hidden_size=32,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            intermediate_size=64,
-            vocab_size=10,
-            max_length=8,
-            attn_backend="sdpa",
-            ngpt=False,
-            hidden_act="gelu",
-        )
-        model = NeoBERTForMTEB(
-            config=config,
-            tokenizer=tokenizer,
-            max_length=8,
-            batch_size=2,
-            pooling="avg",
-        )
-        model.to("cpu")
-
-        with patch("torch.cuda.is_available", return_value=True):
-            embeddings = model.encode(["hello world"])
-
-        self.assertEqual(embeddings.shape[0], 1)
 
     def test_lm_head_ties_word_embeddings(self):
         """Ensure LM heads tie input/output embeddings by default."""
@@ -1177,10 +994,7 @@ class TestModelForward(unittest.TestCase):
 
         # Outputs should be different (different position encoding methods)
         self.assertFalse(torch.allclose(rope_outputs, pos_outputs, atol=1e-4))
-
-    def test_positional_embeddings_nonzero_pad_token(self):
-        """Ensure positional embeddings handle non-zero pad_token_id."""
-        pos_config = NeoBERTConfig(
+        pos_nonzero_pad_config = NeoBERTConfig(
             hidden_size=32,
             num_hidden_layers=1,
             num_attention_heads=2,
@@ -1192,18 +1006,19 @@ class TestModelForward(unittest.TestCase):
             attn_backend="sdpa",
             hidden_act="gelu",
         )
-        model = NeoBERT(pos_config)
+        model = NeoBERT(pos_nonzero_pad_config)
         model.eval()
-
         input_ids = torch.tensor([[1, 2, 3, 4, 5, 6, 8, 9]])
         pad_mask = torch.zeros_like(input_ids, dtype=torch.float32)
-
         with torch.no_grad():
             outputs = model(input_ids, pad_mask)
-
         self.assertEqual(
             outputs.shape,
-            (input_ids.shape[0], input_ids.shape[1], pos_config.hidden_size),
+            (
+                input_ids.shape[0],
+                input_ids.shape[1],
+                pos_nonzero_pad_config.hidden_size,
+            ),
         )
 
     def test_rope_freqs_cis_is_buffer(self):
@@ -1232,8 +1047,8 @@ class TestModelForward(unittest.TestCase):
         self.assertGreater(model.freqs_cis.numel(), 0)
         self.assertEqual(model.freqs_cis.data_ptr(), ptr_before)
 
-    def test_normalize_pad_mask_upcasts_to_float32(self):
-        """Ensure additive masks are upcast to float32 for softmax stability."""
+    def test_normalize_pad_mask_type_handling(self):
+        """Ensure additive mask normalization enforces expected dtype semantics."""
         from neobert.model.model import _normalize_pad_mask
 
         pad_mask = torch.zeros((2, 4), dtype=torch.bfloat16)
@@ -1241,32 +1056,22 @@ class TestModelForward(unittest.TestCase):
         self.assertEqual(normalized.dtype, torch.float32)
         self.assertEqual(normalized.shape, (2, 1, 1, 4))
 
-    def test_normalize_pad_mask_rejects_non_floating_masks(self):
-        """Ensure integer masks fail fast to enforce additive-mask semantics."""
-        from neobert.model.model import _normalize_pad_mask
-
         int_mask = torch.ones((2, 4), dtype=torch.int64)
         with self.assertRaises(TypeError):
             _normalize_pad_mask(int_mask)
 
-    def test_infer_single_segment_rejects_fully_padded_rows(self):
-        """Ensure packed inference falls back when any sample has zero valid tokens."""
+    def test_infer_single_segment_fallback_conditions(self):
+        """Ensure packed-length inference falls back for unsupported masks."""
         from neobert.model.model import (
             _infer_single_segment_packed_seqlens_from_pad_mask,
         )
 
-        pad_mask = torch.full((2, 4), float("-inf"), dtype=torch.float32)
-        pad_mask[1, :2] = 0.0
+        fully_masked = torch.full((2, 4), float("-inf"), dtype=torch.float32)
+        fully_masked[1, :2] = 0.0
         inferred = _infer_single_segment_packed_seqlens_from_pad_mask(
-            pad_mask, seq_len=4
+            fully_masked, seq_len=4
         )
         self.assertIsNone(inferred)
-
-    def test_infer_single_segment_cuda_mask_falls_back(self):
-        """Ensure CUDA masks gracefully skip packed-length inference."""
-        from neobert.model.model import (
-            _infer_single_segment_packed_seqlens_from_pad_mask,
-        )
 
         pad_mask = torch.zeros((2, 4), dtype=torch.float32)
         with patch.object(
@@ -1605,7 +1410,7 @@ class TestModelForward(unittest.TestCase):
         self.assertEqual(config.vocab_size, 30522)
 
     def test_mteb_encode_with_sdpa_backend(self):
-        """Ensure MTEB encode works with attn_backend='sdpa'."""
+        """Ensure SDPA MTEB encode honors model device even when CUDA is available."""
         from neobert.model import NeoBERTConfig, NeoBERTForMTEB
 
         tokenizer = self._make_tokenizer()
@@ -1627,8 +1432,10 @@ class TestModelForward(unittest.TestCase):
             batch_size=2,
             pooling="avg",
         )
+        model.to("cpu")
         model.eval()
-        embeddings = model.encode(["hello world", "hello"])
+        with patch("torch.cuda.is_available", return_value=True):
+            embeddings = model.encode(["hello world", "hello"])
         self.assertEqual(embeddings.shape[0], 2)
         self.assertEqual(embeddings.shape[1], config.hidden_size)
 

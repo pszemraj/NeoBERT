@@ -39,36 +39,29 @@ from neobert.pretraining.trainer import (
 class TestPretrainPipeline:
     """Test pretraining pipeline functionality."""
 
-    def test_pretraining_rejects_fp16(
+    def test_pretraining_fail_fast_validation_paths(
         self, tiny_pretrain_config_path: Path, temp_output_dir: str
     ):
-        """Ensure pretraining trainer rejects fp16 mixed precision."""
-        config = ConfigLoader.load(str(tiny_pretrain_config_path))
-        config.trainer.output_dir = temp_output_dir
-        config.trainer.mixed_precision = "fp16"
+        """Ensure invalid pretraining settings fail before expensive setup."""
 
+        def _base_config() -> Config:
+            cfg = ConfigLoader.load(str(tiny_pretrain_config_path))
+            cfg.trainer.output_dir = temp_output_dir
+            return cfg
+
+        fp16_cfg = _base_config()
+        fp16_cfg.trainer.mixed_precision = "fp16"
         with pytest.raises(ValueError, match="fp16"):
-            trainer(config)
+            trainer(fp16_cfg)
 
-    def test_pretraining_rejects_invalid_masked_logits_only_loss(
-        self, tiny_pretrain_config_path: Path, temp_output_dir: str
-    ):
-        """Ensure invalid loss-path config fails before tokenizer/network setup."""
-        config = ConfigLoader.load(str(tiny_pretrain_config_path))
-        config.trainer.output_dir = temp_output_dir
-        config.trainer.masked_logits_only_loss = "something_else"
-
+        invalid_loss_cfg = _base_config()
+        invalid_loss_cfg.trainer.masked_logits_only_loss = "something_else"
         with patch("neobert.pretraining.trainer.get_tokenizer") as mocked_tokenizer:
             with pytest.raises(ValueError, match="masked_logits_only_loss"):
-                trainer(config)
+                trainer(invalid_loss_cfg)
             mocked_tokenizer.assert_not_called()
 
-    def test_pretraining_rejects_fsdp1_before_tokenizer_setup(
-        self, tiny_pretrain_config_path: Path, temp_output_dir: str
-    ):
-        """Ensure FSDP1 fails fast before tokenizer/dataset initialization."""
-        config = ConfigLoader.load(str(tiny_pretrain_config_path))
-        config.trainer.output_dir = temp_output_dir
+        fsdp_cfg = _base_config()
 
         class _FSDPPluginStub:
             fsdp_version = 1
@@ -86,7 +79,7 @@ class TestPretrainPipeline:
         ):
             with patch("neobert.pretraining.trainer.get_tokenizer") as mocked_tokenizer:
                 with pytest.raises(RuntimeError, match="FSDP2-first"):
-                    trainer(config)
+                    trainer(fsdp_cfg)
                 mocked_tokenizer.assert_not_called()
 
     def test_pretraining_setup_smoke_without_full_execution(
@@ -774,13 +767,13 @@ class TestPretrainComponents:
         assert not backward_done
         assert accelerator.backward_calls == 0
 
-    def test_compute_weight_norm_for_logging_deepspeed_skips_missing_full_params(self):
-        """Ensure DeepSpeed weight-norm logging ignores params without full mappings."""
-        model = torch.nn.Linear(3, 2, bias=True)
+    def test_compute_weight_norm_for_logging_deepspeed(self):
+        """Ensure DeepSpeed norm logging handles mapped and unmapped params."""
 
         class _AcceleratorStub:
             distributed_type = DistributedType.DEEPSPEED
 
+        model = torch.nn.Linear(3, 2, bias=True)
         params = list(model.parameters())
         weight_full = torch.full_like(params[0], 2.0)
 
@@ -794,26 +787,15 @@ class TestPretrainComponents:
             side_effect=_fake_safe_get_full_fp32_param,
         ):
             norm = _compute_weight_norm_for_logging(model, _AcceleratorStub())
-
         assert norm is not None
         assert round(abs(norm - weight_full.norm(2).item()), 6) == 0
-
-    def test_compute_weight_norm_for_logging_deepspeed_returns_none_when_unavailable(
-        self,
-    ):
-        """Ensure DeepSpeed weight-norm logging returns None without mapped params."""
-        model = torch.nn.Linear(3, 2, bias=False)
-
-        class _AcceleratorStub:
-            distributed_type = DistributedType.DEEPSPEED
 
         with patch(
             "neobert.pretraining.trainer.safe_get_full_fp32_param",
             return_value=None,
         ):
-            norm = _compute_weight_norm_for_logging(model, _AcceleratorStub())
-
-        assert norm is None
+            norm_none = _compute_weight_norm_for_logging(model, _AcceleratorStub())
+        assert norm_none is None
 
     def test_resolve_loader_perf_settings_cuda_and_cpu(self):
         """Ensure loader perf settings differ appropriately across CUDA and CPU."""
