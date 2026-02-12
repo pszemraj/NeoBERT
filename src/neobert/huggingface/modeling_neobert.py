@@ -380,7 +380,7 @@ class EncoderBlock(nn.Module):
                 xq.permute(0, 2, 1, 3) @ xk.permute(0, 2, 3, 1) / (xq.size(-1) ** 0.5)
             )
             if attention_mask is not None:
-                attn_weights = attn_weights.masked_fill(attention_mask, float("-inf"))
+                attn_weights = attn_weights.masked_fill(~attention_mask, float("-inf"))
             attn_weights = attn_weights.softmax(-1)
             # Apply attention dropout to match SDPA path.
             if self.training and self.config.dropout > 0:
@@ -506,10 +506,10 @@ class NeoBERT(NeoBERTPreTrainedModel):
         self,
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """Convert HF attention mask (1=keep) to SDPA format (True=masked).
+        """Normalize attention mask to a bool key mask (True=keep).
 
         :param torch.Tensor attention_mask: Input attention mask (batch, seq_len).
-        :return torch.Tensor: Boolean mask where True entries are masked.
+        :return torch.Tensor: Boolean mask where True entries are kept.
         """
         if attention_mask.dim() != 2:
             raise ValueError(
@@ -517,12 +517,12 @@ class NeoBERT(NeoBERTPreTrainedModel):
                 "(batch, seq_len). Pre-expanded masks are not supported."
             )
         if attention_mask.dtype is torch.bool:
-            # HF convention: True=keep → SDPA: True=masked
-            return ~attention_mask
-        # Float/int: HF uses 1=keep, 0=mask; additive uses 0=keep, -inf=mask
-        if attention_mask.min() < 0:
-            return attention_mask < 0  # Additive mask
-        return attention_mask == 0  # Binary 0/1 mask
+            # HF convention for bool masks: True=keep, False=mask.
+            return attention_mask
+        # Float/int: HF uses 1=keep, 0=mask; additive uses 0=keep, -inf=mask.
+        if attention_mask.is_floating_point() and attention_mask.min() < 0:
+            return attention_mask >= 0
+        return attention_mask != 0
 
     def forward(
         self,
@@ -555,9 +555,9 @@ class NeoBERT(NeoBERTPreTrainedModel):
         # Initialize containers for outputs (HF contract, populated only if requested).
         hidden_states, attentions = [], []
 
-        # Prepare attention mask for multi-head attention.
-        # Shape: (batch, seq_len) -> (batch, heads, seq_len, seq_len)
-        # SDPA expects a bool mask where True entries are masked.
+        # Prepare key keep-mask for multi-head attention.
+        # Shape: (batch, seq_len) -> (batch, 1, 1, seq_len).
+        # SDPA expects a bool mask where True entries participate in attention.
         if attention_mask is not None:
             attention_mask = self._normalize_attention_mask(attention_mask)
             if attention_mask.shape != input_ids.shape:

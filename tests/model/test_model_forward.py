@@ -483,23 +483,22 @@ class TestModelForward(unittest.TestCase):
 
         input_ids = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
 
-        # All-False bool mask (HF: keep nothing) -> SDPA: mask all
+        # All-False bool mask means keep nothing.
         all_false = torch.zeros_like(input_ids, dtype=torch.bool)
         normalized = model._normalize_attention_mask(all_false)
-        self.assertTrue(normalized.all().item())  # All masked
+        self.assertFalse(normalized.any().item())  # Keep none
 
-        # All-True bool mask (HF: keep all) -> SDPA: mask none
+        # All-True bool mask means keep all.
         keep_all = torch.ones_like(input_ids, dtype=torch.bool)
         normalized_keep_all = model._normalize_attention_mask(keep_all)
-        self.assertFalse(normalized_keep_all.any().item())  # None masked
+        self.assertTrue(normalized_keep_all.all().item())  # Keep all
 
-        # Mixed mask: True=keep, False=mask -> inverted for SDPA
+        # Mixed mask should preserve HF semantics directly.
         mixed_mask = torch.tensor(
             [[True, False, True, False], [False, True, False, True]]
         )
         normalized_mixed = model._normalize_attention_mask(mixed_mask)
-        expected = ~mixed_mask
-        self.assertTrue(torch.equal(normalized_mixed, expected))
+        self.assertTrue(torch.equal(normalized_mixed, mixed_mask))
 
     def test_hf_bool_attention_mask_supported(self):
         """Ensure HF-style bool masks (True=keep) are accepted."""
@@ -530,6 +529,119 @@ class TestModelForward(unittest.TestCase):
                 outputs_int.last_hidden_state,
                 outputs_bool.last_hidden_state,
                 atol=1e-6,
+                rtol=1e-5,
+            )
+        )
+
+    def test_hf_all_ones_mask_matches_none_sdpa(self):
+        """Ensure all-ones masks are equivalent to omitted masks in SDPA path."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=16,
+            flash_attention=False,
+        )
+        model = NeoBERT(config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
+        all_ones = torch.ones_like(input_ids)
+
+        with torch.no_grad():
+            outputs_none = model(input_ids=input_ids, attention_mask=None)
+            outputs_ones = model(input_ids=input_ids, attention_mask=all_ones)
+
+        self.assertTrue(
+            torch.allclose(
+                outputs_none.last_hidden_state,
+                outputs_ones.last_hidden_state,
+                atol=1e-6,
+                rtol=1e-5,
+            )
+        )
+
+    def test_hf_all_ones_mask_matches_none_eager(self):
+        """Ensure all-ones masks are equivalent in eager attention path."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=16,
+            flash_attention=False,
+        )
+        model = NeoBERT(config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
+        all_ones = torch.ones_like(input_ids)
+
+        with torch.no_grad():
+            outputs_none = model(
+                input_ids=input_ids,
+                attention_mask=None,
+                output_attentions=True,
+            )
+            outputs_ones = model(
+                input_ids=input_ids,
+                attention_mask=all_ones,
+                output_attentions=True,
+            )
+
+        self.assertTrue(
+            torch.allclose(
+                outputs_none.last_hidden_state,
+                outputs_ones.last_hidden_state,
+                atol=1e-6,
+                rtol=1e-5,
+            )
+        )
+
+    def test_hf_eager_and_sdpa_match_with_padding_mask(self):
+        """Ensure eager and SDPA paths agree under the same key mask."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=16,
+            flash_attention=False,
+        )
+        model = NeoBERT(config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 0, 0], [4, 5, 6, 7, 8]])
+        attention_mask = torch.tensor([[1, 1, 1, 0, 0], [1, 1, 1, 1, 1]])
+
+        with torch.no_grad():
+            outputs_sdpa = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_attentions=False,
+            )
+            outputs_eager = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_attentions=True,
+            )
+
+        self.assertTrue(
+            torch.allclose(
+                outputs_sdpa.last_hidden_state,
+                outputs_eager.last_hidden_state,
+                atol=1e-6,
+                rtol=1e-5,
             )
         )
 
