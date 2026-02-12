@@ -394,7 +394,7 @@ def test_end_to_end_pipeline(model_path: Path) -> Tuple[bool, str]:
 
 
 def test_cosine_similarity_sanity(model_path: Path) -> Tuple[bool, str]:
-    """Sanity-check cosine similarities of CLS embeddings.
+    """Sanity-check cosine similarities of mean-pooled sentence embeddings.
 
     :param Path model_path: Model directory path.
     :return tuple[bool, str]: Success flag and message.
