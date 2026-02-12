@@ -10,6 +10,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import torch
+import yaml
+from safetensors.torch import save_file
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 
@@ -78,23 +80,80 @@ class TestExportHF(unittest.TestCase):
         self.assertIn("model.decoder.weight", state_dict)
         self.assertIn("model.decoder.bias", state_dict)
 
-    def test_copy_hf_modeling_files_includes_modeling_utils(self):
-        """Ensure modeling_utils.py is copied for exported repos."""
+    def test_copy_hf_modeling_files_exports_self_contained_module(self):
+        """Ensure exported modeling module does not depend on modeling_utils.py."""
         export = self.export
         with tempfile.TemporaryDirectory() as tmpdir:
             target_dir = Path(tmpdir)
             export.copy_hf_modeling_files(target_dir)
 
-            self.assertTrue((target_dir / "model.py").exists())
+            self.assertTrue((target_dir / "modeling_neobert.py").exists())
             self.assertTrue((target_dir / "rotary.py").exists())
-            self.assertTrue((target_dir / "modeling_utils.py").exists())
-            model_text = (target_dir / "model.py").read_text()
-            self.assertIn('["neobert.modeling_utils", "modeling_utils"]', model_text)
+            self.assertFalse((target_dir / "modeling_utils.py").exists())
+            self.assertFalse((target_dir / "model.py").exists())
+            model_text = (target_dir / "modeling_neobert.py").read_text()
             self.assertIn(
                 '["neobert.huggingface.rotary", "rotary"]',
                 model_text,
             )
-            self.assertNotIn("from ..modeling_utils import", model_text)
+            self.assertIn("def scaled_dot_product_attention_compat(", model_text)
+
+    def test_copy_hf_modeling_files_removes_legacy_model_py(self):
+        """Ensure copy step removes stale legacy model.py artifacts."""
+        export = self.export
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target_dir = Path(tmpdir)
+            legacy_path = target_dir / "model.py"
+            legacy_path.write_text("# stale legacy file\n")
+            self.assertTrue(legacy_path.exists())
+
+            export.copy_hf_modeling_files(target_dir)
+
+            self.assertFalse(legacy_path.exists())
+            self.assertTrue((target_dir / "modeling_neobert.py").exists())
+
+    def test_copy_hf_modeling_files_removes_legacy_modeling_utils(self):
+        """Ensure copy step removes stale legacy modeling_utils.py artifacts."""
+        export = self.export
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target_dir = Path(tmpdir)
+            legacy_path = target_dir / "modeling_utils.py"
+            legacy_path.write_text("# stale legacy file\n")
+            self.assertTrue(legacy_path.exists())
+
+            export.copy_hf_modeling_files(target_dir)
+
+            self.assertFalse(legacy_path.exists())
+            self.assertTrue((target_dir / "modeling_neobert.py").exists())
+
+    def test_create_hf_config_auto_map_uses_modeling_neobert_module(self):
+        """Ensure exported auto_map points at modeling_neobert.py symbols."""
+        export = self.export
+        neobert_config = {
+            "model": {
+                "hidden_size": 4,
+                "num_hidden_layers": 1,
+                "num_attention_heads": 2,
+                "intermediate_size": 8,
+                "vocab_size": 16,
+                "max_position_embeddings": 32,
+                "norm_eps": 1e-5,
+                "pad_token_id": 0,
+                "rope": True,
+                "rms_norm": True,
+                "hidden_act": "swiglu",
+            }
+        }
+        state_dict = {"model.encoder.weight": torch.zeros(16, 4, dtype=torch.float32)}
+
+        hf_config = export.create_hf_config(neobert_config, state_dict)
+        auto_map = hf_config.get("auto_map", {})
+
+        self.assertEqual(auto_map["AutoConfig"], "modeling_neobert.NeoBERTConfig")
+        self.assertEqual(auto_map["AutoModel"], "modeling_neobert.NeoBERT")
+        self.assertEqual(
+            auto_map["AutoModelForMaskedLM"], "modeling_neobert.NeoBERTLMHead"
+        )
 
     def test_get_torch_dtype_from_state_dict_handles_uncommon_dtypes(self):
         """Ensure dtype export path uses generic torch dtype string names."""
@@ -207,3 +266,114 @@ class TestExportHF(unittest.TestCase):
         self.assertIn("decoder.weight", mapped)
         self.assertIn("model.encoder.weight", mapped)
         self.assertNotIn("decoder.bias", mapped)
+
+    @staticmethod
+    def _make_export_tokenizer() -> PreTrainedTokenizerFast:
+        """Build tokenizer with required special tokens for export."""
+        vocab = {
+            "[PAD]": 0,
+            "[UNK]": 1,
+            "[CLS]": 2,
+            "[SEP]": 3,
+            "[MASK]": 4,
+            "hello": 5,
+            "world": 6,
+        }
+        tokenizer = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
+        tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+        return PreTrainedTokenizerFast(
+            tokenizer_object=tokenizer,
+            pad_token="[PAD]",
+            unk_token="[UNK]",
+            cls_token="[CLS]",
+            sep_token="[SEP]",
+            mask_token="[MASK]",
+        )
+
+    def _write_minimal_checkpoint(self, checkpoint_dir: Path) -> None:
+        """Write minimal valid checkpoint tree for export integration tests."""
+        export = self.export
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+        model_cfg = {
+            "hidden_size": 4,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "intermediate_size": 12,
+            "vocab_size": 7,
+            "max_position_embeddings": 16,
+            "norm_eps": 1e-5,
+            "pad_token_id": 0,
+            "rope": True,
+            "rms_norm": True,
+            "hidden_act": "swiglu",
+        }
+        config = {"model": model_cfg}
+        (checkpoint_dir / "config.yaml").write_text(yaml.safe_dump(config))
+
+        mlp_hidden = export._swiglu_intermediate_size(model_cfg["intermediate_size"])
+        state_dict = {
+            "model.encoder.weight": torch.zeros(
+                model_cfg["vocab_size"], model_cfg["hidden_size"]
+            ),
+            "model.decoder.weight": torch.zeros(
+                model_cfg["vocab_size"], model_cfg["hidden_size"]
+            ),
+            "model.transformer_encoder.0.qkv.weight": torch.zeros(
+                model_cfg["hidden_size"] * 3, model_cfg["hidden_size"]
+            ),
+            "model.transformer_encoder.0.wo.weight": torch.zeros(
+                model_cfg["hidden_size"], model_cfg["hidden_size"]
+            ),
+            "model.transformer_encoder.0.ffn.w1.weight": torch.zeros(
+                mlp_hidden, model_cfg["hidden_size"]
+            ),
+            "model.transformer_encoder.0.ffn.w2.weight": torch.zeros(
+                mlp_hidden, model_cfg["hidden_size"]
+            ),
+            "model.transformer_encoder.0.ffn.w3.weight": torch.zeros(
+                model_cfg["hidden_size"], mlp_hidden
+            ),
+        }
+        save_file(state_dict, checkpoint_dir / "model.safetensors")
+
+        tokenizer = self._make_export_tokenizer()
+        tokenizer.save_pretrained(checkpoint_dir / "tokenizer")
+
+    def test_export_checkpoint_skips_pytorch_bin_by_default(self):
+        """Ensure export only writes safetensors unless explicitly requested."""
+        export = self.export
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            checkpoint_dir = root / "checkpoint"
+            output_dir = root / "exported"
+            self._write_minimal_checkpoint(checkpoint_dir)
+
+            with patch.object(export, "run_forward_sanity_check", return_value=None):
+                export.export_checkpoint(
+                    checkpoint_path=checkpoint_dir,
+                    output_dir=output_dir,
+                    include_pytorch_bin=False,
+                )
+
+            self.assertTrue((output_dir / "model.safetensors").exists())
+            self.assertFalse((output_dir / "pytorch_model.bin").exists())
+
+    def test_export_checkpoint_writes_pytorch_bin_when_requested(self):
+        """Ensure optional pytorch_model.bin export works via flag."""
+        export = self.export
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            checkpoint_dir = root / "checkpoint"
+            output_dir = root / "exported"
+            self._write_minimal_checkpoint(checkpoint_dir)
+
+            with patch.object(export, "run_forward_sanity_check", return_value=None):
+                export.export_checkpoint(
+                    checkpoint_path=checkpoint_dir,
+                    output_dir=output_dir,
+                    include_pytorch_bin=True,
+                )
+
+            self.assertTrue((output_dir / "model.safetensors").exists())
+            self.assertTrue((output_dir / "pytorch_model.bin").exists())

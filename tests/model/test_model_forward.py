@@ -465,6 +465,41 @@ class TestModelForward(unittest.TestCase):
             )
         )
 
+    def test_hf_zero_only_additive_mask_treated_as_keep_all(self):
+        """Ensure all-zero additive masks are treated as keep-all."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=16,
+            flash_attention=False,
+        )
+        model = NeoBERT(config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
+        zero_additive_mask = torch.zeros_like(input_ids, dtype=torch.float32)
+
+        with torch.no_grad():
+            outputs_none = model(input_ids=input_ids, attention_mask=None)
+            outputs_zero = model(
+                input_ids=input_ids,
+                attention_mask=zero_additive_mask,
+            )
+
+        self.assertTrue(
+            torch.allclose(
+                outputs_none.last_hidden_state,
+                outputs_zero.last_hidden_state,
+                atol=1e-6,
+                rtol=1e-5,
+            )
+        )
+
     def test_hf_sdpa_bool_mask_without_padding(self):
         """Ensure HF-style bool masks work when there is no padding."""
         from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
@@ -483,23 +518,22 @@ class TestModelForward(unittest.TestCase):
 
         input_ids = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
 
-        # All-False bool mask (HF: keep nothing) -> SDPA: mask all
+        # All-False bool mask means keep nothing.
         all_false = torch.zeros_like(input_ids, dtype=torch.bool)
         normalized = model._normalize_attention_mask(all_false)
-        self.assertTrue(normalized.all().item())  # All masked
+        self.assertFalse(normalized.any().item())  # Keep none
 
-        # All-True bool mask (HF: keep all) -> SDPA: mask none
+        # All-True bool mask means keep all.
         keep_all = torch.ones_like(input_ids, dtype=torch.bool)
         normalized_keep_all = model._normalize_attention_mask(keep_all)
-        self.assertFalse(normalized_keep_all.any().item())  # None masked
+        self.assertTrue(normalized_keep_all.all().item())  # Keep all
 
-        # Mixed mask: True=keep, False=mask -> inverted for SDPA
+        # Mixed mask should preserve HF semantics directly.
         mixed_mask = torch.tensor(
             [[True, False, True, False], [False, True, False, True]]
         )
         normalized_mixed = model._normalize_attention_mask(mixed_mask)
-        expected = ~mixed_mask
-        self.assertTrue(torch.equal(normalized_mixed, expected))
+        self.assertTrue(torch.equal(normalized_mixed, mixed_mask))
 
     def test_hf_bool_attention_mask_supported(self):
         """Ensure HF-style bool masks (True=keep) are accepted."""
@@ -530,8 +564,441 @@ class TestModelForward(unittest.TestCase):
                 outputs_int.last_hidden_state,
                 outputs_bool.last_hidden_state,
                 atol=1e-6,
+                rtol=1e-5,
             )
         )
+
+    def test_hf_all_ones_mask_matches_none_sdpa(self):
+        """Ensure all-ones masks are equivalent to omitted masks in SDPA path."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=16,
+            flash_attention=False,
+        )
+        model = NeoBERT(config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
+        all_ones = torch.ones_like(input_ids)
+
+        with torch.no_grad():
+            outputs_none = model(input_ids=input_ids, attention_mask=None)
+            outputs_ones = model(input_ids=input_ids, attention_mask=all_ones)
+
+        self.assertTrue(
+            torch.allclose(
+                outputs_none.last_hidden_state,
+                outputs_ones.last_hidden_state,
+                atol=1e-6,
+                rtol=1e-5,
+            )
+        )
+
+    def test_hf_all_ones_mask_matches_none_eager(self):
+        """Ensure all-ones masks are equivalent in eager attention path."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=16,
+            flash_attention=False,
+        )
+        model = NeoBERT(config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
+        all_ones = torch.ones_like(input_ids)
+
+        with torch.no_grad():
+            outputs_none = model(
+                input_ids=input_ids,
+                attention_mask=None,
+                output_attentions=True,
+            )
+            outputs_ones = model(
+                input_ids=input_ids,
+                attention_mask=all_ones,
+                output_attentions=True,
+            )
+
+        self.assertTrue(
+            torch.allclose(
+                outputs_none.last_hidden_state,
+                outputs_ones.last_hidden_state,
+                atol=1e-6,
+                rtol=1e-5,
+            )
+        )
+
+    def test_hf_eager_and_sdpa_match_with_padding_mask(self):
+        """Ensure eager and SDPA paths agree under the same key mask."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=16,
+            flash_attention=False,
+        )
+        model = NeoBERT(config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 0, 0], [4, 5, 6, 7, 8]])
+        attention_mask = torch.tensor([[1, 1, 1, 0, 0], [1, 1, 1, 1, 1]])
+
+        with torch.no_grad():
+            outputs_sdpa = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_attentions=False,
+            )
+            outputs_eager = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_attentions=True,
+            )
+
+        self.assertTrue(
+            torch.allclose(
+                outputs_sdpa.last_hidden_state,
+                outputs_eager.last_hidden_state,
+                atol=1e-6,
+                rtol=1e-5,
+            )
+        )
+
+    def test_hf_eager_all_masked_rows_are_finite_and_match_sdpa(self):
+        """Ensure fully-masked rows do not produce NaNs in eager attention."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=16,
+            flash_attention=False,
+            dropout=0.0,
+        )
+        model = NeoBERT(config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
+        all_masked = torch.zeros_like(input_ids)
+
+        with torch.no_grad():
+            outputs_sdpa = model(
+                input_ids=input_ids,
+                attention_mask=all_masked,
+                output_attentions=False,
+            )
+            outputs_eager = model(
+                input_ids=input_ids,
+                attention_mask=all_masked,
+                output_attentions=True,
+            )
+
+        self.assertFalse(torch.isnan(outputs_eager.last_hidden_state).any())
+        self.assertFalse(torch.isnan(outputs_eager.attentions[0]).any())
+        self.assertTrue(
+            torch.equal(
+                outputs_eager.attentions[0],
+                torch.zeros_like(outputs_eager.attentions[0]),
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                outputs_sdpa.last_hidden_state,
+                outputs_eager.last_hidden_state,
+                atol=1e-6,
+                rtol=1e-5,
+            )
+        )
+
+    def test_hf_position_ids_can_exceed_sequence_length(self):
+        """Ensure RoPE cache grows when callers pass large explicit position IDs."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=8,
+            flash_attention=False,
+        )
+        model = NeoBERT(config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 4]])
+        position_ids = torch.tensor([[8, 9, 10, 11]])
+
+        with torch.no_grad():
+            outputs = model(input_ids=input_ids, position_ids=position_ids)
+
+        self.assertEqual(outputs.last_hidden_state.shape, (1, 4, 32))
+        self.assertGreaterEqual(
+            model.freqs_cis.shape[0],
+            int(position_ids.max().item()) + 1,
+        )
+
+    def test_hf_hidden_states_follow_hf_convention(self):
+        """Ensure hidden_states includes embeddings and ends at final output."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=2,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=16,
+            flash_attention=False,
+            dropout=0.0,
+        )
+        model = NeoBERT(config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 4]])
+        with torch.no_grad():
+            outputs = model(input_ids=input_ids, output_hidden_states=True)
+
+        self.assertIsInstance(outputs.hidden_states, tuple)
+        self.assertEqual(len(outputs.hidden_states), config.num_hidden_layers + 1)
+        self.assertTrue(
+            torch.allclose(
+                outputs.hidden_states[-1],
+                outputs.last_hidden_state,
+                atol=1e-6,
+                rtol=1e-5,
+            )
+        )
+
+    def test_hf_sdpa_compat_omits_scale_kw_when_unavailable(self):
+        """Ensure SDPA compat path never passes unsupported ``scale`` kwarg."""
+        import neobert.huggingface.modeling_neobert as hf_mod
+
+        captured_queries: list[torch.Tensor] = []
+
+        def _fake_sdpa(
+            *,
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            attn_mask: torch.Tensor | None = None,
+            dropout_p: float = 0.0,
+            is_causal: bool = False,
+        ) -> torch.Tensor:
+            del key, value, attn_mask, dropout_p, is_causal
+            captured_queries.append(query.detach().clone())
+            return torch.zeros_like(query)
+
+        query = torch.randn(1, 2, 3, 8)
+        key = torch.randn(1, 2, 3, 8)
+        value = torch.randn(1, 2, 3, 8)
+
+        with (
+            patch.object(hf_mod, "_SDPA_SUPPORTS_SCALE", False),
+            patch.object(hf_mod, "scaled_dot_product_attention", new=_fake_sdpa),
+        ):
+            out_default = hf_mod.scaled_dot_product_attention_compat(
+                query=query, key=key, value=value, scale=None
+            )
+            out_scaled = hf_mod.scaled_dot_product_attention_compat(
+                query=query, key=key, value=value, scale=0.5
+            )
+
+        self.assertEqual(out_default.shape, query.shape)
+        self.assertEqual(out_scaled.shape, query.shape)
+        self.assertEqual(len(captured_queries), 2)
+        self.assertFalse(torch.allclose(captured_queries[0], captured_queries[1]))
+
+    def test_hf_sequence_classification_respects_return_dict_default(self):
+        """Ensure return_dict=None follows config.use_return_dict in HF classifier."""
+        from neobert.huggingface.modeling_neobert import (
+            NeoBERTConfig,
+            NeoBERTForSequenceClassification,
+        )
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=16,
+            flash_attention=False,
+            num_labels=2,
+        )
+        self.assertTrue(config.use_return_dict)
+
+        model = NeoBERTForSequenceClassification(config)
+        model.eval()
+        input_ids = torch.tensor([[1, 2, 3, 4]])
+        attention_mask = torch.ones_like(input_ids)
+
+        with torch.no_grad():
+            outputs_default = model(input_ids=input_ids, attention_mask=attention_mask)
+            outputs_tuple = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                return_dict=False,
+            )
+
+        self.assertFalse(isinstance(outputs_default, tuple))
+        self.assertTrue(hasattr(outputs_default, "logits"))
+        self.assertIsInstance(outputs_tuple, tuple)
+
+    def test_hf_base_model_respects_return_dict_flag(self):
+        """Ensure NeoBERT forward supports return_dict=False tuple outputs."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=16,
+            flash_attention=False,
+        )
+        model = NeoBERT(config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 4]])
+        attention_mask = torch.ones_like(input_ids)
+
+        with torch.no_grad():
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+                output_attentions=True,
+                return_dict=False,
+            )
+
+        self.assertIsInstance(outputs, tuple)
+        self.assertEqual(len(outputs), 3)
+        self.assertEqual(outputs[0].shape, (1, 4, 32))
+        self.assertIsInstance(outputs[1], tuple)
+        self.assertIsInstance(outputs[2], tuple)
+
+    def test_hf_lm_head_respects_return_dict_and_labels(self):
+        """Ensure MLM head supports loss labels and tuple outputs."""
+        from neobert.huggingface.modeling_neobert import NeoBERTConfig, NeoBERTLMHead
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=50,
+            max_length=16,
+            flash_attention=False,
+        )
+        model = NeoBERTLMHead(config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 4]])
+        labels = torch.tensor([[1, 2, -100, 4]])
+
+        with torch.no_grad():
+            outputs = model(input_ids=input_ids, labels=labels, return_dict=True)
+            outputs_tuple = model(
+                input_ids=input_ids,
+                labels=labels,
+                output_hidden_states=True,
+                return_dict=False,
+            )
+
+        self.assertIsNotNone(outputs.loss)
+        self.assertEqual(outputs.logits.shape, (1, 4, 50))
+        self.assertIsInstance(outputs_tuple, tuple)
+        self.assertEqual(len(outputs_tuple), 3)  # loss, logits, hidden_states
+
+    def test_hf_rejects_non_integer_input_ids(self):
+        """Ensure base model fails fast for non-integer input_ids."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=16,
+            flash_attention=False,
+        )
+        model = NeoBERT(config)
+        model.eval()
+
+        with self.assertRaisesRegex(TypeError, "input_ids must be an integer tensor"):
+            with torch.no_grad():
+                model(input_ids=torch.randn(1, 4))
+
+    def test_hf_rejects_nan_attention_mask(self):
+        """Ensure NaN values in attention_mask fail fast."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=16,
+            flash_attention=False,
+        )
+        model = NeoBERT(config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 4]])
+        bad_mask = torch.tensor([[1.0, float("nan"), 1.0, 1.0]])
+
+        with self.assertRaisesRegex(ValueError, "must not contain NaN"):
+            with torch.no_grad():
+                model(input_ids=input_ids, attention_mask=bad_mask)
+
+    def test_hf_non_rope_position_ids_out_of_range_fails_fast(self):
+        """Ensure learned positional embeddings check max position IDs."""
+        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=4,
+            rope=False,
+            flash_attention=False,
+        )
+        model = NeoBERT(config)
+        model.eval()
+
+        input_ids = torch.tensor([[1, 2, 3, 4]])
+        position_ids = torch.tensor([[1, 2, 3, 5]])
+
+        with self.assertRaisesRegex(
+            ValueError, "position_ids exceed configured max_length"
+        ):
+            with torch.no_grad():
+                model(input_ids=input_ids, position_ids=position_ids)
 
     def test_hf_flash_attention_silently_ignored(self):
         """Ensure flash_attention=True is silently accepted for HF config compat."""

@@ -99,14 +99,15 @@ def validate_model_files(model_path: Path) -> List[str]:
     :return list[str]: Missing file names.
     """
     # Project-specific expectations
-    required_files = [
-        "config.json",
-        "model.py",
-        "rotary.py",
-    ]
+    required_files = ["config.json", "rotary.py"]
     weight_files = ["model.safetensors", "pytorch_model.bin"]
 
     missing = [f for f in required_files if not (model_path / f).exists()]
+    if (
+        not (model_path / "modeling_neobert.py").exists()
+        and not (model_path / "model.py").exists()
+    ):
+        missing.append("modeling_neobert.py (or legacy model.py)")
     if not any((model_path / f).exists() for f in weight_files):
         missing.append("model weights (model.safetensors or pytorch_model.bin)")
     config = _load_config(model_path)
@@ -280,6 +281,90 @@ def test_masked_lm_loading(model_path: Path, verbose: bool = False) -> Tuple[boo
         return False, f"{type(e).__name__}: {e}"
 
 
+def test_attention_mask_parity(
+    model_path: Path,
+    *,
+    atol: float = 1e-6,
+    rtol: float = 1e-5,
+) -> Tuple[bool, str]:
+    """Verify attention-mask parity across equivalent mask representations.
+
+    :param Path model_path: Model directory path.
+    :param float atol: Absolute tolerance for tensor comparisons.
+    :param float rtol: Relative tolerance for tensor comparisons.
+    :return tuple[bool, str]: Success flag and message.
+    """
+    try:
+        tok = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
+        model = AutoModel.from_pretrained(str(model_path), trust_remote_code=True)
+        model.eval()
+
+        inputs = tok(
+            [
+                "mask parity check sentence.",
+                "short mask test.",
+            ],
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+        )
+        input_ids = inputs["input_ids"]
+        int_mask = inputs.get("attention_mask", None)
+        if int_mask is None:
+            return False, "tokenizer did not return attention_mask"
+
+        ones_mask = torch.ones_like(int_mask)
+        bool_mask = int_mask.bool()
+        additive_mask = torch.where(
+            int_mask == 1,
+            torch.tensor(0.0),
+            torch.tensor(float("-inf")),
+        )
+        additive_mask = additive_mask.to(torch.float32)
+
+        with torch.no_grad():
+            out_none = model(input_ids=input_ids).last_hidden_state
+            out_ones = model(
+                input_ids=input_ids,
+                attention_mask=ones_mask,
+            ).last_hidden_state
+            out_int_sdpa = model(
+                input_ids=input_ids,
+                attention_mask=int_mask,
+                output_attentions=False,
+            ).last_hidden_state
+            out_int_eager = model(
+                input_ids=input_ids,
+                attention_mask=int_mask,
+                output_attentions=True,
+            ).last_hidden_state
+            out_bool = model(
+                input_ids=input_ids,
+                attention_mask=bool_mask,
+            ).last_hidden_state
+            out_add = model(
+                input_ids=input_ids,
+                attention_mask=additive_mask,
+            ).last_hidden_state
+
+        checks = [
+            ("none_vs_ones", out_none, out_ones, atol, rtol),
+            ("int_vs_bool", out_int_sdpa, out_bool, atol, rtol),
+            ("int_vs_additive", out_int_sdpa, out_add, atol, rtol),
+            # Eager softmax and SDPA can differ slightly on full-sized models.
+            ("sdpa_vs_eager", out_int_sdpa, out_int_eager, 2e-5, rtol),
+        ]
+        for label, left, right, local_atol, local_rtol in checks:
+            if not torch.allclose(left, right, atol=local_atol, rtol=local_rtol):
+                max_diff = (left - right).abs().max().item()
+                return False, f"{label} mismatch (max_abs_diff={max_diff:.6f})"
+
+        print("mask_parity: OK")
+        return True, "ok"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
 def test_end_to_end_pipeline(model_path: Path) -> Tuple[bool, str]:
     """Test end-to-end tokenization and encoding.
 
@@ -310,7 +395,7 @@ def test_end_to_end_pipeline(model_path: Path) -> Tuple[bool, str]:
 
 
 def test_cosine_similarity_sanity(model_path: Path) -> Tuple[bool, str]:
-    """Sanity-check cosine similarities of CLS embeddings.
+    """Sanity-check cosine similarities of mean-pooled sentence embeddings.
 
     :param Path model_path: Model directory path.
     :return tuple[bool, str]: Success flag and message.
@@ -332,7 +417,13 @@ def test_cosine_similarity_sanity(model_path: Path) -> Tuple[bool, str]:
             for s in sents:
                 inp = tok(s, return_tensors="pt")
                 out = model(**inp)
-                embs.append(out.last_hidden_state[:, 0, :].squeeze())
+                mask = (
+                    inp["attention_mask"].unsqueeze(-1).to(out.last_hidden_state.dtype)
+                )
+                pooled = (out.last_hidden_state * mask).sum(dim=1) / mask.sum(
+                    dim=1
+                ).clamp(min=1)
+                embs.append(pooled.squeeze())
 
         def cos(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
             """Compute cosine similarity between two vectors.
@@ -422,11 +513,18 @@ def main() -> None:
     all_ok &= ok
 
     # 5) Pipeline
+    ok, msg = test_attention_mask_parity(model_path)
+    print(
+        ("mask parity: OK" if ok else "mask parity: FAIL") + ("" if ok else f" - {msg}")
+    )
+    all_ok &= ok
+
+    # 6) Pipeline
     ok, msg = test_end_to_end_pipeline(model_path)
     print(("pipeline: OK" if ok else "pipeline: FAIL") + ("" if ok else f" - {msg}"))
     all_ok &= ok
 
-    # 6) Cosine sanity
+    # 7) Cosine sanity
     ok, msg = test_cosine_similarity_sanity(model_path)
     print(("cosine: OK" if ok else "cosine: FAIL") + ("" if ok else f" - {msg}"))
     all_ok &= ok
