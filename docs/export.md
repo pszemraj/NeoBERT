@@ -57,6 +57,8 @@ python scripts/export-hf/validate.py outputs/<run>/hf/<export_name>
 
 Validator checks file presence, model/tokenizer loading, MLM forward pass, and
 basic output sanity.
+It now also checks attention-mask parity (no-mask vs all-ones and
+int/bool/additive equivalence) to catch exported-model mask regressions.
 
 ## Mapping Notes
 
