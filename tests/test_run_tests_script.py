@@ -65,6 +65,8 @@ def test_unittest_discovery_file_target_uses_parent_directory(monkeypatch) -> No
         return unittest.TestSuite()
 
     class _Result:
+        testsRun = 1
+
         def wasSuccessful(self) -> bool:
             return True
 
@@ -106,6 +108,8 @@ def test_unittest_discovery_nested_file_target_uses_nested_parent(
         return unittest.TestSuite()
 
     class _Result:
+        testsRun = 1
+
         def wasSuccessful(self) -> bool:
             return True
 
@@ -129,3 +133,36 @@ def test_unittest_discovery_nested_file_target_uses_nested_parent(
     assert captured["start_dir"] == str(expected_file.parent)
     assert captured["pattern"] == expected_file.name
     assert captured["top_level_dir"] == str(expected_file.parent)
+
+
+def test_unittest_discovery_fails_when_no_tests_collected(monkeypatch) -> None:
+    """Ensure unittest fallback fails closed when discovery finds zero tests."""
+    run_tests = _load_run_tests_module()
+
+    def fake_discover(self, start_dir, pattern, top_level_dir=None):
+        del self, start_dir, pattern, top_level_dir
+        return unittest.TestSuite()
+
+    class _Result:
+        testsRun = 0
+
+        def wasSuccessful(self) -> bool:
+            return True
+
+    class _Runner:
+        def __init__(self, verbosity: int) -> None:
+            self.verbosity = verbosity
+
+        def run(self, _suite: unittest.TestSuite) -> _Result:
+            return _Result()
+
+    monkeypatch.setattr(run_tests.unittest.TestLoader, "discover", fake_discover)
+    monkeypatch.setattr(run_tests.unittest, "TextTestRunner", _Runner)
+
+    success = run_tests._run_unittest_discovery(
+        test_dir="integration",
+        pattern="test_*.py",
+        verbosity=2,
+    )
+
+    assert not success

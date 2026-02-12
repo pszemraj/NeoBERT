@@ -55,6 +55,10 @@ def _run_unittest_discovery(test_dir: str | None, pattern: str, verbosity: int) 
     runner = unittest.TextTestRunner(verbosity=verbosity)
     result = runner.run(suite)
 
+    if result.testsRun == 0:
+        print("No tests were collected by unittest discovery.")
+        return False
+
     return result.wasSuccessful()
 
 
