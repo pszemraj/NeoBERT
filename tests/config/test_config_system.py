@@ -192,48 +192,31 @@ class TestConfigSystem(unittest.TestCase):
             sys.argv = original_argv
             os.unlink(path)
 
-    def test_cli_dataset_eval_samples_override(self):
-        """Ensure CLI parsing accepts dataset.eval_samples integer override."""
-        config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"
-
-        test_args = [
-            "script.py",
-            str(config_path),
-            "--dataset.eval_samples",
-            "2048",
+    def test_cli_dataset_and_tokenizer_scalar_overrides(self):
+        """Ensure CLI parsing applies common dataset/tokenizer scalar overrides."""
+        cases = [
+            (
+                self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml",
+                ["--dataset.eval_samples", "2048"],
+                lambda cfg: self.assertEqual(cfg.dataset.eval_samples, 2048),
+            ),
+            (
+                self.test_config_dir / "contrastive" / "test_tiny_contrastive.yaml",
+                ["--dataset.alpha", "0.75", "--tokenizer.truncation", "false"],
+                lambda cfg: (
+                    self.assertEqual(cfg.dataset.alpha, 0.75),
+                    self.assertFalse(cfg.tokenizer.truncation),
+                ),
+            ),
         ]
-
-        original_argv = sys.argv
-        sys.argv = test_args
-        try:
-            config = load_config_from_args()
-            self.assertEqual(config.dataset.eval_samples, 2048)
-        finally:
-            sys.argv = original_argv
-
-    def test_cli_dataset_alpha_and_tokenizer_truncation_overrides(self):
-        """Ensure CLI parsing supports dataset.alpha and tokenizer.truncation."""
-        config_path = (
-            self.test_config_dir / "contrastive" / "test_tiny_contrastive.yaml"
-        )
-
-        test_args = [
-            "script.py",
-            str(config_path),
-            "--dataset.alpha",
-            "0.75",
-            "--tokenizer.truncation",
-            "false",
-        ]
-
-        original_argv = sys.argv
-        sys.argv = test_args
-        try:
-            config = load_config_from_args()
-            self.assertEqual(config.dataset.alpha, 0.75)
-            self.assertFalse(config.tokenizer.truncation)
-        finally:
-            sys.argv = original_argv
+        for config_path, cli_tokens, checker in cases:
+            with self.subTest(config=str(config_path), cli_tokens=cli_tokens):
+                original_argv = sys.argv
+                sys.argv = ["script.py", str(config_path), *cli_tokens]
+                try:
+                    checker(load_config_from_args())
+                finally:
+                    sys.argv = original_argv
 
     def test_nested_config_override(self):
         """Test deeply nested configuration overrides."""
@@ -404,15 +387,11 @@ optimizer:
                 if "wandb.name" in expected:
                     self.assertEqual(cfg.wandb.name, expected["wandb.name"])
 
-    def test_load_dot_overrides_unknown_path_raises(self):
-        """Ensure unknown dot-path overrides fail with clear diagnostics."""
+    def test_load_dot_overrides_validation_errors(self):
+        """Ensure unknown paths and invalid bool coercions fail for dot overrides."""
         config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"
         with self.assertRaises(ValueError):
             ConfigLoader.load(str(config_path), overrides=["trainer.not_real=1"])
-
-    def test_load_dot_overrides_invalid_bool_raises(self):
-        """Ensure strict boolean coercion is enforced in list overrides."""
-        config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"
         with self.assertRaises(ValueError):
             ConfigLoader.load(
                 str(config_path),
@@ -420,14 +399,14 @@ optimizer:
             )
 
     def test_all_test_configs_load(self):
-        """Test that all test configuration files load without errors."""
+        """Test that all tiny task configs load with expected task/dataset metadata."""
         test_configs = [
-            "pretraining/test_tiny_pretrain.yaml",
-            "evaluation/test_tiny_glue.yaml",
-            "contrastive/test_tiny_contrastive.yaml",
+            ("pretraining/test_tiny_pretrain.yaml", "pretraining", None),
+            ("evaluation/test_tiny_glue.yaml", "glue", "cola"),
+            ("contrastive/test_tiny_contrastive.yaml", "contrastive", "ALLNLI"),
         ]
 
-        for config_name in test_configs:
+        for config_name, expected_task, expected_dataset in test_configs:
             config_path = self.test_config_dir / config_name
             with self.subTest(config=config_name):
                 self.assertTrue(
@@ -436,8 +415,9 @@ optimizer:
 
                 config = ConfigLoader.load(str(config_path))
                 self.assertIsInstance(config, Config)
-
-                # Check that all required fields are present
+                self.assertEqual(config.task, expected_task)
+                if expected_dataset is not None:
+                    self.assertEqual(config.dataset.name, expected_dataset)
                 self.assertIsNotNone(config.model.hidden_size)
                 self.assertIsNotNone(config.trainer.output_dir)
 
@@ -474,23 +454,6 @@ optimizer:
         finally:
             os.unlink(path)
 
-    def test_unknown_keys_raise(self):
-        """Ensure unknown config keys raise a clear error."""
-        config_data = {
-            "model": {"hidden_size": 32, "unknown_key": 123},
-            "trainer": {"output_dir": "./tmp"},
-        }
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            path = f.name
-            yaml.safe_dump(config_data, f)
-
-        try:
-            with self.assertRaises(ValueError):
-                ConfigLoader.load(path)
-        finally:
-            os.unlink(path)
-
     def test_preprocess_uses_tokenizer_path(self):
         """Ensure tokenizer path is preferred when provided."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -517,23 +480,24 @@ optimizer:
             expected_vocab_size = round_up_to_multiple(len(tokenizer), 128)
             self.assertEqual(processed.model.vocab_size, expected_vocab_size)
 
-    def test_missing_config_file(self):
-        """Test handling of missing config file."""
+    def test_config_loading_error_paths(self):
+        """Ensure missing files and unknown keys fail with clear exceptions."""
         with self.assertRaises(FileNotFoundError):
             ConfigLoader.load("nonexistent_config.yaml")
 
-    def test_task_specific_test_configs_load_expected_task_and_dataset(self):
-        """Ensure tiny task-specific configs resolve the expected task and dataset."""
-        cases = [
-            ("evaluation/test_tiny_glue.yaml", "glue", "cola"),
-            ("contrastive/test_tiny_contrastive.yaml", "contrastive", "ALLNLI"),
-        ]
-        for rel_path, expected_task, expected_dataset in cases:
-            with self.subTest(config=rel_path):
-                config_path = self.test_config_dir / rel_path
-                config = ConfigLoader.load(str(config_path))
-                self.assertEqual(config.task, expected_task)
-                self.assertEqual(config.dataset.name, expected_dataset)
+        config_data = {
+            "model": {"hidden_size": 32, "unknown_key": 123},
+            "trainer": {"output_dir": "./tmp"},
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            path = f.name
+            yaml.safe_dump(config_data, f)
+
+        try:
+            with self.assertRaises(ValueError):
+                ConfigLoader.load(path)
+        finally:
+            os.unlink(path)
 
     def test_legacy_contrastive_key_migrations(self):
         """Ensure legacy contrastive fields map cleanly and reject conflicts."""
@@ -693,37 +657,36 @@ optimizer:
                 )
                 self.assertEqual(found, expect_warning)
 
-    def test_legacy_report_to_is_ignored(self):
-        """Ensure trainer.report_to is treated as deprecated/ignored."""
+    def test_legacy_fields_are_ignored_with_deprecation_warnings(self):
+        """Ensure deprecated fields are ignored while emitting clear warnings."""
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            cfg = ConfigLoader.dict_to_config(
+            cfg_report = ConfigLoader.dict_to_config(
                 {"trainer": {"report_to": ["wandb"]}, "wandb": {"enabled": False}}
             )
-        self.assertEqual(cfg.trainer.report_to, [])
+            cfg_scheduler = ConfigLoader.dict_to_config(
+                {"scheduler": {"name": "cosine", "num_cycles": 1.5}}
+            )
+        self.assertEqual(cfg_report.trainer.report_to, [])
+        self.assertEqual(cfg_scheduler.scheduler.name, "cosine")
         self.assertTrue(
             any("trainer.report_to" in str(w.message) for w in caught),
             "Expected deprecation warning for trainer.report_to",
         )
-
-    def test_legacy_scheduler_num_cycles_is_ignored(self):
-        """Ensure scheduler.num_cycles is deprecated and removed cleanly."""
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            cfg = ConfigLoader.dict_to_config(
-                {"scheduler": {"name": "cosine", "num_cycles": 1.5}}
-            )
-        self.assertEqual(cfg.scheduler.name, "cosine")
         self.assertTrue(
             any("scheduler.num_cycles" in str(w.message) for w in caught),
             "Expected deprecation warning for scheduler.num_cycles",
         )
 
-    def test_dataset_alpha_must_be_positive(self):
-        """Ensure dataset.alpha must be strictly positive."""
+    def test_config_value_validation_errors(self):
+        """Ensure invalid scalar config values fail for known validation paths."""
         with self.assertRaises(ValueError):
             ConfigLoader.dict_to_config(
                 {"task": "contrastive", "dataset": {"alpha": 0.0}}
+            )
+        with self.assertRaises(ValueError):
+            ConfigLoader.dict_to_config(
+                {"task": "glue", "glue": {"preprocessing_num_proc": -1}}
             )
 
     def test_legacy_trainer_aliases_map_to_canonical_fields(self):
@@ -770,13 +733,6 @@ optimizer:
                 for w in caught
             )
         )
-
-    def test_glue_preprocessing_num_proc_validation(self):
-        """Ensure glue.preprocessing_num_proc must be >= 0."""
-        with self.assertRaises(ValueError):
-            ConfigLoader.dict_to_config(
-                {"task": "glue", "glue": {"preprocessing_num_proc": -1}}
-            )
 
 
 if __name__ == "__main__":
