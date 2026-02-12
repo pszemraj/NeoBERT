@@ -33,5 +33,6 @@ See `scripts/evaluation/glue/README.md` for:
 
 ## Related Docs
 
+- [docs/README.md](../../docs/README.md)
 - [docs/evaluation.md](../../docs/evaluation.md)
 - [docs/troubleshooting.md](../../docs/troubleshooting.md)

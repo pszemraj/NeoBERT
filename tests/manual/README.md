@@ -1,6 +1,7 @@
 # Manual Validation Scripts
 
 These scripts are intentionally excluded from default `pytest -q` runs.
+Use this file as the canonical command list for manual test scripts.
 
 Use them for opt-in manual validation and benchmarking:
 

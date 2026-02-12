@@ -7,29 +7,21 @@ This README is intentionally lightweight; canonical testing guidance is in
 ## Entry Points
 
 ```bash
-# Preferred
+# Preferred default suite
 conda run --name neobert pytest -q
 
-# Helper wrapper
+# Optional wrapper
 conda run --name neobert python tests/run_tests.py
 ```
 
-Useful helper flags:
+## Suite Layout
 
-```bash
-conda run --name neobert python tests/run_tests.py --test-dir training
-conda run --name neobert python tests/run_tests.py --pattern "test_*attention*.py"
-conda run --name neobert python tests/run_tests.py --no-pytest
-```
+- `tests/configs/` - tiny smoke-test configs used by tests.
+- `tests/manual/` - opt-in manual validation/benchmark scripts, excluded from
+  default discovery.
 
-## Notes
+## Canonical References
 
-- Tiny smoke configs live in `tests/configs/`.
-- Manual validation/benchmark scripts live in `tests/manual/` and are excluded
-  from default `pytest -q` discovery.
-- Run manual scripts explicitly when needed:
-  - `conda run --name neobert pytest -q tests/manual/test_muonclip_integration.py -s`
-  - `conda run --name neobert python tests/manual/test_muonclip_training.py`
-  - `conda run --name neobert python tests/manual/validate_muonclip.py`
-- For full workflows and test authoring conventions, see
-  [docs/testing.md](../docs/testing.md).
+- Process and authoring conventions: [docs/testing.md](../docs/testing.md)
+- Tiny test config catalog: [tests/configs/README.md](configs/README.md)
+- Manual-script commands: [tests/manual/README.md](manual/README.md)

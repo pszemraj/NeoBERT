@@ -43,13 +43,8 @@ conda run --name neobert python tests/run_tests.py --no-pytest
 `tests/manual/` contains opt-in validation/benchmark scripts and is excluded from
 default `pytest -q` discovery.
 
-Run manually when needed:
-
-```bash
-conda run --name neobert pytest -q tests/manual/test_muonclip_integration.py -s
-conda run --name neobert python tests/manual/test_muonclip_training.py
-conda run --name neobert python tests/manual/validate_muonclip.py
-```
+Canonical command list for those scripts is maintained in
+[tests/manual/README.md](../tests/manual/README.md).
 
 ## Test Authoring Guidelines
 

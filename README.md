@@ -74,6 +74,9 @@ python tests/run_tests.py
 - [Testing](docs/testing.md)
 - [Dev Notes](docs/dev.md)
 
+Directory READMEs under `configs/`, `scripts/`, `tests/`, and `jobs/` are
+entrypoint-oriented; runtime semantics are canonical in `docs/`.
+
 ## Repository Layout
 
 - `src/neobert/` - core model/trainer/config/runtime code
