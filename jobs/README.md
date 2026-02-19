@@ -6,6 +6,7 @@
 jobs/
   example_pretrain.sh
   example_evaluate.sh
+  pretrain_fp8_fsdp2_4gpu.sh
 ```
 
 These are convenience wrappers around scripts in `scripts/` and configs in
@@ -32,6 +33,15 @@ RUN_FULL=1 ./jobs/example_pretrain.sh
 
 # Evaluation example
 ./jobs/example_evaluate.sh
+
+# FP8 + FSDP2 pretraining on 4 GPUs (Accelerate launch)
+./jobs/pretrain_fp8_fsdp2_4gpu.sh
+
+# Optional overrides
+TRAIN_CONFIG=configs/pretraining/pretrain_neobert_fp8_4gpu.yaml \
+ACCELERATE_CONFIG=configs/accelerate/fsdp2_fp8_4gpu.yaml \
+WANDB_MODE=offline \
+./jobs/pretrain_fp8_fsdp2_4gpu.sh --trainer.max_steps 2000
 ```
 
 ## Notes

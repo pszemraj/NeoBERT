@@ -11,6 +11,7 @@ Field definitions/defaults are documented in
 
 ```text
 configs/
+  accelerate/
   pretraining/
   glue/
   contrastive/
@@ -28,6 +29,7 @@ configs/
 ## Directory Intent
 
 - `configs/pretraining/` - production/experiment pretraining recipes.
+- `configs/accelerate/` - Accelerate launcher configs (distributed runtime policy).
 - `configs/glue/` - per-task GLUE recipes and generated sweep configs.
 - `configs/contrastive/` - contrastive fine-tuning recipes.
 
