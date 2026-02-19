@@ -38,12 +38,24 @@ def _parse_cli_bool(value: str) -> bool:
     )
 
 
+def _parse_cli_csv_list(value: str) -> List[str]:
+    """Parse comma-separated CLI values into a string list.
+
+    :param str value: Raw CLI token, e.g. ``"decoder,output"``.
+    :return list[str]: Normalized list without empty entries.
+    """
+    raw = str(value).strip()
+    if not raw:
+        return []
+    return [token.strip() for token in raw.split(",") if token.strip()]
+
+
 def resolve_mixed_precision(value: Any, *, task: str) -> str:
     """Normalize and validate mixed-precision policy for a task.
 
     Accepted user values:
     - booleans: ``True`` -> ``"bf16"``, ``False`` -> ``"no"``
-    - strings: ``"bf16"``, ``"fp32"``, ``"no"``
+    - strings: ``"bf16"``, ``"fp32"``, ``"no"``, ``"fp8"`` (pretraining only)
 
     Runtime policy:
     - ``fp32`` is normalized to ``no``
@@ -54,7 +66,6 @@ def resolve_mixed_precision(value: Any, *, task: str) -> str:
     :raises ValueError: If the value is unsupported for the given task.
     :return str: Normalized precision mode.
     """
-    del task  # Mixed-precision policy is task-independent.
     if isinstance(value, bool):
         normalized = "bf16" if value else "no"
     else:
@@ -68,10 +79,19 @@ def resolve_mixed_precision(value: Any, *, task: str) -> str:
             "Use 'bf16' (recommended) or 'no'/'fp32'."
         )
 
+    if normalized == "fp8":
+        if str(task).strip().lower() != "pretraining":
+            raise ValueError(
+                "trainer.mixed_precision='fp8' is supported only for pretraining. "
+                f"Current task={task!r}."
+            )
+        return normalized
+
     valid_values = {"no", "bf16"}
     if normalized not in valid_values:
         raise ValueError(
-            "trainer.mixed_precision must be one of {'no','bf16','fp32'}, "
+            "trainer.mixed_precision must be one of {'no','bf16','fp32'} "
+            "(or 'fp8' for pretraining), "
             f"got {value!r}."
         )
     return normalized
@@ -216,6 +236,18 @@ class SchedulerConfig:
 
 
 @dataclass
+class FP8Config:
+    """FP8 (torchao) configuration for pretraining."""
+
+    recipe: str = "tensorwise"  # tensorwise, rowwise, rowwise_with_gw_hp
+    filter_fqns: List[str] = field(default_factory=list)
+    auto_filter_small_kn: bool = False
+    enable_fsdp_float8_all_gather: Optional[bool] = None
+    pad_inner_dim: Optional[bool] = None
+    use_regional_compilation: bool = True
+
+
+@dataclass
 class TrainerConfig:
     """Training loop and runtime configuration."""
 
@@ -235,6 +267,7 @@ class TrainerConfig:
     gradient_checkpointing: bool = False
     gradient_clipping: Optional[float] = None
     mixed_precision: str = "bf16"
+    fp8: FP8Config = field(default_factory=FP8Config)
     masked_logits_only_loss: bool = True
     torch_compile: bool = False
     torch_compile_dynamic: Optional[bool] = None
@@ -1361,6 +1394,18 @@ class ConfigLoader:
                     if key not in valid_muon:
                         unknown_keys.append(f"optimizer.muon_config.{key}")
 
+        # Validate nested trainer.fp8 keys if provided.
+        trainer_cfg = cfg_dict.get("trainer", {})
+        if isinstance(trainer_cfg, dict) and "fp8" in trainer_cfg:
+            fp8_cfg = trainer_cfg["fp8"]
+            if isinstance(fp8_cfg, dict):
+                valid_fp8 = {f.name for f in fields(FP8Config)}
+                for key in fp8_cfg:
+                    if key not in valid_fp8:
+                        unknown_keys.append(f"trainer.fp8.{key}")
+            else:
+                unknown_keys.append("trainer.fp8")
+
         if unknown_keys:
             unknown_keys.sort()
             raise ValueError(
@@ -1637,6 +1682,93 @@ class ConfigLoader:
             )
         except ValueError as exc:
             errors.append(str(exc))
+        else:
+            if config.trainer.mixed_precision == "fp8":
+                fp8_cfg = getattr(config.trainer, "fp8", None)
+                if isinstance(fp8_cfg, dict):
+                    hydrated_fp8 = FP8Config()
+                    for key, value in fp8_cfg.items():
+                        if hasattr(hydrated_fp8, key):
+                            setattr(hydrated_fp8, key, value)
+                    config.trainer.fp8 = hydrated_fp8
+                    fp8_cfg = hydrated_fp8
+                elif fp8_cfg is None:
+                    config.trainer.fp8 = FP8Config()
+                    fp8_cfg = config.trainer.fp8
+
+                if not isinstance(fp8_cfg, FP8Config):
+                    errors.append(
+                        "trainer.fp8 must be a mapping compatible with FP8Config."
+                    )
+                else:
+                    recipe = str(fp8_cfg.recipe).strip().lower()
+                    valid_recipes = {"tensorwise", "rowwise", "rowwise_with_gw_hp"}
+                    if recipe not in valid_recipes:
+                        errors.append(
+                            "trainer.fp8.recipe must be one of "
+                            f"{sorted(valid_recipes)}, got {fp8_cfg.recipe!r}."
+                        )
+                    else:
+                        fp8_cfg.recipe = recipe
+
+                    if isinstance(fp8_cfg.filter_fqns, str):
+                        fp8_cfg.filter_fqns = _parse_cli_csv_list(fp8_cfg.filter_fqns)
+                    elif fp8_cfg.filter_fqns is None:
+                        fp8_cfg.filter_fqns = []
+                    elif isinstance(fp8_cfg.filter_fqns, tuple):
+                        fp8_cfg.filter_fqns = list(fp8_cfg.filter_fqns)
+                    elif not isinstance(fp8_cfg.filter_fqns, list):
+                        errors.append(
+                            "trainer.fp8.filter_fqns must be a list of strings, "
+                            f"got {type(fp8_cfg.filter_fqns).__name__}."
+                        )
+
+                    if isinstance(fp8_cfg.filter_fqns, list):
+                        normalized_filter: list[str] = []
+                        for token in fp8_cfg.filter_fqns:
+                            if not isinstance(token, str):
+                                errors.append(
+                                    "trainer.fp8.filter_fqns entries must be strings, "
+                                    f"got {type(token).__name__}."
+                                )
+                                continue
+                            normalized = token.strip()
+                            if normalized:
+                                normalized_filter.append(normalized)
+                        fp8_cfg.filter_fqns = normalized_filter
+
+                    if not isinstance(fp8_cfg.auto_filter_small_kn, bool):
+                        errors.append(
+                            "trainer.fp8.auto_filter_small_kn must be a bool, got "
+                            f"{type(fp8_cfg.auto_filter_small_kn).__name__}."
+                        )
+                    if not isinstance(fp8_cfg.use_regional_compilation, bool):
+                        errors.append(
+                            "trainer.fp8.use_regional_compilation must be a bool, got "
+                            f"{type(fp8_cfg.use_regional_compilation).__name__}."
+                        )
+                    if fp8_cfg.enable_fsdp_float8_all_gather is not None and not isinstance(
+                        fp8_cfg.enable_fsdp_float8_all_gather, bool
+                    ):
+                        errors.append(
+                            "trainer.fp8.enable_fsdp_float8_all_gather must be a bool "
+                            "or null."
+                        )
+                    if fp8_cfg.pad_inner_dim is not None and not isinstance(
+                        fp8_cfg.pad_inner_dim, bool
+                    ):
+                        errors.append(
+                            "trainer.fp8.pad_inner_dim must be a bool or null."
+                        )
+
+                    if (
+                        recipe in {"rowwise", "rowwise_with_gw_hp"}
+                        and fp8_cfg.enable_fsdp_float8_all_gather is True
+                    ):
+                        errors.append(
+                            "trainer.fp8.enable_fsdp_float8_all_gather=true is only "
+                            "supported with trainer.fp8.recipe='tensorwise'."
+                        )
 
         valid_wandb_modes = {"online", "offline", "disabled"}
         wandb_mode = str(config.wandb.mode).strip().lower()
@@ -1788,9 +1920,26 @@ class ConfigLoader:
 
         # Update trainer config
         if "trainer" in cfg_dict:
-            for k, v in cfg_dict["trainer"].items():
+            trainer_dict = dict(cfg_dict["trainer"])
+            fp8_cfg_dict = trainer_dict.pop("fp8", None)
+
+            for k, v in trainer_dict.items():
                 if hasattr(config.trainer, k):
                     setattr(config.trainer, k, v)
+
+            if fp8_cfg_dict is not None:
+                if isinstance(fp8_cfg_dict, FP8Config):
+                    config.trainer.fp8 = fp8_cfg_dict
+                elif isinstance(fp8_cfg_dict, dict):
+                    fp8_cfg = FP8Config()
+                    for fk, fv in fp8_cfg_dict.items():
+                        if hasattr(fp8_cfg, fk):
+                            setattr(fp8_cfg, fk, fv)
+                    config.trainer.fp8 = fp8_cfg
+                else:
+                    raise TypeError(
+                        "trainer.fp8 must be a mapping or FP8Config instance"
+                    )
 
         # Update datacollator config
         if "datacollator" in cfg_dict:
@@ -2162,6 +2311,36 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         "--trainer.gradient_clipping", type=float, help="Gradient clipping"
     )
     parser.add_argument("--trainer.mixed_precision", type=str, help="Mixed precision")
+    parser.add_argument(
+        "--trainer.fp8.recipe",
+        type=str,
+        help="FP8 recipe: tensorwise, rowwise, or rowwise_with_gw_hp (pretraining only)",
+    )
+    parser.add_argument(
+        "--trainer.fp8.filter_fqns",
+        type=_parse_cli_csv_list,
+        help="Comma-separated module name substrings to exclude from FP8 conversion",
+    )
+    parser.add_argument(
+        "--trainer.fp8.auto_filter_small_kn",
+        type=_parse_cli_bool,
+        help="Enable torchao auto-filtering for small GEMMs in FP8 conversion",
+    )
+    parser.add_argument(
+        "--trainer.fp8.enable_fsdp_float8_all_gather",
+        type=_parse_cli_bool,
+        help="Enable FP8 FSDP2 all-gather for tensorwise FP8 recipe",
+    )
+    parser.add_argument(
+        "--trainer.fp8.pad_inner_dim",
+        type=_parse_cli_bool,
+        help="Pad linear inner dims to multiples of 16 for FP8 _scaled_mm kernels",
+    )
+    parser.add_argument(
+        "--trainer.fp8.use_regional_compilation",
+        type=_parse_cli_bool,
+        help="Enable regional compilation in Accelerate TorchDynamo plugin for FP8",
+    )
     parser.add_argument(
         "--trainer.masked_logits_only_loss",
         type=_parse_cli_bool,

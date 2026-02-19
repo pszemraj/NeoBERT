@@ -62,6 +62,15 @@ python tests/run_tests.py
 | Export HF | `python scripts/export-hf/export.py outputs/<run>/checkpoints/<step>`                                                |
 | Tests     | `python tests/run_tests.py`                                                                                          |
 
+## FP8 Pretraining
+
+- Example config: `configs/pretraining/pretrain_neobert_fp8.yaml`
+- Required runtime policy:
+  - `trainer.mixed_precision: fp8`
+  - `trainer.torch_compile: true`
+  - Accelerate FSDP2 launch (`fsdp_version: 2`)
+  - Accelerate `fsdp_cpu_ram_efficient_loading: false`
+
 ## Documentation
 
 - [docs/README.md](docs/README.md) (index + source-of-truth map)

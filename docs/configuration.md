@@ -292,7 +292,7 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | `trainer.eval_steps`                  | `int` | `10000`      | Eval interval in steps.                       |
 | `trainer.logging_steps`               | `int` | `100`        | Logging interval in steps.                    |
 | `trainer.output_dir`                  | `str` | `"./output"` | Output root for checkpoints and artifacts.    |
-| `trainer.mixed_precision`             | `str` | `"bf16"`     | `no`, `fp32`, or `bf16` (`fp16` unsupported). |
+| `trainer.mixed_precision`             | `str` | `"bf16"`     | `no`, `fp32`, `bf16`, or `fp8` (`fp8` is pretraining-only; `fp16` unsupported). |
 
 ### Stability and Performance
 
@@ -316,6 +316,21 @@ Overrides are validated with the same semantic checks as base YAML configs.
 > multi-objective mixing interface. Choose one path for the run.
 > The project default is `true`; use `false` only when intentionally running a
 > legacy full-logits baseline.
+
+### FP8 (Pretraining Only)
+
+| Key                                             | Type            | Default        | Description                                                                                          |
+| ----------------------------------------------- | --------------- | -------------- | ---------------------------------------------------------------------------------------------------- |
+| `trainer.fp8.recipe`                            | `str`           | `"tensorwise"` | FP8 recipe: `tensorwise`, `rowwise`, `rowwise_with_gw_hp`.                                          |
+| `trainer.fp8.filter_fqns`                       | `list[str]`     | `[]`           | Module-name substrings to exclude from FP8 linear conversion.                                       |
+| `trainer.fp8.auto_filter_small_kn`              | `bool`          | `false`        | Enable torchao auto-filter heuristics for small GEMMs.                                               |
+| `trainer.fp8.enable_fsdp_float8_all_gather`     | `bool \| None`  | `null`         | Tensorwise-only FSDP2 float8 all-gather toggle (`null` resolves to `true` in tensorwise mode).      |
+| `trainer.fp8.pad_inner_dim`                     | `bool \| None`  | `null`         | Tensorwise-only inner-dim padding for fp8 `_scaled_mm` (`null` resolves to `true` in tensorwise).   |
+| `trainer.fp8.use_regional_compilation`          | `bool`          | `true`         | Enable Accelerate TorchDynamo regional compilation in FP8 path.                                     |
+
+> [!IMPORTANT]
+> `trainer.mixed_precision: fp8` currently requires pretraining + FSDP2, and
+> rowwise recipes cannot enable `trainer.fp8.enable_fsdp_float8_all_gather`.
 
 ### Control and Legacy Compatibility
 

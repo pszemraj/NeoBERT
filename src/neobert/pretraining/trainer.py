@@ -42,6 +42,7 @@ from neobert.checkpointing import MODEL_WEIGHTS_NAME, save_state_dict_safetensor
 from neobert.config import (
     Config,
     ConfigLoader,
+    FP8Config,
     MuonConfig,
     resolve_mixed_precision,
     round_up_to_multiple,
@@ -194,6 +195,174 @@ def _resolve_fsdp_version(accelerator: Accelerator) -> int:
         return int(raw_version) if raw_version is not None else 1
     except (TypeError, ValueError):
         return 1
+
+
+def _find_first_last_linear_layer_names(
+    model: torch.nn.Module,
+) -> tuple[Optional[str], Optional[str]]:
+    """Return first/last ``nn.Linear`` module names from model traversal."""
+    first_linear: Optional[str] = None
+    last_linear: Optional[str] = None
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Linear):
+            if first_linear is None:
+                first_linear = name
+            last_linear = name
+    return first_linear, last_linear
+
+
+class _FP8ModuleFilter:
+    """Stateful FP8 linear-layer filter with first/last exclusions."""
+
+    def __init__(
+        self,
+        *,
+        recipe: str,
+        filter_fqns: list[str],
+        auto_filter_small_kn: bool,
+        auto_filter_factory: Optional[Callable[[str, list[str]], Callable[..., bool]]],
+    ) -> None:
+        self._recipe = recipe
+        self._filter_fqns = list(filter_fqns)
+        self._auto_filter_small_kn = bool(auto_filter_small_kn)
+        self._auto_filter_factory = auto_filter_factory
+        self._first_linear: Optional[str] = None
+        self._last_linear: Optional[str] = None
+        self._auto_filter: Optional[Callable[[torch.nn.Module, str], bool]] = None
+        self._is_bound = False
+
+    def bind_model(self, model: torch.nn.Module) -> None:
+        """Bind model-level state required by the filter before conversion."""
+        self._first_linear, self._last_linear = _find_first_last_linear_layer_names(
+            model
+        )
+        if self._auto_filter_small_kn:
+            if self._auto_filter_factory is None:
+                raise RuntimeError(
+                    "trainer.fp8.auto_filter_small_kn=true requires a torchao build "
+                    "that exposes torchao.float8._auto_filter_for_recipe."
+                )
+            self._auto_filter = self._auto_filter_factory(
+                self._recipe,
+                list(self._filter_fqns),
+            )
+        self._is_bound = True
+
+    def __call__(self, module: torch.nn.Module, fqn: str) -> bool:
+        """Return whether ``module`` should be converted to ``Float8Linear``."""
+        if not isinstance(module, torch.nn.Linear):
+            return False
+        if not self._is_bound:
+            raise RuntimeError(
+                "FP8 module filter was not bound to a model before conversion. "
+                "This is an internal error in pretraining FP8 setup."
+            )
+        if fqn in {self._first_linear, self._last_linear}:
+            return False
+        if module.in_features % 16 != 0 or module.out_features % 16 != 0:
+            return False
+        if any(pattern in fqn for pattern in self._filter_fqns):
+            return False
+        if self._auto_filter is not None and not self._auto_filter(module, fqn):
+            return False
+        return True
+
+
+def _build_fp8_accelerator_components(
+    cfg: Config,
+) -> tuple[Optional[Any], Optional[Any], Optional[_FP8ModuleFilter]]:
+    """Build FP8-specific Accelerate handlers and model filter state."""
+    if str(cfg.trainer.mixed_precision).strip().lower() != "fp8":
+        return None, None, None
+
+    if not bool(getattr(cfg.trainer, "torch_compile", False)):
+        raise RuntimeError(
+            "trainer.mixed_precision='fp8' requires trainer.torch_compile=true."
+        )
+
+    try:
+        from accelerate.utils import AORecipeKwargs, TorchDynamoPlugin
+    except ImportError as exc:
+        raise RuntimeError(
+            "FP8 training requires an Accelerate version with AORecipeKwargs and "
+            "TorchDynamoPlugin. Upgrade accelerate to a recent release."
+        ) from exc
+
+    try:
+        from torchao.float8 import Float8LinearConfig
+    except ImportError as exc:
+        raise RuntimeError(
+            "FP8 training requires torchao. Install torchao and retry "
+            "(for example: pip install torchao)."
+        ) from exc
+
+    fp8_cfg = getattr(cfg.trainer, "fp8", FP8Config())
+    recipe = str(getattr(fp8_cfg, "recipe", "tensorwise")).strip().lower()
+    filter_fqns = list(getattr(fp8_cfg, "filter_fqns", []))
+    auto_filter_small_kn = bool(getattr(fp8_cfg, "auto_filter_small_kn", False))
+    enable_all_gather = getattr(fp8_cfg, "enable_fsdp_float8_all_gather", None)
+    pad_inner_dim = getattr(fp8_cfg, "pad_inner_dim", None)
+
+    if recipe == "tensorwise":
+        if enable_all_gather is None:
+            enable_all_gather = True
+        if pad_inner_dim is None:
+            pad_inner_dim = True
+        float8_config = Float8LinearConfig(
+            enable_fsdp_float8_all_gather=bool(enable_all_gather),
+            pad_inner_dim=bool(pad_inner_dim),
+        )
+    else:
+        if enable_all_gather is True:
+            raise RuntimeError(
+                "trainer.fp8.enable_fsdp_float8_all_gather=true is only supported "
+                "with trainer.fp8.recipe='tensorwise'."
+            )
+        if not hasattr(Float8LinearConfig, "from_recipe_name"):
+            raise RuntimeError(
+                "Configured trainer.fp8.recipe requires torchao with "
+                "Float8LinearConfig.from_recipe_name(). Upgrade torchao."
+            )
+        float8_config = Float8LinearConfig.from_recipe_name(recipe)
+
+    auto_filter_factory = None
+    if auto_filter_small_kn:
+        try:
+            from torchao.float8 import _auto_filter_for_recipe
+        except (ImportError, AttributeError) as exc:
+            raise RuntimeError(
+                "trainer.fp8.auto_filter_small_kn=true requires "
+                "torchao.float8._auto_filter_for_recipe. Install a newer torchao "
+                "build and retry."
+            ) from exc
+        auto_filter_factory = _auto_filter_for_recipe
+
+    module_filter = _FP8ModuleFilter(
+        recipe=recipe,
+        filter_fqns=filter_fqns,
+        auto_filter_small_kn=auto_filter_small_kn,
+        auto_filter_factory=auto_filter_factory,
+    )
+    ao_recipe_handler = AORecipeKwargs(
+        config=float8_config,
+        module_filter_func=module_filter,
+    )
+    compile_backend = str(
+        getattr(cfg.trainer, "torch_compile_backend", "inductor")
+    ).lower()
+    if compile_backend not in {"inductor", "aot_eager", "eager"}:
+        logger.warning(
+            "Unknown trainer.torch_compile_backend for FP8 path "
+            f"('{compile_backend}'); using 'inductor'."
+        )
+        compile_backend = "inductor"
+    dynamo_plugin = TorchDynamoPlugin(
+        backend=compile_backend,
+        use_regional_compilation=bool(
+            getattr(fp8_cfg, "use_regional_compilation", True)
+        ),
+    )
+    return ao_recipe_handler, dynamo_plugin, module_filter
 
 
 @contextmanager
@@ -1687,7 +1856,7 @@ def trainer(cfg: Config) -> None:
         iteration=iteration,
     )
     # All parameters participate in the forward graph; keep DDP in fast-path mode.
-    kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
     wandb_enabled = cfg.wandb.enabled and cfg.wandb.mode != "disabled"
     cfg.model.attn_backend = resolve_runtime_attn_backend(
         cfg.model.attn_backend,
@@ -1706,19 +1875,43 @@ def trainer(cfg: Config) -> None:
         task="pretraining",
     )
     cfg.trainer.mixed_precision = mixed_precision
+    fp8_enabled = mixed_precision == "fp8"
+    ao_recipe_handler = None
+    dynamo_plugin = None
+    fp8_module_filter: Optional[_FP8ModuleFilter] = None
+    if fp8_enabled:
+        ao_recipe_handler, dynamo_plugin, fp8_module_filter = (
+            _build_fp8_accelerator_components(cfg)
+        )
 
-    accelerator = create_accelerator(
-        use_cpu=bool(getattr(cfg.trainer, "use_cpu", False)),
-        log=logger,
-        accelerator_factory=Accelerator,
-        step_scheduler_with_optimizer=False,  # enable manual control of the scheduler
-        mixed_precision=mixed_precision,
-        gradient_accumulation_steps=cfg.trainer.gradient_accumulation_steps,
-        log_with="wandb" if wandb_enabled else None,
-        project_config=project_config,
-        kwargs_handlers=[kwargs],
-        dataloader_config=dataloader_config,
-    )
+    kwargs_handlers: list[Any] = [ddp_kwargs]
+    if ao_recipe_handler is not None:
+        kwargs_handlers.append(ao_recipe_handler)
+
+    accelerator_kwargs: dict[str, Any] = {
+        "use_cpu": bool(getattr(cfg.trainer, "use_cpu", False)),
+        "log": logger,
+        "accelerator_factory": Accelerator,
+        "step_scheduler_with_optimizer": False,  # enable manual control of the scheduler
+        "mixed_precision": mixed_precision,
+        "gradient_accumulation_steps": cfg.trainer.gradient_accumulation_steps,
+        "log_with": "wandb" if wandb_enabled else None,
+        "project_config": project_config,
+        "kwargs_handlers": kwargs_handlers,
+        "dataloader_config": dataloader_config,
+    }
+    if dynamo_plugin is not None:
+        accelerator_kwargs["dynamo_plugin"] = dynamo_plugin
+
+    try:
+        accelerator = create_accelerator(**accelerator_kwargs)
+    except Exception as exc:
+        if fp8_enabled:
+            raise RuntimeError(
+                "Failed to initialize Accelerate FP8 torchao runtime. Ensure a "
+                "recent accelerate + torchao installation and retry."
+            ) from exc
+        raise
     if accelerator.distributed_type is DistributedType.MEGATRON_LM:
         raise RuntimeError(
             "Megatron-LM backend is not supported by this training loop. "
@@ -1736,6 +1929,11 @@ def trainer(cfg: Config) -> None:
             )
         else:
             logger.info("Checkpoint retention policy: disabled (keep all checkpoints).")
+    if fp8_enabled and accelerator.distributed_type is not DistributedType.FSDP:
+        raise RuntimeError(
+            "trainer.mixed_precision='fp8' requires FSDP2 runtime. "
+            "Launch with Accelerate FSDP (fsdp_version=2)."
+        )
     if accelerator.distributed_type is DistributedType.FSDP:
         fsdp_version = _resolve_fsdp_version(accelerator)
         if fsdp_version < 2:
@@ -1744,6 +1942,24 @@ def trainer(cfg: Config) -> None:
                 "FSDP v1 is unsupported; set Accelerate fsdp_version=2."
             )
         logger.info(f"FSDP2 runtime detected (fsdp_version={fsdp_version}).")
+        if fp8_enabled:
+            fsdp_plugin = getattr(getattr(accelerator, "state", None), "fsdp_plugin", None)
+            if bool(getattr(fsdp_plugin, "cpu_ram_efficient_loading", False)):
+                raise RuntimeError(
+                    "trainer.mixed_precision='fp8' with torchao is incompatible with "
+                    "FSDP2 cpu_ram_efficient_loading=true. Set it to false in the "
+                    "Accelerate FSDP config."
+                )
+            fp8_backend = str(getattr(accelerator, "fp8_backend", "")).lower()
+            if fp8_backend and "ao" not in fp8_backend:
+                raise RuntimeError(
+                    "trainer.mixed_precision='fp8' requires Accelerate AO backend "
+                    f"(torchao), got fp8_backend={fp8_backend!r}."
+                )
+            logger.info(
+                "FP8 torchao runtime enabled "
+                f"(recipe={cfg.trainer.fp8.recipe}, backend={fp8_backend or 'ao'})."
+            )
     validate_muon_distributed_compatibility(
         accelerator=accelerator,
         optimizer_name=cfg.optimizer.name,
@@ -2249,7 +2465,18 @@ def trainer(cfg: Config) -> None:
     if accelerator.is_main_process:
         model_summary(model, max_depth=3, show_param_shapes=True)
 
-    model = _maybe_compile_model(model, cfg, accelerator, logger)
+    if fp8_enabled:
+        if fp8_module_filter is None:
+            raise RuntimeError(
+                "FP8 runtime expected module filter state, but none was configured."
+            )
+        fp8_module_filter.bind_model(model)
+        logger.info(
+            "Skipping pre-prepare torch.compile for FP8: Accelerate TorchDynamoPlugin "
+            "will compile in the FSDP2 prepare path."
+        )
+    else:
+        model = _maybe_compile_model(model, cfg, accelerator, logger)
 
     # Optimizer and Scheduler
     # Log if using MuonClip optimizer

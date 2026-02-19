@@ -717,6 +717,105 @@ optimizer:
                 }
             )
 
+    def test_fp8_mixed_precision_task_gating(self):
+        """FP8 mixed precision should be accepted only for pretraining."""
+        cfg = ConfigLoader.dict_to_config(
+            {"task": "pretraining", "trainer": {"mixed_precision": "fp8"}}
+        )
+        self.assertEqual(cfg.trainer.mixed_precision, "fp8")
+        self.assertEqual(cfg.trainer.fp8.recipe, "tensorwise")
+
+        with self.assertRaises(ValueError):
+            ConfigLoader.dict_to_config(
+                {"task": "contrastive", "trainer": {"mixed_precision": "fp8"}}
+            )
+        with self.assertRaises(ValueError):
+            ConfigLoader.dict_to_config(
+                {"task": "mteb", "trainer": {"mixed_precision": "fp8"}}
+            )
+
+    def test_fp8_recipe_validation_and_rowwise_allgather_guard(self):
+        """Validate trainer.fp8 recipe values and tensorwise-only all-gather."""
+        with self.assertRaises(ValueError):
+            ConfigLoader.dict_to_config(
+                {
+                    "task": "pretraining",
+                    "trainer": {
+                        "mixed_precision": "fp8",
+                        "fp8": {"recipe": "invalid_recipe"},
+                    },
+                }
+            )
+
+        with self.assertRaises(ValueError):
+            ConfigLoader.dict_to_config(
+                {
+                    "task": "pretraining",
+                    "trainer": {
+                        "mixed_precision": "fp8",
+                        "fp8": {
+                            "recipe": "rowwise",
+                            "enable_fsdp_float8_all_gather": True,
+                        },
+                    },
+                }
+            )
+
+    def test_fp8_unknown_nested_key_rejected(self):
+        """Unknown trainer.fp8 keys should fail strict config validation."""
+        with self.assertRaises(ValueError):
+            ConfigLoader.dict_to_config(
+                {"task": "pretraining", "trainer": {"fp8": {"unknown_key": "x"}}}
+            )
+
+    def test_cli_fp8_nested_overrides(self):
+        """CLI should parse nested trainer.fp8 overrides, including CSV list fields."""
+        config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"
+        original_argv = sys.argv
+        sys.argv = [
+            "script.py",
+            str(config_path),
+            "--trainer.mixed_precision",
+            "fp8",
+            "--trainer.torch_compile",
+            "true",
+            "--trainer.fp8.recipe",
+            "rowwise",
+            "--trainer.fp8.filter_fqns",
+            "decoder, output",
+            "--trainer.fp8.enable_fsdp_float8_all_gather",
+            "false",
+            "--trainer.fp8.auto_filter_small_kn",
+            "false",
+            "--trainer.fp8.use_regional_compilation",
+            "true",
+        ]
+        try:
+            cfg = load_config_from_args()
+        finally:
+            sys.argv = original_argv
+
+        self.assertEqual(cfg.trainer.mixed_precision, "fp8")
+        self.assertTrue(cfg.trainer.torch_compile)
+        self.assertEqual(cfg.trainer.fp8.recipe, "rowwise")
+        self.assertEqual(cfg.trainer.fp8.filter_fqns, ["decoder", "output"])
+        self.assertFalse(cfg.trainer.fp8.enable_fsdp_float8_all_gather)
+        self.assertFalse(cfg.trainer.fp8.auto_filter_small_kn)
+        self.assertTrue(cfg.trainer.fp8.use_regional_compilation)
+
+    def test_fp8_example_config_loads(self):
+        """Ensure the shipped pretraining FP8 example config parses cleanly."""
+        repo_root = Path(__file__).resolve().parents[1]
+        config_path = (
+            repo_root / "configs" / "pretraining" / "pretrain_neobert_fp8.yaml"
+        )
+        self.assertTrue(config_path.exists(), f"Missing config: {config_path}")
+        cfg = ConfigLoader.load(str(config_path))
+        self.assertEqual(cfg.task, "pretraining")
+        self.assertEqual(cfg.trainer.mixed_precision, "fp8")
+        self.assertTrue(cfg.trainer.torch_compile)
+        self.assertEqual(cfg.trainer.fp8.recipe, "tensorwise")
+
     def test_legacy_trainer_aliases_map_to_canonical_fields(self):
         """Ensure legacy trainer aliases map to canonical fields."""
         with warnings.catch_warnings(record=True) as caught:

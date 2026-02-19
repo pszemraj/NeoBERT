@@ -1,0 +1,87 @@
+task: "pretraining"
+
+model:
+  hidden_size: 768
+  num_hidden_layers: 12
+  num_attention_heads: 12
+  intermediate_size: 3072
+  dropout_prob: 0.0
+  vocab_size: 30522
+  max_position_embeddings: 4096
+  attn_backend: flash_attn_varlen
+  kernel_backend: auto
+  ngpt: false
+  hidden_act: "swiglu"
+  rope: true
+  rms_norm: true
+
+dataset:
+  name: "wikipedia"
+  path: null
+  config: "20220301.en"
+  trust_remote_code: true
+  streaming: true
+  num_proc: 16
+  num_workers: 4
+  max_seq_length: 512
+  train_split: "train[:1%]"
+  eval_split: null
+  eval_samples: 2048
+
+tokenizer:
+  name: "bert-base-uncased"
+  vocab_size: 30522
+  max_length: 512
+  truncation: true
+
+datacollator:
+  mlm_probability: 0.15
+  mask_all: false
+  pad_to_multiple_of: 8
+
+trainer:
+  output_dir: "./outputs/neobert_pretrain_fp8"
+  max_steps: 1000000
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 1
+  enforce_full_packed_batches: true
+  logging_steps: 100
+  log_train_accuracy: false
+  log_grad_norm: true
+  log_weight_norms: true
+  eval_steps: 10000
+  save_steps: 10000
+  mixed_precision: "fp8"
+  torch_compile: true
+  torch_compile_backend: "inductor"
+  fp8:
+    recipe: "tensorwise"
+    filter_fqns: []
+    auto_filter_small_kn: false
+    enable_fsdp_float8_all_gather: true
+    pad_inner_dim: true
+    use_regional_compilation: true
+  masked_logits_only_loss: true
+  gradient_checkpointing: false
+  resume_from_checkpoint: false
+
+optimizer:
+  name: "adamw"
+  lr: 1e-4
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  eps: 1e-8
+
+scheduler:
+  name: "cosine"
+  warmup_steps: 10000
+  total_steps: 1000000
+
+wandb:
+  enabled: true
+  project: "neobert-pretraining"
+  name: "neobert_pretrain_fp8"
+  mode: "online"
+
+seed: 42

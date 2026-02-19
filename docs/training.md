@@ -87,14 +87,31 @@ Runtime behavior:
 
 ## Mixed Precision and Compile
 
-- `trainer.mixed_precision`: `no | fp32 | bf16` (`bf16` recommended default)
+- `trainer.mixed_precision`: `no | fp32 | bf16 | fp8`
 - runtime normalization: `fp32 -> no`, `true -> bf16`, `false -> no`
 - `fp16` is unsupported in NeoBERT training paths
+- `fp8` is pretraining-only and requires FSDP2 runtime
 - `trainer.torch_compile`: enable `torch.compile`
 - `trainer.torch_compile_backend`: `inductor | aot_eager | eager`
 - `trainer.torch_compile_dynamic`: optional override for dynamic-shape compile;
   default behavior prefers static-shape compile for stability.
 - `trainer.masked_logits_only_loss`: `true | false`
+
+### FP8 (torchao + FSDP2)
+
+- enable with `trainer.mixed_precision: fp8`
+- required guardrails:
+  - launch with Accelerate FSDP2 (`fsdp_version: 2`)
+  - disable `fsdp_cpu_ram_efficient_loading` in Accelerate config
+  - set `trainer.torch_compile: true`
+- FP8 controls live under `trainer.fp8.*`:
+  - `recipe`: `tensorwise` (default), `rowwise`, `rowwise_with_gw_hp`
+  - `filter_fqns`: module name substrings to exclude from FP8 conversion
+  - `auto_filter_small_kn`: optional torchao auto-filtering for small GEMMs
+  - `enable_fsdp_float8_all_gather`: tensorwise-only (default `true`)
+  - `pad_inner_dim`: tensorwise-only (default `true`)
+  - `use_regional_compilation`: TorchDynamo regional compilation toggle
+- recommended starting point: `configs/pretraining/pretrain_neobert_fp8.yaml`
 
 ## MLM Loss Path Selection
 

@@ -61,6 +61,72 @@ class TestPretrainPipeline:
                 trainer(invalid_loss_cfg)
             mocked_tokenizer.assert_not_called()
 
+        fp8_no_compile_cfg = _base_config()
+        fp8_no_compile_cfg.trainer.mixed_precision = "fp8"
+        fp8_no_compile_cfg.trainer.torch_compile = False
+        with patch("neobert.pretraining.trainer.get_tokenizer") as mocked_tokenizer:
+            with pytest.raises(RuntimeError, match="torch_compile=true"):
+                trainer(fp8_no_compile_cfg)
+            mocked_tokenizer.assert_not_called()
+
+        fp8_non_fsdp_cfg = _base_config()
+        fp8_non_fsdp_cfg.trainer.mixed_precision = "fp8"
+        fp8_non_fsdp_cfg.trainer.torch_compile = True
+
+        class _FP8FilterStub:
+            @staticmethod
+            def bind_model(_model):
+                return None
+
+        class _NonFSDPAcceleratorStub:
+            distributed_type = DistributedType.NO
+            state = object()
+
+        with patch(
+            "neobert.pretraining.trainer._build_fp8_accelerator_components",
+            return_value=(object(), object(), _FP8FilterStub()),
+        ):
+            with patch(
+                "neobert.pretraining.trainer.Accelerator",
+                return_value=_NonFSDPAcceleratorStub(),
+            ):
+                with patch(
+                    "neobert.pretraining.trainer.get_tokenizer"
+                ) as mocked_tokenizer:
+                    with pytest.raises(RuntimeError, match="requires FSDP2 runtime"):
+                        trainer(fp8_non_fsdp_cfg)
+                    mocked_tokenizer.assert_not_called()
+
+        fp8_cpu_ram_cfg = _base_config()
+        fp8_cpu_ram_cfg.trainer.mixed_precision = "fp8"
+        fp8_cpu_ram_cfg.trainer.torch_compile = True
+
+        class _FSDPPluginCPUStub:
+            fsdp_version = 2
+            cpu_ram_efficient_loading = True
+
+        class _FSDPCPUStateStub:
+            fsdp_plugin = _FSDPPluginCPUStub()
+
+        class _FSDPCPUAcceleratorStub:
+            distributed_type = DistributedType.FSDP
+            state = _FSDPCPUStateStub()
+
+        with patch(
+            "neobert.pretraining.trainer._build_fp8_accelerator_components",
+            return_value=(object(), object(), _FP8FilterStub()),
+        ):
+            with patch(
+                "neobert.pretraining.trainer.Accelerator",
+                return_value=_FSDPCPUAcceleratorStub(),
+            ):
+                with patch(
+                    "neobert.pretraining.trainer.get_tokenizer"
+                ) as mocked_tokenizer:
+                    with pytest.raises(RuntimeError, match="cpu_ram_efficient_loading"):
+                        trainer(fp8_cpu_ram_cfg)
+                    mocked_tokenizer.assert_not_called()
+
         fsdp_cfg = _base_config()
 
         class _FSDPPluginStub:
