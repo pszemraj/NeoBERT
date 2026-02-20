@@ -17,6 +17,11 @@ from torch.utils.hooks import RemovableHandle
 logger = logging.getLogger(__name__)
 
 try:
+    from torch.distributed.tensor import DTensor as _TorchDTensor
+except Exception:  # pragma: no cover - import safety for stripped torch builds
+    _TorchDTensor = None
+
+try:
     _dynamo_disable = torch._dynamo.disable  # pyright: ignore[reportAttributeAccessIssue]
 except Exception:
 
@@ -523,6 +528,7 @@ class MuonClipOptimizer(Optimizer):
         self._layer_mapping = dict(self.config.clipping_layers_mapping)
         self._polar_coeff_cache: Dict[int, List[Tuple[float, float, float]]] = {}
         self._polar_work_dtype: Optional[torch.dtype] = None
+        self._warned_dtensor_qk_message: set[str] = set()
         if torch.cuda.is_available():
             try:
                 # bfloat16 offers good perf/stability balance for polar iteration
@@ -561,6 +567,30 @@ class MuonClipOptimizer(Optimizer):
             logger.warning(
                 "Gradient anomaly detection enabled - training will be slower"
             )
+
+    @staticmethod
+    def _is_dtensor(value: Any) -> bool:
+        """Return whether ``value`` is a DTensor instance."""
+        return _TorchDTensor is not None and isinstance(value, _TorchDTensor)
+
+    def _local_param_view(self, param: torch.Tensor) -> Tuple[torch.Tensor, bool]:
+        """Return a local tensor view for DTensor params.
+
+        :param torch.Tensor param: Candidate parameter tensor (Tensor or DTensor).
+        :return tuple[torch.Tensor, bool]: (local/view tensor, is_dtensor flag).
+        """
+        if self._is_dtensor(param):
+            to_local = getattr(param, "to_local", None)
+            if callable(to_local):
+                return to_local(), True
+        return param, False
+
+    def _warn_dtensor_once(self, key: str, message: str) -> None:
+        """Log a DTensor compatibility warning once per optimizer instance."""
+        if key in self._warned_dtensor_qk_message:
+            return
+        self._warned_dtensor_qk_message.add(key)
+        logger.warning(message)
 
     def should_clip_update(self, update_step: int) -> bool:
         """Return True if QK clipping should run on this optimizer update step.
@@ -1212,26 +1242,58 @@ class MuonClipOptimizer(Optimizer):
         :param torch.nn.Module | None layer: Optional encoder layer (ngpt metadata).
         :return tuple[torch.Tensor | None, float | None]: Eta per head and max logit.
         """
+        local_param, is_dtensor = self._local_param_view(param)
         try:
-            inputs = inputs.to(device=param.device, dtype=param.dtype)
-            projections = torch.matmul(inputs, param.transpose(0, 1))
+            inputs = inputs.to(device=local_param.device, dtype=local_param.dtype)
+            projections = torch.matmul(inputs, local_param.transpose(0, 1))
         except RuntimeError as exc:
-            logger.error(f"Failed to compute fused QKV projections: {exc}")
+            if is_dtensor:
+                self._warn_dtensor_once(
+                    "dtensor_fused_projection_error",
+                    "Skipping Dion2 QK clipping for a DTensor-fused layer due to "
+                    f"projection failure: {exc}",
+                )
+            else:
+                logger.error(f"Failed to compute fused QKV projections: {exc}")
             return None, None
 
         batch, seq_len, _ = projections.shape
-        expected = 3 * self.model_config.hidden_size
-        if projections.shape[-1] != expected:
-            logger.error(
-                "Unexpected fused QKV projection shape "
-                f"{projections.shape} (expected last dim {expected})"
-            )
+        if projections.shape[-1] % 3 != 0:
+            if is_dtensor:
+                self._warn_dtensor_once(
+                    "dtensor_fused_projection_width",
+                    "Skipping Dion2 QK clipping for DTensor-fused layer: "
+                    f"projection width {projections.shape[-1]} is not divisible by 3.",
+                )
+            else:
+                logger.error(
+                    "Unexpected fused QKV projection shape "
+                    f"{projections.shape}; last dim must be divisible by 3."
+                )
             return None, None
 
+        local_hidden = projections.shape[-1] // 3
+        if local_hidden % self.model_config.dim_head != 0:
+            if is_dtensor:
+                self._warn_dtensor_once(
+                    "dtensor_fused_head_partition",
+                    "Skipping Dion2 QK clipping for DTensor-fused layer: "
+                    f"local hidden width {local_hidden} is not divisible by head_dim "
+                    f"{self.model_config.dim_head}.",
+                )
+            else:
+                expected = 3 * self.model_config.hidden_size
+                logger.error(
+                    "Unexpected fused QKV projection shape "
+                    f"{projections.shape} (expected last dim {expected})"
+                )
+            return None, None
+
+        local_heads = local_hidden // self.model_config.dim_head
         proj = projections.view(
             batch,
             seq_len,
-            self.model_config.num_attention_heads,
+            local_heads,
             self.model_config.dim_head * 3,
         )
         xq, xk, _ = proj.chunk(3, dim=-1)
@@ -1266,22 +1328,62 @@ class MuonClipOptimizer(Optimizer):
         :param torch.nn.Module | None layer: Optional encoder layer (ngpt metadata).
         :return tuple[torch.Tensor | None, float | None]: Eta per head and max logit.
         """
+        q_local, q_is_dtensor = self._local_param_view(q_param)
+        k_local, k_is_dtensor = self._local_param_view(k_param)
+        is_dtensor = q_is_dtensor or k_is_dtensor
         try:
-            inputs_q = inputs.to(device=q_param.device, dtype=q_param.dtype)
-            inputs_k = inputs.to(device=k_param.device, dtype=k_param.dtype)
-            q_proj = torch.matmul(inputs_q, q_param.transpose(0, 1))
-            k_proj = torch.matmul(inputs_k, k_param.transpose(0, 1))
+            inputs_q = inputs.to(device=q_local.device, dtype=q_local.dtype)
+            inputs_k = inputs.to(device=k_local.device, dtype=k_local.dtype)
+            q_proj = torch.matmul(inputs_q, q_local.transpose(0, 1))
+            k_proj = torch.matmul(inputs_k, k_local.transpose(0, 1))
         except RuntimeError as exc:
-            logger.error(f"Failed to compute separate Q/K projections: {exc}")
+            if is_dtensor:
+                self._warn_dtensor_once(
+                    "dtensor_separate_projection_error",
+                    "Skipping Dion2 QK clipping for DTensor Q/K layer due to "
+                    f"projection failure: {exc}",
+                )
+            else:
+                logger.error(f"Failed to compute separate Q/K projections: {exc}")
             return None, None
 
         batch, seq_len, _ = q_proj.shape
         head_dim = self.model_config.dim_head
+        if q_proj.shape[-1] != k_proj.shape[-1]:
+            if is_dtensor:
+                self._warn_dtensor_once(
+                    "dtensor_separate_projection_mismatch",
+                    "Skipping Dion2 QK clipping for DTensor Q/K layer: "
+                    f"q width {q_proj.shape[-1]} != k width {k_proj.shape[-1]}.",
+                )
+            else:
+                logger.error(
+                    "Failed to compute separate Q/K projections: "
+                    f"q width {q_proj.shape[-1]} != k width {k_proj.shape[-1]}."
+                )
+            return None, None
+        if q_proj.shape[-1] % head_dim != 0:
+            if is_dtensor:
+                self._warn_dtensor_once(
+                    "dtensor_separate_head_partition",
+                    "Skipping Dion2 QK clipping for DTensor Q/K layer: "
+                    f"local width {q_proj.shape[-1]} is not divisible by head_dim "
+                    f"{head_dim}.",
+                )
+            else:
+                logger.error(
+                    "Failed to compute separate Q/K projections: "
+                    f"projection width {q_proj.shape[-1]} is not divisible by "
+                    f"head_dim {head_dim}."
+                )
+            return None, None
+
+        local_heads = q_proj.shape[-1] // head_dim
         q_proj = q_proj.view(
-            batch, seq_len, self.model_config.num_attention_heads, head_dim
+            batch, seq_len, local_heads, head_dim
         )
         k_proj = k_proj.view(
-            batch, seq_len, self.model_config.num_attention_heads, head_dim
+            batch, seq_len, local_heads, head_dim
         )
 
         return self._compute_eta_from_qk(
@@ -1596,26 +1698,52 @@ class MuonClipOptimizer(Optimizer):
         hidden_size = self.model_config.hidden_size
         num_heads = self.model_config.num_attention_heads
         head_dim = hidden_size // num_heads
+        local_param, is_dtensor = self._local_param_view(param)
 
-        expected_shape = (3 * hidden_size, hidden_size)
-        if param.shape != expected_shape:
+        if local_param.shape[1] != hidden_size or local_param.shape[0] % (
+            3 * head_dim
+        ) != 0:
+            if is_dtensor:
+                self._warn_dtensor_once(
+                    "dtensor_fused_scale_layout",
+                    "Skipping Dion2 QK clipping scale for DTensor fused QKV layout "
+                    f"{tuple(local_param.shape)}; expected cols={hidden_size} and "
+                    f"rows divisible by {3 * head_dim}.",
+                )
+                return
+            expected_shape = (3 * hidden_size, hidden_size)
             raise RuntimeError(
                 "Unexpected fused QKV parameter layout "
                 f"{tuple(param.shape)}; expected {expected_shape} for per-head interleaved "
                 "rows [Q_h, K_h, V_h]."
             )
+        local_heads = local_param.shape[0] // (3 * head_dim)
+        if int(eta_per_head.numel()) != int(local_heads):
+            if is_dtensor:
+                self._warn_dtensor_once(
+                    "dtensor_fused_scale_eta_mismatch",
+                    "Skipping Dion2 QK clipping scale for DTensor fused QKV layout "
+                    f"{tuple(local_param.shape)}; eta has {eta_per_head.numel()} "
+                    f"entries but local shard expects {local_heads}.",
+                )
+                return
+            raise RuntimeError(
+                "Unexpected eta_per_head size "
+                f"{eta_per_head.numel()} for fused QKV layout with {local_heads} heads."
+            )
 
         # Ensure scaling factors are finite and on the right device/dtype
-        eta = eta_per_head.to(device=param.device, dtype=param.dtype)
+        eta = eta_per_head.to(device=local_param.device, dtype=local_param.dtype)
         eta = torch.clamp(eta, min=1e-6, max=1.0)
 
         # Compute per-head scaling powers
-        eta_q = eta.pow(alpha).view(num_heads, 1, 1)
-        eta_k = eta.pow(1 - alpha).view(num_heads, 1, 1)
+        eta_q = eta.pow(alpha).view(local_heads, 1, 1)
+        eta_k = eta.pow(1 - alpha).view(local_heads, 1, 1)
 
-        # Reshape to [H, 3*D, hidden] to match EncoderBlock._att_block:
+        # Reshape local shard to [H_local, 3*D, hidden] to match
+        # EncoderBlock._att_block:
         # self.qkv(x).view(B,S,H,3*D).chunk(3, dim=-1).
-        param_view = param.view(num_heads, 3 * head_dim, hidden_size)
+        param_view = local_param.view(local_heads, 3 * head_dim, hidden_size)
         q_slice = slice(0, head_dim)
         k_slice = slice(head_dim, 2 * head_dim)
         param_view[:, q_slice].mul_(eta_q)  # Query rows per head
@@ -1639,20 +1767,45 @@ class MuonClipOptimizer(Optimizer):
         hidden_size = self.model_config.hidden_size
         num_heads = self.model_config.num_attention_heads
         head_dim = hidden_size // num_heads
+        local_param, is_dtensor = self._local_param_view(param)
 
-        if param.shape[0] != hidden_size:
+        if local_param.shape[0] % head_dim != 0:
+            if is_dtensor:
+                self._warn_dtensor_once(
+                    f"dtensor_{proj_type}_scale_layout",
+                    "Skipping Dion2 QK clipping scale for DTensor "
+                    f"{proj_type}-projection layout {tuple(local_param.shape)}; "
+                    f"rows must be divisible by head_dim {head_dim}.",
+                )
+                return
             raise RuntimeError(
                 f"Unexpected {proj_type}-projection shape {tuple(param.shape)}; "
-                f"expected first dimension {hidden_size}"
+                f"expected first dimension divisible by head_dim={head_dim}"
+            )
+        local_heads = local_param.shape[0] // head_dim
+        if int(eta_per_head.numel()) != int(local_heads):
+            if is_dtensor:
+                self._warn_dtensor_once(
+                    f"dtensor_{proj_type}_scale_eta_mismatch",
+                    "Skipping Dion2 QK clipping scale for DTensor "
+                    f"{proj_type}-projection layout {tuple(local_param.shape)}; "
+                    f"eta has {eta_per_head.numel()} entries but local shard expects "
+                    f"{local_heads}.",
+                )
+                return
+            raise RuntimeError(
+                "Unexpected eta_per_head size "
+                f"{eta_per_head.numel()} for {proj_type}-projection layout with "
+                f"{local_heads} heads."
             )
 
-        eta = eta_per_head.to(device=param.device, dtype=param.dtype)
+        eta = eta_per_head.to(device=local_param.device, dtype=local_param.dtype)
         eta = torch.clamp(eta, min=1e-6, max=1.0)
 
         power = alpha if proj_type == "q" else (1 - alpha)
-        eta_power = eta.pow(power).view(num_heads, 1, 1)
+        eta_power = eta.pow(power).view(local_heads, 1, 1)
 
-        param_view = param.view(num_heads, head_dim, -1)
+        param_view = local_param.view(local_heads, head_dim, -1)
         param_view.mul_(eta_power)
 
     def get_metrics(self) -> Dict[str, float]:

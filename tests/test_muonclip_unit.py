@@ -9,6 +9,7 @@ import torch
 
 from neobert.model import NeoBERT, NeoBERTConfig, NeoBERTLMHead
 from neobert.optimizer import MuonClipConfig, MuonClipOptimizer
+import neobert.optimizer.muon_clip as muon_clip_module
 
 
 class TestMuonClipConfig:
@@ -273,6 +274,48 @@ class TestMuonClipOptimizer:
         view = expected.view(config.num_attention_heads, config.dim_head * 3, -1)
         view[:, : config.dim_head].mul_(eta.view(-1, 1, 1))
         assert torch.allclose(qkv_param, expected)
+
+    def test_interleaved_qkv_scaling_supports_dtensor_local_view(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Ensure fused QKV scaling can update DTensor-like local shards."""
+
+        class _FakeDTensor:
+            def __init__(self, local_tensor: torch.Tensor):
+                self._local_tensor = local_tensor
+
+            def to_local(self) -> torch.Tensor:
+                return self._local_tensor
+
+        monkeypatch.setattr(muon_clip_module, "_TorchDTensor", _FakeDTensor)
+
+        config = NeoBERTConfig(
+            hidden_size=4,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=16,
+            vocab_size=32,
+            max_length=8,
+            attn_backend="sdpa",
+            hidden_act="gelu",
+            rope=False,
+        )
+        model = NeoBERT(config)
+        optimizer = MuonClipOptimizer(
+            model, config, MuonClipConfig(enable_clipping=False)
+        )
+
+        local_qkv = torch.arange(24, dtype=torch.float32).view(6, 4)
+        dtensor_param = _FakeDTensor(local_qkv)
+        eta = torch.tensor([0.5], dtype=torch.float32)
+
+        with torch.no_grad():
+            optimizer._scale_qkv_weights(dtensor_param, eta, alpha=1.0)
+
+        expected = torch.arange(24, dtype=torch.float32).view(6, 4)
+        view = expected.view(1, config.dim_head * 3, -1)
+        view[:, : config.dim_head].mul_(eta.view(-1, 1, 1))
+        assert torch.allclose(local_qkv, expected)
 
     def test_qkv_scaling_rejects_non_interleaved_layout(self):
         """Ensure fused QKV scaling fails fast on incompatible weight layouts."""
