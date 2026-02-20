@@ -34,6 +34,8 @@ Notes:
 - Dion2 with `use_triton: true` requires a Triton-compatible runtime.
 - Dion2 is unsupported with DeepSpeed in this integration.
 - MuonClip is incompatible with FSDP sharded parameters.
+- Dion2 QK clipping (`dion2+qk`) currently runs on single GPU/DDP only.
+  FSDP2 matrix runs skip this variant for stability.
 
 ## Fixed Controls (for fair comparison)
 
@@ -52,9 +54,9 @@ Keep these constant across all optimizer runs:
 | --- | --- | --- | --- | --- | --- |
 | A | smoke correctness | all 4 variants | 1 GPU | 200 | 1 |
 | B | distributed startup/step | all 4 variants | 2-GPU DDP | 200 | 1 |
-| C | FSDP2 mesh compatibility | `adamw`, `dion2`, `dion2+qk` | 2-GPU FSDP2 1D | 200 | 1 |
+| C | FSDP2 mesh compatibility | `adamw`, `dion2` | 2-GPU FSDP2 1D | 200 | 1 |
 | D | convergence + stability | all 4 variants | 1 GPU | 10,000 | 3 |
-| E | resume integrity | `dion2`, `dion2+qk` | 1 GPU and FSDP2 | 2,000 + resume to 4,000 | 1 |
+| E | resume integrity | `dion2`, `dion2+qk` | 1 GPU and DDP | 2,000 + resume to 4,000 | 1 |
 
 ## Commands
 

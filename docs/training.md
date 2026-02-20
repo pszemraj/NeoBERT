@@ -46,7 +46,8 @@ Notes:
 - For FSDP2, use a 1D shard `DeviceMesh`.
 - Starter config for 2 GPUs: `configs/accelerate/fsdp2_2x5090.yaml`.
 - `optimizer.dion2_config.enable_clipping: true` enables MuonClip QK clipping hooks
-  on top of Dion2 updates.
+  on top of Dion2 updates in non-FSDP runs (e.g., single GPU/DDP). Under FSDP2,
+  this path is currently disabled for stability.
 
 ### Override selected knobs
 

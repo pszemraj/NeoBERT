@@ -261,6 +261,49 @@ def test_dion2_qk_clipping_runtime_is_attached(
     assert optimizer.get_metrics() == {}
 
 
+def test_dion2_qk_clipping_disabled_on_fsdp(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Dion2 QK clipping should be disabled with a warning under FSDP2."""
+
+    class _FakeDion2:
+        def __init__(self, param_groups, **kwargs):
+            self.param_groups = list(param_groups)
+            self.kwargs = kwargs
+
+        def step(self):
+            return None
+
+    class _FailIfConstructedMuonClip:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("MuonClipOptimizer should not be created for FSDP2")
+
+    monkeypatch.setitem(sys.modules, "dion", types.SimpleNamespace(Dion2=_FakeDion2))
+    monkeypatch.setattr(
+        optimizer_module,
+        "MuonClipOptimizer",
+        _FailIfConstructedMuonClip,
+        raising=True,
+    )
+
+    caplog.set_level("WARNING")
+    optimizer = get_optimizer(
+        _ToyModel(),
+        DistributedType.FSDP,
+        model_config=types.SimpleNamespace(),
+        name="dion2",
+        lr=1e-4,
+        weight_decay=0.01,
+        betas=(0.9, 0.95),
+        eps=1e-8,
+        dion2_config={"enable_clipping": True},
+    )
+
+    assert not hasattr(optimizer, "_neobert_dion2_qk_runtime")
+    assert "disabled under FSDP2/DTensor" in caplog.text
+
+
 def test_dion2_qk_step_wrapper_is_scheduler_compatible(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

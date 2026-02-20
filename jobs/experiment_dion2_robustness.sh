@@ -206,13 +206,17 @@ run_matrix_for_runtime() {
   fi
 
   if variant_enabled "dion2_qk"; then
-    launch_pretrain "${runtime}" dion2_qk "${seed}" "${STABILITY_STEPS}" "${CFG_DION2}" \
-      "${base_dir}/dion2_qk" \
-      --optimizer.dion2_config.enable_clipping true \
-      --optimizer.dion2_config.clipping_threshold "${QK_THRESHOLD}" \
-      --optimizer.dion2_config.clipping_interval "${QK_INTERVAL}" \
-      --optimizer.dion2_config.clipping_warmup_steps "${QK_WARMUP}" \
-      --optimizer.dion2_config.clipping_alpha "${QK_ALPHA}"
+    if [[ "${runtime}" == "fsdp2" ]]; then
+      echo "INFO: skipping dion2_qk on fsdp2 runtime (currently unsupported for stability)."
+    else
+      launch_pretrain "${runtime}" dion2_qk "${seed}" "${STABILITY_STEPS}" "${CFG_DION2}" \
+        "${base_dir}/dion2_qk" \
+        --optimizer.dion2_config.enable_clipping true \
+        --optimizer.dion2_config.clipping_threshold "${QK_THRESHOLD}" \
+        --optimizer.dion2_config.clipping_interval "${QK_INTERVAL}" \
+        --optimizer.dion2_config.clipping_warmup_steps "${QK_WARMUP}" \
+        --optimizer.dion2_config.clipping_alpha "${QK_ALPHA}"
+    fi
   fi
 }
 
@@ -280,7 +284,7 @@ for seed in ${SEEDS}; do
       run_resume_check ddp "${seed}"
     fi
     if [[ "${RUN_FSDP2}" == "1" ]]; then
-      run_resume_check fsdp2 "${seed}"
+      echo "INFO: skipping fsdp2 resume check (dion2_qk resume path unsupported on fsdp2)."
     fi
   fi
 done

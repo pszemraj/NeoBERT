@@ -51,6 +51,11 @@ SEEDS="42" \
 ./jobs/experiment_dion2_robustness.sh
 ```
 
+Notes:
+
+- `dion2_qk` currently runs on single GPU/DDP only.
+- FSDP2 runs in this script skip `dion2_qk` automatically for stability.
+
 ## Notes
 
 - Checkpoints and logs are written under each run's `trainer.output_dir`.

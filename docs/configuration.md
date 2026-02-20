@@ -409,7 +409,7 @@ a compatible Triton runtime.
 | `ns_steps`         | `int`            | `5`               | Iteration count used by the selected orthogonalization method.                 |
 | `flatten`          | `bool`           | `false`           | Flatten 3D+ tensors to 2D before orthogonalization.                            |
 | `use_triton`       | `bool`           | `false`           | Enable Triton Newton-Schulz kernels (requires Triton-compatible runtime).      |
-| `enable_clipping`  | `bool`           | `false`           | Enable MuonClip QK clipping hooks for Dion2 pretraining updates.               |
+| `enable_clipping`  | `bool`           | `false`           | Enable MuonClip QK clipping hooks for Dion2 pretraining updates (non-FSDP runs). |
 | `clipping_threshold` | `float`        | `50.0`            | Target max QK logit used to derive per-head scaling factors.                   |
 | `clipping_alpha`   | `float`          | `0.5`             | Q/K scaling balance (`0.5` applies equal power to Q and K).                    |
 | `clipping_warmup_steps` | `int`       | `0`               | Skip Dion2 QK clipping for first N optimizer updates.                          |
@@ -563,6 +563,7 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 | `optimizer.name=dion2` without optional `dion` package                            | **ERROR**          | Install optional dependency: `pip install -e ".[dion]"` (or `pip install "dion @ git+https://github.com/microsoft/dion.git"`). |
 | `optimizer.name=dion2` with DeepSpeed                                             | **ERROR**          | Dion2 is unsupported with DeepSpeed in this framework integration.                                                  |
 | `optimizer.name=dion2` with FSDP non-1D mesh                                      | **ERROR**          | Dion2 requires a 1D FSDP2 shard mesh (use a 1D shard sub-mesh).                                                    |
+| `optimizer.name=dion2` + `optimizer.dion2_config.enable_clipping=true` with FSDP2 | **WARNING/FALLBACK** | MuonClip QK clipping is disabled at runtime under FSDP2 for stability; run QK clipping sweeps on DDP/single GPU. |
 | `datacollator.pack_sequences=true` with `model.attn_backend=sdpa`                 | **WARNING**        | Works, but slower than `flash_attn_varlen`; SDPA uses fallback path.                                                |
 | `dataset.path` and `dataset.name` both set                                        | **PRECEDENCE**     | Existing local `dataset.path` is used first; hub dataset acts as fallback.                                          |
 | Tokenizer/model vocab sizes                                                       | **IMPORTANT**      | Runtime now pads tokenizer with inert tokens so tokenizer length matches model vocab size.                          |

@@ -669,32 +669,42 @@ def get_optimizer(
             )
             setattr(optimizer, "_is_neobert_dion2", True)
             if enable_qk_clipping:
-                if model_config is None:
-                    raise ValueError(
-                        "optimizer.dion2_config.enable_clipping=true requires "
-                        "model_config to enable MuonClip QK clipping hooks."
+                if distributed_type is DistributedType.FSDP:
+                    logger.warning(
+                        "optimizer.dion2_config.enable_clipping=true is currently "
+                        "disabled under FSDP2/DTensor due collective-stability "
+                        "risk (rank-skewed clipping overhead). "
+                        "Falling back to Dion2 without MuonClip QK clipping for "
+                        "this run."
                     )
-                qk_clip_cfg = MuonClipConfig(
-                    lr=float(lr),
-                    ns_steps=ns_steps,
-                    enable_clipping=True,
-                    clipping_threshold=clipping_threshold,
-                    clipping_alpha=clipping_alpha,
-                    clipping_warmup_steps=clipping_warmup_steps,
-                    clipping_interval=clipping_interval,
-                    clipping_qk_chunk_size=clipping_qk_chunk_size,
-                    capture_last_microbatch_only=capture_last_microbatch_only,
-                    clipping_layers_mapping=clipping_layers_mapping,
-                )
-                qk_clipper = MuonClipOptimizer(model, model_config, qk_clip_cfg)
-                _attach_dion2_qk_clipping_runtime(optimizer, qk_clipper)
-                logger.info(
-                    "Dion2 MuonClip QK clipping enabled "
-                    f"(threshold={clipping_threshold}, alpha={clipping_alpha}, "
-                    f"interval={clipping_interval}, warmup={clipping_warmup_steps}, "
-                    f"chunk_size={clipping_qk_chunk_size}, "
-                    f"capture_last_microbatch_only={capture_last_microbatch_only})."
-                )
+                    enable_qk_clipping = False
+                if enable_qk_clipping:
+                    if model_config is None:
+                        raise ValueError(
+                            "optimizer.dion2_config.enable_clipping=true requires "
+                            "model_config to enable MuonClip QK clipping hooks."
+                        )
+                    qk_clip_cfg = MuonClipConfig(
+                        lr=float(lr),
+                        ns_steps=ns_steps,
+                        enable_clipping=True,
+                        clipping_threshold=clipping_threshold,
+                        clipping_alpha=clipping_alpha,
+                        clipping_warmup_steps=clipping_warmup_steps,
+                        clipping_interval=clipping_interval,
+                        clipping_qk_chunk_size=clipping_qk_chunk_size,
+                        capture_last_microbatch_only=capture_last_microbatch_only,
+                        clipping_layers_mapping=clipping_layers_mapping,
+                    )
+                    qk_clipper = MuonClipOptimizer(model, model_config, qk_clip_cfg)
+                    _attach_dion2_qk_clipping_runtime(optimizer, qk_clipper)
+                    logger.info(
+                        "Dion2 MuonClip QK clipping enabled "
+                        f"(threshold={clipping_threshold}, alpha={clipping_alpha}, "
+                        f"interval={clipping_interval}, warmup={clipping_warmup_steps}, "
+                        f"chunk_size={clipping_qk_chunk_size}, "
+                        f"capture_last_microbatch_only={capture_last_microbatch_only})."
+                    )
             logger.info(
                 f"Dion2 initialized with lr={lr}, fraction={fraction}, "
                 f"ef_decay={ef_decay}, adjust_lr={adjust_lr}, "
