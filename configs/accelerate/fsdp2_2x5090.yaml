@@ -6,7 +6,7 @@ enable_cpu_affinity: false
 fsdp_config:
   fsdp_version: 2
   fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
-  fsdp_transformer_layer_cls_to_wrap: EncoderBlock,NormEncoderBlock
+  fsdp_transformer_layer_cls_to_wrap: EncoderBlock
   fsdp_reshard_after_forward: true
   fsdp_state_dict_type: SHARDED_STATE_DICT
   fsdp_offload_params: false

@@ -7,7 +7,7 @@ This directory contains launch-time `accelerate` configs for distributed runs.
 - `fsdp2_2x5090.yaml`: 2-GPU local-machine FSDP2 config tuned for NeoBERT.
   - `mixed_precision: bf16`
   - `num_processes: 2`
-  - FSDP2 transformer auto-wrap targets `EncoderBlock,NormEncoderBlock`
+  - FSDP2 transformer auto-wrap targets `EncoderBlock`
   - Sharded state dict enabled (`SHARDED_STATE_DICT`)
 
 ## Usage
