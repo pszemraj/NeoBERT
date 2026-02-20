@@ -178,3 +178,15 @@ def test_validate_muon_distributed_compatibility_rejects_fsdp() -> None:
             log=logging.getLogger("test"),
             context="unit-test",
         )
+
+
+def test_validate_muon_distributed_compatibility_rejects_dion2_deepspeed() -> None:
+    """Dion2 must fail fast under DeepSpeed in this integration."""
+    accelerator = SimpleNamespace(distributed_type=DistributedType.DEEPSPEED)
+    with pytest.raises(RuntimeError, match="Dion2 is not compatible with DeepSpeed"):
+        validate_muon_distributed_compatibility(
+            accelerator=accelerator,
+            optimizer_name="dion2",
+            log=logging.getLogger("test"),
+            context="unit-test",
+        )

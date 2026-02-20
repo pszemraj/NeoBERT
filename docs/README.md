@@ -15,6 +15,7 @@ This directory is the canonical home for behavior semantics.
 - [Architecture](architecture.md) - model internals and backend behavior
 - [Testing](testing.md) - test execution and authoring conventions
 - [Troubleshooting](troubleshooting.md) - common runtime/perf failures and fixes
+- [Dion2 robustness experiment](dion2_robustness_experiment.md) - comparative runbook for optimizer validation
 - [Dev Notes](dev.md) - current status and engineering backlog
 
 ## Source-of-Truth Map

@@ -42,6 +42,7 @@ from neobert.checkpointing import MODEL_WEIGHTS_NAME, save_state_dict_safetensor
 from neobert.config import (
     Config,
     ConfigLoader,
+    Dion2Config,
     MuonConfig,
     resolve_mixed_precision,
     round_up_to_multiple,
@@ -62,6 +63,8 @@ from neobert.training_utils import (
     _maybe_prepare_for_forward,
     _resolve_resume_checkpoint,
     create_accelerator,
+    finalize_dion2_distributed_mesh,
+    finalize_dion2_qk_clipping_runtime,
     resolve_wandb_watch_mode,
     validate_muon_distributed_compatibility,
 )
@@ -2270,6 +2273,36 @@ def trainer(cfg: Config) -> None:
             f"Capture last microbatch only: {muon_cfg.capture_last_microbatch_only}"
         )
         logger.info("=" * 60)
+    if cfg.optimizer.name.lower() in ["dion2", "dion-2", "dion_2"]:
+        dion2_cfg = cfg.optimizer.dion2_config or Dion2Config()
+        logger.info("=" * 60)
+        logger.info("Dion2 Optimizer Configuration")
+        logger.info("=" * 60)
+        logger.info(f"Fraction: {dion2_cfg.fraction}")
+        logger.info(f"EF decay: {dion2_cfg.ef_decay}")
+        logger.info(f"Adjust LR: {dion2_cfg.adjust_lr}")
+        logger.info(f"Orthogonalization: {dion2_cfg.orthogonalization}")
+        logger.info(f"NS steps: {dion2_cfg.ns_steps}")
+        logger.info(f"Scalar algorithm: {dion2_cfg.scalar_algorithm}")
+        logger.info(f"Flatten: {dion2_cfg.flatten}")
+        logger.info(
+            f"MuonClip QK clipping enabled: {dion2_cfg.enable_clipping}"
+        )
+        logger.info(f"QK clipping threshold: {dion2_cfg.clipping_threshold}")
+        logger.info(f"QK clipping alpha: {dion2_cfg.clipping_alpha}")
+        logger.info(f"QK clipping warmup steps: {dion2_cfg.clipping_warmup_steps}")
+        logger.info(f"QK clipping interval: {dion2_cfg.clipping_interval}")
+        logger.info(f"QK clipping chunk size: {dion2_cfg.clipping_qk_chunk_size}")
+        logger.info(
+            "Capture last microbatch only: "
+            f"{dion2_cfg.capture_last_microbatch_only}"
+        )
+        if dion2_cfg.clipping_layers_mapping:
+            logger.info(
+                f"QK clipping layer mapping: {dion2_cfg.clipping_layers_mapping}"
+            )
+        logger.info(f"Use Triton: {dion2_cfg.use_triton}")
+        logger.info("=" * 60)
 
     optimizer = get_optimizer(
         model,
@@ -2281,6 +2314,7 @@ def trainer(cfg: Config) -> None:
         betas=tuple(cfg.optimizer.betas),
         eps=cfg.optimizer.eps,
         muon_config=cfg.optimizer.muon_config,
+        dion2_config=cfg.optimizer.dion2_config,
     )
     _, warmup_steps, decay_steps, constant_steps = resolve_scheduler_steps(
         trainer_max_steps=cfg.trainer.max_steps,
@@ -2389,6 +2423,13 @@ def trainer(cfg: Config) -> None:
                     scheduler,
                     device_placement=[False, True, True, True],
                 )
+
+    finalize_dion2_distributed_mesh(optimizer=optimizer, log=logger)
+    finalize_dion2_qk_clipping_runtime(
+        optimizer=optimizer,
+        model=accelerator.unwrap_model(model),
+        log=logger,
+    )
 
     # Packed mode keeps manual batch transfers; non-packed mode uses Accelerate
     # device placement for lower Python overhead and better overlap.

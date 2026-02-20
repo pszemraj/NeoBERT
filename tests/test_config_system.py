@@ -502,6 +502,91 @@ optimizer:
             finally:
                 os.unlink(path)
 
+    def test_dion2_pretraining_config_loads(self):
+        """Ensure Dion2 optimizer config is accepted for pretraining."""
+        config_data = {
+            "task": "pretraining",
+            "optimizer": {
+                "name": "dion2",
+                "dion2_config": {
+                    "fraction": 0.4,
+                    "ef_decay": 0.9,
+                    "adjust_lr": "rms_norm",
+                    "orthogonalization": "polar",
+                    "ns_steps": 7,
+                    "enable_clipping": True,
+                    "clipping_threshold": 40.0,
+                    "clipping_alpha": 0.4,
+                    "clipping_qk_chunk_size": 256,
+                    "capture_last_microbatch_only": False,
+                    "clipping_layers_mapping": {"Q_PROJ": "query_proj"},
+                    "scalar_algorithm": "lion",
+                },
+            },
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            path = f.name
+            yaml.safe_dump(config_data, f)
+
+        try:
+            cfg = ConfigLoader.load(path)
+            self.assertEqual(cfg.task, "pretraining")
+            self.assertEqual(cfg.optimizer.name, "dion2")
+            self.assertIsNotNone(cfg.optimizer.dion2_config)
+            self.assertEqual(cfg.optimizer.dion2_config.fraction, 0.4)
+            self.assertEqual(cfg.optimizer.dion2_config.ef_decay, 0.9)
+            self.assertEqual(cfg.optimizer.dion2_config.adjust_lr, "rms_norm")
+            self.assertEqual(
+                cfg.optimizer.dion2_config.orthogonalization, "polar_express"
+            )
+            self.assertEqual(cfg.optimizer.dion2_config.ns_steps, 7)
+            self.assertTrue(cfg.optimizer.dion2_config.enable_clipping)
+            self.assertEqual(cfg.optimizer.dion2_config.clipping_threshold, 40.0)
+            self.assertEqual(cfg.optimizer.dion2_config.clipping_alpha, 0.4)
+            self.assertEqual(cfg.optimizer.dion2_config.clipping_qk_chunk_size, 256)
+            self.assertFalse(cfg.optimizer.dion2_config.capture_last_microbatch_only)
+            self.assertEqual(
+                cfg.optimizer.dion2_config.clipping_layers_mapping,
+                {"q_proj": "query_proj"},
+            )
+            self.assertEqual(cfg.optimizer.dion2_config.scalar_algorithm, "lion")
+        finally:
+            os.unlink(path)
+
+    def test_dion2_rejected_for_non_pretraining_tasks(self):
+        """Ensure Dion2 scope guard rejects non-pretraining tasks."""
+        config_data = {
+            "task": "glue",
+            "optimizer": {"name": "dion2"},
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            path = f.name
+            yaml.safe_dump(config_data, f)
+
+        try:
+            with self.assertRaises(ValueError):
+                ConfigLoader.load(path)
+        finally:
+            os.unlink(path)
+
+    def test_unknown_dion2_nested_keys_fail_validation(self):
+        """Ensure unknown optimizer.dion2_config keys fail key validation."""
+        config_data = {
+            "optimizer": {
+                "name": "dion2",
+                "dion2_config": {"unknown_knob": 123},
+            }
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            path = f.name
+            yaml.safe_dump(config_data, f)
+
+        try:
+            with self.assertRaises(ValueError):
+                ConfigLoader.load(path)
+        finally:
+            os.unlink(path)
+
     def test_legacy_contrastive_key_migrations(self):
         """Ensure legacy contrastive fields map cleanly and reject conflicts."""
         with warnings.catch_warnings(record=True) as caught:

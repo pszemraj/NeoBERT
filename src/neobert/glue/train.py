@@ -973,6 +973,10 @@ def trainer(cfg: Config) -> None:
         log=logger,
         context="glue",
     )
+    if str(cfg.optimizer.name).strip().lower() in {"dion2", "dion-2", "dion_2"}:
+        raise RuntimeError(
+            "optimizer.name='dion2' is currently supported only for pretraining."
+        )
 
     set_seed(int(cfg.seed))
 
@@ -1439,6 +1443,7 @@ def trainer(cfg: Config) -> None:
         betas=tuple(getattr(cfg.optimizer, "betas", [0.9, 0.999])),
         eps=getattr(cfg.optimizer, "eps", 1e-8),
         muon_config=getattr(cfg.optimizer, "muon_config", None),
+        dion2_config=getattr(cfg.optimizer, "dion2_config", None),
     )
 
     # Prepare with accelerator before deriving epoch-based max_steps so distributed

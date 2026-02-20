@@ -6,6 +6,7 @@
 jobs/
   example_pretrain.sh
   example_evaluate.sh
+  experiment_dion2_robustness.sh
 ```
 
 These are convenience wrappers around scripts in `scripts/` and configs in
@@ -32,6 +33,15 @@ RUN_FULL=1 ./jobs/example_pretrain.sh
 
 # Evaluation example
 ./jobs/example_evaluate.sh
+
+# Dion2 robustness experiment runner (W&B-enabled)
+./jobs/experiment_dion2_robustness.sh
+
+# 2-GPU W&B experiment with explicit FSDP2 enablement
+WANDB_PROJECT=neobert-dion2-robustness \
+FSDP2_CONFIG=<accelerate_fsdp2_config.yaml> \
+RUN_FSDP2=1 \
+./jobs/experiment_dion2_robustness.sh
 ```
 
 ## Notes

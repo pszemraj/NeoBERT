@@ -24,6 +24,29 @@ python scripts/pretraining/pretrain.py \
   configs/pretraining/pretrain_neobert.yaml
 ```
 
+### Dion2 pretraining (optional optimizer path)
+
+Install optional dependency first:
+
+```bash
+pip install -e .[dion]
+```
+
+Launch example:
+
+```bash
+python scripts/pretraining/pretrain.py \
+  configs/pretraining/pretrain_neobert100m_smollm2data_dion2.yaml
+```
+
+Notes:
+
+- Dion2 is currently pretraining-only in this repository.
+- Dion2 is unsupported with DeepSpeed.
+- For FSDP2, use a 1D shard `DeviceMesh`.
+- `optimizer.dion2_config.enable_clipping: true` enables MuonClip QK clipping hooks
+  on top of Dion2 updates.
+
 ### Override selected knobs
 
 ```bash

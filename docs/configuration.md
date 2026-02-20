@@ -142,7 +142,7 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | `trainer.per_device_train_batch_size` | `int`         | `16`            | Per-device train microbatch size.                                    |
 | `trainer.gradient_accumulation_steps` | `int`         | `1`             | Number of microbatches per optimizer step.                           |
 | `trainer.max_steps`                   | `int`         | `1000000`       | Total training steps.                                                |
-| `optimizer.name`                      | `str`         | `"adamw"`       | Optimizer family (`adamw`, `adam`, `muonclip`).                      |
+| `optimizer.name`                      | `str`         | `"adamw"`       | Optimizer family (`adamw`, `adam`, `muonclip`, `dion2`).             |
 | `optimizer.lr`                        | `float`       | `1e-4`          | Base learning rate.                                                  |
 | `scheduler.name`                      | `str`         | `"cosine"`      | LR schedule type.                                                    |
 | `datacollator.mask_all`               | `bool`        | `false`         | `false` uses sampled-token BERT-style 80/10/10 masking.              |
@@ -365,12 +365,13 @@ Overrides are validated with the same semantic checks as base YAML configs.
 
 | Key                      | Type                 | Default        | Description                                              |
 | ------------------------ | -------------------- | -------------- | -------------------------------------------------------- |
-| `optimizer.name`         | `str`                | `"adamw"`      | `adamw`, `adam`, or `muonclip`.                          |
+| `optimizer.name`         | `str`                | `"adamw"`      | `adamw`, `adam`, `muonclip`, or `dion2`.                 |
 | `optimizer.lr`           | `float`              | `1e-4`         | Base learning rate.                                      |
 | `optimizer.weight_decay` | `float`              | `0.01`         | Weight decay.                                            |
 | `optimizer.betas`        | `list[float]`        | `[0.9, 0.999]` | Adam-family beta coefficients.                           |
 | `optimizer.eps`          | `float`              | `1e-8`         | Adam-family epsilon.                                     |
 | `optimizer.muon_config`  | `MuonConfig \| None` | `null`         | MuonClip settings (used when `optimizer.name=muonclip`). |
+| `optimizer.dion2_config` | `Dion2Config \| None` | `null`        | Dion2 settings (used when `optimizer.name=dion2`).       |
 
 ### MuonClip (`optimizer.muon_config`)
 
@@ -391,6 +392,32 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | `algorithm`                    | `str \| None`    | `null`            | Deprecated alias of `orthogonalization`.                     |
 | `polar_express`                | `bool \| None`   | `null`            | Deprecated legacy toggle.                                    |
 | `clipping_layers_mapping`      | `dict[str, str]` | `{}`              | Projection-name overrides for non-standard attention blocks. |
+
+### Dion2 (`optimizer.dion2_config`)
+
+Install requirement: `pip install -e .[dion]` (or `pip install "neobert[dion]"`).
+Upstream `dion` expects a modern PyTorch runtime; `use_triton: true` also requires
+a compatible Triton runtime.
+
+| Key                | Type             | Default           | Description                                                                    |
+| ------------------ | ---------------- | ----------------- | ------------------------------------------------------------------------------ |
+| `fraction`         | `float`          | `0.25`            | Fraction of submatrix to orthogonalize per update (`0 < fraction <= 1`).      |
+| `ef_decay`         | `float`          | `0.95`            | Error-feedback decay factor for selected submatrix momentum update.            |
+| `adjust_lr`        | `str \| None`    | `"spectral_norm"` | LR adjustment mode: `spectral_norm`, `rms_norm`, or `null`.                   |
+| `orthogonalization`| `str`            | `"newton_schulz"` | Orthogonalization method: `newton_schulz` or `polar_express`.                 |
+| `ns_steps`         | `int`            | `5`               | Iteration count used by the selected orthogonalization method.                 |
+| `flatten`          | `bool`           | `false`           | Flatten 3D+ tensors to 2D before orthogonalization.                            |
+| `use_triton`       | `bool`           | `false`           | Enable Triton Newton-Schulz kernels (requires Triton-compatible runtime).      |
+| `enable_clipping`  | `bool`           | `false`           | Enable MuonClip QK clipping hooks for Dion2 pretraining updates.               |
+| `clipping_threshold` | `float`        | `50.0`            | Target max QK logit used to derive per-head scaling factors.                   |
+| `clipping_alpha`   | `float`          | `0.5`             | Q/K scaling balance (`0.5` applies equal power to Q and K).                    |
+| `clipping_warmup_steps` | `int`       | `0`               | Skip Dion2 QK clipping for first N optimizer updates.                          |
+| `clipping_interval` | `int`           | `10`              | Apply Dion2 QK clipping every N optimizer updates after warmup.                |
+| `clipping_qk_chunk_size` | `int`      | `1024`            | Chunk size for tiled QK logit-max computation.                                 |
+| `capture_last_microbatch_only` | `bool` | `true`          | Capture activations only on the last microbatch in grad-accum windows.         |
+| `clipping_layers_mapping` | `dict[str, str]` | `{}`       | Optional projection-name overrides for unfused Q/K attention blocks.           |
+| `verbose`          | `bool`           | `false`           | Enable verbose Dion2 selection/debug logs.                                     |
+| `scalar_algorithm` | `str`            | `"adamw"`         | Scalar-parameter update algorithm (`adamw` or `lion`) for non-matrix params.  |
 
 ---
 
@@ -531,6 +558,10 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 | `scheduler.warmup_percent` and `scheduler.warmup_steps`                           | **PRECEDENCE**     | `warmup_percent` overrides absolute warmup steps.                                                                   |
 | `scheduler.decay_percent` and `scheduler.decay_steps`                             | **PRECEDENCE**     | `decay_percent` overrides absolute decay steps.                                                                     |
 | `optimizer.name=muonclip` with DeepSpeed ZeRO stage >= 2                          | **ERROR**          | MuonClip is incompatible with sharded grads/params at ZeRO stage >= 2.                                              |
+| `optimizer.name=dion2` outside pretraining                                        | **ERROR**          | Dion2 is currently supported only for `task=pretraining`.                                                           |
+| `optimizer.name=dion2` without optional `dion` package                            | **ERROR**          | Install optional dependency: `pip install -e .[dion]` (or `pip install "neobert[dion]"`).                        |
+| `optimizer.name=dion2` with DeepSpeed                                             | **ERROR**          | Dion2 is unsupported with DeepSpeed in this framework integration.                                                  |
+| `optimizer.name=dion2` with FSDP non-1D mesh                                      | **ERROR**          | Dion2 requires a 1D FSDP2 shard mesh (use a 1D shard sub-mesh).                                                    |
 | `datacollator.pack_sequences=true` with `model.attn_backend=sdpa`                 | **WARNING**        | Works, but slower than `flash_attn_varlen`; SDPA uses fallback path.                                                |
 | `dataset.path` and `dataset.name` both set                                        | **PRECEDENCE**     | Existing local `dataset.path` is used first; hub dataset acts as fallback.                                          |
 | Tokenizer/model vocab sizes                                                       | **IMPORTANT**      | Runtime now pads tokenizer with inert tokens so tokenizer length matches model vocab size.                          |

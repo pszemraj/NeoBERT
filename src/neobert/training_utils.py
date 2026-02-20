@@ -9,6 +9,12 @@ import torch
 from accelerate import Accelerator
 from accelerate.utils import DistributedType
 
+try:
+    from torch.distributed.tensor import DTensor, DeviceMesh
+except Exception:  # pragma: no cover - import safety for stripped torch builds
+    DTensor = None  # type: ignore[assignment]
+    DeviceMesh = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 
@@ -107,7 +113,7 @@ def validate_muon_distributed_compatibility(
     log: logging.Logger,
     context: str,
 ) -> None:
-    """Validate MuonClip compatibility for the active distributed runtime.
+    """Validate optimizer compatibility for the active distributed runtime.
 
     MuonClip orthogonalizes full 2D tensors. Sharded-parameter modes (notably
     FSDP and DeepSpeed ZeRO-2/3) violate this assumption because each rank holds
@@ -117,20 +123,27 @@ def validate_muon_distributed_compatibility(
     :param str optimizer_name: Configured optimizer name.
     :param logging.Logger log: Logger for compatibility warnings.
     :param str context: Human-readable task context for error messages.
-    :raises RuntimeError: If MuonClip is enabled with incompatible sharding.
+    :raises RuntimeError: If optimizer is enabled with incompatible sharding.
     """
     optimizer_key = str(optimizer_name).strip().lower()
-    if optimizer_key not in {"muonclip", "muon-clip", "muon_clip"}:
+    muon_enabled = optimizer_key in {"muonclip", "muon-clip", "muon_clip"}
+    dion2_enabled = optimizer_key in {"dion2", "dion-2", "dion_2"}
+    if not (muon_enabled or dion2_enabled):
         return
 
     distributed_type = getattr(accelerator, "distributed_type", None)
-    if distributed_type is DistributedType.FSDP:
+    if muon_enabled and distributed_type is DistributedType.FSDP:
         raise RuntimeError(
             "MuonClip is not compatible with FSDP sharded parameters in "
             f"{context}. Use AdamW or disable FSDP for MuonClip runs."
         )
+    if dion2_enabled and distributed_type is DistributedType.DEEPSPEED:
+        raise RuntimeError(
+            "Dion2 is not compatible with DeepSpeed in "
+            f"{context}. Use FSDP2 or DDP/no-sharding."
+        )
 
-    if distributed_type is not DistributedType.DEEPSPEED:
+    if not muon_enabled or distributed_type is not DistributedType.DEEPSPEED:
         return
 
     deepspeed_plugin = getattr(
@@ -148,6 +161,110 @@ def validate_muon_distributed_compatibility(
             "MuonClip is not compatible with DeepSpeed ZeRO stage >= 2 in "
             f"{context} (sharded grads/params). Use ZeRO stage 0/1 or disable MuonClip."
         )
+
+
+def finalize_dion2_distributed_mesh(
+    *,
+    optimizer: Any,
+    log: logging.Logger,
+) -> None:
+    """Bind Dion2 to the prepared FSDP2 DTensor mesh after ``accelerator.prepare``.
+
+    Dion2 can be instantiated before FSDP wrapping, but when parameters are
+    converted to DTensor during prepare-time, the optimizer must use the same
+    1D sharded DeviceMesh for communication.
+
+    :param Any optimizer: Optimizer instance (possibly wrapped by Accelerate).
+    :param logging.Logger log: Logger for informational messages.
+    :raises RuntimeError: If DTensor parameters use an unsupported mesh layout.
+    """
+    inner = _unwrap_optimizer(optimizer)
+    cls = inner.__class__
+    is_dion2 = bool(getattr(inner, "_is_neobert_dion2", False)) or (
+        cls.__name__ == "Dion2" and cls.__module__.startswith("dion")
+    )
+    if not is_dion2:
+        return
+
+    dtensor_param = None
+    for group in getattr(inner, "param_groups", []):
+        for param in group.get("params", []):
+            if DTensor is not None and isinstance(param, DTensor):
+                dtensor_param = param
+                break
+        if dtensor_param is not None:
+            break
+
+    if dtensor_param is None:
+        # DDP or single-process execution path; WORLD pg is set in get_optimizer.
+        return
+    if DeviceMesh is None:
+        raise RuntimeError(
+            "Detected DTensor parameters for Dion2, but torch.distributed.tensor "
+            "DeviceMesh is unavailable in this runtime."
+        )
+
+    mesh = dtensor_param.device_mesh
+    if not isinstance(mesh, DeviceMesh):
+        raise RuntimeError(
+            "Detected DTensor parameters for Dion2 but could not resolve a "
+            "DeviceMesh from parameter metadata."
+        )
+    if int(mesh.ndim) != 1:
+        raise RuntimeError(
+            "Dion2 requires a 1D sharded DeviceMesh under FSDP2. "
+            f"Got {mesh.ndim}D mesh {mesh}. "
+            "Use the 1D shard sub-mesh for fully_shard()/FSDP2."
+        )
+
+    process_group = mesh.get_group()
+    if process_group is None:
+        raise RuntimeError(
+            "Dion2 could not resolve process group from FSDP2 DeviceMesh."
+        )
+    try:
+        device_rank = int(mesh.get_local_rank())
+    except TypeError:
+        device_rank = int(mesh.get_local_rank(0))
+    world_size = int(mesh.size())
+
+    inner._distributed_mesh = mesh
+    inner._process_group = process_group
+    inner._device_rank = device_rank
+    inner._world_size = world_size
+    log.info(
+        "Dion2 distributed mesh finalized from prepared DTensor parameters "
+        f"(world_size={world_size}, local_rank={device_rank})."
+    )
+
+
+def finalize_dion2_qk_clipping_runtime(
+    *,
+    optimizer: Any,
+    model: Any,
+    log: logging.Logger,
+) -> None:
+    """Rebind Dion2 MuonClip QK runtime hooks after ``accelerator.prepare``.
+
+    Dion2's optional MuonClip QK clipping path registers forward hooks and
+    parameter references. After model preparation/wrapping, those references
+    should be refreshed to point at the active model/parameter objects.
+
+    :param Any optimizer: Optimizer instance (possibly wrapped by Accelerate).
+    :param Any model: Prepared model object (preferably unwrapped base module).
+    :param logging.Logger log: Logger for informational messages.
+    """
+    inner = _unwrap_optimizer(optimizer)
+    runtime = getattr(inner, "_neobert_dion2_qk_runtime", None)
+    if runtime is None:
+        return
+
+    rebind = getattr(runtime, "rebind_model", None)
+    if not callable(rebind):
+        return
+
+    rebind(model)
+    log.info("Dion2 MuonClip QK clipping runtime rebound to prepared model.")
 
 
 def _maybe_prepare_for_forward(

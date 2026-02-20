@@ -191,6 +191,29 @@ class MuonConfig:
 
 
 @dataclass
+class Dion2Config:
+    """Dion2 optimizer-specific configuration."""
+
+    fraction: float = 0.25
+    ef_decay: float = 0.95
+    adjust_lr: Optional[str] = "spectral_norm"
+    orthogonalization: str = "newton_schulz"
+    ns_steps: int = 5
+    flatten: bool = False
+    use_triton: bool = False
+    enable_clipping: bool = False
+    clipping_threshold: float = 50.0
+    clipping_alpha: float = 0.5
+    clipping_warmup_steps: int = 0
+    clipping_interval: int = 10
+    clipping_qk_chunk_size: int = 1024
+    capture_last_microbatch_only: bool = True
+    clipping_layers_mapping: Dict[str, str] = field(default_factory=dict)
+    verbose: bool = False
+    scalar_algorithm: str = "adamw"
+
+
+@dataclass
 class OptimizerConfig:
     """Optimizer hyperparameters for training."""
 
@@ -200,6 +223,7 @@ class OptimizerConfig:
     betas: List[float] = field(default_factory=lambda: [0.9, 0.999])
     eps: float = 1e-8
     muon_config: Optional[MuonConfig] = None
+    dion2_config: Optional[Dion2Config] = None
 
 
 @dataclass
@@ -1351,7 +1375,7 @@ class ConfigLoader:
         _check_section("glue", GLUEConfig)
         _check_section("contrastive", ContrastiveConfig)
 
-        # Validate nested muon_config keys if provided.
+        # Validate nested optimizer sub-config keys if provided.
         optimizer_cfg = cfg_dict.get("optimizer", {})
         if isinstance(optimizer_cfg, dict) and "muon_config" in optimizer_cfg:
             muon_cfg = optimizer_cfg["muon_config"]
@@ -1360,6 +1384,13 @@ class ConfigLoader:
                 for key in muon_cfg:
                     if key not in valid_muon:
                         unknown_keys.append(f"optimizer.muon_config.{key}")
+        if isinstance(optimizer_cfg, dict) and "dion2_config" in optimizer_cfg:
+            dion2_cfg = optimizer_cfg["dion2_config"]
+            if isinstance(dion2_cfg, dict):
+                valid_dion2 = {f.name for f in fields(Dion2Config)}
+                for key in dion2_cfg:
+                    if key not in valid_dion2:
+                        unknown_keys.append(f"optimizer.dion2_config.{key}")
 
         if unknown_keys:
             unknown_keys.sort()
@@ -1629,6 +1660,109 @@ class ConfigLoader:
                     "optimizer.betas values must be in [0, 1), got "
                     f"{config.optimizer.betas}."
                 )
+        optimizer_name = str(config.optimizer.name).strip().lower()
+        if optimizer_name in {"dion2", "dion-2", "dion_2"} and task != "pretraining":
+            errors.append(
+                "optimizer.name='dion2' is currently supported only for "
+                "task='pretraining'."
+            )
+        dion2_cfg = config.optimizer.dion2_config
+        if dion2_cfg is not None:
+            if not (0.0 < float(dion2_cfg.fraction) <= 1.0):
+                errors.append(
+                    "optimizer.dion2_config.fraction must be in (0, 1], got "
+                    f"{dion2_cfg.fraction}."
+                )
+            if float(dion2_cfg.ef_decay) < 0.0:
+                errors.append(
+                    "optimizer.dion2_config.ef_decay must be >= 0, got "
+                    f"{dion2_cfg.ef_decay}."
+                )
+            adjust_lr = dion2_cfg.adjust_lr
+            if isinstance(adjust_lr, str):
+                adjust_lr = adjust_lr.strip().lower()
+                dion2_cfg.adjust_lr = adjust_lr
+            valid_adjust_lr = {"spectral_norm", "rms_norm", None}
+            if adjust_lr not in valid_adjust_lr:
+                errors.append(
+                    "optimizer.dion2_config.adjust_lr must be one of "
+                    f"{sorted(v for v in valid_adjust_lr if v is not None)} or null, "
+                    f"got {adjust_lr!r}."
+                )
+            orthogonalization = str(dion2_cfg.orthogonalization).strip().lower()
+            orthogonalization_aliases = {
+                "polar": "polar_express",
+                "polar_express": "polar_express",
+                "newton_schulz": "newton_schulz",
+                "newton-schulz": "newton_schulz",
+                "ns": "newton_schulz",
+            }
+            if orthogonalization not in orthogonalization_aliases:
+                errors.append(
+                    "optimizer.dion2_config.orthogonalization must be one of "
+                    "{'newton_schulz', 'polar_express'}, got "
+                    f"{dion2_cfg.orthogonalization!r}."
+                )
+            else:
+                dion2_cfg.orthogonalization = orthogonalization_aliases[
+                    orthogonalization
+                ]
+            dion2_cfg.ns_steps = int(dion2_cfg.ns_steps)
+            if dion2_cfg.ns_steps < 1:
+                errors.append(
+                    "optimizer.dion2_config.ns_steps must be >= 1, got "
+                    f"{dion2_cfg.ns_steps}."
+                )
+            dion2_cfg.clipping_threshold = float(dion2_cfg.clipping_threshold)
+            if not (0.0 < dion2_cfg.clipping_threshold <= 1000.0):
+                errors.append(
+                    "optimizer.dion2_config.clipping_threshold must be in (0, 1000], got "
+                    f"{dion2_cfg.clipping_threshold}."
+                )
+            dion2_cfg.clipping_alpha = float(dion2_cfg.clipping_alpha)
+            if not (0.0 <= dion2_cfg.clipping_alpha <= 1.0):
+                errors.append(
+                    "optimizer.dion2_config.clipping_alpha must be in [0, 1], got "
+                    f"{dion2_cfg.clipping_alpha}."
+                )
+            dion2_cfg.clipping_warmup_steps = int(dion2_cfg.clipping_warmup_steps)
+            if dion2_cfg.clipping_warmup_steps < 0:
+                errors.append(
+                    "optimizer.dion2_config.clipping_warmup_steps must be >= 0, got "
+                    f"{dion2_cfg.clipping_warmup_steps}."
+                )
+            dion2_cfg.clipping_interval = int(dion2_cfg.clipping_interval)
+            if dion2_cfg.clipping_interval < 1:
+                errors.append(
+                    "optimizer.dion2_config.clipping_interval must be >= 1, got "
+                    f"{dion2_cfg.clipping_interval}."
+                )
+            dion2_cfg.clipping_qk_chunk_size = int(dion2_cfg.clipping_qk_chunk_size)
+            if dion2_cfg.clipping_qk_chunk_size < 1:
+                errors.append(
+                    "optimizer.dion2_config.clipping_qk_chunk_size must be >= 1, got "
+                    f"{dion2_cfg.clipping_qk_chunk_size}."
+                )
+            if dion2_cfg.clipping_layers_mapping is None:
+                dion2_cfg.clipping_layers_mapping = {}
+            elif not isinstance(dion2_cfg.clipping_layers_mapping, dict):
+                errors.append(
+                    "optimizer.dion2_config.clipping_layers_mapping must be a mapping."
+                )
+            else:
+                dion2_cfg.clipping_layers_mapping = {
+                    str(key).lower(): str(value)
+                    for key, value in dion2_cfg.clipping_layers_mapping.items()
+                }
+            scalar_algorithm = str(dion2_cfg.scalar_algorithm).strip().lower()
+            if scalar_algorithm not in {"adamw", "lion"}:
+                errors.append(
+                    "optimizer.dion2_config.scalar_algorithm must be one of "
+                    "{'adamw', 'lion'}, got "
+                    f"{dion2_cfg.scalar_algorithm!r}."
+                )
+            else:
+                dion2_cfg.scalar_algorithm = scalar_algorithm
 
         try:
             config.trainer.mixed_precision = resolve_mixed_precision(
@@ -1759,6 +1893,7 @@ class ConfigLoader:
         if "optimizer" in cfg_dict:
             optimizer_dict = dict(cfg_dict["optimizer"])
             muon_cfg_dict = optimizer_dict.pop("muon_config", None)
+            dion2_cfg_dict = optimizer_dict.pop("dion2_config", None)
 
             for k, v in optimizer_dict.items():
                 if hasattr(config.optimizer, k):
@@ -1778,6 +1913,19 @@ class ConfigLoader:
                 else:
                     raise TypeError(
                         "optimizer.muon_config must be a mapping or MuonConfig instance"
+                    )
+            if dion2_cfg_dict is not None:
+                if isinstance(dion2_cfg_dict, Dion2Config):
+                    config.optimizer.dion2_config = dion2_cfg_dict
+                elif isinstance(dion2_cfg_dict, dict):
+                    dion2_cfg = Dion2Config()
+                    for dk, dv in dion2_cfg_dict.items():
+                        if hasattr(dion2_cfg, dk):
+                            setattr(dion2_cfg, dk, dv)
+                    config.optimizer.dion2_config = dion2_cfg
+                else:
+                    raise TypeError(
+                        "optimizer.dion2_config must be a mapping or Dion2Config instance"
                     )
 
         # Update scheduler config

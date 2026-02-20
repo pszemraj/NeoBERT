@@ -26,4 +26,8 @@ if [[ "${RUN_FULL:-0}" == "1" ]]; then
   # MuonClip variant
   "${PYTHON[@]}" scripts/pretraining/pretrain.py \
     configs/pretraining/pretrain_neobert100m_smollm2data_muonclip.yaml
+
+  # Dion2 variant
+  "${PYTHON[@]}" scripts/pretraining/pretrain.py \
+    configs/pretraining/pretrain_neobert100m_smollm2data_dion2.yaml
 fi

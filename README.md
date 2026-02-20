@@ -37,6 +37,8 @@ Optional extras:
 pip install -U -q packaging wheel ninja
 # Packed flash-attn training backend
 pip install -e .[flash] --no-build-isolation
+# Dion2 optimizer support (pretraining)
+pip install -e .[dion]
 ```
 
 See [docs/troubleshooting.md](docs/troubleshooting.md) for environment issues.

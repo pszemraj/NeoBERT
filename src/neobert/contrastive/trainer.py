@@ -320,6 +320,10 @@ def trainer(cfg: Config) -> None:
         log=logger,
         context="contrastive",
     )
+    if str(cfg.optimizer.name).strip().lower() in {"dion2", "dion-2", "dion_2"}:
+        raise RuntimeError(
+            "optimizer.name='dion2' is currently supported only for pretraining."
+        )
     tracker_config_dict = prepare_wandb_config(cfg)
     if accelerator.is_main_process:
         accelerator.print(
@@ -634,6 +638,7 @@ def trainer(cfg: Config) -> None:
         betas=tuple(cfg.optimizer.betas),
         eps=cfg.optimizer.eps,
         muon_config=cfg.optimizer.muon_config,
+        dion2_config=cfg.optimizer.dion2_config,
     )
 
     # Scheduler

@@ -116,6 +116,57 @@ class TestPretrainPipeline:
                 if not any(err in error_str for err in expected_errors):
                     raise
 
+    def test_pretraining_calls_dion2_finalize_hook_after_prepare(
+        self,
+        tiny_pretrain_config_path: Path,
+        temp_output_dir: str,
+        make_wordlevel_tokenizer,
+    ):
+        """Ensure Dion2 mesh-finalization hook is invoked in pretraining runtime."""
+        config = ConfigLoader.load(str(tiny_pretrain_config_path))
+        config.trainer.output_dir = temp_output_dir
+        config.trainer.max_steps = 0
+        config.trainer.use_cpu = True
+        config.wandb.mode = "disabled"
+        config.dataset.streaming = False
+        config.dataset.num_workers = 0
+        config.dataset.num_proc = 1
+        config.dataset.train_split = None
+        config.dataset.eval_split = None
+        config.dataset.eval_samples = 2
+        config.datacollator.pack_sequences = False
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset_path = Path(tmpdir) / "dataset"
+            Dataset.from_dict(
+                {"text": ["hello world", "hello test", "test sentence", "world test"]}
+            ).save_to_disk(str(dataset_path))
+            config.dataset.path = str(dataset_path)
+            config.dataset.name = ""
+            config.dataset.text_column = "text"
+
+            tokenizer = make_wordlevel_tokenizer()
+            tokenizer_path = Path(tmpdir) / "tokenizer"
+            tokenizer.save_pretrained(str(tokenizer_path))
+            config.tokenizer.path = str(tokenizer_path)
+            config.tokenizer.name = "local-test-tokenizer"
+            config.tokenizer.max_length = 32
+            config.dataset.max_seq_length = 32
+            config.model.max_position_embeddings = 32
+
+            with (
+                patch(
+                    "neobert.pretraining.trainer.finalize_dion2_distributed_mesh"
+                ) as finalize_mock,
+                patch(
+                    "neobert.pretraining.trainer.finalize_dion2_qk_clipping_runtime"
+                ) as finalize_qk_mock,
+            ):
+                trainer(config)
+
+            finalize_mock.assert_called_once()
+            finalize_qk_mock.assert_called_once()
+
 
 class TestPretrainComponents:
     """Test individual pretraining components."""
