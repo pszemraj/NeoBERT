@@ -39,7 +39,7 @@ RUN_FULL=1 ./jobs/example_pretrain.sh
 
 # 2-GPU W&B experiment with explicit FSDP2 enablement
 WANDB_PROJECT=neobert-dion2-robustness \
-FSDP2_CONFIG=<accelerate_fsdp2_config.yaml> \
+FSDP2_CONFIG=configs/accelerate/fsdp2_2x5090.yaml \
 RUN_FSDP2=1 \
 ./jobs/experiment_dion2_robustness.sh
 ```

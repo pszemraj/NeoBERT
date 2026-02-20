@@ -44,6 +44,7 @@ Notes:
 - Dion2 is currently pretraining-only in this repository.
 - Dion2 is unsupported with DeepSpeed.
 - For FSDP2, use a 1D shard `DeviceMesh`.
+- Starter config for 2 GPUs: `configs/accelerate/fsdp2_2x5090.yaml`.
 - `optimizer.dion2_config.enable_clipping: true` enables MuonClip QK clipping hooks
   on top of Dion2 updates.
 

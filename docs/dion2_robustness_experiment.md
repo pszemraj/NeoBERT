@@ -73,7 +73,7 @@ Include FSDP2 in same script run:
 ```bash
 WANDB_PROJECT=neobert-dion2-robustness \
 WANDB_ENTITY=<your_wandb_entity> \
-FSDP2_CONFIG=<accelerate_fsdp2_config.yaml> \
+FSDP2_CONFIG=configs/accelerate/fsdp2_2x5090.yaml \
 RUN_FSDP2=1 \
 ./jobs/experiment_dion2_robustness.sh
 ```
@@ -128,7 +128,7 @@ accelerate launch --num_processes 2 \
   --trainer.max_steps 200
 
 # 2-GPU FSDP2 1D mesh (requires your fsdp2 accelerate config)
-accelerate launch --config_file <accelerate_fsdp2_1d.yaml> \
+accelerate launch --config_file configs/accelerate/fsdp2_2x5090.yaml \
   scripts/pretraining/pretrain.py \
   configs/pretraining/pretrain_neobert100m_smollm2data_dion2.yaml \
   --trainer.max_steps 200

@@ -14,6 +14,7 @@ configs/
   pretraining/
   glue/
   contrastive/
+  accelerate/
 ```
 
 ## Config Authoring Policy
@@ -30,6 +31,7 @@ configs/
 - `configs/pretraining/` - production/experiment pretraining recipes.
 - `configs/glue/` - per-task GLUE recipes and generated sweep configs.
 - `configs/contrastive/` - contrastive fine-tuning recipes.
+- `configs/accelerate/` - launcher configs for distributed runtimes (e.g. FSDP2).
 
 ## Related Docs
 

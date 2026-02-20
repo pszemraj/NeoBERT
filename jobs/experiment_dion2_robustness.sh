@@ -78,6 +78,7 @@ if [[ "${RUN_FSDP2}" == "1" ]]; then
   if [[ -z "${FSDP2_CONFIG}" ]]; then
     echo "ERROR: RUN_FSDP2=1 but FSDP2_CONFIG is not set." >&2
     echo "Set FSDP2_CONFIG to your Accelerate fsdp_version=2 config file." >&2
+    echo "Example: FSDP2_CONFIG=configs/accelerate/fsdp2_2x5090.yaml" >&2
     exit 1
   fi
   if [[ ! -f "${FSDP2_CONFIG}" ]]; then
