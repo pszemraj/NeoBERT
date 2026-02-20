@@ -1,9 +1,34 @@
 """Learning-rate scheduler factory for training runs."""
 
+from types import MethodType
 from typing import Any, Optional, Tuple
 
 import torch
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
+
+
+def _ensure_scheduler_compatible_step(optimizer: torch.optim.Optimizer) -> None:
+    """Ensure optimizer.step is method-like for PyTorch scheduler wrappers.
+
+    Recent PyTorch schedulers expect ``optimizer.step`` to expose ``__func__``.
+    Some optimizer integrations may replace ``step`` with a plain function,
+    which then fails during scheduler construction.
+
+    :param torch.optim.Optimizer optimizer: Optimizer to normalize.
+    """
+    step_fn = getattr(optimizer, "step", None)
+    if step_fn is None or not callable(step_fn):
+        return
+    if hasattr(step_fn, "__func__"):
+        return
+
+    original_step = step_fn
+
+    def _step_proxy(_self: torch.optim.Optimizer, *args: Any, **kwargs: Any) -> Any:
+        del _self
+        return original_step(*args, **kwargs)
+
+    optimizer.step = MethodType(_step_proxy, optimizer)
 
 
 def get_scheduler(
@@ -28,6 +53,7 @@ def get_scheduler(
     :param Any kwargs: Unused extra scheduler arguments.
     :return SequentialLR: Configured scheduler.
     """
+    _ensure_scheduler_compatible_step(optimizer)
 
     decay = str(decay).lower().strip()
     if decay not in {"cosine", "linear"}:

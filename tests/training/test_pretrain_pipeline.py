@@ -937,3 +937,41 @@ class TestPretrainComponents:
         )
 
         assert any(isinstance(s, CosineAnnealingLR) for s in scheduler._schedulers)
+
+    def test_scheduler_accepts_optimizers_with_function_step(self):
+        """Ensure scheduler factory normalizes function-style optimizer.step."""
+        from torch.optim import Optimizer
+
+        from neobert.scheduler import get_scheduler
+
+        param = torch.nn.Parameter(torch.tensor([1.0]))
+
+        class _FunctionStepOptimizer(Optimizer):
+            def __init__(self, params):
+                super().__init__(params, defaults={"lr": 1e-3})
+
+                def _plain_step(*args, **kwargs):
+                    del args, kwargs
+                    return None
+
+                self.step = _plain_step
+
+            def zero_grad(self, set_to_none: bool = False):
+                del set_to_none
+                return None
+
+        optimizer = _FunctionStepOptimizer([param])
+        assert callable(optimizer.step)
+        assert not hasattr(optimizer.step, "__func__")
+
+        scheduler = get_scheduler(
+            optimizer=optimizer,
+            lr=1e-3,
+            decay="linear",
+            warmup_steps=0,
+            decay_steps=10,
+            constant_steps=0,
+        )
+
+        assert scheduler is not None
+        assert hasattr(optimizer.step, "__func__")
