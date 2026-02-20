@@ -10,6 +10,9 @@ set -euo pipefail
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 ACCELERATE_BIN="${ACCELERATE_BIN:-accelerate}"
 NUM_GPUS="${NUM_GPUS:-2}"
+ACCELERATE_NUM_MACHINES="${ACCELERATE_NUM_MACHINES:-1}"
+ACCELERATE_MIXED_PRECISION="${ACCELERATE_MIXED_PRECISION:-bf16}"
+ACCELERATE_DYNAMO_BACKEND="${ACCELERATE_DYNAMO_BACKEND:-no}"
 
 # Stage toggles
 RUN_SINGLE="${RUN_SINGLE:-0}"   # 0/1: optional single-GPU runs
@@ -127,7 +130,13 @@ launch_pretrain() {
       launch_prefix=("${PYTHON_BIN}")
       ;;
     ddp)
-      launch_prefix=("${ACCELERATE_BIN}" launch --num_processes "${NUM_GPUS}")
+      launch_prefix=(
+        "${ACCELERATE_BIN}" launch
+        --num_processes "${NUM_GPUS}"
+        --num_machines "${ACCELERATE_NUM_MACHINES}"
+        --mixed_precision "${ACCELERATE_MIXED_PRECISION}"
+        --dynamo_backend "${ACCELERATE_DYNAMO_BACKEND}"
+      )
       ;;
     fsdp2)
       launch_prefix=("${ACCELERATE_BIN}" launch --config_file "${FSDP2_CONFIG}")

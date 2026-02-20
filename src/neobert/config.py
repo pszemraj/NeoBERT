@@ -2297,6 +2297,36 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     parser.add_argument("--optimizer.name", type=str, help="Optimizer name")
     parser.add_argument("--optimizer.lr", type=float, help="Learning rate")
     parser.add_argument("--optimizer.weight_decay", type=float, help="Weight decay")
+    parser.add_argument(
+        "--optimizer.dion2_config.enable_clipping",
+        type=_parse_cli_bool,
+        help="Enable/disable Dion2 MuonClip QK clipping hooks",
+    )
+    parser.add_argument(
+        "--optimizer.dion2_config.clipping_threshold",
+        type=float,
+        help="Dion2 QK clipping threshold",
+    )
+    parser.add_argument(
+        "--optimizer.dion2_config.clipping_interval",
+        type=int,
+        help="Dion2 QK clipping interval",
+    )
+    parser.add_argument(
+        "--optimizer.dion2_config.clipping_warmup_steps",
+        type=int,
+        help="Dion2 QK clipping warmup steps",
+    )
+    parser.add_argument(
+        "--optimizer.dion2_config.clipping_alpha",
+        type=float,
+        help="Dion2 QK clipping Q/K balance alpha",
+    )
+    parser.add_argument(
+        "--optimizer.dion2_config.clipping_qk_chunk_size",
+        type=int,
+        help="Dion2 QK clipping chunk size",
+    )
 
     # Scheduler arguments
     parser.add_argument("--scheduler.name", type=str, help="Scheduler name")

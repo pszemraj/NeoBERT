@@ -254,6 +254,41 @@ class TestConfigSystem(unittest.TestCase):
         finally:
             sys.argv = original_argv
 
+    def test_cli_dion2_nested_overrides(self):
+        """Ensure Dion2 nested optimizer CLI overrides are accepted."""
+        config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"
+        original_argv = sys.argv
+        sys.argv = [
+            "script.py",
+            str(config_path),
+            "--optimizer.name",
+            "dion2",
+            "--optimizer.dion2_config.enable_clipping",
+            "true",
+            "--optimizer.dion2_config.clipping_threshold",
+            "55.0",
+            "--optimizer.dion2_config.clipping_interval",
+            "7",
+            "--optimizer.dion2_config.clipping_warmup_steps",
+            "12",
+            "--optimizer.dion2_config.clipping_alpha",
+            "0.6",
+            "--optimizer.dion2_config.clipping_qk_chunk_size",
+            "2048",
+        ]
+        try:
+            cfg = load_config_from_args()
+            self.assertEqual(cfg.optimizer.name, "dion2")
+            self.assertIsNotNone(cfg.optimizer.dion2_config)
+            self.assertTrue(cfg.optimizer.dion2_config.enable_clipping)
+            self.assertEqual(cfg.optimizer.dion2_config.clipping_threshold, 55.0)
+            self.assertEqual(cfg.optimizer.dion2_config.clipping_interval, 7)
+            self.assertEqual(cfg.optimizer.dion2_config.clipping_warmup_steps, 12)
+            self.assertEqual(cfg.optimizer.dion2_config.clipping_alpha, 0.6)
+            self.assertEqual(cfg.optimizer.dion2_config.clipping_qk_chunk_size, 2048)
+        finally:
+            sys.argv = original_argv
+
     def test_nested_config_override(self):
         """Test deeply nested configuration overrides."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
