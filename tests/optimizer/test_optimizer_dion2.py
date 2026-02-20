@@ -39,7 +39,7 @@ def test_dion2_missing_dependency_raises_actionable_error(
 
     monkeypatch.setattr(builtins, "__import__", _fake_import)
 
-    with pytest.raises(ImportError, match=r"neobert\[dion\]"):
+    with pytest.raises(ImportError, match=r"\.\[dion\]|microsoft/dion"):
         get_optimizer(
             _ToyModel(),
             DistributedType.NO,
@@ -256,3 +256,77 @@ def test_dion2_qk_clipping_runtime_is_attached(
 
     assert optimizer.get_metrics()["train/max_attention_logit"] == pytest.approx(12.3)
     assert optimizer.get_metrics() == {}
+
+
+def test_dion2_qk_step_wrapper_is_scheduler_compatible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dion2 QK step wrapper must remain a bound method for LR schedulers."""
+
+    class _FakeDion2(torch.optim.Optimizer):
+        def __init__(self, param_groups, **kwargs):
+            defaults = {"lr": float(kwargs.get("lr", 1e-4))}
+            super().__init__(param_groups, defaults)
+
+        def step(self, closure=None):
+            del closure
+            return None
+
+    class _FakeHookSystem:
+        def has_captured_inputs(self):
+            return False
+
+        def clear(self):
+            return None
+
+        def set_enabled(self, enabled, *, clear_cache_when_disabling=True):
+            del enabled, clear_cache_when_disabling
+            return None
+
+    class _FakeMuonClipOptimizer:
+        def __init__(self, model, model_config, config):
+            del model, model_config
+            self.config = config
+            self._step = 0
+            self._last_metrics = {}
+            self.hook_system = _FakeHookSystem()
+
+        def should_clip_update(self, update_step):
+            return False
+
+        def prepare_for_forward(self, *, update_step, is_last_microbatch):
+            del update_step, is_last_microbatch
+            return True
+
+        def get_metrics(self):
+            return {}
+
+    monkeypatch.setitem(sys.modules, "dion", types.SimpleNamespace(Dion2=_FakeDion2))
+    monkeypatch.setattr(
+        optimizer_module,
+        "MuonClipOptimizer",
+        _FakeMuonClipOptimizer,
+        raising=True,
+    )
+
+    optimizer = get_optimizer(
+        _ToyModel(),
+        DistributedType.NO,
+        model_config=types.SimpleNamespace(),
+        name="dion2",
+        lr=1e-4,
+        weight_decay=0.01,
+        betas=(0.9, 0.95),
+        eps=1e-8,
+        dion2_config={"enable_clipping": True},
+    )
+
+    step_method = optimizer.step
+    assert hasattr(step_method, "__func__")
+    assert getattr(step_method, "__self__", None) is optimizer
+    _ = torch.optim.lr_scheduler.LinearLR(
+        optimizer,
+        start_factor=1.0,
+        end_factor=1.0,
+        total_iters=1,
+    )

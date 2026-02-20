@@ -2,6 +2,7 @@
 
 import logging
 from dataclasses import asdict, is_dataclass
+from types import MethodType
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -324,12 +325,17 @@ def _attach_dion2_qk_clipping_runtime(
     )
     original_step = optimizer.step
 
-    def _step_with_qk_clipping(*args: Any, **kwargs: Any) -> Any:
+    def _step_with_qk_clipping(
+        _self: torch.optim.Optimizer, *args: Any, **kwargs: Any
+    ) -> Any:
+        del _self
         loss = original_step(*args, **kwargs)
         runtime.post_step()
         return loss
 
-    setattr(optimizer, "step", _step_with_qk_clipping)
+    # Keep ``optimizer.step`` method-like (bound to optimizer) so PyTorch LR
+    # schedulers can inspect ``__func__`` and wrap it correctly.
+    setattr(optimizer, "step", MethodType(_step_with_qk_clipping, optimizer))
     setattr(optimizer, "prepare_for_forward", runtime.prepare_for_forward)
     setattr(optimizer, "get_metrics", runtime.get_metrics)
     setattr(optimizer, "_neobert_dion2_qk_runtime", runtime)
