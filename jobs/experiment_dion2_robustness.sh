@@ -29,6 +29,7 @@ LOGGING_STEPS="${LOGGING_STEPS:-25}"
 SAVE_STEPS="${SAVE_STEPS:-250}"
 EVAL_STEPS="${EVAL_STEPS:-250}"
 SEEDS="${SEEDS:-42 1337}"
+VARIANTS="${VARIANTS:-adamw muonclip dion2 dion2_qk}"
 
 # Resume budget
 RESUME_PHASE1_STEPS="${RESUME_PHASE1_STEPS:-400}"
@@ -52,6 +53,17 @@ ROOT_OUT="${ROOT_OUT:-./outputs/exp/${WANDB_GROUP}}"
 CFG_ADAMW="configs/pretraining/pretrain_neobert100m_smollm2data.yaml"
 CFG_MUON="configs/pretraining/pretrain_neobert100m_smollm2data_muonclip.yaml"
 CFG_DION2="configs/pretraining/pretrain_neobert100m_smollm2data_dion2.yaml"
+
+variant_enabled() {
+  local target="$1"
+  local variant
+  for variant in ${VARIANTS}; do
+    if [[ "${variant}" == "${target}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
 
 require_cmd() {
   local cmd="$1"
@@ -93,6 +105,11 @@ fi
 if [[ "${RUN_FSDP2}" != "0" && "${RUN_FSDP2}" != "1" ]]; then
   echo "ERROR: RUN_FSDP2 must be one of: auto, 0, 1 (got '${RUN_FSDP2}')." >&2
   exit 1
+fi
+
+if [[ "${RUN_RESUME}" == "1" ]] && ! variant_enabled "dion2_qk"; then
+  echo "INFO: disabling resume checks because VARIANTS excludes 'dion2_qk'."
+  RUN_RESUME="0"
 fi
 
 mkdir -p "${ROOT_OUT}"
@@ -167,26 +184,36 @@ run_matrix_for_runtime() {
   local base_dir="${ROOT_OUT}/${runtime}/seed${seed}"
   mkdir -p "${base_dir}"
 
-  launch_pretrain "${runtime}" adamw "${seed}" "${STABILITY_STEPS}" "${CFG_ADAMW}" \
-    "${base_dir}/adamw"
-
-  if [[ "${runtime}" != "fsdp2" ]]; then
-    # MuonClip is incompatible with FSDP sharded parameters.
-    launch_pretrain "${runtime}" muonclip "${seed}" "${STABILITY_STEPS}" "${CFG_MUON}" \
-      "${base_dir}/muonclip"
+  if variant_enabled "adamw"; then
+    launch_pretrain "${runtime}" adamw "${seed}" "${STABILITY_STEPS}" "${CFG_ADAMW}" \
+      "${base_dir}/adamw"
   fi
 
-  launch_pretrain "${runtime}" dion2 "${seed}" "${STABILITY_STEPS}" "${CFG_DION2}" \
-    "${base_dir}/dion2" \
-    --optimizer.dion2_config.enable_clipping false
+  if variant_enabled "muonclip"; then
+    if [[ "${runtime}" != "fsdp2" ]]; then
+      # MuonClip is incompatible with FSDP sharded parameters.
+      launch_pretrain "${runtime}" muonclip "${seed}" "${STABILITY_STEPS}" "${CFG_MUON}" \
+        "${base_dir}/muonclip"
+    else
+      echo "INFO: skipping muonclip on fsdp2 runtime (unsupported)."
+    fi
+  fi
 
-  launch_pretrain "${runtime}" dion2_qk "${seed}" "${STABILITY_STEPS}" "${CFG_DION2}" \
-    "${base_dir}/dion2_qk" \
-    --optimizer.dion2_config.enable_clipping true \
-    --optimizer.dion2_config.clipping_threshold "${QK_THRESHOLD}" \
-    --optimizer.dion2_config.clipping_interval "${QK_INTERVAL}" \
-    --optimizer.dion2_config.clipping_warmup_steps "${QK_WARMUP}" \
-    --optimizer.dion2_config.clipping_alpha "${QK_ALPHA}"
+  if variant_enabled "dion2"; then
+    launch_pretrain "${runtime}" dion2 "${seed}" "${STABILITY_STEPS}" "${CFG_DION2}" \
+      "${base_dir}/dion2" \
+      --optimizer.dion2_config.enable_clipping false
+  fi
+
+  if variant_enabled "dion2_qk"; then
+    launch_pretrain "${runtime}" dion2_qk "${seed}" "${STABILITY_STEPS}" "${CFG_DION2}" \
+      "${base_dir}/dion2_qk" \
+      --optimizer.dion2_config.enable_clipping true \
+      --optimizer.dion2_config.clipping_threshold "${QK_THRESHOLD}" \
+      --optimizer.dion2_config.clipping_interval "${QK_INTERVAL}" \
+      --optimizer.dion2_config.clipping_warmup_steps "${QK_WARMUP}" \
+      --optimizer.dion2_config.clipping_alpha "${QK_ALPHA}"
+  fi
 }
 
 run_resume_check() {
@@ -223,6 +250,7 @@ print_plan() {
   echo "wandb_mode: ${WANDB_MODE}"
   echo "output:     ${ROOT_OUT}"
   echo "seeds:      ${SEEDS}"
+  echo "variants:   ${VARIANTS}"
   echo "steps:      ${STABILITY_STEPS}"
   echo "run_single: ${RUN_SINGLE}"
   echo "run_ddp:    ${RUN_DDP}"

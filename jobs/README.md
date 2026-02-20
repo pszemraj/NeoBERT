@@ -42,6 +42,13 @@ WANDB_PROJECT=neobert-dion2-robustness \
 FSDP2_CONFIG=configs/accelerate/fsdp2_2x5090.yaml \
 RUN_FSDP2=1 \
 ./jobs/experiment_dion2_robustness.sh
+
+# Resume from a failed point without rerunning completed variants
+WANDB_GROUP=<existing_group_name> \
+ROOT_OUT=./outputs/exp/<existing_group_name> \
+VARIANTS="dion2 dion2_qk" \
+SEEDS="42" \
+./jobs/experiment_dion2_robustness.sh
 ```
 
 ## Notes

@@ -78,6 +78,16 @@ RUN_FSDP2=1 \
 ./jobs/experiment_dion2_robustness.sh
 ```
 
+Resume only remaining variants (skip already completed `adamw` / `muonclip`):
+
+```bash
+WANDB_GROUP=<existing_group_name> \
+ROOT_OUT=./outputs/exp/<existing_group_name> \
+VARIANTS="dion2 dion2_qk" \
+SEEDS="42" \
+./jobs/experiment_dion2_robustness.sh
+```
+
 Minimal smoke examples:
 
 ```bash
