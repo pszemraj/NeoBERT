@@ -38,6 +38,52 @@ def _parse_cli_bool(value: str) -> bool:
     )
 
 
+def _parse_cli_string_list(value: str) -> List[str]:
+    """Parse CLI tokens into a list of strings.
+
+    Accepted forms:
+    - YAML/JSON list: ``[a,b]`` or ``['a','b']``
+    - Comma-separated: ``a,b``
+    - Empty string: ``[]``
+
+    :param str value: Raw CLI token.
+    :raises argparse.ArgumentTypeError: If parsing fails or non-string items exist.
+    :return list[str]: Parsed non-empty string list.
+    """
+    raw = str(value).strip()
+    if raw == "":
+        return []
+
+    try:
+        parsed = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        raise argparse.ArgumentTypeError(
+            f"Failed to parse list value {value!r}: {exc}"
+        ) from exc
+
+    if parsed is None:
+        return []
+
+    if isinstance(parsed, str):
+        return [item.strip() for item in parsed.split(",") if item.strip()]
+
+    if not isinstance(parsed, list):
+        raise argparse.ArgumentTypeError(
+            "Expected a list of strings (e.g. '[a,b]' or 'a,b')."
+        )
+
+    cleaned: List[str] = []
+    for idx, item in enumerate(parsed):
+        if not isinstance(item, str):
+            raise argparse.ArgumentTypeError(
+                f"Expected string at index {idx}, got {type(item).__name__}."
+            )
+        token = item.strip()
+        if token:
+            cleaned.append(token)
+    return cleaned
+
+
 def resolve_mixed_precision(value: Any, *, task: str) -> str:
     """Normalize and validate mixed-precision policy for a task.
 
@@ -2364,6 +2410,11 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         help=(
             "W&B model watching mode: gradients, parameters, all, or off/none/disabled"
         ),
+    )
+    parser.add_argument(
+        "--wandb.tags",
+        type=_parse_cli_string_list,
+        help="W&B tags list (e.g. '[dion2,robustness]' or 'dion2,robustness')",
     )
 
     # Top-level arguments

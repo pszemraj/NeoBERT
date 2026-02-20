@@ -218,6 +218,42 @@ class TestConfigSystem(unittest.TestCase):
                 finally:
                     sys.argv = original_argv
 
+    def test_cli_wandb_tags_override(self):
+        """Ensure W&B tags can be overridden from CLI in list/comma forms."""
+        config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"
+        cases = [
+            ("[dion2,robustness,stability]", ["dion2", "robustness", "stability"]),
+            ("dion2,robustness,stability", ["dion2", "robustness", "stability"]),
+        ]
+
+        for raw_tags, expected in cases:
+            with self.subTest(raw_tags=raw_tags):
+                original_argv = sys.argv
+                sys.argv = [
+                    "script.py",
+                    str(config_path),
+                    "--wandb.tags",
+                    raw_tags,
+                ]
+                try:
+                    cfg = load_config_from_args()
+                    self.assertEqual(cfg.wandb.tags, expected)
+                finally:
+                    sys.argv = original_argv
+
+        original_argv = sys.argv
+        sys.argv = [
+            "script.py",
+            str(config_path),
+            "--wandb.tags",
+            "[dion2,1]",
+        ]
+        try:
+            with self.assertRaises(SystemExit):
+                load_config_from_args()
+        finally:
+            sys.argv = original_argv
+
     def test_nested_config_override(self):
         """Test deeply nested configuration overrides."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
