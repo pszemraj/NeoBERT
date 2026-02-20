@@ -108,12 +108,12 @@ Actions:
 
 ## Environment and Dependency Notes
 
-- Flash-attn path: install optional extra `pip install -e .[flash]`.
-- Dion2 optimizer path: install optional extra `pip install -e .[dion]`.
+- Flash-attn path: install optional extra `pip install -e ".[flash]"`.
+- Dion2 optimizer path: install optional extra `pip install -e ".[dion]"`.
 - Liger kernels are used when available under `kernel_backend: auto` on CUDA.
 - Keep PyTorch/CUDA versions aligned with your installed extension wheels.
 - If `optimizer.name: dion2` fails with missing dependency, install
-  `pip install "neobert[dion]"` and re-run.
+  `pip install "dion @ git+https://github.com/microsoft/dion.git"` and re-run.
 
 ## Minimal Diagnostics
 

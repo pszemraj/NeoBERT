@@ -28,7 +28,7 @@ Paper (original): <https://arxiv.org/abs/2502.19587>
 ```bash
 git clone https://github.com/pszemraj/NeoBERT.git
 cd NeoBERT
-pip install -e .[dev]
+pip install -e ".[dev]"
 ```
 
 Optional extras:
@@ -36,9 +36,9 @@ Optional extras:
 ```bash
 pip install -U -q packaging wheel ninja
 # Packed flash-attn training backend
-pip install -e .[flash] --no-build-isolation
-# Dion2 optimizer support (pretraining)
-pip install -e .[dion]
+pip install -e ".[flash]" --no-build-isolation
+# Dion2 optimizer support (pretraining; installs microsoft/dion from GitHub)
+pip install -e ".[dion]"
 ```
 
 See [docs/troubleshooting.md](docs/troubleshooting.md) for environment issues.

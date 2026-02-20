@@ -40,7 +40,7 @@ keywords = []
 [project.optional-dependencies]
 dev = ["ruff", "isort", "pytest", "pytest-cov", "pytest-clarity", "xeger"]
 flash = ["flash-attn>=2.5"]
-dion = ["dion>=0.1.0"]
+dion = ["dion @ git+https://github.com/microsoft/dion.git"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

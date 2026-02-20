@@ -395,7 +395,8 @@ Overrides are validated with the same semantic checks as base YAML configs.
 
 ### Dion2 (`optimizer.dion2_config`)
 
-Install requirement: `pip install -e .[dion]` (or `pip install "neobert[dion]"`).
+Install requirement: `pip install -e ".[dion]"` (this extra installs
+`dion` from `https://github.com/microsoft/dion.git`).
 Upstream `dion` expects a modern PyTorch runtime; `use_triton: true` also requires
 a compatible Triton runtime.
 
@@ -559,7 +560,7 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 | `scheduler.decay_percent` and `scheduler.decay_steps`                             | **PRECEDENCE**     | `decay_percent` overrides absolute decay steps.                                                                     |
 | `optimizer.name=muonclip` with DeepSpeed ZeRO stage >= 2                          | **ERROR**          | MuonClip is incompatible with sharded grads/params at ZeRO stage >= 2.                                              |
 | `optimizer.name=dion2` outside pretraining                                        | **ERROR**          | Dion2 is currently supported only for `task=pretraining`.                                                           |
-| `optimizer.name=dion2` without optional `dion` package                            | **ERROR**          | Install optional dependency: `pip install -e .[dion]` (or `pip install "neobert[dion]"`).                        |
+| `optimizer.name=dion2` without optional `dion` package                            | **ERROR**          | Install optional dependency: `pip install -e ".[dion]"` (or `pip install "dion @ git+https://github.com/microsoft/dion.git"`). |
 | `optimizer.name=dion2` with DeepSpeed                                             | **ERROR**          | Dion2 is unsupported with DeepSpeed in this framework integration.                                                  |
 | `optimizer.name=dion2` with FSDP non-1D mesh                                      | **ERROR**          | Dion2 requires a 1D FSDP2 shard mesh (use a 1D shard sub-mesh).                                                    |
 | `datacollator.pack_sequences=true` with `model.attn_backend=sdpa`                 | **WARNING**        | Works, but slower than `flash_attn_varlen`; SDPA uses fallback path.                                                |

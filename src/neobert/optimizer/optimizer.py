@@ -456,7 +456,8 @@ def get_optimizer(
             except ImportError as exc:
                 raise ImportError(
                     "optimizer.name='dion2' requires the optional 'dion' package. "
-                    "Install with: pip install \"neobert[dion]\". "
+                    "Install with: pip install -e \".[dion]\" "
+                    "or pip install \"dion @ git+https://github.com/microsoft/dion.git\". "
                     "Note: upstream dion requires a recent PyTorch + Triton runtime."
                 ) from exc
 

@@ -29,7 +29,7 @@ python scripts/pretraining/pretrain.py \
 Install optional dependency first:
 
 ```bash
-pip install -e .[dion]
+pip install -e ".[dion]"
 ```
 
 Launch example:
@@ -64,7 +64,7 @@ Enable packing via `datacollator.pack_sequences: true`.
 Recommended for throughput:
 
 - `model.attn_backend: flash_attn_varlen`
-- install flash-attn (`pip install -e .[flash]`)
+- install flash-attn (`pip install -e ".[flash]"`)
 
 Supported but slower:
 

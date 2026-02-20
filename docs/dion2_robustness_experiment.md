@@ -19,18 +19,18 @@ This runbook validates that `optimizer.name: dion2` is correct, stable, and comp
 
 ```bash
 # Base dev/test tools
-pip install -e .[dev]
+pip install -e ".[dev]"
 
 # Dion2 optional dependency
-pip install -e .[dion]
+pip install -e ".[dion]"
 
 # Optional packed attention backend
-pip install -e .[flash] --no-build-isolation
+pip install -e ".[flash]" --no-build-isolation
 ```
 
 Notes:
 
-- Dion2 requires the upstream `dion` package.
+- Dion2 requires the upstream `dion` package (installed from GitHub via `.[dion]`).
 - Dion2 with `use_triton: true` requires a Triton-compatible runtime.
 - Dion2 is unsupported with DeepSpeed in this integration.
 - MuonClip is incompatible with FSDP sharded parameters.

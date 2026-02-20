@@ -59,7 +59,7 @@ Canonical command list for those scripts is maintained in
 
 1. Import errors
 
-- install editable package (`pip install -e .[dev]`).
+- install editable package (`pip install -e ".[dev]"`).
 
 1. Device mismatches
 
