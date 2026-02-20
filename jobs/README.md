@@ -7,6 +7,8 @@ jobs/
   example_pretrain.sh
   example_evaluate.sh
   pretrain_fp8_fsdp2_4gpu.sh
+  pretrain_muon_fsdp2_no_shard.sh
+  pretrain_muon_fp8_fsdp2_no_shard_4gpu.sh
 ```
 
 These are convenience wrappers around scripts in `scripts/` and configs in
@@ -42,6 +44,12 @@ TRAIN_CONFIG=configs/pretraining/pretrain_neobert_fp8_4gpu.yaml \
 ACCELERATE_CONFIG=configs/accelerate/fsdp2_fp8_4gpu.yaml \
 WANDB_MODE=offline \
 ./jobs/pretrain_fp8_fsdp2_4gpu.sh --trainer.max_steps 2000
+
+# MuonClip + FSDP2 without sharding (single-process)
+./jobs/pretrain_muon_fsdp2_no_shard.sh
+
+# MuonClip + FP8 + FSDP2 without sharding (4 GPUs)
+./jobs/pretrain_muon_fp8_fsdp2_no_shard_4gpu.sh
 ```
 
 ## Notes

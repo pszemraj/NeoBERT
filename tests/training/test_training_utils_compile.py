@@ -168,13 +168,51 @@ def test_resolve_wandb_watch_mode_matrix() -> None:
             assert warning is None
 
 
-def test_validate_muon_distributed_compatibility_rejects_fsdp() -> None:
-    """MuonClip must fail fast under FSDP-sharded training."""
-    accelerator = SimpleNamespace(distributed_type=DistributedType.FSDP)
-    with pytest.raises(RuntimeError, match="not compatible with FSDP"):
+def test_validate_muon_distributed_compatibility_rejects_fsdp_sharded() -> None:
+    """MuonClip must fail fast under sharded FSDP training."""
+    accelerator = SimpleNamespace(
+        distributed_type=DistributedType.FSDP,
+        num_processes=4,
+        state=SimpleNamespace(
+            fsdp_plugin=SimpleNamespace(sharding_strategy="FULL_SHARD")
+        ),
+    )
+    with pytest.raises(RuntimeError, match="sharded FSDP"):
         validate_muon_distributed_compatibility(
             accelerator=accelerator,
             optimizer_name="muonclip",
             log=logging.getLogger("test"),
             context="unit-test",
         )
+
+
+def test_validate_muon_distributed_compatibility_allows_fsdp_single_process() -> None:
+    """MuonClip should be allowed when FSDP runs on a single process."""
+    accelerator = SimpleNamespace(
+        distributed_type=DistributedType.FSDP,
+        num_processes=1,
+        state=SimpleNamespace(
+            fsdp_plugin=SimpleNamespace(sharding_strategy="FULL_SHARD")
+        ),
+    )
+    validate_muon_distributed_compatibility(
+        accelerator=accelerator,
+        optimizer_name="muonclip",
+        log=logging.getLogger("test"),
+        context="unit-test",
+    )
+
+
+def test_validate_muon_distributed_compatibility_allows_fsdp_no_shard() -> None:
+    """MuonClip should be allowed when FSDP is configured with NO_SHARD."""
+    accelerator = SimpleNamespace(
+        distributed_type=DistributedType.FSDP,
+        num_processes=4,
+        state=SimpleNamespace(fsdp_plugin=SimpleNamespace(sharding_strategy="NO_SHARD")),
+    )
+    validate_muon_distributed_compatibility(
+        accelerator=accelerator,
+        optimizer_name="muonclip",
+        log=logging.getLogger("test"),
+        context="unit-test",
+    )

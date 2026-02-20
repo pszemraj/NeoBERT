@@ -100,6 +100,66 @@ def create_accelerator(
         raise
 
 
+def _resolve_num_processes(accelerator: Accelerator) -> Optional[int]:
+    """Best-effort resolve process count for distributed compatibility checks.
+
+    :param Accelerator accelerator: Active accelerator runtime.
+    :return int | None: Process count when discoverable, otherwise ``None``.
+    """
+    candidates = (
+        getattr(accelerator, "num_processes", None),
+        getattr(getattr(accelerator, "state", None), "num_processes", None),
+    )
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            resolved = int(candidate)
+        except (TypeError, ValueError):
+            continue
+        if resolved > 0:
+            return resolved
+
+    dist = getattr(torch, "distributed", None)
+    if dist is None:
+        return None
+    try:
+        if dist.is_available() and dist.is_initialized():
+            world_size = int(dist.get_world_size())
+            if world_size > 0:
+                return world_size
+    except Exception:
+        return None
+    return None
+
+
+def _resolve_fsdp_sharding_strategy(accelerator: Accelerator) -> Optional[str]:
+    """Best-effort resolve FSDP sharding strategy name.
+
+    :param Accelerator accelerator: Active accelerator runtime.
+    :return str | None: Upper-cased sharding strategy (for example ``FULL_SHARD``).
+    """
+    fsdp_plugin = getattr(getattr(accelerator, "state", None), "fsdp_plugin", None)
+    if fsdp_plugin is None:
+        return None
+
+    raw_strategy = getattr(fsdp_plugin, "sharding_strategy", None)
+    if raw_strategy is None:
+        raw_strategy = getattr(fsdp_plugin, "fsdp_sharding_strategy", None)
+    if raw_strategy is None:
+        return None
+
+    name = getattr(raw_strategy, "name", None)
+    if name is not None:
+        strategy = str(name).strip().upper()
+        return strategy or None
+
+    strategy = str(raw_strategy).strip().upper()
+    if "." in strategy:
+        strategy = strategy.rsplit(".", 1)[-1]
+    return strategy or None
+
+
 def validate_muon_distributed_compatibility(
     *,
     accelerator: Accelerator,
@@ -109,9 +169,8 @@ def validate_muon_distributed_compatibility(
 ) -> None:
     """Validate MuonClip compatibility for the active distributed runtime.
 
-    MuonClip orthogonalizes full 2D tensors. Sharded-parameter modes (notably
-    FSDP and DeepSpeed ZeRO-2/3) violate this assumption because each rank holds
-    only slices of the matrix.
+    MuonClip orthogonalizes full 2D tensors. Sharded-parameter modes violate
+    this assumption because each rank holds only slices of the matrix.
 
     :param Accelerator accelerator: Active Accelerator runtime.
     :param str optimizer_name: Configured optimizer name.
@@ -125,9 +184,24 @@ def validate_muon_distributed_compatibility(
 
     distributed_type = getattr(accelerator, "distributed_type", None)
     if distributed_type is DistributedType.FSDP:
+        num_processes = _resolve_num_processes(accelerator)
+        sharding_strategy = _resolve_fsdp_sharding_strategy(accelerator)
+        if num_processes == 1 or sharding_strategy == "NO_SHARD":
+            log.warning(
+                "MuonClip with FSDP in %s is running without parameter sharding "
+                "(num_processes=%s, sharding_strategy=%s). This is experimental "
+                "and does not provide sharded-memory savings.",
+                context,
+                num_processes if num_processes is not None else "unknown",
+                sharding_strategy or "unknown",
+            )
+            return
         raise RuntimeError(
-            "MuonClip is not compatible with FSDP sharded parameters in "
-            f"{context}. Use AdamW or disable FSDP for MuonClip runs."
+            "MuonClip is not compatible with sharded FSDP parameters in "
+            f"{context} (num_processes={num_processes if num_processes is not None else 'unknown'}, "
+            f"sharding_strategy={sharding_strategy or 'unknown'}). Use AdamW for "
+            "sharded FSDP runs, or run MuonClip with num_processes=1 or "
+            "fsdp_sharding_strategy=NO_SHARD."
         )
 
     if distributed_type is not DistributedType.DEEPSPEED:
