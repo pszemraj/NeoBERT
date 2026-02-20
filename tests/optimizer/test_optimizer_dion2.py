@@ -200,6 +200,7 @@ def test_dion2_qk_clipping_runtime_is_attached(
             self.hook_system = _HookSystem()
             self.prepare_calls = []
             self.apply_calls = 0
+            self.apply_grad_enabled_states = []
 
         def should_clip_update(self, update_step):
             return int(update_step) % 2 == 1
@@ -209,6 +210,7 @@ def test_dion2_qk_clipping_runtime_is_attached(
             return True
 
         def _apply_qk_clipping(self):
+            self.apply_grad_enabled_states.append(torch.is_grad_enabled())
             self.apply_calls += 1
             self._last_metrics["train/max_attention_logit"] = 12.3
 
@@ -250,6 +252,7 @@ def test_dion2_qk_clipping_runtime_is_attached(
     runtime = getattr(optimizer, "_neobert_dion2_qk_runtime")
     clipper = runtime._qk_clipper
     assert clipper.apply_calls == 1
+    assert clipper.apply_grad_enabled_states == [False]
     assert clipper.prepare_calls == [(1, True)]
     assert clipper.hook_system.clear_calls == 1
     assert clipper.hook_system.enable_calls[-1] == (False, False)

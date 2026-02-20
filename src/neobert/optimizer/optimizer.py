@@ -296,7 +296,10 @@ class _Dion2QKClippingRuntime:
                 )
                 clipper._last_metrics.clear()
             else:
-                clipper._apply_qk_clipping()
+                # QK clipping mutates projection weights post-step and must not be
+                # tracked by autograd.
+                with torch.no_grad():
+                    clipper._apply_qk_clipping()
         else:
             clipper._last_metrics.clear()
 
