@@ -622,6 +622,25 @@ class TestMuonClipOptimizer:
 
         assert optimizer_clone._step == optimizer._step
 
+    def test_sharded_runtime_clipping_disable_preserves_config_intent(self, model):
+        """Runtime disable should not rewrite user config intent."""
+        model_instance, config = model
+        optimizer = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(enable_clipping=True, clipping_interval=1),
+        )
+        assert optimizer.config.enable_clipping
+        assert optimizer.should_clip_update(0)
+
+        optimizer._disable_clipping_for_sharded_runtime()
+
+        assert optimizer.config.enable_clipping
+        assert not optimizer.should_clip_update(0)
+        assert not optimizer._runtime_clipping_enabled
+        if optimizer.hook_system is not None:
+            assert not optimizer.hook_system.enabled
+
     def test_clipping_applied(self, model):
         """Test QK-clipping actually modifies weights."""
         model_instance, config = model

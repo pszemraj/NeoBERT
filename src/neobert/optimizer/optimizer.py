@@ -111,7 +111,7 @@ def get_optimizer(
             betas = kwargs.pop("betas", (0.9, 0.98))
             eps = kwargs.pop("eps", 1e-10)
 
-            extra_args = {k: v for k, v in kwargs.items()}
+            extra_args = dict(kwargs)
             if extra_args:
                 logger.warning(
                     "Ignoring unused optimizer kwargs for MuonClip: "

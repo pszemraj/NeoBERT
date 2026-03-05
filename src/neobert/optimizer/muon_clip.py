@@ -545,7 +545,13 @@ class MuonClipOptimizer(Optimizer):
         self._layer_mapping = dict(self.config.clipping_layers_mapping)
         self._polar_coeff_cache: Dict[int, List[Tuple[float, float, float]]] = {}
         self._polar_work_dtype: Optional[torch.dtype] = None
-        self._muon_owner_rank_cache: Dict[Tuple[int, int], Dict[int, int]] = {}
+        self._muon_owner_rank_cache: Dict[
+            Tuple[Tuple[int, ...], int], Dict[int, int]
+        ] = {}
+        self._dtensor_row_count_cache: Dict[
+            Tuple[Tuple[int, ...], Tuple[int, ...], int], List[int]
+        ] = {}
+        self._runtime_clipping_enabled = bool(self.config.enable_clipping)
         self._clipping_disabled_warning_emitted = False
         if torch.cuda.is_available():
             try:
@@ -592,7 +598,7 @@ class MuonClipOptimizer(Optimizer):
         :param int update_step: Optimizer update index (0-based).
         :return bool: Whether clipping should run.
         """
-        if not getattr(self.config, "enable_clipping", False):
+        if not self._runtime_clipping_enabled:
             return False
 
         warmup = int(getattr(self.config, "clipping_warmup_steps", 0))
@@ -851,7 +857,7 @@ class MuonClipOptimizer(Optimizer):
                 self._adam_step(group)
 
         # Apply QK-clipping
-        if self.config.enable_clipping and self.hook_system:
+        if self._runtime_clipping_enabled and self.hook_system:
             should_clip = self.should_clip_update(self._step)
             if should_clip:
                 if not self.hook_system.has_captured_inputs():
@@ -1019,7 +1025,7 @@ class MuonClipOptimizer(Optimizer):
 
     def _disable_clipping_for_sharded_runtime(self) -> None:
         """Disable QK clipping once when sharded Muon updates are detected."""
-        if not self.config.enable_clipping:
+        if not self._runtime_clipping_enabled:
             return
         if not self._clipping_disabled_warning_emitted:
             logger.warning(
@@ -1028,10 +1034,26 @@ class MuonClipOptimizer(Optimizer):
             )
             self._clipping_disabled_warning_emitted = True
 
-        self.config.enable_clipping = False
+        self._runtime_clipping_enabled = False
         if self.hook_system is not None:
             self.hook_system.clear()
             self.hook_system.set_enabled(False, clear_cache_when_disabling=False)
+
+    def _process_group_cache_key(
+        self, process_group: dist.ProcessGroup
+    ) -> Tuple[int, ...]:
+        """Build a stable cache key for a process group.
+
+        :param dist.ProcessGroup process_group: Process group for collective ops.
+        :return tuple[int, ...]: Deterministic key based on member global ranks.
+        """
+        get_ranks = getattr(dist, "get_process_group_ranks", None)
+        if callable(get_ranks):
+            ranks = tuple(int(rank) for rank in get_ranks(process_group))
+            if ranks:
+                return ranks
+        # Fallback for older torch builds lacking get_process_group_ranks.
+        return (int(id(process_group)),)
 
     def _resolve_owner_rank(
         self,
@@ -1049,9 +1071,9 @@ class MuonClipOptimizer(Optimizer):
         :param dist.ProcessGroup process_group: Process group backing the shard mesh.
         :return int: Owner rank in the process group.
         """
-        cache_key = (id(process_group), int(world_size))
+        cache_key = (self._process_group_cache_key(process_group), int(world_size))
         owners = self._muon_owner_rank_cache.get(cache_key)
-        if owners is None:
+        if owners is None or id(param) not in owners:
             owners = {}
             loads = [0] * world_size
             ordered = sorted(group_params, key=lambda p: int(p.numel()), reverse=True)
@@ -1064,7 +1086,53 @@ class MuonClipOptimizer(Optimizer):
                 loads[owner] += int(group_param.numel())
             self._muon_owner_rank_cache[cache_key] = owners
 
-        return int(owners.get(id(param), 0))
+        owner = owners.get(id(param))
+        if owner is None:
+            raise RuntimeError(
+                "Failed to resolve owner rank for Muon DTensor parameter; "
+                "owner assignment cache does not contain this parameter."
+            )
+        return int(owner)
+
+    def _get_dtensor_row_counts(
+        self,
+        *,
+        local_shard: torch.Tensor,
+        global_shape: torch.Size,
+        process_group: dist.ProcessGroup,
+        world_size: int,
+        rank: int,
+    ) -> List[int]:
+        """Return cached per-rank row counts for a row-sharded DTensor.
+
+        :param torch.Tensor local_shard: Local shard tensor on this rank.
+        :param torch.Size global_shape: Global DTensor shape.
+        :param dist.ProcessGroup process_group: Process group backing the DTensor mesh.
+        :param int world_size: Group-local world size.
+        :param int rank: Group-local rank.
+        :return list[int]: Row count owned by each rank in process-group order.
+        """
+        key = (
+            self._process_group_cache_key(process_group),
+            tuple(int(dim) for dim in global_shape),
+            int(world_size),
+        )
+        row_counts = self._dtensor_row_count_cache.get(key)
+        local_rows = int(local_shard.shape[0])
+        if row_counts is not None and len(row_counts) == world_size:
+            if int(row_counts[rank]) == local_rows:
+                return row_counts
+
+        local_row_count = torch.tensor(
+            [local_rows],
+            device=local_shard.device,
+            dtype=torch.int64,
+        )
+        gathered_counts = [torch.zeros_like(local_row_count) for _ in range(world_size)]
+        dist.all_gather(gathered_counts, local_row_count, group=process_group)
+        row_counts = [int(count.item()) for count in gathered_counts]
+        self._dtensor_row_count_cache[key] = row_counts
+        return row_counts
 
     def _orthogonalize_dtensor_update(
         self,
@@ -1123,14 +1191,13 @@ class MuonClipOptimizer(Optimizer):
                 f"shape={tuple(local_shard.shape)}."
             )
         local_rows = int(local_shard.shape[0])
-        local_row_count = torch.tensor(
-            [local_rows],
-            device=local_shard.device,
-            dtype=torch.int64,
+        row_counts = self._get_dtensor_row_counts(
+            local_shard=local_shard,
+            global_shape=momentum_buffer.shape,
+            process_group=process_group,
+            world_size=world_size,
+            rank=rank,
         )
-        gathered_counts = [torch.zeros_like(local_row_count) for _ in range(world_size)]
-        dist.all_gather(gathered_counts, local_row_count, group=process_group)
-        row_counts = [int(count.item()) for count in gathered_counts]
         max_rows = max(row_counts)
         pad_rows = max_rows - local_rows
         if pad_rows > 0:
@@ -1153,7 +1220,10 @@ class MuonClipOptimizer(Optimizer):
 
         scatter_list: Optional[List[torch.Tensor]]
         if rank == owner_rank:
-            assert gather_list is not None
+            if gather_list is None:
+                raise RuntimeError(
+                    "gather_list must not be None on owner rank during DTensor Muon gather."
+                )
             pieces = [
                 gather_list[idx][: row_counts[idx]]
                 for idx in range(world_size)
@@ -1219,6 +1289,7 @@ class MuonClipOptimizer(Optimizer):
                 "orthogonalization. Use bf16 or fp32."
             )
         if working.dtype == torch.bfloat16:
+            # NS path computes in fp32 for stability, then casts back.
             working = working.float()
         norm = torch.linalg.norm(working)
         if norm == 0:
@@ -1303,6 +1374,7 @@ class MuonClipOptimizer(Optimizer):
             and working.is_cuda
             and working.dtype != self._polar_work_dtype
         ):
+            # Polar path intentionally stays in a fast CUDA work dtype (bf16).
             working = working.to(self._polar_work_dtype)
 
         # Frobenius norm provides the needed scale control without expensive SVD

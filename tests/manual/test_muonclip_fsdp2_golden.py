@@ -200,9 +200,10 @@ def main() -> None:
         if ckpt_root is None:
             raise RuntimeError("Failed to resolve checkpoint directory path.")
 
-        ckpt_path = ckpt_root / "optimizer_state.pt"
-        if rank == 0:
-            torch.save(dist_optimizer.state_dict(), ckpt_path)
+        # Save/load optimizer state per-rank because DTensor momentum buffers are
+        # stored as local shards in optimizer.state_dict().
+        ckpt_path = ckpt_root / f"optimizer_state_rank{rank}.pt"
+        torch.save(dist_optimizer.state_dict(), ckpt_path)
         dist.barrier()
         loaded_optim_state = torch.load(ckpt_path, map_location=device)
 
