@@ -122,6 +122,32 @@ def _select_cached_dataset_splits(
     return DatasetDict({name: dataset[name] for name in selected_names})
 
 
+def _discover_cached_dataset_names(all_dir: Path) -> list[str]:
+    """Return cached contrastive split names with complete on-disk payloads.
+
+    :param Path all_dir: Root ``all/`` directory containing cached split folders.
+    :return list[str]: Cached split names in registry order.
+    """
+    cached_names: list[str] = []
+    for name in CONTRASTIVE_DATASETS:
+        dataset_dir = all_dir / name
+        if dataset_dir.is_dir() and (dataset_dir / "state.json").is_file():
+            cached_names.append(name)
+    return cached_names
+
+
+def _write_cached_dataset_manifest(all_dir: Path) -> list[str]:
+    """Write the cached contrastive split manifest from directories on disk.
+
+    :param Path all_dir: Root ``all/`` directory containing cached split folders.
+    :return list[str]: Manifest split names that were written.
+    """
+    cached_names = _discover_cached_dataset_names(all_dir)
+    with (all_dir / "dataset_dict.json").open("w", encoding="utf-8") as handle:
+        json.dump({"splits": cached_names}, handle, indent=2)
+    return cached_names
+
+
 def pipeline(cfg: Any) -> DatasetDict:
     """Run dataset preprocessing and tokenization.
 
@@ -203,11 +229,10 @@ def pipeline(cfg: Any) -> DatasetDict:
 
         # Aggregate datasets
         dataset = DatasetDict(dataset_dict)
-        with (all_dir / "dataset_dict.json").open("w", encoding="utf-8") as handle:
-            json.dump({"splits": list(dataset.keys())}, handle, indent=2)
+        cached_names = _write_cached_dataset_manifest(all_dir)
         print(
-            "Global contrastive dataset is ready. It contains subdatasets "
-            f"{list(dataset.keys())}."
+            "Prepared contrastive dataset selection "
+            f"{list(dataset.keys())}. Cached manifest now lists {cached_names}."
         )
 
     return dataset

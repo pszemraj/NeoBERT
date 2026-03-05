@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from datasets import Dataset, DatasetDict
+from datasets import Dataset, DatasetDict, load_from_disk
 
 
 def _load_contrastive_preprocess_module():
@@ -111,3 +111,31 @@ def test_pipeline_load_all_from_disk_rejects_missing_requested_split(
 
     with pytest.raises(ValueError, match="missing requested splits"):
         module.pipeline(cfg)
+
+
+def test_pipeline_subset_refresh_preserves_other_cached_manifest_entries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Subset preprocess runs should not drop untouched cached split manifests."""
+    module = _load_contrastive_preprocess_module()
+    cfg = _make_cfg("ALLNLI", dataset_path=str(tmp_path), load_all_from_disk=False)
+    all_dir = tmp_path / "all"
+    all_dir.mkdir(parents=True, exist_ok=True)
+
+    Dataset.from_dict({"query": ["a"], "corpus": ["b"]}).save_to_disk(
+        all_dir / "ALLNLI"
+    )
+    Dataset.from_dict({"query": ["c"], "corpus": ["d"]}).save_to_disk(all_dir / "QQP")
+    (all_dir / "dataset_dict.json").write_text(
+        '{"splits": ["ALLNLI", "QQP"]}\n',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(module, "get_tokenizer", lambda **_: object())
+
+    dataset = module.pipeline(cfg)
+
+    assert list(dataset.keys()) == ["ALLNLI"]
+    reloaded = load_from_disk(all_dir)
+    assert list(reloaded.keys()) == ["ALLNLI", "QQP"]

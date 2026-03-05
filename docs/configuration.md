@@ -279,7 +279,8 @@ Overrides are validated with the same semantic checks as base YAML configs.
 > such as `ALLNLI`, or common HF dataset IDs whose trailing path segment matches
 > a built-in wrapper (for example `sentence-transformers/all-nli`). When
 > `dataset.load_all_from_disk=true`, cached `all/` reloads are filtered back to
-> the requested splits and missing splits fail fast.
+> the requested splits and missing splits fail fast. Subset preprocess refreshes
+> preserve other cached split entries already present under `all/`.
 
 ---
 
