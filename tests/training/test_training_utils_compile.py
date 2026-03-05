@@ -15,6 +15,7 @@ from neobert.optimizer import get_optimizer
 from neobert.training_utils import (
     _maybe_compile_model,
     resolve_wandb_watch_mode,
+    stabilize_cuda_mixed_precision,
     validate_muon_distributed_compatibility,
 )
 
@@ -168,6 +169,85 @@ def test_resolve_wandb_watch_mode_matrix() -> None:
             assert warning is not None
         else:
             assert warning is None
+
+
+def test_stabilize_cuda_mixed_precision_passthrough_no_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-CUDA runtimes must keep the configured mixed precision unchanged."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    out = stabilize_cuda_mixed_precision(
+        mixed_precision="bf16",
+        log=logging.getLogger("test"),
+    )
+    assert out == "bf16"
+
+
+def test_stabilize_cuda_mixed_precision_switches_to_cublaslt(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """When default bf16 probe fails, helper should switch to cuBLASLt."""
+    import neobert.training_utils as training_utils
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    probe_results = iter([False, True])
+    monkeypatch.setattr(
+        training_utils,
+        "_probe_cuda_linear_dtype",
+        lambda _dtype: next(probe_results),
+    )
+
+    backend_state = {"name": "cublas"}
+
+    def _preferred_blas_library(
+        requested: str | None = None,
+    ) -> object:
+        if requested is None:
+            return backend_state["name"]
+        backend_state["name"] = str(requested).lower()
+        return backend_state["name"]
+
+    monkeypatch.setattr(
+        torch.backends.cuda, "preferred_blas_library", _preferred_blas_library
+    )
+
+    with caplog.at_level(logging.WARNING):
+        out = stabilize_cuda_mixed_precision(
+            mixed_precision="bf16",
+            log=logging.getLogger("test"),
+        )
+
+    assert out == "bf16"
+    assert backend_state["name"] == "cublaslt"
+    assert "switched torch.backends.cuda.preferred_blas_library('cublaslt')" in (
+        caplog.text
+    )
+
+
+def test_stabilize_cuda_mixed_precision_falls_back_to_fp32(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """If bf16 probe still fails after switch, helper must disable bf16."""
+    import neobert.training_utils as training_utils
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(
+        training_utils, "_probe_cuda_linear_dtype", lambda _dtype: False
+    )
+    monkeypatch.setattr(
+        torch.backends.cuda,
+        "preferred_blas_library",
+        lambda _requested=None: "cublaslt",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        out = stabilize_cuda_mixed_precision(
+            mixed_precision="bf16",
+            log=logging.getLogger("test"),
+        )
+
+    assert out == "no"
+    assert "falling back to mixed_precision='no'" in caplog.text
 
 
 def test_validate_muon_distributed_compatibility_rejects_fsdp1() -> None:

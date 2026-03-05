@@ -51,6 +51,7 @@ from neobert.training_utils import (
     _resolve_resume_checkpoint,
     _unwrap_optimizer,
     create_accelerator,
+    stabilize_cuda_mixed_precision,
     validate_muon_distributed_compatibility,
 )
 from neobert.utils import configure_tf32, format_resolved_config, prepare_wandb_config
@@ -955,6 +956,10 @@ def trainer(cfg: Config) -> None:
     mixed_precision = resolve_mixed_precision(
         cfg.trainer.mixed_precision,
         task="glue",
+    )
+    mixed_precision = stabilize_cuda_mixed_precision(
+        mixed_precision=mixed_precision,
+        log=logger,
     )
     cfg.trainer.mixed_precision = mixed_precision
 

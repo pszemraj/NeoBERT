@@ -49,6 +49,7 @@ from neobert.training_utils import (
     _resolve_resume_checkpoint,
     create_accelerator,
     resolve_wandb_watch_mode,
+    stabilize_cuda_mixed_precision,
     validate_muon_distributed_compatibility,
 )
 from neobert.contrastive.datasets import get_bsz
@@ -303,6 +304,16 @@ def trainer(cfg: Config) -> None:
         cfg.trainer.mixed_precision,
         task="contrastive",
     )
+    mixed_precision = stabilize_cuda_mixed_precision(
+        mixed_precision=mixed_precision,
+        log=logger,
+    )
+    if mixed_precision == "no" and cfg.model.attn_backend == "flash_attn_varlen":
+        logger.warning(
+            "attn_backend='flash_attn_varlen' with mixed_precision='no' is unsupported; "
+            "falling back to attn_backend='sdpa'."
+        )
+        cfg.model.attn_backend = "sdpa"
     cfg.trainer.mixed_precision = mixed_precision
     wandb_enabled = cfg.wandb.enabled and cfg.wandb.mode != "disabled"
     accelerator = create_accelerator(

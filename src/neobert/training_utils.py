@@ -11,6 +11,86 @@ from accelerate.utils import DistributedType
 
 logger = logging.getLogger(__name__)
 
+_LOW_PRECISION_LINEAR_PROBE_CACHE: dict[tuple[int, str, str], bool] = {}
+
+
+def _probe_cuda_linear_dtype(dtype: torch.dtype) -> bool:
+    """Probe whether CUDA linear GEMM works for a low-precision dtype.
+
+    :param torch.dtype dtype: Probe dtype (typically ``torch.bfloat16``).
+    :return bool: ``True`` when a tiny linear op succeeds end-to-end.
+    """
+    if not torch.cuda.is_available():
+        return False
+    device_index = torch.cuda.current_device()
+    preferred_blas = getattr(torch.backends.cuda, "preferred_blas_library", None)
+    blas_tag = "unknown"
+    if callable(preferred_blas):
+        try:
+            blas_tag = str(preferred_blas())
+        except Exception:
+            blas_tag = "unknown"
+    cache_key = (int(device_index), str(dtype), blas_tag)
+    cached = _LOW_PRECISION_LINEAR_PROBE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        with torch.no_grad():
+            x = torch.randn((16, 64), device="cuda", dtype=dtype)
+            w = torch.randn((128, 64), device="cuda", dtype=dtype)
+            _ = torch.nn.functional.linear(x, w)
+            torch.cuda.synchronize()
+        _LOW_PRECISION_LINEAR_PROBE_CACHE[cache_key] = True
+        return True
+    except RuntimeError:
+        _LOW_PRECISION_LINEAR_PROBE_CACHE[cache_key] = False
+        return False
+
+
+def stabilize_cuda_mixed_precision(
+    *,
+    mixed_precision: str,
+    log: logging.Logger,
+) -> str:
+    """Stabilize mixed precision policy for CUDA runtimes with broken bf16 GEMM.
+
+    Some driver/toolchain/GPU combinations report bf16 support but fail at
+    runtime in default cuBLAS GEMM. We first probe bf16 linear; on failure we
+    try switching to cuBLASLt, and only then fall back to fp32.
+
+    :param str mixed_precision: Requested mixed precision mode.
+    :param logging.Logger log: Logger for runtime policy warnings.
+    :return str: Effective mixed precision mode (``"bf16"`` or ``"no"``).
+    """
+    if mixed_precision != "bf16" or not torch.cuda.is_available():
+        return mixed_precision
+
+    if _probe_cuda_linear_dtype(torch.bfloat16):
+        return mixed_precision
+
+    preferred_blas = getattr(torch.backends.cuda, "preferred_blas_library", None)
+    if callable(preferred_blas):
+        try:
+            preferred_blas("cublaslt")
+            if _probe_cuda_linear_dtype(torch.bfloat16):
+                log.warning(
+                    "bf16 CUDA linear GEMM failed with default cuBLAS on this runtime; "
+                    "switched torch.backends.cuda.preferred_blas_library('cublaslt')."
+                )
+                return mixed_precision
+        except Exception as exc:
+            log.warning(
+                "Failed to switch CUDA BLAS backend to cuBLASLt for bf16 stability: "
+                f"{exc}"
+            )
+
+    log.warning(
+        "bf16 CUDA linear GEMM is unavailable on this runtime; "
+        "falling back to mixed_precision='no' to avoid immediate crashes."
+    )
+    return "no"
+
 
 def resolve_wandb_watch_mode(
     *,
