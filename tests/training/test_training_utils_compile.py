@@ -10,6 +10,8 @@ import torch
 from accelerate.utils import DistributedType
 
 from neobert.config import Config
+from neobert.model import NeoBERT, NeoBERTConfig
+from neobert.optimizer import get_optimizer
 from neobert.training_utils import (
     _maybe_compile_model,
     resolve_wandb_watch_mode,
@@ -207,3 +209,43 @@ def test_validate_muon_distributed_compatibility_rejects_unknown_fsdp() -> None:
             log=logging.getLogger("test"),
             context="unit-test",
         )
+
+
+def test_get_optimizer_disables_muonclip_clipping_under_fsdp(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """FSDP MuonClip builds must force clipping off and emit a warning once."""
+    import neobert.optimizer.optimizer as optimizer_module
+
+    monkeypatch.setattr(
+        optimizer_module, "_WARNED_MUONCLIP_FSDP_CLIPPING_DISABLE", False
+    )
+    model_cfg = NeoBERTConfig(
+        hidden_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        intermediate_size=64,
+        vocab_size=128,
+        max_length=32,
+        attn_backend="sdpa",
+        hidden_act="gelu",
+        rope=False,
+    )
+    model = NeoBERT(model_cfg)
+
+    with caplog.at_level(logging.WARNING):
+        optimizer = get_optimizer(
+            model,
+            DistributedType.FSDP,
+            model_config=model_cfg,
+            name="muonclip",
+            lr=1e-4,
+            weight_decay=0.0,
+            betas=(0.9, 0.95),
+            eps=1e-8,
+            muon_config={"enable_clipping": True},
+        )
+
+    assert hasattr(optimizer, "config")
+    assert not optimizer.config.enable_clipping
+    assert "Auto-disabling clipping" in caplog.text
