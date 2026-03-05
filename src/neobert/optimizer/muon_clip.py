@@ -10,10 +10,18 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import torch
+import torch.distributed as dist
 from torch.optim import Optimizer
 from torch.utils.hooks import RemovableHandle
 
 logger = logging.getLogger(__name__)
+
+try:
+    from torch.distributed.tensor import DTensor
+    from torch.distributed.tensor.placement_types import Shard
+except Exception:  # pragma: no cover - older torch builds without DTensor APIs
+    DTensor = None  # type: ignore[assignment]
+    Shard = None  # type: ignore[assignment]
 
 try:
     _dynamo_disable = torch._dynamo.disable  # pyright: ignore[reportAttributeAccessIssue]
@@ -537,6 +545,7 @@ class MuonClipOptimizer(Optimizer):
         self._layer_mapping = dict(self.config.clipping_layers_mapping)
         self._polar_coeff_cache: Dict[int, List[Tuple[float, float, float]]] = {}
         self._polar_work_dtype: Optional[torch.dtype] = None
+        self._muon_owner_rank_cache: Dict[Tuple[int, int], Dict[int, int]] = {}
         if torch.cuda.is_available():
             try:
                 # bfloat16 offers good perf/stability balance for polar iteration
@@ -926,11 +935,18 @@ class MuonClipOptimizer(Optimizer):
                 grad, alpha=1 - group["beta"]
             )
 
-            # Orthogonalize 2D gradients using Newton-Schulz
-            # NOTE: this operates on full (non-sharded) parameter tensors.
-            # Training entrypoints enforce distributed-compatibility guards for Muon.
-            update = self._orthogonalize_update(state["momentum_buffer"])
-            update = self._normalize_muon_update(update, param.shape)
+            momentum_buffer = state["momentum_buffer"]
+            if self._is_dtensor(momentum_buffer):
+                update = self._orthogonalize_dtensor_update(
+                    momentum_buffer=momentum_buffer,
+                    param=param,
+                    group_params=group["params"],
+                )
+            else:
+                # Orthogonalize 2D gradients using Newton-Schulz/Polar Express.
+                # NOTE: this local path assumes full (non-sharded) parameter tensors.
+                update = self._orthogonalize_update(momentum_buffer)
+                update = self._normalize_muon_update(update, param.shape)
 
             # Weight decay
             if group["weight_decay"] > 0:
@@ -990,6 +1006,162 @@ class MuonClipOptimizer(Optimizer):
 
             # Update parameters
             param.addcdiv_(state["exp_avg"], denom, value=-step_size)
+
+    def _is_dtensor(self, tensor: torch.Tensor) -> bool:
+        """Return whether ``tensor`` is a DTensor instance."""
+        return DTensor is not None and isinstance(tensor, DTensor)
+
+    def _resolve_owner_rank(
+        self,
+        *,
+        param: torch.nn.Parameter,
+        group_params: Sequence[torch.nn.Parameter],
+        world_size: int,
+        process_group: dist.ProcessGroup,
+    ) -> int:
+        """Resolve a stable owner rank (group-local) for a parameter."""
+        cache_key = (id(process_group), int(world_size))
+        owners = self._muon_owner_rank_cache.get(cache_key)
+        if owners is None:
+            owners = {}
+            loads = [0] * world_size
+            ordered = sorted(group_params, key=lambda p: int(p.numel()), reverse=True)
+            for group_param in ordered:
+                owner = min(
+                    range(world_size),
+                    key=lambda rank_idx: (loads[rank_idx], rank_idx),
+                )
+                owners[id(group_param)] = int(owner)
+                loads[owner] += int(group_param.numel())
+            self._muon_owner_rank_cache[cache_key] = owners
+
+        return int(owners.get(id(param), 0))
+
+    def _orthogonalize_dtensor_update(
+        self,
+        *,
+        momentum_buffer: Any,
+        param: torch.nn.Parameter,
+        group_params: Sequence[torch.nn.Parameter],
+    ) -> Any:
+        """Orthogonalize a row-sharded DTensor via owner-compute gather/scatter."""
+        if DTensor is None or Shard is None:
+            raise RuntimeError(
+                "DTensor Muon path requested but DTensor APIs are unavailable in this torch build."
+            )
+        if not dist.is_available() or not dist.is_initialized():
+            raise RuntimeError(
+                "DTensor Muon update requires torch.distributed to be initialized."
+            )
+
+        placements = momentum_buffer.placements
+        if len(placements) != 1 or not isinstance(placements[0], Shard):
+            raise RuntimeError(
+                "MuonClip DTensor path currently supports only 1D row-sharded DTensors."
+            )
+        shard_dim = int(placements[0].dim)
+        if shard_dim != 0:
+            raise RuntimeError(
+                "MuonClip DTensor path currently supports only Shard(0) placement."
+            )
+
+        mesh = momentum_buffer.device_mesh
+        process_group = mesh.get_group()
+        if process_group is None:
+            raise RuntimeError(
+                "Failed to resolve process group for DTensor device mesh."
+            )
+
+        world_size = int(dist.get_world_size(process_group))
+        rank = int(dist.get_rank(process_group))
+        owner_rank = self._resolve_owner_rank(
+            param=param,
+            group_params=group_params,
+            world_size=world_size,
+            process_group=process_group,
+        )
+
+        local_shard = momentum_buffer.to_local()
+        if local_shard.ndim != 2:
+            raise RuntimeError(
+                "MuonClip DTensor path expects rank-2 local shards, got "
+                f"shape={tuple(local_shard.shape)}."
+            )
+        local_rows = int(local_shard.shape[0])
+        local_row_count = torch.tensor(
+            [local_rows],
+            device=local_shard.device,
+            dtype=torch.int64,
+        )
+        gathered_counts = [torch.zeros_like(local_row_count) for _ in range(world_size)]
+        dist.all_gather(gathered_counts, local_row_count, group=process_group)
+        row_counts = [int(count.item()) for count in gathered_counts]
+        max_rows = max(row_counts)
+        pad_rows = max_rows - local_rows
+        if pad_rows > 0:
+            pad = local_shard.new_zeros((pad_rows, local_shard.shape[1]))
+            local_padded = torch.cat((local_shard, pad), dim=0).contiguous()
+        else:
+            local_padded = local_shard.contiguous()
+
+        gather_list: Optional[List[torch.Tensor]]
+        if rank == owner_rank:
+            gather_list = [torch.empty_like(local_padded) for _ in range(world_size)]
+        else:
+            gather_list = None
+        dist.gather(
+            tensor=local_padded,
+            gather_list=gather_list,
+            group=process_group,
+            group_dst=owner_rank,
+        )
+
+        scatter_list: Optional[List[torch.Tensor]]
+        if rank == owner_rank:
+            assert gather_list is not None
+            pieces = [
+                gather_list[idx][: row_counts[idx]]
+                for idx in range(world_size)
+                if row_counts[idx] > 0
+            ]
+            if pieces:
+                full_matrix = torch.cat(pieces, dim=0)
+            else:
+                full_matrix = local_padded.new_zeros((0, local_padded.shape[1]))
+
+            update_full = self._orthogonalize_update(full_matrix)
+            update_full = self._normalize_muon_update(update_full, param.shape)
+
+            scatter_list = []
+            row_start = 0
+            for rows in row_counts:
+                rows_i = int(rows)
+                row_end = row_start + rows_i
+                chunk = update_full[row_start:row_end]
+                row_start = row_end
+                if rows_i < max_rows:
+                    padding = chunk.new_zeros((max_rows - rows_i, chunk.shape[1]))
+                    chunk = torch.cat((chunk, padding), dim=0)
+                scatter_list.append(chunk.contiguous())
+        else:
+            scatter_list = None
+
+        local_update_padded = torch.empty_like(local_padded)
+        dist.scatter(
+            tensor=local_update_padded,
+            scatter_list=scatter_list,
+            group=process_group,
+            group_src=owner_rank,
+        )
+        local_update = local_update_padded[:local_rows].contiguous()
+
+        return DTensor.from_local(
+            local_update,
+            device_mesh=mesh,
+            placements=placements,
+            run_check=False,
+            shape=momentum_buffer.shape,
+        )
 
     def _newton_schulz_update(self, grad: torch.Tensor, steps: int = 5) -> torch.Tensor:
         """Apply Newton-Schulz orthogonalization to a gradient.
