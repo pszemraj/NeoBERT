@@ -1,11 +1,18 @@
-"""Dataset wrappers for contrastive training tasks."""
+"""Dataset wrappers and cache helpers for contrastive training tasks."""
 
 import os
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from pathlib import Path
+from typing import Any, Optional, Sequence
 
 import pandas as pd
-from datasets import Dataset, concatenate_datasets, load_dataset, load_from_disk
+from datasets import (
+    Dataset,
+    DatasetDict,
+    concatenate_datasets,
+    load_dataset,
+    load_from_disk,
+)
 
 DATASET_TO_BSZ = {
     "ALLNLI": 2,
@@ -27,6 +34,8 @@ DATASET_TO_BSZ = {
     "WIKIHOW": 2,
 }
 
+_SHARED_DATASET_DEFAULT_NAME = "refinedweb"
+
 
 def get_bsz(dataset_name: str, target_batch_size: int) -> int:
     """Compute per-dataset batch size multiplier.
@@ -41,6 +50,149 @@ def get_bsz(dataset_name: str, target_batch_size: int) -> int:
         )
 
     return target_batch_size // DATASET_TO_BSZ[dataset_name]
+
+
+def normalize_contrastive_dataset_name_token(value: Any) -> str:
+    """Normalize a dataset selector token for registry matching.
+
+    :param Any value: Raw dataset selector.
+    :return str: Uppercase alphanumeric token.
+    """
+    return "".join(ch for ch in str(value).strip().upper() if ch.isalnum())
+
+
+def resolve_contrastive_dataset_name(requested: Any) -> str:
+    """Resolve one dataset selector to a canonical contrastive registry key.
+
+    Accepts canonical keys (for example ``ALLNLI``), class names, and common
+    Hugging Face dataset IDs such as ``sentence-transformers/all-nli`` by
+    matching on the trailing path segment.
+
+    :param Any requested: Raw selector value.
+    :return str: Canonical registry key.
+    :raises ValueError: If the selector cannot be resolved.
+    """
+    aliases: dict[str, str] = {}
+    for key, dataset_cls in CONTRASTIVE_DATASETS.items():
+        for candidate in {
+            key,
+            getattr(dataset_cls, "name", None),
+            dataset_cls.__name__,
+        }:
+            if candidate is None:
+                continue
+            normalized = normalize_contrastive_dataset_name_token(candidate)
+            if normalized:
+                aliases.setdefault(normalized, key)
+
+    raw_value = str(requested).strip()
+    candidates = [raw_value]
+    if "/" in raw_value:
+        candidates.append(raw_value.rsplit("/", maxsplit=1)[-1])
+
+    for candidate in candidates:
+        normalized = normalize_contrastive_dataset_name_token(candidate)
+        resolved = aliases.get(normalized)
+        if resolved is not None:
+            return resolved
+
+    raise ValueError(
+        "Unknown contrastive dataset name "
+        f"'{requested}'. Available dataset keys: {sorted(CONTRASTIVE_DATASETS.keys())}."
+    )
+
+
+def resolve_contrastive_dataset_names(requested: Any) -> list[str]:
+    """Resolve which contrastive datasets should participate in a run.
+
+    Contrastive entrypoints share ``DatasetConfig`` with pretraining, whose
+    default name is ``refinedweb``. When that shared default reaches a
+    contrastive-only path, treat it as "unset" so omitted selectors keep the
+    historical "all contrastive datasets" behavior.
+
+    :param Any requested: Raw ``dataset.name`` value.
+    :return list[str]: Dataset registry keys in request order.
+    :raises TypeError: If the selector type is unsupported.
+    """
+    inherited_default = normalize_contrastive_dataset_name_token(
+        _SHARED_DATASET_DEFAULT_NAME
+    )
+    if requested is None:
+        return list(CONTRASTIVE_DATASETS.keys())
+    if isinstance(requested, str):
+        normalized = normalize_contrastive_dataset_name_token(requested)
+        if normalized in {"", "ALL", inherited_default}:
+            return list(CONTRASTIVE_DATASETS.keys())
+        return [resolve_contrastive_dataset_name(requested)]
+    if isinstance(requested, (list, tuple)):
+        names: list[str] = []
+        seen: set[str] = set()
+        for name in requested:
+            resolved = resolve_contrastive_dataset_name(name)
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            names.append(resolved)
+        return names
+    raise TypeError(
+        "dataset.name must be a string or list of strings for contrastive workflows."
+    )
+
+
+def discover_cached_contrastive_dataset_names(all_dir: str | Path) -> list[str]:
+    """Return cached contrastive split names with complete on-disk payloads.
+
+    :param str | Path all_dir: Root ``all/`` directory containing cached split folders.
+    :return list[str]: Cached split names in registry order.
+    """
+    cache_root = Path(all_dir)
+    cached_names: list[str] = []
+    for name in CONTRASTIVE_DATASETS:
+        dataset_dir = cache_root / name
+        if dataset_dir.is_dir() and (dataset_dir / "state.json").is_file():
+            cached_names.append(name)
+    return cached_names
+
+
+def load_cached_contrastive_datasets(
+    all_dir: str | Path,
+    *,
+    selected_names: Sequence[str],
+) -> DatasetDict:
+    """Load cached contrastive split directories for the requested selection.
+
+    This path is intentionally independent from ``dataset_dict.json`` so subset
+    refreshes can preserve other cached split directories without forcing them
+    into subsequent training runs.
+
+    :param str | Path all_dir: Root ``all/`` directory containing cached split folders.
+    :param Sequence[str] selected_names: Canonical split names requested for this run.
+    :return DatasetDict: Loaded dataset dictionary in request order.
+    :raises ValueError: If any requested split is missing from the cache.
+    """
+    cache_root = Path(all_dir)
+    if not cache_root.exists():
+        raise ValueError(
+            f"Cached contrastive dataset root does not exist: {cache_root}"
+        )
+
+    selected = list(selected_names)
+    if not selected:
+        raise ValueError("selected_names must contain at least one contrastive split.")
+
+    available = discover_cached_contrastive_dataset_names(cache_root)
+    missing = [name for name in selected if name not in available]
+    if missing:
+        raise ValueError(
+            "Cached contrastive dataset is missing requested splits "
+            f"{missing}. Available splits: {available}."
+        )
+
+    dataset_dict = {
+        name: CONTRASTIVE_DATASETS[name].from_disk(str(cache_root / name)).dataset
+        for name in selected
+    }
+    return DatasetDict(dataset_dict)
 
 
 class AbsDataset(ABC):

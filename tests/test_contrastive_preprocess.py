@@ -7,7 +7,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from datasets import Dataset, DatasetDict, load_from_disk
+from datasets import Dataset, load_from_disk
+
+from neobert.contrastive.datasets import CONTRASTIVE_DATASETS
 
 
 def _load_contrastive_preprocess_module():
@@ -75,8 +77,15 @@ def test_resolve_dataset_names_rejects_unknown_selector() -> None:
         module._resolve_dataset_names(cfg)
 
 
+def test_resolve_dataset_names_treats_shared_default_as_all() -> None:
+    """The inherited pretraining dataset default should behave like an unset selector."""
+    module = _load_contrastive_preprocess_module()
+    cfg = _make_cfg("refinedweb", dataset_path="/tmp/contrastive")
+
+    assert module._resolve_dataset_names(cfg) == list(CONTRASTIVE_DATASETS.keys())
+
+
 def test_pipeline_load_all_from_disk_filters_selected_splits(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Cached reloads should honor the selected contrastive datasets."""
@@ -86,13 +95,11 @@ def test_pipeline_load_all_from_disk_filters_selected_splits(
         dataset_path=str(tmp_path),
         load_all_from_disk=True,
     )
-    cached = DatasetDict(
-        {
-            "ALLNLI": Dataset.from_dict({"query": ["a"], "corpus": ["b"]}),
-            "QQP": Dataset.from_dict({"query": ["c"], "corpus": ["d"]}),
-        }
+    all_dir = tmp_path / "all"
+    Dataset.from_dict({"query": ["a"], "corpus": ["b"]}).save_to_disk(
+        all_dir / "ALLNLI"
     )
-    monkeypatch.setattr(module, "load_from_disk", lambda _path: cached)
+    Dataset.from_dict({"query": ["c"], "corpus": ["d"]}).save_to_disk(all_dir / "QQP")
 
     dataset = module.pipeline(cfg)
 
@@ -100,14 +107,14 @@ def test_pipeline_load_all_from_disk_filters_selected_splits(
 
 
 def test_pipeline_load_all_from_disk_rejects_missing_requested_split(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Cached reloads should error when the requested split is absent."""
     module = _load_contrastive_preprocess_module()
     cfg = _make_cfg("ALLNLI", dataset_path=str(tmp_path), load_all_from_disk=True)
-    cached = DatasetDict({"QQP": Dataset.from_dict({"query": ["c"], "corpus": ["d"]})})
-    monkeypatch.setattr(module, "load_from_disk", lambda _path: cached)
+    Dataset.from_dict({"query": ["c"], "corpus": ["d"]}).save_to_disk(
+        tmp_path / "all" / "QQP"
+    )
 
     with pytest.raises(ValueError, match="missing requested splits"):
         module.pipeline(cfg)

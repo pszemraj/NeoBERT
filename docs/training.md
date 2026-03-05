@@ -14,10 +14,11 @@ Full field-level schema/defaults are in [configuration.md](configuration.md).
 | `scripts/contrastive/finetune.py`         | contrastive fine-tuning           |
 | `scripts/contrastive/preprocess.py`       | contrastive dataset preprocessing |
 
-For contrastive preprocessing, `dataset.name` may be `ALL`, a canonical key
-such as `ALLNLI`, or an HF dataset ID alias such as
-`sentence-transformers/all-nli`. Cached `all/` reloads are filtered back to the
-requested splits.
+For contrastive preprocessing, `dataset.name` may be omitted, `ALL`, a
+canonical key such as `ALLNLI`, or an HF dataset ID alias such as
+`sentence-transformers/all-nli`. Both preprocessing and contrastive training
+load only the requested cached splits from `all/`; other cached split
+directories may remain on disk for later reuse.
 
 ## Pretraining
 

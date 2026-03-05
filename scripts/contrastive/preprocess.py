@@ -5,10 +5,17 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from datasets import DatasetDict, load_from_disk
+from datasets import DatasetDict
 
 from neobert.config import load_config_from_args
-from neobert.contrastive.datasets import CONTRASTIVE_DATASETS
+from neobert.contrastive.datasets import (
+    CONTRASTIVE_DATASETS,
+    discover_cached_contrastive_dataset_names,
+    load_cached_contrastive_datasets,
+    normalize_contrastive_dataset_name_token,
+    resolve_contrastive_dataset_name,
+    resolve_contrastive_dataset_names,
+)
 from neobert.tokenizer import get_tokenizer, tokenize
 
 
@@ -18,7 +25,7 @@ def _normalize_dataset_name_token(value: Any) -> str:
     :param Any value: Raw dataset selector.
     :return str: Uppercase alphanumeric token.
     """
-    return "".join(ch for ch in str(value).strip().upper() if ch.isalnum())
+    return normalize_contrastive_dataset_name_token(value)
 
 
 def _resolve_single_dataset_name(requested: Any) -> str:
@@ -32,34 +39,7 @@ def _resolve_single_dataset_name(requested: Any) -> str:
     :return str: Canonical registry key.
     :raises ValueError: If the selector cannot be resolved.
     """
-    aliases: dict[str, str] = {}
-    for key, dataset_cls in CONTRASTIVE_DATASETS.items():
-        for candidate in {
-            key,
-            getattr(dataset_cls, "name", None),
-            dataset_cls.__name__,
-        }:
-            if candidate is None:
-                continue
-            normalized = _normalize_dataset_name_token(candidate)
-            if normalized:
-                aliases.setdefault(normalized, key)
-
-    raw_value = str(requested).strip()
-    candidates = [raw_value]
-    if "/" in raw_value:
-        candidates.append(raw_value.rsplit("/", maxsplit=1)[-1])
-
-    for candidate in candidates:
-        normalized = _normalize_dataset_name_token(candidate)
-        resolved = aliases.get(normalized)
-        if resolved is not None:
-            return resolved
-
-    raise ValueError(
-        "Unknown contrastive dataset name "
-        f"'{requested}'. Available dataset keys: {sorted(CONTRASTIVE_DATASETS.keys())}."
-    )
+    return resolve_contrastive_dataset_name(requested)
 
 
 def _resolve_dataset_names(cfg: Any) -> list[str]:
@@ -70,56 +50,7 @@ def _resolve_dataset_names(cfg: Any) -> list[str]:
     """
     dataset_cfg = getattr(cfg, "dataset", None)
     requested = getattr(dataset_cfg, "name", None)
-    if requested is None:
-        return list(CONTRASTIVE_DATASETS.keys())
-    if isinstance(requested, str):
-        normalized = requested.strip().upper()
-        if normalized in {"", "ALL"}:
-            return list(CONTRASTIVE_DATASETS.keys())
-        return [_resolve_single_dataset_name(requested)]
-    if isinstance(requested, (list, tuple)):
-        names: list[str] = []
-        seen: set[str] = set()
-        for name in requested:
-            resolved = _resolve_single_dataset_name(name)
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            names.append(resolved)
-        return names
-    raise TypeError(
-        "dataset.name must be a string or list of strings for contrastive preprocess."
-    )
-
-
-def _select_cached_dataset_splits(
-    dataset: DatasetDict,
-    *,
-    selected_names: list[str],
-) -> DatasetDict:
-    """Filter a cached contrastive ``DatasetDict`` to the requested splits.
-
-    :param DatasetDict dataset: Cached dataset dictionary loaded from disk.
-    :param list[str] selected_names: Canonical split names requested for this run.
-    :return DatasetDict: Filtered dataset dictionary in request order.
-    :raises TypeError: If the cached payload is not a ``DatasetDict``.
-    :raises ValueError: If any requested split is missing from the cache.
-    """
-    if not isinstance(dataset, DatasetDict):
-        raise TypeError(
-            "Contrastive preprocess expected a cached DatasetDict at "
-            "'<dataset.path>/all', but found "
-            f"{type(dataset).__name__}."
-        )
-
-    missing = [name for name in selected_names if name not in dataset]
-    if missing:
-        raise ValueError(
-            "Cached contrastive dataset is missing requested splits "
-            f"{missing}. Available splits: {sorted(dataset.keys())}."
-        )
-
-    return DatasetDict({name: dataset[name] for name in selected_names})
+    return resolve_contrastive_dataset_names(requested)
 
 
 def _discover_cached_dataset_names(all_dir: Path) -> list[str]:
@@ -128,12 +59,7 @@ def _discover_cached_dataset_names(all_dir: Path) -> list[str]:
     :param Path all_dir: Root ``all/`` directory containing cached split folders.
     :return list[str]: Cached split names in registry order.
     """
-    cached_names: list[str] = []
-    for name in CONTRASTIVE_DATASETS:
-        dataset_dir = all_dir / name
-        if dataset_dir.is_dir() and (dataset_dir / "state.json").is_file():
-            cached_names.append(name)
-    return cached_names
+    return discover_cached_contrastive_dataset_names(all_dir)
 
 
 def _write_cached_dataset_manifest(all_dir: Path) -> list[str]:
@@ -171,8 +97,8 @@ def pipeline(cfg: Any) -> DatasetDict:
     selected_names = _resolve_dataset_names(cfg)
 
     if load_all_from_disk:
-        dataset = _select_cached_dataset_splits(
-            load_from_disk(all_dir),
+        dataset = load_cached_contrastive_datasets(
+            all_dir,
             selected_names=selected_names,
         )
 

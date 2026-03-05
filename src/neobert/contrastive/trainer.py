@@ -54,7 +54,11 @@ from neobert.training_utils import (
     validate_muon_distributed_compatibility,
     validate_muon_runtime_topology,
 )
-from neobert.contrastive.datasets import get_bsz
+from neobert.contrastive.datasets import (
+    get_bsz,
+    load_cached_contrastive_datasets,
+    resolve_contrastive_dataset_names,
+)
 from neobert.contrastive.loss import SupConLoss
 from neobert.contrastive.metrics import Metrics
 from neobert.utils import configure_tf32, format_resolved_config, prepare_wandb_config
@@ -315,7 +319,16 @@ def trainer(cfg: Config) -> None:
 
     # Dataset
     dataset_path = Path(cfg.dataset.path)
-    dataset = load_from_disk(os.fspath(dataset_path / "all"))
+    selected_dataset_names = resolve_contrastive_dataset_names(cfg.dataset.name)
+    dataset = load_cached_contrastive_datasets(
+        dataset_path / "all",
+        selected_names=selected_dataset_names,
+    )
+    logger.info(
+        "Loaded contrastive dataset selection %s from %s.",
+        list(dataset.keys()),
+        dataset_path / "all",
+    )
     pretraining_dataset_raw = load_from_disk(
         os.fspath(dataset_path)
     )  # Base dataset for pretraining SimCSE
