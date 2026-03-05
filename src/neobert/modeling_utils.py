@@ -24,6 +24,24 @@ def swiglu_intermediate_size(intermediate_size: int, multiple_of: int = 8) -> in
     return multiple_of * ((reduced + multiple_of - 1) // multiple_of)
 
 
+def is_torch_compiling() -> bool:
+    """Return whether execution is inside a ``torch.compile`` trace.
+
+    :return bool: ``True`` when tracing/compiling is active, else ``False``.
+    """
+    compiler = getattr(torch, "compiler", None)
+    if compiler is not None:
+        is_compiling = getattr(compiler, "is_compiling", None)
+        if callable(is_compiling):
+            return bool(is_compiling())
+    dynamo = getattr(torch, "_dynamo", None)
+    if dynamo is not None:
+        is_compiling = getattr(dynamo, "is_compiling", None)
+        if callable(is_compiling):
+            return bool(is_compiling())
+    return False
+
+
 try:
     _SDPA_SUPPORTS_SCALE = (
         "scale" in inspect.signature(scaled_dot_product_attention).parameters

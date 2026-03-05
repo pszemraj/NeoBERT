@@ -1,44 +1,7 @@
 """Download and cache contrastive datasets from the Hugging Face Hub."""
 
-from neobert.contrastive.datasets import (
-    ALLNLI,
-    AMAZONQA,
-    CONCURRENTQA,
-    FEVER,
-    GITHUBISSUE,
-    GOOAQ,
-    MSMARCO,
-    PAQ,
-    PUBMEDQA,
-    QQP,
-    SENTENCECOMP,
-    STACKEXCHANGE,
-    STACKOVERFLOW,
-    STS12,
-    STSBENCHMARK,
-    TRIVIAQA,
-    WIKIHOW,
-)
+from neobert.contrastive.datasets import CONTRASTIVE_DATASETS
 
-DATASETS = {
-    "ALLNLI": ALLNLI,
-    "AMAZONQA": AMAZONQA,
-    "CONCURRENTQA": CONCURRENTQA,
-    "FEVER": FEVER,
-    "GITHUBISSUE": GITHUBISSUE,
-    "GOOAQ": GOOAQ,
-    "MSMARCO": MSMARCO,
-    "PAQ": PAQ,
-    "PUBMEDQA": PUBMEDQA,
-    "QQP": QQP,
-    "SENTENCECOMP": SENTENCECOMP,
-    "STACKEXCHANGE": STACKEXCHANGE,
-    "STACKOVERFLOW": STACKOVERFLOW,
-    "STS12": STS12,
-    "STSBENCHMARK": STSBENCHMARK,
-    "TRIVIAQA": TRIVIAQA,
-    "WIKIHOW": WIKIHOW,
-}
-
-for name in DATASETS.keys():
-    subdataset = DATASETS[name]().dataset
+for name, dataset_cls in CONTRASTIVE_DATASETS.items():
+    print(f"Downloading {name}...")
+    _ = dataset_cls().dataset

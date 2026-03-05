@@ -2,7 +2,6 @@
 
 import logging
 import os
-import shutil
 import signal
 import sys
 from contextlib import nullcontext
@@ -31,7 +30,9 @@ from neobert.checkpointing import (
     MODEL_WEIGHTS_NAME,
     load_deepspeed_fp32_state_dict,
     load_model_safetensors,
-    save_state_dict_safetensors,
+    prune_step_checkpoints as _prune_step_checkpoints,
+    resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
+    save_portable_checkpoint_weights as _save_portable_checkpoint_weights,
 )
 from neobert.collator.collator import (
     _is_right_padded_mask,
@@ -48,8 +49,8 @@ from neobert.training_utils import (
     _maybe_prepare_for_forward,
     _resolve_resume_checkpoint,
     create_accelerator,
+    resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
-    stabilize_cuda_mixed_precision,
     validate_muon_distributed_compatibility,
 )
 from neobert.contrastive.datasets import get_bsz
@@ -58,56 +59,6 @@ from neobert.contrastive.metrics import Metrics
 from neobert.utils import configure_tf32, format_resolved_config, prepare_wandb_config
 
 logger = logging.getLogger(__name__)
-
-
-def _resolve_checkpoint_retention_limit(cfg: Config) -> int:
-    """Resolve effective checkpoint retention limit from trainer config.
-
-    ``trainer.save_total_limit`` is preferred; deprecated ``trainer.max_ckpt``
-    is used only as a fallback when ``save_total_limit`` is unset.
-
-    :param Config cfg: Runtime training configuration.
-    :return int: Maximum number of retained checkpoints (0 disables pruning).
-    """
-    save_total_limit = getattr(cfg.trainer, "save_total_limit", None)
-    if save_total_limit is not None:
-        return max(0, int(save_total_limit))
-    max_ckpt = getattr(cfg.trainer, "max_ckpt", None)
-    if max_ckpt is not None:
-        return max(0, int(max_ckpt))
-    return 0
-
-
-def _prune_step_checkpoints(checkpoint_dir: Path, retention_limit: int) -> None:
-    """Prune old numeric step checkpoint folders in ``checkpoint_dir``.
-
-    :param Path checkpoint_dir: Root directory containing ``<step>/`` folders.
-    :param int retention_limit: Number of newest numeric checkpoints to keep.
-    """
-    if retention_limit <= 0 or not checkpoint_dir.exists():
-        return
-
-    checkpoints: list[tuple[int, Path]] = []
-    for item_path in checkpoint_dir.iterdir():
-        if not item_path.is_dir():
-            continue
-        try:
-            checkpoints.append((int(item_path.name), item_path))
-        except ValueError:
-            continue
-
-    if len(checkpoints) <= retention_limit:
-        return
-
-    checkpoints.sort(key=lambda item: item[0])
-    for _, old_path in checkpoints[: len(checkpoints) - retention_limit]:
-        try:
-            shutil.rmtree(old_path)
-            logger.info(f"Removed old checkpoint: {old_path} (limit={retention_limit})")
-        except FileNotFoundError:
-            logger.warning(f"Checkpoint already removed before prune: {old_path}")
-        except OSError as exc:
-            logger.warning(f"Failed to remove old checkpoint {old_path}: {exc}")
 
 
 def _normalize_contrastive_pretrained_checkpoint_root(
@@ -136,50 +87,6 @@ def _normalize_contrastive_pretrained_checkpoint_root(
             f"{root}. Contrastive expects 'checkpoints/<step>/' checkpoints."
         )
     return root / "checkpoints"
-
-
-def _save_portable_checkpoint_weights(
-    model: torch.nn.Module,
-    accelerator: Any,
-    checkpoint_path: Path,
-) -> bool:
-    """Save backend-agnostic ``model.safetensors`` into a step checkpoint.
-
-    :param torch.nn.Module model: Prepared training model.
-    :param Accelerator accelerator: Active accelerator runtime.
-    :param Path checkpoint_path: Step checkpoint directory path.
-    :return bool: True when portable weights were saved.
-    """
-    try:
-        state_dict = accelerator.get_state_dict(model, unwrap=True)
-    except Exception as exc:
-        if accelerator.is_main_process:
-            logger.warning(
-                "Unable to export portable checkpoint weights to "
-                f"{checkpoint_path / MODEL_WEIGHTS_NAME}: {exc}. "
-                "Resumable state was still saved."
-            )
-        return False
-
-    if not accelerator.is_main_process:
-        return False
-
-    try:
-        weights_path = save_state_dict_safetensors(
-            state_dict,
-            checkpoint_path,
-            metadata={"format": "pt", "source": "accelerate.get_state_dict"},
-        )
-    except Exception as exc:
-        logger.warning(
-            "Failed to persist portable checkpoint weights at "
-            f"{checkpoint_path / MODEL_WEIGHTS_NAME}: {exc}. "
-            "Resumable state was still saved."
-        )
-        return False
-
-    logger.info(f"Saved portable model weights to {weights_path}.")
-    return True
 
 
 def _build_packed_seqlens(attention_mask: torch.Tensor, *, name: str) -> torch.Tensor:
@@ -304,16 +211,13 @@ def trainer(cfg: Config) -> None:
         cfg.trainer.mixed_precision,
         task="contrastive",
     )
-    mixed_precision = stabilize_cuda_mixed_precision(
-        mixed_precision=mixed_precision,
-        log=logger,
-    )
-    if mixed_precision == "no" and cfg.model.attn_backend == "flash_attn_varlen":
-        logger.warning(
-            "attn_backend='flash_attn_varlen' with mixed_precision='no' is unsupported; "
-            "falling back to attn_backend='sdpa'."
+    mixed_precision, cfg.model.attn_backend = (
+        resolve_runtime_mixed_precision_and_attn_backend(
+            mixed_precision=mixed_precision,
+            attn_backend=cfg.model.attn_backend,
+            log=logger,
         )
-        cfg.model.attn_backend = "sdpa"
+    )
     cfg.trainer.mixed_precision = mixed_precision
     wandb_enabled = cfg.wandb.enabled and cfg.wandb.mode != "disabled"
     accelerator = create_accelerator(

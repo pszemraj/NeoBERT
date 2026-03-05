@@ -20,11 +20,13 @@ __all__ = [
     "STSBENCHMARK",
     "TRIVIAQA",
     "WIKIHOW",
+    "CONTRASTIVE_DATASETS",
 ]
 
 from .datasets import (
     ALLNLI,
     AMAZONQA,
+    CONTRASTIVE_DATASETS,
     CONCURRENTQA,
     FEVER,
     GITHUBISSUE,

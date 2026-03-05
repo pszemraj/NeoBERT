@@ -128,6 +128,36 @@ def stabilize_cuda_mixed_precision(
     return "no"
 
 
+def resolve_runtime_mixed_precision_and_attn_backend(
+    *,
+    mixed_precision: str,
+    attn_backend: str,
+    log: logging.Logger,
+) -> tuple[str, str]:
+    """Resolve stable mixed precision and attention backend policy for CUDA.
+
+    :param str mixed_precision: Requested mixed precision mode.
+    :param str attn_backend: Requested attention backend.
+    :param logging.Logger log: Logger for runtime warnings.
+    :return tuple[str, str]: Effective ``(mixed_precision, attn_backend)``.
+    """
+    effective_precision = stabilize_cuda_mixed_precision(
+        mixed_precision=mixed_precision,
+        log=log,
+    )
+    effective_backend = str(attn_backend)
+    if (
+        effective_precision == "no"
+        and effective_backend.strip().lower() == "flash_attn_varlen"
+    ):
+        log.warning(
+            "attn_backend='flash_attn_varlen' with mixed_precision='no' is unsupported; "
+            "falling back to attn_backend='sdpa'."
+        )
+        effective_backend = "sdpa"
+    return effective_precision, effective_backend
+
+
 def resolve_wandb_watch_mode(
     *,
     wandb_mode: str,

@@ -1,5 +1,7 @@
 """Checkpoint I/O helpers for NeoBERT training and evaluation."""
 
+import logging
+import shutil
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -8,6 +10,7 @@ from safetensors.torch import load_file, save_file
 from torch import nn
 
 MODEL_WEIGHTS_NAME = "model.safetensors"
+logger = logging.getLogger(__name__)
 _DEEPSPEED_TAG_DIR_PATTERNS = (
     "mp_rank_*_model_states.pt",
     "zero_pp_rank_*_mp_rank_*_optim_states.pt",
@@ -243,3 +246,117 @@ def load_model_safetensors(
     if not state_dict:
         raise ValueError(f"Loaded state dict is empty from {weights_path}")
     return state_dict
+
+
+def resolve_checkpoint_retention_limit(cfg: Any) -> int:
+    """Resolve effective checkpoint retention limit from trainer config.
+
+    ``trainer.save_total_limit`` is preferred. Deprecated ``trainer.max_ckpt``
+    is used only as a fallback when ``save_total_limit`` is unset.
+
+    :param Any cfg: Runtime config object or ``cfg.trainer``.
+    :return int: Maximum number of retained checkpoints (0 disables pruning).
+    """
+    trainer_cfg = getattr(cfg, "trainer", cfg)
+    save_total_limit = getattr(trainer_cfg, "save_total_limit", None)
+    if save_total_limit is not None:
+        return max(0, int(save_total_limit))
+    max_ckpt = getattr(trainer_cfg, "max_ckpt", None)
+    if max_ckpt is not None:
+        return max(0, int(max_ckpt))
+    return 0
+
+
+def prune_step_checkpoints(checkpoint_dir: str | Path, retention_limit: int) -> None:
+    """Prune old numeric step checkpoint folders in ``checkpoint_dir``.
+
+    This helper is best-effort and resilient to concurrent filesystem mutations.
+    It never raises on a missing/deleted checkpoint directory.
+
+    :param str | Path checkpoint_dir: Root directory containing ``<step>/`` folders.
+    :param int retention_limit: Number of newest numeric checkpoints to keep.
+    """
+    checkpoint_dir = Path(checkpoint_dir)
+    if retention_limit <= 0 or not checkpoint_dir.exists():
+        return
+
+    checkpoints: list[tuple[int, Path]] = []
+    for item_path in checkpoint_dir.iterdir():
+        if not item_path.is_dir():
+            continue
+        try:
+            checkpoints.append((int(item_path.name), item_path))
+        except ValueError:
+            continue
+
+    if len(checkpoints) <= retention_limit:
+        return
+
+    checkpoints.sort(key=lambda item: item[0])
+    for _, old_path in checkpoints[: len(checkpoints) - retention_limit]:
+        try:
+            shutil.rmtree(old_path)
+            logger.info(
+                "Removed old checkpoint: %s (limit=%d)", old_path, retention_limit
+            )
+        except FileNotFoundError:
+            logger.warning("Checkpoint already removed before prune: %s", old_path)
+        except OSError as exc:
+            logger.warning("Failed to remove old checkpoint %s: %s", old_path, exc)
+
+
+def save_portable_checkpoint_weights(
+    model: nn.Module,
+    accelerator: Any,
+    checkpoint_path: str | Path,
+    *,
+    skip_if_exists: bool = False,
+) -> bool:
+    """Save backend-agnostic ``model.safetensors`` into a step checkpoint.
+
+    :param nn.Module model: Prepared training model.
+    :param Any accelerator: Active accelerator runtime.
+    :param str | Path checkpoint_path: Step checkpoint directory path.
+    :param bool skip_if_exists: Return early when a portable file already exists.
+    :return bool: True when portable weights were saved (or already existed).
+    """
+    checkpoint_path = Path(checkpoint_path)
+    weights_path = checkpoint_path / MODEL_WEIGHTS_NAME
+    if skip_if_exists and weights_path.exists():
+        return True
+
+    try:
+        # Distributed backends (FSDP/FSDP2/DeepSpeed) may require all ranks to
+        # participate in state-dict collection collectives even when only rank 0
+        # persists the portable safetensors payload.
+        state_dict = accelerator.get_state_dict(model, unwrap=True)
+    except Exception as exc:
+        if getattr(accelerator, "is_main_process", True):
+            logger.warning(
+                "Unable to export portable checkpoint weights to %s: %s. "
+                "Resumable state was still saved.",
+                weights_path,
+                exc,
+            )
+        return False
+
+    if not getattr(accelerator, "is_main_process", True):
+        return False
+
+    try:
+        weights_path = save_state_dict_safetensors(
+            state_dict,
+            checkpoint_path,
+            metadata={"format": "pt", "source": "accelerate.get_state_dict"},
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to persist portable checkpoint weights at %s: %s. "
+            "Resumable state was still saved.",
+            weights_path,
+            exc,
+        )
+        return False
+
+    logger.info("Saved portable model weights to %s.", weights_path)
+    return True

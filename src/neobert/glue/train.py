@@ -6,7 +6,6 @@ import math
 import os
 import random
 import re
-import shutil
 import warnings
 from contextlib import nullcontext
 from copy import deepcopy
@@ -36,7 +35,9 @@ from neobert.checkpointing import (
     MODEL_WEIGHTS_NAME,
     load_deepspeed_fp32_state_dict,
     load_model_safetensors,
-    save_state_dict_safetensors,
+    prune_step_checkpoints as _prune_step_checkpoints,
+    resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
+    save_portable_checkpoint_weights,
 )
 from neobert.model import NeoBERTConfig, NeoBERTForSequenceClassification
 from neobert.tokenizer import get_tokenizer
@@ -650,48 +651,6 @@ def load_pretrained_weights(
     return model
 
 
-def _resolve_checkpoint_retention_limit(cfg: Config) -> int:
-    """Resolve effective checkpoint retention limit from trainer config.
-
-    :param Config cfg: Runtime GLUE training configuration.
-    :return int: Maximum number of retained checkpoints (0 disables pruning).
-    """
-    save_total_limit = getattr(cfg.trainer, "save_total_limit", None)
-    if save_total_limit is not None:
-        return max(0, int(save_total_limit))
-    max_ckpt = getattr(cfg.trainer, "max_ckpt", None)
-    if max_ckpt is not None:
-        return max(0, int(max_ckpt))
-    return 0
-
-
-def _prune_step_checkpoints(checkpoint_dir: Path, retention_limit: int) -> None:
-    """Prune old numeric step checkpoint folders in ``checkpoint_dir``.
-
-    :param Path checkpoint_dir: Root directory containing ``<step>/`` folders.
-    :param int retention_limit: Number of newest numeric checkpoints to keep.
-    """
-    if retention_limit <= 0 or not checkpoint_dir.exists():
-        return
-
-    checkpoints: list[tuple[int, Path]] = []
-    for item_path in checkpoint_dir.iterdir():
-        if not item_path.is_dir():
-            continue
-        try:
-            checkpoints.append((int(item_path.name), item_path))
-        except ValueError:
-            continue
-
-    if len(checkpoints) <= retention_limit:
-        return
-
-    checkpoints.sort(key=lambda item: item[0])
-    for _, old_path in checkpoints[: len(checkpoints) - retention_limit]:
-        shutil.rmtree(old_path)
-        logger.info(f"Removed old checkpoint: {old_path} (limit={retention_limit})")
-
-
 def _save_portable_glue_checkpoint_weights(
     model: torch.nn.Module,
     accelerator: Accelerator,
@@ -704,42 +663,12 @@ def _save_portable_glue_checkpoint_weights(
     :param Path checkpoint_path: Checkpoint directory ``checkpoints/<step>/``.
     :return bool: True when portable weights exist (written or already present).
     """
-    weights_path = checkpoint_path / MODEL_WEIGHTS_NAME
-    if weights_path.exists():
-        return True
-
-    try:
-        # Some distributed backends require all ranks to participate in
-        # state-dict collection even if only rank 0 writes the file.
-        state_dict = accelerator.get_state_dict(model, unwrap=True)
-    except Exception as exc:
-        if accelerator.is_main_process:
-            logger.warning(
-                "Unable to export portable GLUE weights to %s: %s. "
-                "Resumable state was still saved.",
-                weights_path,
-                exc,
-            )
-        return False
-
-    if not accelerator.is_main_process:
-        return False
-
-    try:
-        save_state_dict_safetensors(
-            state_dict,
-            checkpoint_path,
-            metadata={"format": "pt", "source": "accelerate.get_state_dict"},
-        )
-    except Exception as exc:
-        logger.warning(
-            "Failed to persist portable GLUE weights at %s: %s. "
-            "Resumable state was still saved.",
-            weights_path,
-            exc,
-        )
-        return False
-    return True
+    return save_portable_checkpoint_weights(
+        model,
+        accelerator,
+        checkpoint_path,
+        skip_if_exists=True,
+    )
 
 
 def _should_save_glue_checkpoint(

@@ -6,7 +6,6 @@ import logging
 import math
 import os
 import re
-import shutil
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional, Tuple
@@ -38,7 +37,11 @@ from deepspeed.utils import safe_get_full_fp32_param
 from tqdm import tqdm
 from transformers import BatchEncoding, PreTrainedTokenizerBase
 
-from neobert.checkpointing import MODEL_WEIGHTS_NAME, save_state_dict_safetensors
+from neobert.checkpointing import (
+    prune_step_checkpoints as _prune_step_checkpoints,
+    resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
+    save_portable_checkpoint_weights as _save_portable_checkpoint_weights,
+)
 from neobert.config import (
     Config,
     ConfigLoader,
@@ -62,8 +65,8 @@ from neobert.training_utils import (
     _maybe_prepare_for_forward,
     _resolve_resume_checkpoint,
     create_accelerator,
+    resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
-    stabilize_cuda_mixed_precision,
     validate_muon_distributed_compatibility,
 )
 from neobert.utils import (
@@ -502,50 +505,6 @@ def _ensure_pinned_cpu_batch(batch: BatchEncoding) -> BatchEncoding:
     if not repinned:
         return batch
     return pinned_batch
-
-
-def _promote_tmp_checkpoint_dir(tmp_path: Path, final_path: Path) -> None:
-    """Promote ``tmp_path`` to ``final_path`` with crash-safe replacement.
-
-    Keep the previous final checkpoint as ``*.old`` until the tmp->final rename
-    succeeds. This avoids deleting the prior checkpoint before the new one is in
-    place when running on shared filesystems.
-
-    Note: active pretraining writes directly to ``checkpoints/<step>/`` and does
-    not currently call this helper; it is kept for legacy/manual migration paths.
-
-    :param Path tmp_path: Newly written temporary checkpoint directory.
-    :param Path final_path: Final checkpoint directory path.
-    """
-    backup_path = final_path.with_name(f"{final_path.name}.old")
-    if backup_path.exists():
-        shutil.rmtree(backup_path)
-
-    if final_path.exists():
-        final_path.replace(backup_path)
-
-    try:
-        tmp_path.replace(final_path)
-    except Exception:
-        if backup_path.exists() and not final_path.exists():
-            backup_path.replace(final_path)
-        raise
-
-    if backup_path.exists():
-        shutil.rmtree(backup_path)
-
-
-def _write_deepspeed_latest_file(checkpoint_root: Path, tag: str) -> None:
-    """Write DeepSpeed ``latest`` indirection for a checkpoint root.
-
-    DeepSpeed's fp32 conversion helper resolves ``tag=None`` via this file, so
-    we keep it updated after tmp->final tag promotion.
-
-    :param Path checkpoint_root: DeepSpeed checkpoint root directory.
-    :param str tag: Active checkpoint tag directory name.
-    """
-    latest_path = checkpoint_root / "latest"
-    latest_path.write_text(f"{tag}\n", encoding="utf-8")
 
 
 def _pad_tokenizer_to_multiple(
@@ -1554,111 +1513,6 @@ def _safe_len(dataloader: torch.utils.data.DataLoader) -> Optional[int]:
         return None
 
 
-def _resolve_checkpoint_retention_limit(cfg: Config) -> int:
-    """Resolve effective checkpoint retention limit from trainer config.
-
-    ``trainer.save_total_limit`` is the canonical knob. Deprecated
-    ``trainer.max_ckpt`` is only used as a fallback when save_total_limit is unset.
-
-    :param Config cfg: Runtime training configuration.
-    :return int: Maximum number of retained checkpoints (0 disables pruning).
-    """
-    save_total_limit = getattr(cfg.trainer, "save_total_limit", None)
-    if save_total_limit is not None:
-        return max(0, int(save_total_limit))
-    max_ckpt = getattr(cfg.trainer, "max_ckpt", None)
-    if max_ckpt is not None:
-        return max(0, int(max_ckpt))
-    return 0
-
-
-def _prune_step_checkpoints(checkpoint_dir: Path, retention_limit: int) -> None:
-    """Prune old numeric step checkpoint folders in ``checkpoint_dir``.
-
-    This helper is best-effort and resilient to concurrent filesystem mutations.
-    It never raises on a missing/deleted checkpoint directory.
-
-    :param Path checkpoint_dir: Root directory containing ``<step>/`` folders.
-    :param int retention_limit: Number of newest numeric checkpoints to keep.
-    """
-    if retention_limit <= 0 or not checkpoint_dir.exists():
-        return
-
-    checkpoints: list[tuple[int, Path]] = []
-    for item_path in checkpoint_dir.iterdir():
-        if not item_path.is_dir():
-            continue
-        try:
-            checkpoints.append((int(item_path.name), item_path))
-        except ValueError:
-            continue
-
-    if len(checkpoints) <= retention_limit:
-        return
-
-    checkpoints.sort(key=lambda item: item[0])
-    for _, old_path in checkpoints[: len(checkpoints) - retention_limit]:
-        try:
-            shutil.rmtree(old_path)
-            logger.info(f"Removed old checkpoint: {old_path} (limit={retention_limit})")
-        except FileNotFoundError:
-            logger.warning(f"Checkpoint already removed before prune: {old_path}")
-        except OSError as exc:
-            logger.warning(f"Failed to remove old checkpoint {old_path}: {exc}")
-
-
-def _save_portable_checkpoint_weights(
-    model: torch.nn.Module,
-    accelerator: Accelerator,
-    checkpoint_path: Path,
-) -> bool:
-    """Save backend-agnostic ``model.safetensors`` into a step checkpoint.
-
-    The resumable Accelerate state remains the source of truth for restart; this
-    helper adds a portable inference/export payload for downstream consumers.
-
-    :param torch.nn.Module model: Prepared training model.
-    :param Accelerator accelerator: Active accelerator runtime.
-    :param Path checkpoint_path: Step checkpoint directory path.
-    :return bool: True when portable weights were saved.
-    """
-    try:
-        # Distributed backends (FSDP/FSDP2/DeepSpeed) may require all ranks to
-        # participate in state-dict collection collectives even when only rank 0
-        # ultimately persists the portable safetensors payload.
-        state_dict = accelerator.get_state_dict(model, unwrap=True)
-    except Exception as exc:
-        if accelerator.is_main_process:
-            logger.warning(
-                "Unable to export portable checkpoint weights to "
-                f"{checkpoint_path / MODEL_WEIGHTS_NAME}: {exc}. "
-                "Resumable state was still saved. For DeepSpeed ZeRO-3, enable "
-                "`stage3_gather_16bit_weights_on_model_save`/`zero3_save_16bit_model` "
-                "to emit consolidated portable weights automatically."
-            )
-        return False
-
-    if not accelerator.is_main_process:
-        return False
-
-    try:
-        weights_path = save_state_dict_safetensors(
-            state_dict,
-            checkpoint_path,
-            metadata={"format": "pt", "source": "accelerate.get_state_dict"},
-        )
-    except Exception as exc:
-        logger.warning(
-            "Failed to persist portable checkpoint weights at "
-            f"{checkpoint_path / MODEL_WEIGHTS_NAME}: {exc}. "
-            "Resumable state was still saved."
-        )
-        return False
-
-    logger.info(f"Saved portable model weights to {weights_path}.")
-    return True
-
-
 def trainer(cfg: Config) -> None:
     """Run the pretraining loop.
 
@@ -1706,16 +1560,13 @@ def trainer(cfg: Config) -> None:
         cfg.trainer.mixed_precision,
         task="pretraining",
     )
-    mixed_precision = stabilize_cuda_mixed_precision(
-        mixed_precision=mixed_precision,
-        log=logger,
-    )
-    if mixed_precision == "no" and cfg.model.attn_backend == "flash_attn_varlen":
-        logger.warning(
-            "attn_backend='flash_attn_varlen' with mixed_precision='no' is unsupported; "
-            "falling back to attn_backend='sdpa'."
+    mixed_precision, cfg.model.attn_backend = (
+        resolve_runtime_mixed_precision_and_attn_backend(
+            mixed_precision=mixed_precision,
+            attn_backend=cfg.model.attn_backend,
+            log=logger,
         )
-        cfg.model.attn_backend = "sdpa"
+    )
     cfg.trainer.mixed_precision = mixed_precision
 
     accelerator = create_accelerator(

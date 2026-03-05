@@ -7,7 +7,10 @@ from typing import Literal, Optional
 
 import torch
 
-from neobert.modeling_utils import scaled_dot_product_attention_compat
+from neobert.modeling_utils import (
+    is_torch_compiling,
+    scaled_dot_product_attention_compat,
+)
 
 logger = logging.getLogger(__name__)
 PackedSeqLens = torch.Tensor | list[list[int]]
@@ -46,24 +49,6 @@ try:
     _dynamo_disable = torch.compiler.disable
 except (AttributeError, RuntimeError):
     _dynamo_disable = torch._dynamo.disable  # type: ignore[attr-defined]
-
-
-def _is_torch_compiling() -> bool:
-    """Return whether execution is inside a ``torch.compile`` trace.
-
-    :return bool: ``True`` when tracing/compiling is active, else ``False``.
-    """
-    compiler = getattr(torch, "compiler", None)
-    if compiler is not None:
-        is_compiling = getattr(compiler, "is_compiling", None)
-        if callable(is_compiling):
-            return bool(is_compiling())
-    dynamo = getattr(torch, "_dynamo", None)
-    if dynamo is not None:
-        is_compiling = getattr(dynamo, "is_compiling", None)
-        if callable(is_compiling):
-            return bool(is_compiling())
-    return False
 
 
 def canonicalize_attn_backend(
@@ -145,28 +130,6 @@ def resolve_runtime_attn_backend(
 # ---------------------------------------------------------------------------
 # flash_attn_varlen helpers
 # ---------------------------------------------------------------------------
-
-
-def packed_seqlens_to_cu_seqlens(
-    packed_seqlens: list[list[int]],
-    device: torch.device,
-) -> tuple[torch.Tensor, int]:
-    """Convert nested packed segment lengths to cumulative sequence lengths.
-
-    :param list[list[int]] packed_seqlens: Per-sample segment lengths.
-    :param torch.device device: Device for the output tensor.
-    :return tuple[torch.Tensor, int]: ``(cu_seqlens_int32, max_seqlen)``.
-    """
-    all_lens: list[int] = []
-    for segs in packed_seqlens:
-        all_lens.extend(segs)
-    if not all_lens:
-        return torch.zeros(1, dtype=torch.int32, device=device), 0
-    cu = [0]
-    for length in all_lens:
-        cu.append(cu[-1] + length)
-    max_seqlen = max(all_lens)
-    return torch.tensor(cu, dtype=torch.int32, device=device), max_seqlen
 
 
 def _normalize_packed_seqlens_tensor(
@@ -296,7 +259,7 @@ def prepare_packed_flash_metadata(
     )
     cu_seqlens[0] = 0
     cu_seqlens[1:] = seg_lens_flat.cumsum(dim=0, dtype=torch.int32)
-    if _is_torch_compiling():
+    if is_torch_compiling():
         max_seqlen = seq_len
     else:
         max_seqlen = int(seg_lens_flat.max().item())

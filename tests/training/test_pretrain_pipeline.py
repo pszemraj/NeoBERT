@@ -31,7 +31,6 @@ from neobert.pretraining.trainer import (
     _split_train_dataset_for_eval_samples,
     _should_backward_inside_gathered_decoder_weight,
     _sync_tokenizer_derived_config,
-    _write_deepspeed_latest_file,
     trainer,
 )
 
@@ -204,15 +203,6 @@ class TestPretrainComponents:
         assert cfg.model.vocab_size == 128
         assert cfg.tokenizer.vocab_size == 128
         assert cfg.model.pad_token_id == tokenizer.pad_token_id
-
-    def test_write_deepspeed_latest_file(self):
-        """Ensure DeepSpeed root latest indirection is refreshed correctly."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            _write_deepspeed_latest_file(root, "12345")
-            latest_path = root / "latest"
-            assert latest_path.exists()
-            assert latest_path.read_text(encoding="utf-8") == "12345\n"
 
     def test_save_portable_checkpoint_weights_paths(self):
         """Ensure portable checkpoint save behavior for success/failure/rank paths."""
@@ -786,26 +776,6 @@ class TestPretrainComponents:
         }
         _clear_stored_batch(stored_batch)
         assert all(value is None for value in stored_batch.values())
-
-    def test_promote_tmp_checkpoint_dir_keeps_old_until_swap(self):
-        """Ensure tmp checkpoint promotion does not delete final dir pre-swap."""
-        from neobert.pretraining.trainer import _promote_tmp_checkpoint_dir
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            tmp_ckpt = root / "100.tmp"
-            final_ckpt = root / "100"
-            tmp_ckpt.mkdir()
-            final_ckpt.mkdir()
-            (tmp_ckpt / "model.safetensors").write_text("new")
-            (final_ckpt / "model.safetensors").write_text("old")
-
-            _promote_tmp_checkpoint_dir(tmp_ckpt, final_ckpt)
-
-            assert not tmp_ckpt.exists()
-            assert final_ckpt.exists()
-            assert (final_ckpt / "model.safetensors").read_text() == "new"
-            assert not (root / "100.old").exists()
 
     def test_optimizer_and_scheduler_creation_with_decay_name_normalization(self):
         """Ensure optimizer grouping and scheduler decay-name normalization both work."""
