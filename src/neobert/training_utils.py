@@ -8,6 +8,7 @@ from typing import Any, Callable, Optional, Tuple
 
 import torch
 from accelerate import Accelerator
+from accelerate.state import AcceleratorState, GradientState
 from accelerate.utils import DistributedType
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,9 @@ except Exception:  # pragma: no cover - older torch builds without DTensor APIs
 
 _LOW_PRECISION_LINEAR_PROBE_CACHE: dict[tuple[int, str, str], bool] = {}
 _LOCAL_RANK_ENV_VARS = ("LOCAL_RANK", "SLURM_LOCALID", "MPI_LOCALRANKID")
+_ACCELERATOR_STATE_REINIT_PREFIX = (
+    "AcceleratorState has already been initialized and cannot be changed"
+)
 
 
 def _resolve_cuda_probe_device_index() -> int:
@@ -268,6 +272,23 @@ def _is_row_shard_placement(placement: Any) -> bool:
         return False
 
 
+def _is_accelerator_state_reinit_error(exc: Exception) -> bool:
+    """Return whether ``exc`` indicates stale Accelerate singleton state.
+
+    :param Exception exc: Exception raised while constructing ``Accelerator``.
+    :return bool: ``True`` when Accelerate requests a runtime restart.
+    """
+    return isinstance(exc, ValueError) and (
+        _ACCELERATOR_STATE_REINIT_PREFIX in str(exc)
+    )
+
+
+def _reset_accelerate_runtime_state() -> None:
+    """Reset Accelerate singleton state for sequential in-process trainer reuse."""
+    GradientState._reset_state()
+    AcceleratorState._reset_state(reset_partial_state=True)
+
+
 def create_accelerator(
     *,
     use_cpu: bool,
@@ -275,12 +296,13 @@ def create_accelerator(
     accelerator_factory: Callable[..., Accelerator] = Accelerator,
     **kwargs: Any,
 ) -> Accelerator:
-    """Create an Accelerator and gracefully handle mixed cpu/cuda test processes.
+    """Create an Accelerator and handle stale Accelerate singleton state.
 
-    When ``use_cpu=True`` is requested after Accelerate has already initialized a
-    CUDA-backed shared state (common in unit-test suites), Accelerate raises a
-    ValueError about changing ``cpu=True``. In that case we warn once and retry
-    without forcing CPU so the existing process state remains usable.
+    In long-lived processes (tests, notebooks, agent loops), a previous trainer
+    invocation may leave Accelerate singleton state initialized with different
+    runtime settings such as ``cpu=True`` or ``mixed_precision='bf16'``. When
+    that happens, we reset Accelerate's shared state and recreate the
+    accelerator so the new run honors its requested runtime policy.
 
     :param bool use_cpu: Whether to request CPU execution.
     :param logging.Logger log: Logger for fallback warnings.
@@ -294,13 +316,15 @@ def create_accelerator(
     try:
         return accelerator_factory(**accelerator_kwargs)
     except ValueError as exc:
-        if use_cpu and "cpu=True" in str(exc):
+        if _is_accelerator_state_reinit_error(exc):
             log.warning(
-                "trainer.use_cpu=true requested but AcceleratorState is already "
-                "initialized on a non-CPU device in this process; continuing with "
-                "the existing Accelerate device state."
+                "AcceleratorState is already initialized with incompatible runtime "
+                "settings for this process (requested cpu=%s, mixed_precision=%r). "
+                "Resetting Accelerate singleton state and recreating the accelerator.",
+                bool(accelerator_kwargs.get("cpu", False)),
+                accelerator_kwargs.get("mixed_precision"),
             )
-            accelerator_kwargs.pop("cpu", None)
+            _reset_accelerate_runtime_state()
             return accelerator_factory(**accelerator_kwargs)
         raise
 

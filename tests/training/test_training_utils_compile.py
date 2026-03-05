@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from accelerate.state import AcceleratorState, GradientState
 from accelerate.utils import DistributedType
 
 from neobert.config import Config
@@ -14,6 +15,7 @@ from neobert.model import NeoBERT, NeoBERTConfig
 from neobert.optimizer import get_optimizer
 from neobert.training_utils import (
     _maybe_compile_model,
+    create_accelerator,
     resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
     stabilize_cuda_mixed_precision,
@@ -259,6 +261,96 @@ def test_stabilize_cuda_mixed_precision_passthrough_no_cuda(
         log=logging.getLogger("test"),
     )
     assert out == "bf16"
+
+
+def test_create_accelerator_recreates_state_for_mixed_precision_reuse() -> None:
+    """Sequential trainer runs should honor updated mixed precision settings."""
+    GradientState._reset_state()
+    AcceleratorState._reset_state(reset_partial_state=True)
+
+    try:
+        first = create_accelerator(
+            use_cpu=True,
+            log=logging.getLogger("test"),
+            mixed_precision="bf16",
+        )
+        assert first.device.type == "cpu"
+        assert first.state.mixed_precision == "bf16"
+
+        second = create_accelerator(
+            use_cpu=True,
+            log=logging.getLogger("test"),
+            mixed_precision="no",
+        )
+        assert second.device.type == "cpu"
+        assert second.state.mixed_precision == "no"
+    finally:
+        GradientState._reset_state()
+        AcceleratorState._reset_state(reset_partial_state=True)
+
+
+def test_create_accelerator_resets_on_state_mismatch_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """State-mismatch errors should reset Accelerate and retry once."""
+    import neobert.training_utils as training_utils
+
+    reset_calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        training_utils.AcceleratorState,
+        "_reset_state",
+        lambda reset_partial_state=False: reset_calls.append(
+            ("accelerator", bool(reset_partial_state))
+        ),
+    )
+    monkeypatch.setattr(
+        training_utils.GradientState,
+        "_reset_state",
+        lambda: reset_calls.append(("gradient", None)),
+    )
+
+    calls: list[dict[str, object]] = []
+
+    def _fake_factory(**kwargs: object) -> SimpleNamespace:
+        calls.append(dict(kwargs))
+        if len(calls) == 1:
+            raise ValueError(
+                "AcceleratorState has already been initialized and cannot be "
+                "changed, restart your runtime completely and pass `cpu=True` "
+                "to `Accelerator()`."
+            )
+        return SimpleNamespace(**kwargs)
+
+    out = create_accelerator(
+        use_cpu=True,
+        log=logging.getLogger("test"),
+        accelerator_factory=_fake_factory,
+        mixed_precision="bf16",
+    )
+
+    assert out.cpu is True
+    assert out.mixed_precision == "bf16"
+    assert calls == [
+        {"mixed_precision": "bf16", "cpu": True},
+        {"mixed_precision": "bf16", "cpu": True},
+    ]
+    assert reset_calls == [("gradient", None), ("accelerator", True)]
+
+
+def test_create_accelerator_reraises_unrelated_value_errors() -> None:
+    """Non-state errors from Accelerator construction must propagate unchanged."""
+
+    def _boom(**_: object) -> SimpleNamespace:
+        raise ValueError("different accelerator failure")
+
+    with pytest.raises(ValueError, match="different accelerator failure"):
+        create_accelerator(
+            use_cpu=False,
+            log=logging.getLogger("test"),
+            accelerator_factory=_boom,
+            mixed_precision="bf16",
+        )
 
 
 def test_stabilize_cuda_mixed_precision_skips_probe_for_explicit_cpu(
