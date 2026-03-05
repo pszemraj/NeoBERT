@@ -171,6 +171,82 @@ def test_resolve_wandb_watch_mode_matrix() -> None:
             assert warning is None
 
 
+def test_probe_cuda_linear_dtype_uses_local_rank_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Probe must use rank-local CUDA device before Accelerator initialization."""
+    import neobert.training_utils as training_utils
+
+    training_utils._LOW_PRECISION_LINEAR_PROBE_CACHE.clear()
+    monkeypatch.setenv("LOCAL_RANK", "2")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 4)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(
+        torch.backends.cuda, "preferred_blas_library", lambda _requested=None: "cublas"
+    )
+
+    seen_devices: list[str] = []
+    sync_devices: list[str] = []
+
+    def _fake_randn(
+        shape: tuple[int, int], *, device: object = None, dtype: object = None
+    ) -> torch.Tensor:
+        seen_devices.append(str(torch.device(device)))
+        return torch.zeros(shape, dtype=dtype)
+
+    monkeypatch.setattr(torch, "randn", _fake_randn)
+    monkeypatch.setattr(
+        torch.nn.functional,
+        "linear",
+        lambda x, w: torch.zeros((x.shape[0], w.shape[0]), dtype=x.dtype),
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "synchronize",
+        lambda device=None: sync_devices.append(str(torch.device(device))),
+    )
+
+    assert training_utils._probe_cuda_linear_dtype(torch.bfloat16)
+    assert seen_devices == ["cuda:2", "cuda:2"]
+    assert sync_devices == ["cuda:2"]
+
+
+def test_probe_cuda_linear_dtype_falls_back_to_current_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If local-rank metadata is invalid, probe should use current CUDA device."""
+    import neobert.training_utils as training_utils
+
+    training_utils._LOW_PRECISION_LINEAR_PROBE_CACHE.clear()
+    monkeypatch.setenv("LOCAL_RANK", "99")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 1)
+    monkeypatch.setattr(
+        torch.backends.cuda, "preferred_blas_library", lambda _requested=None: "cublas"
+    )
+
+    seen_devices: list[str] = []
+
+    def _fake_randn(
+        shape: tuple[int, int], *, device: object = None, dtype: object = None
+    ) -> torch.Tensor:
+        seen_devices.append(str(torch.device(device)))
+        return torch.zeros(shape, dtype=dtype)
+
+    monkeypatch.setattr(torch, "randn", _fake_randn)
+    monkeypatch.setattr(
+        torch.nn.functional,
+        "linear",
+        lambda x, w: torch.zeros((x.shape[0], w.shape[0]), dtype=x.dtype),
+    )
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda device=None: None)
+
+    assert training_utils._probe_cuda_linear_dtype(torch.bfloat16)
+    assert seen_devices == ["cuda:1", "cuda:1"]
+
+
 def test_stabilize_cuda_mixed_precision_passthrough_no_cuda(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

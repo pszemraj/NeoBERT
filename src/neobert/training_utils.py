@@ -1,6 +1,7 @@
 """Shared helpers for training loops (pretraining, GLUE, contrastive)."""
 
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any, Callable, Optional, Tuple
@@ -12,6 +13,40 @@ from accelerate.utils import DistributedType
 logger = logging.getLogger(__name__)
 
 _LOW_PRECISION_LINEAR_PROBE_CACHE: dict[tuple[int, str, str], bool] = {}
+_LOCAL_RANK_ENV_VARS = ("LOCAL_RANK", "SLURM_LOCALID", "MPI_LOCALRANKID")
+
+
+def _resolve_cuda_probe_device_index() -> int:
+    """Resolve a stable CUDA device index for startup dtype probes.
+
+    Before Accelerate initializes per-rank devices, ``torch.cuda.current_device()``
+    often defaults to ``0`` on every rank. Prefer rank-local environment metadata
+    so probes run on the GPU owned by this process.
+
+    :return int: CUDA device index to probe.
+    """
+    device_count = int(torch.cuda.device_count())
+    if device_count <= 0:
+        return 0
+
+    for env_var in _LOCAL_RANK_ENV_VARS:
+        raw_value = os.environ.get(env_var)
+        if raw_value is None:
+            continue
+        try:
+            local_rank = int(raw_value)
+        except ValueError:
+            continue
+        if 0 <= local_rank < device_count:
+            return local_rank
+
+    try:
+        current_device = int(torch.cuda.current_device())
+    except Exception:
+        current_device = 0
+    if 0 <= current_device < device_count:
+        return current_device
+    return 0
 
 
 def _probe_cuda_linear_dtype(dtype: torch.dtype) -> bool:
@@ -22,7 +57,8 @@ def _probe_cuda_linear_dtype(dtype: torch.dtype) -> bool:
     """
     if not torch.cuda.is_available():
         return False
-    device_index = torch.cuda.current_device()
+    device_index = _resolve_cuda_probe_device_index()
+    probe_device = torch.device("cuda", device_index)
     preferred_blas = getattr(torch.backends.cuda, "preferred_blas_library", None)
     blas_tag = "unknown"
     if callable(preferred_blas):
@@ -37,10 +73,10 @@ def _probe_cuda_linear_dtype(dtype: torch.dtype) -> bool:
 
     try:
         with torch.no_grad():
-            x = torch.randn((16, 64), device="cuda", dtype=dtype)
-            w = torch.randn((128, 64), device="cuda", dtype=dtype)
+            x = torch.randn((16, 64), device=probe_device, dtype=dtype)
+            w = torch.randn((128, 64), device=probe_device, dtype=dtype)
             _ = torch.nn.functional.linear(x, w)
-            torch.cuda.synchronize()
+            torch.cuda.synchronize(device=probe_device)
         _LOW_PRECISION_LINEAR_PROBE_CACHE[cache_key] = True
         return True
     except RuntimeError:
