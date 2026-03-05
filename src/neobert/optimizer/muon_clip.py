@@ -1010,7 +1010,11 @@ class MuonClipOptimizer(Optimizer):
             param.addcdiv_(state["exp_avg"], denom, value=-step_size)
 
     def _is_dtensor(self, tensor: torch.Tensor) -> bool:
-        """Return whether ``tensor`` is a DTensor instance."""
+        """Return whether ``tensor`` is a DTensor instance.
+
+        :param torch.Tensor tensor: Candidate tensor.
+        :return bool: ``True`` when ``tensor`` is a DTensor.
+        """
         return DTensor is not None and isinstance(tensor, DTensor)
 
     def _disable_clipping_for_sharded_runtime(self) -> None:
@@ -1037,7 +1041,14 @@ class MuonClipOptimizer(Optimizer):
         world_size: int,
         process_group: dist.ProcessGroup,
     ) -> int:
-        """Resolve a stable owner rank (group-local) for a parameter."""
+        """Resolve a stable owner rank (group-local) for a parameter.
+
+        :param torch.nn.Parameter param: Parameter to assign.
+        :param Sequence[torch.nn.Parameter] group_params: Muon parameter group members.
+        :param int world_size: Group-local world size.
+        :param dist.ProcessGroup process_group: Process group backing the shard mesh.
+        :return int: Owner rank in the process group.
+        """
         cache_key = (id(process_group), int(world_size))
         owners = self._muon_owner_rank_cache.get(cache_key)
         if owners is None:
@@ -1062,7 +1073,13 @@ class MuonClipOptimizer(Optimizer):
         param: torch.nn.Parameter,
         group_params: Sequence[torch.nn.Parameter],
     ) -> Any:
-        """Orthogonalize a row-sharded DTensor via owner-compute gather/scatter."""
+        """Orthogonalize a row-sharded DTensor via owner-compute gather/scatter.
+
+        :param Any momentum_buffer: DTensor momentum buffer (Shard(0)).
+        :param torch.nn.Parameter param: Parameter being updated.
+        :param Sequence[torch.nn.Parameter] group_params: Muon parameter group members.
+        :return Any: DTensor update with the original placement metadata.
+        """
         if DTensor is None or Shard is None:
             raise RuntimeError(
                 "DTensor Muon path requested but DTensor APIs are unavailable in this torch build."
