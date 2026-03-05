@@ -14,7 +14,7 @@ model:
   hidden_act: "swiglu"
 
 dataset:
-  name: "sentence-transformers/all-nli"
+  name: "sentence-transformers/all-nli"  # preprocess resolves HF IDs like this to ALLNLI
   path: null
   max_seq_length: 256
 

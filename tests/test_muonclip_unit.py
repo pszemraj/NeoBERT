@@ -641,6 +641,43 @@ class TestMuonClipOptimizer:
         if optimizer.hook_system is not None:
             assert not optimizer.hook_system.enabled
 
+    def test_dtensor_update_rejects_multidim_device_mesh(self, model, monkeypatch):
+        """DTensor Muon path should fail fast on unsupported multi-axis meshes."""
+        import neobert.optimizer.muon_clip as muon_clip_module
+
+        if muon_clip_module.Shard is None:
+            pytest.skip("DTensor Shard placement API unavailable in this torch build.")
+
+        model_instance, config = model
+        optimizer = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(enable_clipping=False),
+        )
+
+        class _FakeMesh:
+            ndim = 2
+
+            def get_group(self):
+                raise AssertionError(
+                    "multi-axis mesh should be rejected before collectives"
+                )
+
+        class _FakeDTensor:
+            placements = (muon_clip_module.Shard(0),)
+            device_mesh = _FakeMesh()
+
+        monkeypatch.setattr(muon_clip_module.dist, "is_available", lambda: True)
+        monkeypatch.setattr(muon_clip_module.dist, "is_initialized", lambda: True)
+
+        target = model_instance.transformer_encoder[0].qkv.weight
+        with pytest.raises(RuntimeError, match="device_mesh.ndim=2"):
+            optimizer._orthogonalize_dtensor_update(
+                momentum_buffer=_FakeDTensor(),
+                param=target,
+                group_params=[target],
+            )
+
     def test_clipping_applied(self, model):
         """Test QK-clipping actually modifies weights."""
         model_instance, config = model

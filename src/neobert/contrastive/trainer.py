@@ -216,6 +216,7 @@ def trainer(cfg: Config) -> None:
             mixed_precision=mixed_precision,
             attn_backend=cfg.model.attn_backend,
             log=logger,
+            use_cpu=bool(getattr(cfg.trainer, "use_cpu", False)),
         )
     )
     cfg.trainer.mixed_precision = mixed_precision

@@ -889,6 +889,7 @@ def trainer(cfg: Config) -> None:
     mixed_precision = stabilize_cuda_mixed_precision(
         mixed_precision=mixed_precision,
         log=logger,
+        use_cpu=bool(getattr(cfg.trainer, "use_cpu", False)),
     )
     cfg.trainer.mixed_precision = mixed_precision
 

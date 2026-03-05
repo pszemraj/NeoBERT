@@ -88,6 +88,7 @@ def stabilize_cuda_mixed_precision(
     *,
     mixed_precision: str,
     log: logging.Logger,
+    use_cpu: bool = False,
 ) -> str:
     """Stabilize mixed precision policy for CUDA runtimes with broken bf16 GEMM.
 
@@ -97,9 +98,10 @@ def stabilize_cuda_mixed_precision(
 
     :param str mixed_precision: Requested mixed precision mode.
     :param logging.Logger log: Logger for runtime policy warnings.
+    :param bool use_cpu: Whether the run is explicitly targeting CPU execution.
     :return str: Effective mixed precision mode (``"bf16"`` or ``"no"``).
     """
-    if mixed_precision != "bf16" or not torch.cuda.is_available():
+    if use_cpu or mixed_precision != "bf16" or not torch.cuda.is_available():
         return mixed_precision
 
     if _probe_cuda_linear_dtype(torch.bfloat16):
@@ -133,23 +135,31 @@ def resolve_runtime_mixed_precision_and_attn_backend(
     mixed_precision: str,
     attn_backend: str,
     log: logging.Logger,
+    use_cpu: bool = False,
 ) -> tuple[str, str]:
     """Resolve stable mixed precision and attention backend policy for CUDA.
 
     :param str mixed_precision: Requested mixed precision mode.
     :param str attn_backend: Requested attention backend.
     :param logging.Logger log: Logger for runtime warnings.
+    :param bool use_cpu: Whether the run is explicitly targeting CPU execution.
     :return tuple[str, str]: Effective ``(mixed_precision, attn_backend)``.
     """
     effective_precision = stabilize_cuda_mixed_precision(
         mixed_precision=mixed_precision,
         log=log,
+        use_cpu=use_cpu,
     )
     effective_backend = str(attn_backend)
-    if (
-        effective_precision == "no"
-        and effective_backend.strip().lower() == "flash_attn_varlen"
-    ):
+    normalized_backend = effective_backend.strip().lower()
+    if use_cpu and normalized_backend == "flash_attn_varlen":
+        log.warning(
+            "attn_backend='flash_attn_varlen' requires CUDA tensors, but "
+            "trainer.use_cpu=true; falling back to attn_backend='sdpa'."
+        )
+        effective_backend = "sdpa"
+        normalized_backend = "sdpa"
+    if effective_precision == "no" and normalized_backend == "flash_attn_varlen":
         log.warning(
             "attn_backend='flash_attn_varlen' with mixed_precision='no' is unsupported; "
             "falling back to attn_backend='sdpa'."

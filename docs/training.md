@@ -14,6 +14,11 @@ Full field-level schema/defaults are in [configuration.md](configuration.md).
 | `scripts/contrastive/finetune.py`         | contrastive fine-tuning           |
 | `scripts/contrastive/preprocess.py`       | contrastive dataset preprocessing |
 
+For contrastive preprocessing, `dataset.name` may be `ALL`, a canonical key
+such as `ALLNLI`, or an HF dataset ID alias such as
+`sentence-transformers/all-nli`. Cached `all/` reloads are filtered back to the
+requested splits.
+
 ## Pretraining
 
 ### Basic launch
@@ -124,6 +129,8 @@ Runtime behavior:
 - if `bf16` still fails, trainer falls back to `mixed_precision: no`
 - this startup probe targets the process-local CUDA device (for example
   `LOCAL_RANK`) before Accelerator initialization
+- explicit CPU runs (`trainer.use_cpu: true`) skip CUDA probes and force
+  `attn_backend: sdpa`
 - when mixed precision resolves to `no`, `attn_backend: flash_attn_varlen` is
   auto-switched to `sdpa`
 - `trainer.torch_compile`: enable `torch.compile`

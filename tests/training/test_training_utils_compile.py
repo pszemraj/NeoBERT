@@ -14,6 +14,7 @@ from neobert.model import NeoBERT, NeoBERTConfig
 from neobert.optimizer import get_optimizer
 from neobert.training_utils import (
     _maybe_compile_model,
+    resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
     stabilize_cuda_mixed_precision,
     validate_muon_distributed_compatibility,
@@ -257,6 +258,60 @@ def test_stabilize_cuda_mixed_precision_passthrough_no_cuda(
         log=logging.getLogger("test"),
     )
     assert out == "bf16"
+
+
+def test_stabilize_cuda_mixed_precision_skips_probe_for_explicit_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CPU-targeted runs should not touch CUDA probe paths on GPU hosts."""
+    called = {"probe": 0}
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+
+    def _boom(_dtype: torch.dtype) -> bool:
+        called["probe"] += 1
+        raise AssertionError("CUDA probe should not run for trainer.use_cpu=true")
+
+    monkeypatch.setattr("neobert.training_utils._probe_cuda_linear_dtype", _boom)
+
+    out = stabilize_cuda_mixed_precision(
+        mixed_precision="bf16",
+        log=logging.getLogger("test"),
+        use_cpu=True,
+    )
+
+    assert out == "bf16"
+    assert called["probe"] == 0
+
+
+def test_resolve_runtime_mixed_precision_and_attn_backend_forces_sdpa_on_cpu(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Explicit CPU runs must disable flash-attn even when CUDA is present."""
+    called = {"probe": 0}
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+
+    def _boom(_dtype: torch.dtype) -> bool:
+        called["probe"] += 1
+        raise AssertionError("CUDA probe should not run for trainer.use_cpu=true")
+
+    monkeypatch.setattr("neobert.training_utils._probe_cuda_linear_dtype", _boom)
+
+    with caplog.at_level(logging.WARNING):
+        mixed_precision, attn_backend = (
+            resolve_runtime_mixed_precision_and_attn_backend(
+                mixed_precision="bf16",
+                attn_backend="flash_attn_varlen",
+                log=logging.getLogger("test"),
+                use_cpu=True,
+            )
+        )
+
+    assert mixed_precision == "bf16"
+    assert attn_backend == "sdpa"
+    assert called["probe"] == 0
+    assert "trainer.use_cpu=true" in caplog.text
 
 
 def test_stabilize_cuda_mixed_precision_switches_to_cublaslt(

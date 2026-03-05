@@ -1169,6 +1169,12 @@ class MuonClipOptimizer(Optimizer):
             )
 
         mesh = momentum_buffer.device_mesh
+        mesh_ndim = getattr(mesh, "ndim", None)
+        if mesh_ndim is not None and int(mesh_ndim) != 1:
+            raise RuntimeError(
+                "MuonClip DTensor path currently supports only 1D FSDP2 device meshes "
+                f"with row-sharded parameters, got device_mesh.ndim={int(mesh_ndim)}."
+            )
         process_group = mesh.get_group()
         if process_group is None:
             raise RuntimeError(
