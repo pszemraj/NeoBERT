@@ -184,6 +184,12 @@ Priority order for next performance PR:
 - Collect recompile reasons under the harness above.
 - Remove avoidable dynamic guards and static-attribute churn in hot modules.
 
+1. MuonClip helper deduplication
+
+- Consolidate duplicated transformer-layer resolution logic between
+  `MuonClipOptimizer._resolve_transformer_stack` and
+  `NeoBERTAttentionHooks._resolve_transformer_layers` into one shared utility.
+
 ### Contrastive Sweep TODOs
 
 These are explicitly tracked for sweep-readiness follow-up work:

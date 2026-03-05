@@ -392,6 +392,12 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | `polar_express`                | `bool \| None`   | `null`            | Deprecated legacy toggle.                                    |
 | `clipping_layers_mapping`      | `dict[str, str]` | `{}`              | Projection-name overrides for non-standard attention blocks. |
 
+> [!NOTE]
+> `orthogonalization` changes compute precision behavior on CUDA:
+> `newton_schulz` upcasts BF16 gradients to FP32 for the iteration and casts
+> back; `polar_express` runs in BF16 work dtype (when available) for higher
+> throughput.
+
 ---
 
 ## Data Collator
