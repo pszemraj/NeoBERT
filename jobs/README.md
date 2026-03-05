@@ -1,35 +1,19 @@
 # Job Scripts
 
-`jobs/` contains shell launcher examples for common workflows.
+Shell launcher examples for common workflows.
 
-```text
-jobs/
-  example_pretrain.sh
-  example_evaluate.sh
-```
+These wrap [scripts](../scripts/README.md) and [configs](../configs/README.md).
 
-These are convenience wrappers around scripts in `scripts/` and configs in
-`configs/`. See `docs/training.md` and `docs/evaluation.md` for behavior
-details.
+## Files
 
-## Environment
-
-Examples assume Python environment has NeoBERT installed.
-
-```bash
-python -c "import torch, neobert; print(torch.__version__)"
-```
+- `example_pretrain.sh` - pretraining launcher; set `RUN_FULL=1` for the long run
+- `example_evaluate.sh` - evaluation launcher
 
 ## Example Launches
 
 ```bash
-# Tiny pretraining smoke test
 ./jobs/example_pretrain.sh
-
-# Full variant (if script supports RUN_FULL gate)
 RUN_FULL=1 ./jobs/example_pretrain.sh
-
-# Evaluation example
 ./jobs/example_evaluate.sh
 ```
 
@@ -41,7 +25,6 @@ RUN_FULL=1 ./jobs/example_pretrain.sh
 
 ## Related Docs
 
-- [docs/README.md](../docs/README.md)
-- [scripts/README.md](../scripts/README.md)
-- [training.md](../docs/training.md)
-- [evaluation.md](../docs/evaluation.md)
+- [Scripts](../scripts/README.md)
+- [Training](../docs/training.md)
+- [Evaluation](../docs/evaluation.md)

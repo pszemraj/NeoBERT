@@ -1,34 +1,16 @@
 # Configuration Files
 
 Repository configs for training and evaluation workflows.
-Field definitions/defaults are documented in
-[docs/configuration.md](../docs/configuration.md).
 
-- Production/experiment configs live under `configs/`.
-- Tiny smoke-test configs live under `tests/configs/`.
+Field definitions and defaults are in [docs/configuration.md](../docs/configuration.md).
 
 ## Layout
-
-```text
-configs/
-  pretraining/
-  glue/
-  contrastive/
-```
-
-## Config Authoring
-
-- Keep semantics/default definitions in
-  [docs/configuration.md](../docs/configuration.md).
-- Keep runtime behavior in [docs/training.md](../docs/training.md) and
-  [docs/evaluation.md](../docs/evaluation.md).
-- Use this directory for runnable recipes, not schema documentation.
-
-## Directory Intent
 
 - `configs/pretraining/` - production/experiment pretraining recipes.
 - `configs/glue/` - per-task GLUE recipes and generated sweep configs.
 - `configs/contrastive/` - contrastive fine-tuning recipes.
+
+Tiny smoke-test configs live under [Test Config Files](../tests/configs/README.md).
 
 ## Related Docs
 

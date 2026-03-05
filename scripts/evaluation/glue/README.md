@@ -14,14 +14,6 @@ Automation helpers for generating, running, and summarizing GLUE configs.
 ## Usage Notes
 
 - Invoke from repository root.
-- Generated configs typically land under `configs/glue/generated/`.
-- Execution uses `scripts/evaluation/run_glue.py`.
-- GLUE behavior details are in [docs/evaluation.md](../../../docs/evaluation.md).
-
-## Examples
-
-```bash
-bash scripts/evaluation/glue/run_quick_glue.sh configs/glue
-bash scripts/evaluation/glue/run_all_glue.sh configs/glue
-python scripts/evaluation/glue/summarize_glue.py outputs/glue/<run>
-```
+- Generated configs default to `configs/glue/generated/` unless
+  `build_configs.sh` overrides `--config-output-dir`.
+- GLUE workflow details are in [docs/evaluation.md](../../../docs/evaluation.md).

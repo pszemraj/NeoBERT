@@ -1,19 +1,9 @@
 # NeoBERT Test Suite
 
 Automated regression tests for model, training, config, and evaluation code.
-Testing process and authoring guidance are in [docs/testing.md](../docs/testing.md).
+Test commands and authoring guidance are in [docs/testing.md](../docs/testing.md).
 
-## Entry Points
-
-```bash
-# Preferred default suite
-conda run --name neobert pytest -q
-
-# Optional wrapper
-conda run --name neobert python tests/run_tests.py
-```
-
-## Suite Layout
+## Layout
 
 - Core regression files live directly under `tests/` (flat layout).
 - Multi-file domains stay grouped under:
@@ -24,6 +14,6 @@ conda run --name neobert python tests/run_tests.py
 
 ## Related References
 
-- Process and authoring conventions: [docs/testing.md](../docs/testing.md)
-- Tiny test config catalog: [tests/configs/README.md](configs/README.md)
-- Manual-script commands: [tests/manual/README.md](manual/README.md)
+- [Testing guide](../docs/testing.md)
+- [Test configs](configs/README.md)
+- [Manual validation scripts](manual/README.md)

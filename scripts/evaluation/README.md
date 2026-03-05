@@ -11,27 +11,12 @@ Utilities for GLUE/MTEB evaluation and result analysis.
 - `wrappers.py` - shared script helpers
 - `glue/` - GLUE automation scripts
 
-## Common Commands
-
-```bash
-python scripts/evaluation/run_glue.py configs/glue/cola.yaml
-python scripts/evaluation/run_mteb.py configs/pretraining/pretrain_neobert.yaml --model_name_or_path outputs/<run>
-```
-
-## Important Notes
-
-- Evaluation behavior/caveats are documented in
-  [docs/evaluation.md](../../docs/evaluation.md).
-
 ## GLUE Helpers
 
-See [scripts/evaluation/glue/README.md](glue/README.md) for:
-- config generation from sweeps,
-- quick/full suite launchers,
-- result summarization.
+[GLUE helpers](glue/README.md) cover config generation, suite launchers, and
+result summaries.
 
 ## Related Docs
 
-- [docs/README.md](../../docs/README.md)
-- [docs/evaluation.md](../../docs/evaluation.md)
-- [docs/troubleshooting.md](../../docs/troubleshooting.md)
+- [Evaluation](../../docs/evaluation.md)
+- [Troubleshooting](../../docs/troubleshooting.md)
