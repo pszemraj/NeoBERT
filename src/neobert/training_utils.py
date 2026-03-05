@@ -12,6 +12,13 @@ from accelerate.utils import DistributedType
 
 logger = logging.getLogger(__name__)
 
+try:
+    from torch.distributed.tensor import DTensor
+    from torch.distributed.tensor.placement_types import Shard
+except Exception:  # pragma: no cover - older torch builds without DTensor APIs
+    DTensor = None  # type: ignore[assignment]
+    Shard = None  # type: ignore[assignment]
+
 _LOW_PRECISION_LINEAR_PROBE_CACHE: dict[tuple[int, str, str], bool] = {}
 _LOCAL_RANK_ENV_VARS = ("LOCAL_RANK", "SLURM_LOCALID", "MPI_LOCALRANKID")
 
@@ -219,6 +226,48 @@ def _unwrap_optimizer(opt: Any) -> Any:
     return getattr(opt, "optimizer", opt)
 
 
+def _is_muonclip_optimizer(optimizer_name: str) -> bool:
+    """Return whether ``optimizer_name`` selects MuonClip.
+
+    :param str optimizer_name: Configured optimizer name.
+    :return bool: ``True`` when MuonClip is selected.
+    """
+    optimizer_key = str(optimizer_name).strip().lower()
+    return optimizer_key in {"muonclip", "muon-clip", "muon_clip"}
+
+
+def _looks_like_dtensor(param: Any) -> bool:
+    """Return whether ``param`` exposes DTensor-like metadata.
+
+    :param Any param: Parameter candidate.
+    :return bool: ``True`` when the object behaves like a DTensor.
+    """
+    if DTensor is not None and isinstance(param, DTensor):
+        return True
+    return (
+        hasattr(param, "device_mesh")
+        and hasattr(param, "placements")
+        and callable(getattr(param, "to_local", None))
+    )
+
+
+def _is_row_shard_placement(placement: Any) -> bool:
+    """Return whether ``placement`` represents ``Shard(0)``.
+
+    :param Any placement: DTensor placement descriptor.
+    :return bool: ``True`` when the placement is a row shard.
+    """
+    if Shard is not None and isinstance(placement, Shard):
+        return int(getattr(placement, "dim", -1)) == 0
+
+    placement_name = type(placement).__name__.lower()
+    shard_dim = getattr(placement, "dim", None)
+    try:
+        return placement_name.endswith("shard") and int(shard_dim) == 0
+    except (TypeError, ValueError):
+        return False
+
+
 def create_accelerator(
     *,
     use_cpu: bool,
@@ -274,8 +323,7 @@ def validate_muon_distributed_compatibility(
     :param str context: Human-readable task context for error messages.
     :raises RuntimeError: If MuonClip is enabled with incompatible sharding.
     """
-    optimizer_key = str(optimizer_name).strip().lower()
-    if optimizer_key not in {"muonclip", "muon-clip", "muon_clip"}:
+    if not _is_muonclip_optimizer(optimizer_name):
         return
 
     distributed_type = getattr(accelerator, "distributed_type", None)
@@ -292,6 +340,24 @@ def validate_muon_distributed_compatibility(
             raise RuntimeError(
                 "MuonClip requires FSDP v2 in "
                 f"{context}. Detected FSDP v{fsdp_version}; set fsdp_version=2."
+            )
+
+        parallelism_config = getattr(accelerator, "parallelism_config", None)
+        if parallelism_config is None and state is not None:
+            parallelism_config = getattr(state, "parallelism_config", None)
+        enabled_axes = [
+            axis_name
+            for axis_name, attr_name in (
+                ("tensor parallelism", "tp_enabled"),
+                ("context parallelism", "cp_enabled"),
+            )
+            if bool(getattr(parallelism_config, attr_name, False))
+        ]
+        if enabled_axes:
+            axes = ", ".join(enabled_axes)
+            raise RuntimeError(
+                "MuonClip FSDP v2 currently supports only a 1D row-sharded device "
+                f"mesh in {context}. Disable {axes} for MuonClip runs."
             )
         return
 
@@ -312,6 +378,80 @@ def validate_muon_distributed_compatibility(
         raise RuntimeError(
             "MuonClip is not compatible with DeepSpeed ZeRO stage >= 2 in "
             f"{context} (sharded grads/params). Use ZeRO stage 0/1 or disable MuonClip."
+        )
+
+
+def validate_muon_runtime_topology(
+    *,
+    accelerator: Accelerator,
+    optimizer: Any,
+    optimizer_name: str,
+    log: logging.Logger,
+    context: str,
+) -> None:
+    """Validate prepared MuonClip DTensor topology after ``accelerator.prepare()``.
+
+    :param Accelerator accelerator: Active Accelerator runtime.
+    :param Any optimizer: Prepared optimizer (possibly wrapped by Accelerate).
+    :param str optimizer_name: Configured optimizer name.
+    :param logging.Logger log: Logger for topology warnings.
+    :param str context: Human-readable task context for error messages.
+    :raises RuntimeError: If prepared MuonClip params use unsupported DTensor layout.
+    """
+    if not _is_muonclip_optimizer(optimizer_name):
+        return
+    if getattr(accelerator, "distributed_type", None) is not DistributedType.FSDP:
+        return
+
+    inner = _unwrap_optimizer(optimizer)
+    saw_dtensor = False
+    for group in getattr(inner, "param_groups", ()):
+        if not group.get("use_muon", False):
+            continue
+
+        for param in group.get("params", ()):
+            if not _looks_like_dtensor(param):
+                continue
+            saw_dtensor = True
+
+            mesh = getattr(param, "device_mesh", None)
+            if mesh is None:
+                raise RuntimeError(
+                    "MuonClip encountered a DTensor-like FSDP2 parameter without a "
+                    f"device mesh in {context}."
+                )
+
+            mesh_ndim = getattr(mesh, "ndim", None)
+            if mesh_ndim is None:
+                log.warning(
+                    "MuonClip could not determine FSDP2 device_mesh.ndim in %s; "
+                    "continuing because runtime topology metadata is incomplete.",
+                    context,
+                )
+            elif int(mesh_ndim) != 1:
+                raise RuntimeError(
+                    "MuonClip FSDP v2 currently supports only 1D row-sharded device "
+                    f"meshes in {context}; got device_mesh.ndim={int(mesh_ndim)}."
+                )
+
+            placements = tuple(getattr(param, "placements", ()))
+            if len(placements) != 1 or not _is_row_shard_placement(placements[0]):
+                raise RuntimeError(
+                    "MuonClip FSDP v2 currently supports only Shard(0) DTensor "
+                    f"placements in {context}; got placements={placements!r}."
+                )
+
+    if (
+        getattr(accelerator, "num_processes", 1) > 1
+        and any(
+            group.get("use_muon", False) for group in getattr(inner, "param_groups", ())
+        )
+        and not saw_dtensor
+    ):
+        log.warning(
+            "MuonClip runtime topology check in %s did not observe any DTensor "
+            "Muon parameters after accelerator.prepare().",
+            context,
         )
 
 

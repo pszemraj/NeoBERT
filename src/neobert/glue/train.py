@@ -54,6 +54,7 @@ from neobert.training_utils import (
     create_accelerator,
     stabilize_cuda_mixed_precision,
     validate_muon_distributed_compatibility,
+    validate_muon_runtime_topology,
 )
 from neobert.utils import configure_tf32, format_resolved_config, prepare_wandb_config
 from neobert.validation import ValidationError, validate_glue_config
@@ -1383,6 +1384,14 @@ def trainer(cfg: Config) -> None:
         optimizer,
         train_dataloader,
         eval_dataloader,
+    )
+
+    validate_muon_runtime_topology(
+        accelerator=accelerator,
+        optimizer=optimizer,
+        optimizer_name=cfg.optimizer.name,
+        log=logger,
+        context="glue",
     )
 
     if glue_task == "mnli":

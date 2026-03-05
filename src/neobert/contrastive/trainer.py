@@ -52,6 +52,7 @@ from neobert.training_utils import (
     resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
     validate_muon_distributed_compatibility,
+    validate_muon_runtime_topology,
 )
 from neobert.contrastive.datasets import get_bsz
 from neobert.contrastive.loss import SupConLoss
@@ -586,6 +587,14 @@ def trainer(cfg: Config) -> None:
 
     for key in keys[1:]:
         dataloaders[key] = accelerator.prepare(dataloaders[key])
+
+    validate_muon_runtime_topology(
+        accelerator=accelerator,
+        optimizer=optimizer,
+        optimizer_name=cfg.optimizer.name,
+        log=logger,
+        context="contrastive",
+    )
 
     if wandb_enabled and accelerator.is_main_process:
         watch_mode, watch_warning = resolve_wandb_watch_mode(

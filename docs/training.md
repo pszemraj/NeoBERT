@@ -54,6 +54,9 @@ accelerate launch \
   --wandb.enabled false
 ```
 
+MuonClip's FSDP2 path currently supports only a 1D row-sharded device mesh.
+Do not combine it with tensor/context parallelism or other multi-axis DTensor meshes.
+
 Explicit no-clipping variant:
 
 ```bash

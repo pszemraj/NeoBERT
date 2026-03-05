@@ -68,6 +68,7 @@ from neobert.training_utils import (
     resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
     validate_muon_distributed_compatibility,
+    validate_muon_runtime_topology,
 )
 from neobert.utils import (
     configure_tf32,
@@ -2253,6 +2254,14 @@ def trainer(cfg: Config) -> None:
                     scheduler,
                     device_placement=[False, True, True, True],
                 )
+
+    validate_muon_runtime_topology(
+        accelerator=accelerator,
+        optimizer=optimizer,
+        optimizer_name=cfg.optimizer.name,
+        log=logger,
+        context="pretraining",
+    )
 
     # Packed mode keeps manual batch transfers; non-packed mode uses Accelerate
     # device placement for lower Python overhead and better overlap.

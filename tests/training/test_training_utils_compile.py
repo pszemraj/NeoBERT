@@ -18,6 +18,7 @@ from neobert.training_utils import (
     resolve_wandb_watch_mode,
     stabilize_cuda_mixed_precision,
     validate_muon_distributed_compatibility,
+    validate_muon_runtime_topology,
 )
 
 
@@ -410,6 +411,24 @@ def test_validate_muon_distributed_compatibility_allows_fsdp2() -> None:
     )
 
 
+def test_validate_muon_distributed_compatibility_rejects_fsdp2_tp_mesh() -> None:
+    """MuonClip should fail fast when FSDP2 is combined with extra mesh axes."""
+    accelerator = SimpleNamespace(
+        distributed_type=DistributedType.FSDP,
+        state=SimpleNamespace(
+            fsdp_plugin=SimpleNamespace(fsdp_version=2),
+            parallelism_config=SimpleNamespace(tp_enabled=True, cp_enabled=False),
+        ),
+    )
+    with pytest.raises(RuntimeError, match="1D row-sharded device mesh"):
+        validate_muon_distributed_compatibility(
+            accelerator=accelerator,
+            optimizer_name="muonclip",
+            log=logging.getLogger("test"),
+            context="unit-test",
+        )
+
+
 def test_validate_muon_distributed_compatibility_rejects_unknown_fsdp() -> None:
     """Unknown FSDP version metadata should default to v1-style rejection."""
     accelerator = SimpleNamespace(distributed_type=DistributedType.FSDP)
@@ -420,6 +439,75 @@ def test_validate_muon_distributed_compatibility_rejects_unknown_fsdp() -> None:
             log=logging.getLogger("test"),
             context="unit-test",
         )
+
+
+def test_validate_muon_runtime_topology_rejects_multidim_mesh() -> None:
+    """Prepared MuonClip DTensor params must reject unsupported mesh rank."""
+
+    class _FakeShard:
+        def __init__(self, dim: int):
+            self.dim = dim
+
+    class _FakeMesh:
+        ndim = 2
+
+    class _FakeDTensorParam:
+        device_mesh = _FakeMesh()
+        placements = (_FakeShard(0),)
+
+        def to_local(self) -> torch.Tensor:
+            return torch.zeros(1, 1)
+
+    accelerator = SimpleNamespace(
+        distributed_type=DistributedType.FSDP,
+        num_processes=2,
+    )
+    optimizer = SimpleNamespace(
+        param_groups=[{"use_muon": True, "params": [_FakeDTensorParam()]}]
+    )
+
+    with pytest.raises(RuntimeError, match="device_mesh.ndim=2"):
+        validate_muon_runtime_topology(
+            accelerator=accelerator,
+            optimizer=optimizer,
+            optimizer_name="muonclip",
+            log=logging.getLogger("test"),
+            context="unit-test",
+        )
+
+
+def test_validate_muon_runtime_topology_accepts_row_shard_layout() -> None:
+    """Prepared MuonClip DTensor params should allow 1D Shard(0) layouts."""
+
+    class _FakeShard:
+        def __init__(self, dim: int):
+            self.dim = dim
+
+    class _FakeMesh:
+        ndim = 1
+
+    class _FakeDTensorParam:
+        device_mesh = _FakeMesh()
+        placements = (_FakeShard(0),)
+
+        def to_local(self) -> torch.Tensor:
+            return torch.zeros(1, 1)
+
+    accelerator = SimpleNamespace(
+        distributed_type=DistributedType.FSDP,
+        num_processes=2,
+    )
+    optimizer = SimpleNamespace(
+        param_groups=[{"use_muon": True, "params": [_FakeDTensorParam()]}]
+    )
+
+    validate_muon_runtime_topology(
+        accelerator=accelerator,
+        optimizer=optimizer,
+        optimizer_name="muonclip",
+        log=logging.getLogger("test"),
+        context="unit-test",
+    )
 
 
 def test_get_optimizer_disables_muonclip_clipping_under_fsdp(

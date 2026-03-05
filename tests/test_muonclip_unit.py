@@ -622,6 +622,24 @@ class TestMuonClipOptimizer:
 
         assert optimizer_clone._step == optimizer._step
 
+    def test_state_dict_param_info_avoids_live_parameter_objects(self, model):
+        """Optimizer checkpoint metadata must not embed live Parameter objects."""
+        model_instance, config = model
+        optimizer = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(enable_clipping=False),
+        )
+
+        state = optimizer.state_dict()
+        for group in state["param_groups"]:
+            assert "param_info" in group
+            for info in group["param_info"]:
+                assert "param" not in info
+                assert set(info).issuperset(
+                    {"name", "layer_idx", "is_qkv", "proj_type"}
+                )
+
     def test_sharded_runtime_clipping_disable_preserves_config_intent(self, model):
         """Runtime disable should not rewrite user config intent."""
         model_instance, config = model

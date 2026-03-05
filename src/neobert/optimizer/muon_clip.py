@@ -7,7 +7,7 @@ References: Kimi K2 report, Muon, MuonClip, DISCO, Polar Express.
 import logging
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import torch
 import torch.distributed as dist
@@ -693,8 +693,10 @@ class MuonClipOptimizer(Optimizer):
         :param torch.nn.Module model: Model to inspect.
         :return list[dict]: Parameter groups for the optimizer.
         """
-        muon_params = []
-        adam_params = []
+        muon_params: List[torch.nn.Parameter] = []
+        muon_param_info: List[Dict[str, Any]] = []
+        adam_params: List[torch.nn.Parameter] = []
+        adam_param_info: List[Dict[str, Any]] = []
 
         transformer_param_ids: set[int] = set()
         layer_idx_by_param_id: Dict[int, int] = {}
@@ -761,8 +763,10 @@ class MuonClipOptimizer(Optimizer):
             # Track parameters that participate in Q/K scaling
             is_qkv = proj_type in {"qkv", "q", "k"}
 
+            # Keep only serializable metadata here; ``group["params"]`` remains
+            # the source of truth for live tensors and may be rewritten in-place
+            # by wrappers such as Accelerate FSDP2 during ``prepare()``.
             param_info = {
-                "param": param,
                 "name": name,
                 "layer_idx": layer_idx,
                 "is_qkv": is_qkv,
@@ -775,17 +779,19 @@ class MuonClipOptimizer(Optimizer):
                 and param_id not in embedding_param_ids
             )
             if use_muon:
-                muon_params.append(param_info)
+                muon_params.append(param)
+                muon_param_info.append(param_info)
             else:
-                adam_params.append(param_info)
+                adam_params.append(param)
+                adam_param_info.append(param_info)
 
         groups = []
 
         if muon_params:
             groups.append(
                 {
-                    "params": [p["param"] for p in muon_params],
-                    "param_info": muon_params,
+                    "params": muon_params,
+                    "param_info": muon_param_info,
                     "lr": self.config.lr,
                     "beta": self.config.muon_beta,
                     "weight_decay": self.config.muon_decay,
@@ -797,8 +803,8 @@ class MuonClipOptimizer(Optimizer):
         if adam_params:
             groups.append(
                 {
-                    "params": [p["param"] for p in adam_params],
-                    "param_info": adam_params,
+                    "params": adam_params,
+                    "param_info": adam_param_info,
                     "lr": self.config.lr,
                     "betas": self.config.adam_betas,
                     "eps": self.config.adam_eps,
@@ -1469,13 +1475,13 @@ class MuonClipOptimizer(Optimizer):
             if not group["use_muon"]:
                 continue
 
-            for info in group["param_info"]:
+            for param, info in self._iter_group_params_with_info(group):
                 if not info["is_qkv"] or info["layer_idx"] is None:
                     continue
 
                 params = layer_entries.setdefault(info["layer_idx"], {})
                 proj_type = info.get("proj_type", "qkv") or "qkv"
-                params[proj_type] = info["param"]
+                params[proj_type] = param
 
         if not layer_entries:
             self.hook_system.clear()
@@ -1554,6 +1560,25 @@ class MuonClipOptimizer(Optimizer):
         self.hook_system.clear()
         if max_attention_logit is not None:
             self._last_metrics["train/max_attention_logit"] = max_attention_logit
+
+    def _iter_group_params_with_info(
+        self, group: Dict[str, Any]
+    ) -> Iterator[Tuple[torch.nn.Parameter, Dict[str, Any]]]:
+        """Yield current group parameters alongside their static metadata.
+
+        :param dict[str, Any] group: Optimizer parameter group.
+        :return Iterator[tuple[torch.nn.Parameter, dict[str, Any]]]:
+            Current parameter and its associated metadata.
+        :raises RuntimeError: If group params and metadata become desynchronized.
+        """
+        params = list(group.get("params", ()))
+        param_info = list(group.get("param_info", ()))
+        if len(params) != len(param_info):
+            raise RuntimeError(
+                "MuonClip parameter metadata is desynchronized from optimizer "
+                "params; expected matching lengths for param_info and params."
+            )
+        return iter(zip(params, param_info, strict=True))
 
     def _compute_eta_for_fused(
         self,
