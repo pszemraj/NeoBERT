@@ -242,6 +242,13 @@ def _flatten_display_items(
         depth: int,
         out: List[Tuple[str, Any]],
     ) -> None:
+        """Recursively flatten nested display mappings.
+
+        :param Any current: Current value being traversed.
+        :param str prefix: Accumulated dotted key prefix.
+        :param int depth: Current traversal depth.
+        :param list[tuple[str, Any]] out: Output item accumulator.
+        """
         if isinstance(current, dict) and depth < max_depth:
             for key, inner in current.items():
                 next_prefix = f"{prefix}.{key}" if prefix else str(key)
@@ -319,7 +326,11 @@ def format_resolved_config(
     section_label_width = max((len(label) for label in section_labels), default=0)
 
     def _prefix(label: str) -> str:
-        """Build a padded section prefix with globally aligned continuation column."""
+        """Build a padded section prefix with aligned continuation spacing.
+
+        :param str label: Section label to render.
+        :return str: Padded prefix string.
+        """
         return f"{label:<{section_label_width}} "
 
     if meta_tokens:

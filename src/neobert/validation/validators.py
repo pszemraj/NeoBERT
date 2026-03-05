@@ -44,7 +44,11 @@ def validate_glue_config(cfg: Any) -> None:
         errors.append(f"Invalid task: {task}. Must be one of {valid_tasks}")
 
     def _is_missing(value: Any) -> bool:
-        """Return True when a config value should be treated as unset."""
+        """Return True when a config value should be treated as unset.
+
+        :param Any value: Candidate config value.
+        :return bool: ``True`` when the value is effectively unset.
+        """
         if value is None:
             return True
         if isinstance(value, str):

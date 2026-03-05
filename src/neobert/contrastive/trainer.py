@@ -752,7 +752,17 @@ def trainer(cfg: Config) -> None:
         pad_mask_negatives: torch.Tensor | None,
         packed_negatives: torch.Tensor | None,
     ) -> torch.Tensor:
-        """Run a forward pass and compute contrastive loss for one microbatch."""
+        """Run a forward pass and compute contrastive loss for one microbatch.
+
+        :param dict[str, torch.Tensor] batch: Contrastive microbatch tensors.
+        :param torch.Tensor | None pad_mask_queries: Query attention mask.
+        :param torch.Tensor | None packed_queries: Query packed sequence lengths.
+        :param torch.Tensor | None pad_mask_corpus: Corpus attention mask.
+        :param torch.Tensor | None packed_corpus: Corpus packed sequence lengths.
+        :param torch.Tensor | None pad_mask_negatives: Negative attention mask.
+        :param torch.Tensor | None packed_negatives: Negative packed sequence lengths.
+        :return torch.Tensor: Microbatch contrastive loss.
+        """
         queries = model(
             batch["input_ids_queries"],
             pad_mask_queries,
