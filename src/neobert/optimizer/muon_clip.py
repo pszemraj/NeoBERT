@@ -546,6 +546,7 @@ class MuonClipOptimizer(Optimizer):
         self._polar_coeff_cache: Dict[int, List[Tuple[float, float, float]]] = {}
         self._polar_work_dtype: Optional[torch.dtype] = None
         self._muon_owner_rank_cache: Dict[Tuple[int, int], Dict[int, int]] = {}
+        self._clipping_disabled_warning_emitted = False
         if torch.cuda.is_available():
             try:
                 # bfloat16 offers good perf/stability balance for polar iteration
@@ -937,6 +938,7 @@ class MuonClipOptimizer(Optimizer):
 
             momentum_buffer = state["momentum_buffer"]
             if self._is_dtensor(momentum_buffer):
+                self._disable_clipping_for_sharded_runtime()
                 update = self._orthogonalize_dtensor_update(
                     momentum_buffer=momentum_buffer,
                     param=param,
@@ -1010,6 +1012,22 @@ class MuonClipOptimizer(Optimizer):
     def _is_dtensor(self, tensor: torch.Tensor) -> bool:
         """Return whether ``tensor`` is a DTensor instance."""
         return DTensor is not None and isinstance(tensor, DTensor)
+
+    def _disable_clipping_for_sharded_runtime(self) -> None:
+        """Disable QK clipping once when sharded Muon updates are detected."""
+        if not self.config.enable_clipping:
+            return
+        if not self._clipping_disabled_warning_emitted:
+            logger.warning(
+                "MuonClip QK clipping is disabled under FSDP2 sharded Muon updates. "
+                "Proceeding with Muon-only optimization."
+            )
+            self._clipping_disabled_warning_emitted = True
+
+        self.config.enable_clipping = False
+        if self.hook_system is not None:
+            self.hook_system.clear()
+            self.hook_system.set_enabled(False, clear_cache_when_disabling=False)
 
     def _resolve_owner_rank(
         self,

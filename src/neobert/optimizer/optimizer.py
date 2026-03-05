@@ -14,6 +14,7 @@ from neobert.optimizer.muon_clip import MuonClipConfig, MuonClipOptimizer
 # from .soap.soap import SOAP  # TODO: Add SOAP optimizer implementation
 
 logger = logging.getLogger(__name__)
+_WARNED_MUONCLIP_FSDP_CLIPPING_DISABLE = False
 
 
 def _build_adamw_param_groups(
@@ -97,6 +98,7 @@ def get_optimizer(
             return optimizer
 
         case "muonclip" | "muon-clip" | "muon_clip":
+            global _WARNED_MUONCLIP_FSDP_CLIPPING_DISABLE
             if model_config is None:
                 raise ValueError(
                     "MuonClip requires model_config to be passed. "
@@ -134,6 +136,17 @@ def get_optimizer(
                 adam_eps=eps,
                 **muon_kwargs,
             )
+            if (
+                distributed_type is DistributedType.FSDP
+                and muon_clip_cfg.enable_clipping
+            ):
+                muon_clip_cfg.enable_clipping = False
+                if not _WARNED_MUONCLIP_FSDP_CLIPPING_DISABLE:
+                    logger.warning(
+                        "MuonClip QK clipping is not supported under FSDP2 sharded Muon "
+                        "updates. Auto-disabling clipping for this run."
+                    )
+                    _WARNED_MUONCLIP_FSDP_CLIPPING_DISABLE = True
 
             logger.info(
                 f"MuonClip configuration:\n"

@@ -109,9 +109,8 @@ def validate_muon_distributed_compatibility(
 ) -> None:
     """Validate MuonClip compatibility for the active distributed runtime.
 
-    MuonClip orthogonalizes full 2D tensors. Sharded-parameter modes (notably
-    FSDP and DeepSpeed ZeRO-2/3) violate this assumption because each rank holds
-    only slices of the matrix.
+    MuonClip supports FSDP2 owner-compute orthogonalization for single-node
+    sharded training. FSDP v1 and DeepSpeed ZeRO-2/3 remain unsupported.
 
     :param Accelerator accelerator: Active Accelerator runtime.
     :param str optimizer_name: Configured optimizer name.
@@ -125,10 +124,20 @@ def validate_muon_distributed_compatibility(
 
     distributed_type = getattr(accelerator, "distributed_type", None)
     if distributed_type is DistributedType.FSDP:
-        raise RuntimeError(
-            "MuonClip is not compatible with FSDP sharded parameters in "
-            f"{context}. Use AdamW or disable FSDP for MuonClip runs."
-        )
+        state = getattr(accelerator, "state", None)
+        fsdp_plugin = getattr(state, "fsdp_plugin", None) if state is not None else None
+        raw_version = getattr(fsdp_plugin, "fsdp_version", None)
+        try:
+            fsdp_version = int(raw_version) if raw_version is not None else 1
+        except (TypeError, ValueError):
+            fsdp_version = 1
+
+        if fsdp_version < 2:
+            raise RuntimeError(
+                "MuonClip requires FSDP v2 in "
+                f"{context}. Detected FSDP v{fsdp_version}; set fsdp_version=2."
+            )
+        return
 
     if distributed_type is not DistributedType.DEEPSPEED:
         return

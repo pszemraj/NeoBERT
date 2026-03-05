@@ -168,10 +168,39 @@ def test_resolve_wandb_watch_mode_matrix() -> None:
             assert warning is None
 
 
-def test_validate_muon_distributed_compatibility_rejects_fsdp() -> None:
-    """MuonClip must fail fast under FSDP-sharded training."""
+def test_validate_muon_distributed_compatibility_rejects_fsdp1() -> None:
+    """MuonClip must fail fast when FSDP v1 is active."""
+    accelerator = SimpleNamespace(
+        distributed_type=DistributedType.FSDP,
+        state=SimpleNamespace(fsdp_plugin=SimpleNamespace(fsdp_version=1)),
+    )
+    with pytest.raises(RuntimeError, match="requires FSDP v2"):
+        validate_muon_distributed_compatibility(
+            accelerator=accelerator,
+            optimizer_name="muonclip",
+            log=logging.getLogger("test"),
+            context="unit-test",
+        )
+
+
+def test_validate_muon_distributed_compatibility_allows_fsdp2() -> None:
+    """MuonClip should allow FSDP2 runtime."""
+    accelerator = SimpleNamespace(
+        distributed_type=DistributedType.FSDP,
+        state=SimpleNamespace(fsdp_plugin=SimpleNamespace(fsdp_version=2)),
+    )
+    validate_muon_distributed_compatibility(
+        accelerator=accelerator,
+        optimizer_name="muonclip",
+        log=logging.getLogger("test"),
+        context="unit-test",
+    )
+
+
+def test_validate_muon_distributed_compatibility_rejects_unknown_fsdp() -> None:
+    """Unknown FSDP version metadata should default to v1-style rejection."""
     accelerator = SimpleNamespace(distributed_type=DistributedType.FSDP)
-    with pytest.raises(RuntimeError, match="not compatible with FSDP"):
+    with pytest.raises(RuntimeError, match="requires FSDP v2"):
         validate_muon_distributed_compatibility(
             accelerator=accelerator,
             optimizer_name="muonclip",
