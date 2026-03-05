@@ -5,7 +5,6 @@ References: Kimi K2 report, Muon, MuonClip, DISCO, Polar Express.
 """
 
 import logging
-import re
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -666,21 +665,56 @@ class MuonClipOptimizer(Optimizer):
         muon_params = []
         adam_params = []
 
+        transformer_param_ids: set[int] = set()
+        layer_idx_by_param_id: Dict[int, int] = {}
+        proj_type_by_param_id: Dict[int, str] = {}
+
+        for idx, layer in enumerate(self.transformer_layers):
+            for param in layer.parameters():
+                param_id = id(param)
+                transformer_param_ids.add(param_id)
+                layer_idx_by_param_id[param_id] = idx
+
+            if hasattr(layer, "qkv"):
+                qkv_module = getattr(layer, "qkv", None)
+                if qkv_module is not None and hasattr(qkv_module, "weight"):
+                    proj_type_by_param_id[id(qkv_module.weight)] = "qkv"
+            else:
+                for canonical, attr_name in self._layer_mapping.items():
+                    if not attr_name:
+                        continue
+                    module = getattr(layer, attr_name, None)
+                    if module is None or not hasattr(module, "weight"):
+                        continue
+
+                    if canonical.lower().startswith("q"):
+                        proj_type = "q"
+                    elif canonical.lower().startswith("k"):
+                        proj_type = "k"
+                    elif canonical.lower().startswith("v"):
+                        proj_type = "v"
+                    else:
+                        continue
+                    proj_type_by_param_id[id(module.weight)] = proj_type
+
+        embedding_param_ids = {
+            id(param)
+            for module in model.modules()
+            if isinstance(module, torch.nn.Embedding)
+            for param in module.parameters(recurse=False)
+        }
+
         for name, param in model.named_parameters():
             if not param.requires_grad:
                 continue
 
-            # Extract layer index for QKV tracking
-            layer_idx = None
-            if "transformer_encoder" in name:
-                match = re.search(r"transformer_encoder\.(\d+)", name)
-                if match:
-                    layer_idx = int(match.group(1))
+            param_id = id(param)
+            layer_idx = layer_idx_by_param_id.get(param_id)
 
-            proj_type = None
-            if "qkv" in name:
+            proj_type = proj_type_by_param_id.get(param_id)
+            if proj_type is None and "qkv" in name:
                 proj_type = "qkv"
-            else:
+            if proj_type is None:
                 for canonical, pattern in self._layer_mapping.items():
                     if not pattern or pattern not in name:
                         continue
@@ -704,8 +738,12 @@ class MuonClipOptimizer(Optimizer):
                 "proj_type": proj_type,
             }
 
-            # 2D parameters -> Muon, 1D parameters -> Adam
-            if param.ndim == 2:
+            use_muon = (
+                param.ndim == 2
+                and param_id in transformer_param_ids
+                and param_id not in embedding_param_ids
+            )
+            if use_muon:
                 muon_params.append(param_info)
             else:
                 adam_params.append(param_info)

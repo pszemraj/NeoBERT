@@ -231,15 +231,55 @@ class TestMuonClipOptimizer:
         muon_config = MuonClipConfig(enable_clipping=False)
         optimizer = MuonClipOptimizer(model_instance, config, muon_config)
 
-        # Check Muon group has 2D params
+        # Muon should only see transformer 2D weights.
         muon_group = next(g for g in optimizer.param_groups if g["use_muon"])
+        muon_params = set(muon_group["params"])
         for p in muon_group["params"]:
             assert p.ndim == 2
 
-        # Check Adam group has 1D params
+        assert model_instance.encoder.weight not in muon_params
+        if hasattr(model_instance, "positional_embedding"):
+            assert model_instance.positional_embedding.weight not in muon_params
+        assert model_instance.transformer_encoder[0].qkv.weight in muon_params
+
+        # Adam group includes 1D params and non-transformer 2D weights.
         adam_group = next(g for g in optimizer.param_groups if not g["use_muon"])
-        for p in adam_group["params"]:
-            assert p.ndim == 1
+        adam_params = set(adam_group["params"])
+        assert model_instance.encoder.weight in adam_params
+        if hasattr(model_instance, "positional_embedding"):
+            assert model_instance.positional_embedding.weight in adam_params
+
+    def test_grouping_excludes_embeddings_and_lm_head(self):
+        """Embeddings/output projection must stay in Adam, never Muon."""
+        config = NeoBERTConfig(
+            hidden_size=64,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            intermediate_size=128,
+            vocab_size=257,
+            max_length=64,
+            attn_backend="sdpa",
+            hidden_act="gelu",
+            rope=False,
+            tie_word_embeddings=False,
+        )
+        model = NeoBERTLMHead(config)
+        optimizer = MuonClipOptimizer(
+            model,
+            config,
+            MuonClipConfig(enable_clipping=False),
+        )
+
+        muon_group = next(g for g in optimizer.param_groups if g["use_muon"])
+        adam_group = next(g for g in optimizer.param_groups if not g["use_muon"])
+        muon_params = set(muon_group["params"])
+        adam_params = set(adam_group["params"])
+
+        assert model.model.encoder.weight not in muon_params
+        assert model.model.encoder.weight in adam_params
+        assert model.decoder.weight not in muon_params
+        assert model.decoder.weight in adam_params
+        assert model.model.transformer_encoder[0].qkv.weight in muon_params
 
     def test_interleaved_qkv_scaling(self):
         """Ensure fused QKV scaling matches per-head interleaved layout."""
