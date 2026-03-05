@@ -388,6 +388,7 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | `capture_last_microbatch_only` | `bool`           | `true`            | Capture activations only for final microbatch in GA window.  |
 | `detect_anomalies`             | `bool`           | `false`           | Enable anomaly checks in optimizer step.                     |
 | `orthogonalization`            | `str`            | `"polar_express"` | Orthogonalization algorithm selector.                        |
+| `norm_factor`                  | `str`            | `"spectral"`      | Post-orthogonalization normalization (`spectral`, `match_rms_adamw`, `none`, `legacy_compat`). |
 | `algorithm`                    | `str \| None`    | `null`            | Deprecated alias of `orthogonalization`.                     |
 | `polar_express`                | `bool \| None`   | `null`            | Deprecated legacy toggle.                                    |
 | `clipping_layers_mapping`      | `dict[str, str]` | `{}`              | Projection-name overrides for non-standard attention blocks. |
@@ -530,6 +531,8 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 | `dataset.validation_split` with `dataset.streaming=true`                          | **WARNING / SKIP** | Validation split creation is skipped for streaming datasets.                                                        |
 | `scheduler.warmup_percent` and `scheduler.warmup_steps`                           | **PRECEDENCE**     | `warmup_percent` overrides absolute warmup steps.                                                                   |
 | `scheduler.decay_percent` and `scheduler.decay_steps`                             | **PRECEDENCE**     | `decay_percent` overrides absolute decay steps.                                                                     |
+| `optimizer.name=muonclip` with FSDP v1                                             | **ERROR**          | MuonClip distributed mode requires FSDP2 (`fsdp_version=2`).                                                       |
+| `optimizer.name=muonclip` with FSDP v2 and `muon_config.enable_clipping=true`      | **AUTO-ADJUST**    | QK clipping is auto-disabled with a warning; FSDP2 path runs Muon-only updates.                                   |
 | `optimizer.name=muonclip` with DeepSpeed ZeRO stage >= 2                          | **ERROR**          | MuonClip is incompatible with sharded grads/params at ZeRO stage >= 2.                                              |
 | `datacollator.pack_sequences=true` with `model.attn_backend=sdpa`                 | **WARNING**        | Works, but slower than `flash_attn_varlen`; SDPA uses fallback path.                                                |
 | `dataset.path` and `dataset.name` both set                                        | **PRECEDENCE**     | Existing local `dataset.path` is used first; hub dataset acts as fallback.                                          |
