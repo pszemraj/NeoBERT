@@ -33,6 +33,36 @@ python scripts/pretraining/pretrain.py \
   --trainer.max_steps 100000
 ```
 
+### 2-GPU FSDP2 launch (MuonClip)
+
+Use Accelerate with FSDP v2 and transformer-based wrapping:
+
+```bash
+TORCH_BLAS_PREFER_CUBLASLT=1 CUDA_VISIBLE_DEVICES=0,1 \
+accelerate launch \
+  --multi_gpu --num_processes 2 --num_machines 1 \
+  --use_fsdp --fsdp_version 2 \
+  --fsdp_auto_wrap_policy TRANSFORMER_BASED_WRAP \
+  --fsdp_transformer_layer_cls_to_wrap EncoderBlock \
+  scripts/pretraining/pretrain.py \
+  configs/pretraining/pretrain_neobert100m_smollm2data_muonclip.yaml \
+  --wandb.enabled false
+```
+
+Explicit no-clipping variant:
+
+```bash
+TORCH_BLAS_PREFER_CUBLASLT=1 CUDA_VISIBLE_DEVICES=0,1 \
+accelerate launch \
+  --multi_gpu --num_processes 2 --num_machines 1 \
+  --use_fsdp --fsdp_version 2 \
+  --fsdp_auto_wrap_policy TRANSFORMER_BASED_WRAP \
+  --fsdp_transformer_layer_cls_to_wrap EncoderBlock \
+  scripts/pretraining/pretrain.py \
+  configs/pretraining/pretrain_neobert100m_smollm2data_muonclip_noclip.yaml \
+  --wandb.enabled false
+```
+
 ## Packed Training
 
 Enable packing via `datacollator.pack_sequences: true`.
