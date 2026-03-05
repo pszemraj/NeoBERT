@@ -4,8 +4,7 @@
 > Example configs are in [configs/](../configs/) (for production) and
 > [tests/configs/](../tests/configs/) (for tiny smoke/regression runs).
 
-This page is the primary source of truth for NeoBERT's YAML config schema
-(`src/neobert/config.py`) and defaults.
+NeoBERT YAML config schema (`src/neobert/config.py`) and defaults.
 
 ---
 
@@ -292,7 +291,7 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | `trainer.eval_steps`                  | `int` | `10000`      | Eval interval in steps.                       |
 | `trainer.logging_steps`               | `int` | `100`        | Logging interval in steps.                    |
 | `trainer.output_dir`                  | `str` | `"./output"` | Output root for checkpoints and artifacts.    |
-| `trainer.mixed_precision`             | `str` | `"bf16"`     | `no`, `fp32`, or `bf16` (`fp16` unsupported). |
+| `trainer.mixed_precision`             | `str` | `"bf16"`     | `no`, `fp32`, or `bf16` (`fp16` unsupported; runtime may auto-adjust to `no` if bf16 GEMM is unavailable). |
 
 ### Stability and Performance
 
@@ -531,9 +530,11 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 | `dataset.validation_split` with `dataset.streaming=true`                          | **WARNING / SKIP** | Validation split creation is skipped for streaming datasets.                                                        |
 | `scheduler.warmup_percent` and `scheduler.warmup_steps`                           | **PRECEDENCE**     | `warmup_percent` overrides absolute warmup steps.                                                                   |
 | `scheduler.decay_percent` and `scheduler.decay_steps`                             | **PRECEDENCE**     | `decay_percent` overrides absolute decay steps.                                                                     |
+| `trainer.mixed_precision=bf16` with failing CUDA bf16 linear GEMM                  | **AUTO-ADJUST**    | Runtime probes bf16 on the local rank device, retries with cuBLASLt, then falls back to `mixed_precision='no'` if needed. |
 | `optimizer.name=muonclip` with FSDP v1                                             | **ERROR**          | MuonClip distributed mode requires FSDP2 (`fsdp_version=2`).                                                       |
 | `optimizer.name=muonclip` with FSDP v2 and `muon_config.enable_clipping=true`      | **AUTO-ADJUST**    | QK clipping is auto-disabled with a warning; FSDP2 path runs Muon-only updates.                                   |
 | `optimizer.name=muonclip` with DeepSpeed ZeRO stage >= 2                          | **ERROR**          | MuonClip is incompatible with sharded grads/params at ZeRO stage >= 2.                                              |
+| `trainer.mixed_precision='no'` with `model.attn_backend=flash_attn_varlen`         | **AUTO-ADJUST**    | Runtime switches attention backend to `sdpa` with a warning.                                                       |
 | `datacollator.pack_sequences=true` with `model.attn_backend=sdpa`                 | **WARNING**        | Works, but slower than `flash_attn_varlen`; SDPA uses fallback path.                                                |
 | `dataset.path` and `dataset.name` both set                                        | **PRECEDENCE**     | Existing local `dataset.path` is used first; hub dataset acts as fallback.                                          |
 | Tokenizer/model vocab sizes                                                       | **IMPORTANT**      | Runtime now pads tokenizer with inert tokens so tokenizer length matches model vocab size.                          |

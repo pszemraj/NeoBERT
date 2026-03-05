@@ -1,8 +1,6 @@
 # Scripts Overview
 
 CLI entry points for NeoBERT training, evaluation, and export.
-This page is intentionally script/index oriented.
-Runtime behavior and caveats live in the docs under `docs/`.
 
 ## Directory Map
 
@@ -11,7 +9,7 @@ Runtime behavior and caveats live in the docs under `docs/`.
 - `evaluation/` - GLUE/MTEB runners and analysis helpers
 - `export-hf/` - checkpoint export and validation
 
-See [docs/training.md](../docs/training.md), [docs/evaluation.md](../docs/evaluation.md), and [docs/export.md](../docs/export.md) for runtime semantics and constraints.
+See [docs/training.md](../docs/training.md), [docs/evaluation.md](../docs/evaluation.md), and [docs/export.md](../docs/export.md) for behavior and constraints.
 
 ## Conventions
 
@@ -20,7 +18,6 @@ See [docs/training.md](../docs/training.md), [docs/evaluation.md](../docs/evalua
 - Evaluation scripts expose their own argparse flags and do not support full
   dot-notation override surface.
 - Export script takes a checkpoint path (not a config path).
-- Keep behavior details in canonical docs; use script READMEs for entry points.
 
 ## Common Commands
 

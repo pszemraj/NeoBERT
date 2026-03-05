@@ -22,11 +22,10 @@ python scripts/evaluation/run_mteb.py configs/pretraining/pretrain_neobert.yaml 
 
 - Evaluation behavior/caveats are documented in
   [docs/evaluation.md](../../docs/evaluation.md).
-- Keep this README focused on script entry points and helpers.
 
 ## GLUE Helpers
 
-See `scripts/evaluation/glue/README.md` for:
+See [scripts/evaluation/glue/README.md](glue/README.md) for:
 - config generation from sweeps,
 - quick/full suite launchers,
 - result summarization.

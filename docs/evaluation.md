@@ -1,7 +1,6 @@
 # Evaluation Guide
 
 NeoBERT evaluation currently focuses on GLUE and MTEB.
-This is the canonical reference for evaluation behavior and caveats.
 
 ## GLUE
 

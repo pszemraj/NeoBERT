@@ -27,7 +27,6 @@ python scripts/export-hf/export.py outputs/<run>/checkpoints/<step> --include-py
   [docs/export.md](../../docs/export.md).
 - Legacy checkpoints that still contain a decoder bias require explicit opt-in:
   use `--allow-decoder-bias-drop` with `export.py`.
-- Keep this README focused on script entry points.
 
 ## Related Docs
 

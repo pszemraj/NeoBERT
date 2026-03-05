@@ -20,5 +20,5 @@ conda run --name neobert python scripts/contrastive/finetune.py tests/configs/co
 
 - These are intentionally tiny and not representative of production throughput.
 - For production experiments, use configs under `configs/`.
-- Field semantics and defaults are canonical in
+- Field semantics and defaults are in
   [docs/configuration.md](../../docs/configuration.md).

@@ -16,14 +16,13 @@ configs/
   contrastive/
 ```
 
-## Config Authoring Policy
+## Config Authoring
 
 - Keep semantics/default definitions in
   [docs/configuration.md](../docs/configuration.md).
 - Keep runtime behavior in [docs/training.md](../docs/training.md) and
   [docs/evaluation.md](../docs/evaluation.md).
 - Use this directory for runnable recipes, not schema documentation.
-- Keep this README structural; avoid copying field semantics here.
 
 ## Directory Intent
 

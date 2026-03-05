@@ -1,8 +1,7 @@
 # Training Guide
 
 This guide covers pretraining and contrastive workflows.
-It is the canonical source for training runtime behavior. Full field-level
-schema/defaults are in [configuration.md](configuration.md).
+Full field-level schema/defaults are in [configuration.md](configuration.md).
 
 ## Entry Points
 
@@ -90,6 +89,13 @@ Runtime behavior:
 - `trainer.mixed_precision`: `no | fp32 | bf16` (`bf16` recommended default)
 - runtime normalization: `fp32 -> no`, `true -> bf16`, `false -> no`
 - `fp16` is unsupported in NeoBERT training paths
+- if `bf16` linear GEMM fails at runtime, trainer retries with
+  `torch.backends.cuda.preferred_blas_library("cublaslt")`
+- if `bf16` still fails, trainer falls back to `mixed_precision: no`
+- this startup probe targets the process-local CUDA device (for example
+  `LOCAL_RANK`) before Accelerator initialization
+- when mixed precision resolves to `no`, `attn_backend: flash_attn_varlen` is
+  auto-switched to `sdpa`
 - `trainer.torch_compile`: enable `torch.compile`
 - `trainer.torch_compile_backend`: `inductor | aot_eager | eager`
 - `trainer.torch_compile_dynamic`: optional override for dynamic-shape compile;

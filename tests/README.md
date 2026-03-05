@@ -1,8 +1,7 @@
 # NeoBERT Test Suite
 
 Automated regression tests for model, training, config, and evaluation code.
-This README is intentionally lightweight; canonical testing guidance is in
-[docs/testing.md](../docs/testing.md).
+Testing process and authoring guidance are in [docs/testing.md](../docs/testing.md).
 
 ## Entry Points
 
@@ -23,7 +22,7 @@ conda run --name neobert python tests/run_tests.py
 - `tests/manual/` - opt-in manual validation/benchmark scripts, excluded from
   default discovery.
 
-## Canonical References
+## Related References
 
 - Process and authoring conventions: [docs/testing.md](../docs/testing.md)
 - Tiny test config catalog: [tests/configs/README.md](configs/README.md)

@@ -38,6 +38,29 @@ Checklist:
 2. keep `trainer.mixed_precision: bf16` (or `no` if bf16 unsupported),
 3. use `gradient_checkpointing: true` for additional memory headroom.
 
+### `bf16` startup probe warnings or fallback to fp32
+
+Symptoms:
+
+- warning that bf16 CUDA linear GEMM failed with default cuBLAS
+- warning that mixed precision fell back to `no`
+- flash-attn backend changed to `sdpa` at startup
+
+What happens:
+
+1. startup runs a tiny bf16 linear probe on the process-local CUDA device,
+2. if default cuBLAS fails, runtime retries with cuBLASLt,
+3. if probe still fails, runtime switches `trainer.mixed_precision` to `no`,
+4. if backend is `flash_attn_varlen`, runtime switches to `sdpa`.
+
+Actions:
+
+1. if fallback is unexpected, verify CUDA/driver/PyTorch compatibility and
+   extension wheels,
+2. keep `mixed_precision: no` explicitly if your runtime does not support bf16
+   GEMM reliably,
+3. reinstall or rebuild flash-attn wheels after CUDA/PyTorch changes.
+
 ### `torch.compile` warnings/recompiles
 
 Typical warnings:
