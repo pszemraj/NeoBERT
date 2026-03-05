@@ -915,6 +915,7 @@ class MuonClipOptimizer(Optimizer):
             # NOTE: this operates on full (non-sharded) parameter tensors.
             # Training entrypoints enforce distributed-compatibility guards for Muon.
             update = self._orthogonalize_update(state["momentum_buffer"])
+            update = self._normalize_muon_update(update, param.shape)
 
             # Weight decay
             if group["weight_decay"] > 0:
@@ -1003,21 +1004,32 @@ class MuonClipOptimizer(Optimizer):
 
         # Newton-Schulz iteration coefficients from Polar Express appendix.
         a, b, c = (3.4445, -4.7750, 2.0315)
-        X = working / (norm + 1e-5)
+        X = working / (norm + 1e-7)
 
         for _ in range(steps):
             A = X @ X.T
             B = b * A + c * A @ A
             X = a * X + B @ X
 
-        # RMS scaling for Adam lr compatibility
-        # Factor: 0.4 * sqrt(max_dim) (Polar Express appendix).
-        scale_factor = 0.4 * max(working.size(0), working.size(1)) ** 0.5
-        X = scale_factor * X
         if X.dtype != original_dtype:
             X = X.to(original_dtype)
 
         return X.T if is_transpose else X
+
+    def _normalize_muon_update(
+        self, update: torch.Tensor, param_shape: torch.Size
+    ) -> torch.Tensor:
+        """Normalize orthogonalized update magnitude before applying it.
+
+        :param torch.Tensor update: Orthogonalized update tensor.
+        :param torch.Size param_shape: Shape of the owning parameter.
+        :return torch.Tensor: Normalized update tensor.
+        """
+        if update.ndim != 2:
+            return update
+        d_out, d_in = int(param_shape[0]), int(param_shape[1])
+        scale = (d_out / max(d_in, 1)) ** 0.5
+        return update * scale
 
     def _orthogonalize_update(self, grad: torch.Tensor) -> torch.Tensor:
         """Dispatch orthogonalization based on configuration.
@@ -1068,9 +1080,6 @@ class MuonClipOptimizer(Optimizer):
             A = working @ working.T
             B = b * A + c * (A @ A)
             working = a * working + B @ working
-
-        scale_factor = 0.4 * max(working.size(0), working.size(1)) ** 0.5
-        working = scale_factor * working
 
         if working.dtype != original_dtype:
             working = working.to(original_dtype)
