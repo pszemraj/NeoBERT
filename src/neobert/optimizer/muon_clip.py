@@ -69,6 +69,7 @@ class MuonClipConfig:
 
     # Orthogonalization control
     orthogonalization: str = "polar_express"
+    norm_factor: str = "spectral"
     algorithm: Optional[str] = None  # Alias for orthogonalization
     polar_express: Optional[bool] = None  # Legacy toggle
 
@@ -190,7 +191,21 @@ class MuonClipConfig:
                 f"Valid options: {', '.join(sorted(valid_algos))}"
             )
 
+        norm_factor = str(self.norm_factor).strip().replace("-", "_").lower()
+        valid_norm_factors = {
+            "spectral",
+            "match_rms_adamw",
+            "none",
+            "legacy_compat",
+        }
+        if norm_factor not in valid_norm_factors:
+            raise ValueError(
+                f"Unsupported norm_factor '{self.norm_factor}'. "
+                f"Valid options: {', '.join(sorted(valid_norm_factors))}"
+            )
+
         self.orthogonalization = algo
+        self.norm_factor = norm_factor
         self.algorithm = algo
         # Reset explicit toggle to prevent downstream confusion
         self.polar_express = None
@@ -1027,8 +1042,23 @@ class MuonClipOptimizer(Optimizer):
         """
         if update.ndim != 2:
             return update
+
         d_out, d_in = int(param_shape[0]), int(param_shape[1])
-        scale = (d_out / max(d_in, 1)) ** 0.5
+        norm_factor = getattr(self.config, "norm_factor", "spectral")
+        if norm_factor == "none":
+            scale = 1.0
+        elif norm_factor == "spectral":
+            scale = (d_out / max(d_in, 1)) ** 0.5
+        elif norm_factor == "match_rms_adamw":
+            scale = 0.2 * max(d_out, d_in) ** 0.5
+        elif norm_factor == "legacy_compat":
+            scale = 0.4 * max(d_out, d_in) ** 0.5
+        else:
+            raise ValueError(
+                f"Unsupported norm_factor '{norm_factor}'. "
+                "Expected one of: spectral, match_rms_adamw, none, legacy_compat."
+            )
+
         return update * scale
 
     def _orthogonalize_update(self, grad: torch.Tensor) -> torch.Tensor:

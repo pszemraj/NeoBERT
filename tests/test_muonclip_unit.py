@@ -11,6 +11,62 @@ from neobert.model import NeoBERT, NeoBERTConfig, NeoBERTLMHead
 from neobert.optimizer import MuonClipConfig, MuonClipOptimizer
 
 
+def _legacy_polar_express_reference(
+    grad: torch.Tensor, *, steps: int = 5, eps: float = 1e-7
+) -> torch.Tensor:
+    """Reproduce the pre-refactor Polar Express update with built-in scaling."""
+    if grad.ndim != 2:
+        return grad
+
+    steps = max(1, int(steps))
+    is_transpose = grad.size(0) > grad.size(1)
+    working = grad.T if is_transpose else grad
+
+    original_dtype = working.dtype
+    spectral_norm = torch.linalg.norm(working)
+    if spectral_norm == 0 or not torch.isfinite(spectral_norm):
+        return torch.zeros_like(grad)
+
+    working = working / (spectral_norm * 1.01 + eps)
+
+    coeffs_base = [
+        (8.28721201814563, -23.595886519098837, 17.300387312530933),
+        (4.107059111542203, -2.9478499167379106, 0.5448431082926601),
+        (3.948690853482295, -2.908902115962949, 0.5518191394370137),
+        (3.318419657370602, -2.488488024314874, 0.51004894012372),
+        (2.300652019954817, -1.668903984574749, 0.4188073119525673),
+        (1.891301407787398, -1.267995827194587, 0.3768040894852483),
+        (1.875001480853448, -1.250001645399949, 0.3750001645474248),
+        (1.875000000000000, -1.250000000000000, 0.375000000000000),
+    ]
+    dampening_factor = 1.01
+    coeffs = [
+        (
+            a / dampening_factor,
+            b / (dampening_factor**3),
+            c / (dampening_factor**5),
+        )
+        for (a, b, c) in coeffs_base[:-1]
+    ]
+    coeffs.append(coeffs_base[-1])
+
+    if steps <= len(coeffs):
+        coeffs = coeffs[:steps]
+    else:
+        coeffs.extend([coeffs[-1]] * (steps - len(coeffs)))
+
+    for a, b, c in coeffs:
+        A = working @ working.T
+        B = b * A + c * (A @ A)
+        working = a * working + B @ working
+
+    scale_factor = 0.4 * max(working.size(0), working.size(1)) ** 0.5
+    working = scale_factor * working
+    if working.dtype != original_dtype:
+        working = working.to(original_dtype)
+    return working.T if is_transpose else working
+
+
 class TestMuonClipConfig:
     """Test configuration validation."""
 
@@ -30,6 +86,7 @@ class TestMuonClipConfig:
             {"clipping_interval": 0},
             {"clipping_interval": -3},
             {"clipping_qk_chunk_size": 0},
+            {"norm_factor": "unsupported"},
         ]
         for kwargs in cases:
             with pytest.raises(ValueError):
@@ -280,6 +337,83 @@ class TestMuonClipOptimizer:
         assert model.decoder.weight not in muon_params
         assert model.decoder.weight in adam_params
         assert model.model.transformer_encoder[0].qkv.weight in muon_params
+
+    def test_norm_factor_modes(self):
+        """Normalization modes should apply the expected scalar factors."""
+        config = NeoBERTConfig(
+            hidden_size=8,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=16,
+            vocab_size=64,
+            max_length=16,
+            attn_backend="sdpa",
+            hidden_act="gelu",
+            rope=False,
+        )
+        model = NeoBERT(config)
+        update = torch.ones(6, 3)
+        param_shape = torch.Size([6, 3])
+        expected_scales = {
+            "none": 1.0,
+            "spectral": (6 / 3) ** 0.5,
+            "match_rms_adamw": 0.2 * (6**0.5),
+            "legacy_compat": 0.4 * (6**0.5),
+        }
+
+        for mode, expected_scale in expected_scales.items():
+            optimizer = MuonClipOptimizer(
+                model,
+                config,
+                MuonClipConfig(enable_clipping=False, norm_factor=mode),
+            )
+            normalized = optimizer._normalize_muon_update(update, param_shape)
+            assert torch.allclose(normalized, update * expected_scale)
+
+    def test_legacy_compat_matches_pre_refactor_polar_step(self):
+        """Legacy normalization should match pre-refactor local Polar Express math."""
+        torch.manual_seed(0)
+        config = NeoBERTConfig(
+            hidden_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=32,
+            vocab_size=64,
+            max_length=16,
+            attn_backend="sdpa",
+            hidden_act="gelu",
+            rope=False,
+        )
+        model = NeoBERT(config)
+        muon_config = MuonClipConfig(
+            lr=1e-3,
+            muon_beta=0.95,
+            muon_decay=0.0,
+            adam_decay=0.0,
+            ns_steps=5,
+            enable_clipping=False,
+            orthogonalization="polar_express",
+            norm_factor="legacy_compat",
+        )
+        optimizer = MuonClipOptimizer(model, config, muon_config)
+
+        target = model.transformer_encoder[0].qkv.weight
+        grad = torch.randn_like(target)
+        initial = target.detach().clone()
+
+        for param in model.parameters():
+            if param.requires_grad:
+                param.grad = torch.zeros_like(param)
+        target.grad = grad.clone()
+
+        momentum = (1 - muon_config.muon_beta) * grad
+        expected_update = _legacy_polar_express_reference(
+            momentum, steps=muon_config.ns_steps
+        )
+        expected = initial - muon_config.lr * expected_update
+
+        optimizer.step()
+        assert torch.allclose(target, expected, atol=1e-6, rtol=1e-6)
 
     def test_interleaved_qkv_scaling(self):
         """Ensure fused QKV scaling matches per-head interleaved layout."""

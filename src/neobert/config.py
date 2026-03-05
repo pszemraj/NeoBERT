@@ -170,6 +170,7 @@ class MuonConfig:
     capture_last_microbatch_only: bool = True
     detect_anomalies: bool = False
     orthogonalization: str = "polar_express"
+    norm_factor: str = "spectral"
     algorithm: Optional[str] = None  # Alias for orthogonalization
     polar_express: Optional[bool] = None  # Legacy toggle
     clipping_layers_mapping: Dict[str, str] = field(default_factory=dict)
