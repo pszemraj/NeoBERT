@@ -16,8 +16,9 @@ Full field-level schema/defaults are in [configuration.md](configuration.md).
 
 For contrastive preprocessing, `dataset.name` may be omitted, `ALL`, a
 canonical key such as `ALLNLI`, or an HF dataset ID alias such as
-`sentence-transformers/all-nli`. Both preprocessing and contrastive training
-load only the requested cached splits from `all/`; other cached split
+`sentence-transformers/all-nli`, `embedding-data/QQP_triplets`, or
+`WhereIsAI/github-issue-similarity`. Both preprocessing and contrastive
+training load only the requested cached splits from `all/`; other cached split
 directories may remain on disk for later reuse.
 
 ## Pretraining

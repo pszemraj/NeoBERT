@@ -20,6 +20,7 @@ class TestGLUETaskSpecific:
             _create_glue_data_collator,
             _load_from_hub_tokenizer,
             _load_glue_metric,
+            _resolve_glue_runtime_policy,
         )
 
         cfg = Config()
@@ -66,6 +67,23 @@ class TestGLUETaskSpecific:
         assert train_tracker is created[0]
         assert eval_tracker is created[1]
         assert train_tracker is not eval_tracker
+
+        cfg.trainer.mixed_precision = "bf16"
+        cfg.model.attn_backend = "flash_attn_varlen"
+        with (
+            mock.patch(
+                "neobert.glue.train.stabilize_cuda_mixed_precision",
+                return_value="no",
+            ) as mixed_precision_resolver,
+            mock.patch(
+                "neobert.glue.train._bootstrap_logger.warning"
+            ) as warning_logger,
+        ):
+            mixed_precision, attn_backend = _resolve_glue_runtime_policy(cfg)
+        mixed_precision_resolver.assert_called_once()
+        warning_logger.assert_called_once()
+        assert mixed_precision == "no"
+        assert attn_backend == "sdpa"
 
     def test_hf_logits_and_attention_mask_passthrough_helpers(self):
         """Ensure HF helper paths preserve token_type_ids and binary masks."""

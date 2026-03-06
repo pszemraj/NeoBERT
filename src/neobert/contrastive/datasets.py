@@ -35,6 +35,25 @@ DATASET_TO_BSZ = {
 }
 
 _SHARED_DATASET_DEFAULT_NAME = "refinedweb"
+_CONTRASTIVE_DATASET_HF_IDS: dict[str, tuple[str, ...]] = {
+    "ALLNLI": ("sentence-transformers/all-nli",),
+    "AMAZONQA": ("embedding-data/Amazon-QA",),
+    "CONCURRENTQA": ("stanfordnlp/concurrentqa-retrieval",),
+    "FEVER": ("mteb/fever",),
+    "GITHUBISSUE": ("WhereIsAI/github-issue-similarity",),
+    "GOOAQ": ("tomaarsen/gooaq-hard-negatives",),
+    "MSMARCO": ("mteb/msmarco",),
+    "PAQ": ("embedding-data/PAQ_pairs",),
+    "PUBMEDQA": ("sentence-transformers/pubmedqa",),
+    "QQP": ("embedding-data/QQP_triplets",),
+    "SENTENCECOMP": ("embedding-data/sentence-compression",),
+    "STACKEXCHANGE": ("sentence-transformers/stackexchange-duplicates",),
+    "STACKOVERFLOW": ("mteb/stackoverflowdupquestions-reranking",),
+    "STS12": ("mteb/sts12-sts",),
+    "STSBENCHMARK": ("mteb/stsbenchmark-sts",),
+    "TRIVIAQA": ("sentence-transformers/trivia-qa-triplet",),
+    "WIKIHOW": ("sentence-transformers/wikihow",),
+}
 
 
 def get_bsz(dataset_name: str, target_batch_size: int) -> int:
@@ -61,12 +80,45 @@ def normalize_contrastive_dataset_name_token(value: Any) -> str:
     return "".join(ch for ch in str(value).strip().upper() if ch.isalnum())
 
 
+def _iter_contrastive_dataset_aliases(
+    key: str,
+    dataset_cls: type["AbsDataset"],
+) -> Sequence[str]:
+    """Yield canonical and explicit aliases for one contrastive dataset wrapper.
+
+    :param str key: Canonical registry key.
+    :param type[AbsDataset] dataset_cls: Dataset wrapper class.
+    :return Sequence[str]: Ordered alias candidates.
+    """
+    aliases: list[str] = []
+    seen: set[str] = set()
+    candidates = (
+        key,
+        getattr(dataset_cls, "name", None),
+        dataset_cls.__name__,
+        *_CONTRASTIVE_DATASET_HF_IDS.get(key, ()),
+    )
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        raw = str(candidate).strip()
+        if not raw or raw in seen:
+            continue
+        seen.add(raw)
+        aliases.append(raw)
+        if "/" in raw:
+            trailing = raw.rsplit("/", maxsplit=1)[-1].strip()
+            if trailing and trailing not in seen:
+                seen.add(trailing)
+                aliases.append(trailing)
+    return tuple(aliases)
+
+
 def resolve_contrastive_dataset_name(requested: Any) -> str:
     """Resolve one dataset selector to a canonical contrastive registry key.
 
-    Accepts canonical keys (for example ``ALLNLI``), class names, and common
-    Hugging Face dataset IDs such as ``sentence-transformers/all-nli`` by
-    matching on the trailing path segment.
+    Accepts canonical keys (for example ``ALLNLI``), class names, and the
+    explicit Hugging Face dataset IDs used by the built-in wrapper registry.
 
     :param Any requested: Raw selector value.
     :return str: Canonical registry key.
@@ -74,13 +126,7 @@ def resolve_contrastive_dataset_name(requested: Any) -> str:
     """
     aliases: dict[str, str] = {}
     for key, dataset_cls in CONTRASTIVE_DATASETS.items():
-        for candidate in {
-            key,
-            getattr(dataset_cls, "name", None),
-            dataset_cls.__name__,
-        }:
-            if candidate is None:
-                continue
+        for candidate in _iter_contrastive_dataset_aliases(key, dataset_cls):
             normalized = normalize_contrastive_dataset_name_token(candidate)
             if normalized:
                 aliases.setdefault(normalized, key)

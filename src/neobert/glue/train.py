@@ -39,6 +39,7 @@ from neobert.checkpointing import (
     resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
     save_portable_checkpoint_weights,
 )
+from neobert.kernels.attention import canonicalize_attn_backend
 from neobert.model import NeoBERTConfig, NeoBERTForSequenceClassification
 from neobert.tokenizer import get_tokenizer
 
@@ -60,6 +61,7 @@ from neobert.utils import configure_tf32, format_resolved_config, prepare_wandb_
 from neobert.validation import ValidationError, validate_glue_config
 
 logger = get_logger(__name__)
+_bootstrap_logger = logging.getLogger(__name__)
 
 TASK_TO_METRIC = {
     "stsb": "eval_pearson",
@@ -227,6 +229,39 @@ def _resolve_glue_task(cfg: Any) -> str:
     :return str: Normalized GLUE task name.
     """
     return str(getattr(cfg.glue, "task_name", getattr(cfg, "task", "glue"))).strip()
+
+
+def _resolve_glue_runtime_policy(cfg: Config) -> tuple[str, str]:
+    """Resolve GLUE runtime precision and attention backend policy.
+
+    GLUE classifiers in this repo intentionally run with SDPA attention only.
+    Packed flash-attn kernels are a pretraining/contrastive optimization and
+    are not part of the supported GLUE runtime surface.
+
+    :param Config cfg: Runtime GLUE config.
+    :return tuple[str, str]: Effective ``(mixed_precision, attn_backend)``.
+    """
+    requested_backend = canonicalize_attn_backend(
+        getattr(cfg.model, "attn_backend", "sdpa")
+    )
+    mixed_precision = resolve_mixed_precision(
+        cfg.trainer.mixed_precision,
+        task="glue",
+    )
+    mixed_precision = stabilize_cuda_mixed_precision(
+        mixed_precision=mixed_precision,
+        log=logger,
+        use_cpu=bool(getattr(cfg.trainer, "use_cpu", False)),
+    )
+
+    if requested_backend != "sdpa":
+        _bootstrap_logger.warning(
+            "GLUE classifier wrappers run with SDPA attention only; ignoring "
+            "model.attn_backend=%r and forcing attn_backend='sdpa'.",
+            requested_backend,
+        )
+
+    return mixed_precision, "sdpa"
 
 
 def _load_glue_metric(glue_task: str, meta_task: str, experiment_id: str) -> Any:
@@ -882,16 +917,7 @@ def trainer(cfg: Config) -> None:
         cfg.trainer.output_dir,
         automatic_checkpoint_naming=False,
     )
-    # Handle mixed precision setting (could be bool or string)
-    mixed_precision = resolve_mixed_precision(
-        cfg.trainer.mixed_precision,
-        task="glue",
-    )
-    mixed_precision = stabilize_cuda_mixed_precision(
-        mixed_precision=mixed_precision,
-        log=logger,
-        use_cpu=bool(getattr(cfg.trainer, "use_cpu", False)),
-    )
+    mixed_precision, cfg.model.attn_backend = _resolve_glue_runtime_policy(cfg)
     cfg.trainer.mixed_precision = mixed_precision
 
     wandb_enabled = cfg.wandb.enabled and cfg.wandb.mode != "disabled"
@@ -923,14 +949,6 @@ def trainer(cfg: Config) -> None:
                     file_path.unlink()
         output_dir.mkdir(parents=True, exist_ok=True)
     accelerator.wait_for_everyone()
-
-    # Force SDPA for GLUE - variable-length batches are incompatible with packed attention
-    if hasattr(cfg.model, "attn_backend") and cfg.model.attn_backend != "sdpa":
-        logger.warning(
-            "Packed attention is not supported for GLUE evaluation due to "
-            "variable-length sequences. Forcing attn_backend='sdpa'."
-        )
-    # Always use SDPA (eager) attention for GLUE.
 
     # Check from_hub in raw model dict for GLUE tasks
     from_hub = False

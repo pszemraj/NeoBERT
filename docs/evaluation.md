@@ -19,7 +19,8 @@ bash scripts/evaluation/glue/run_all_glue.sh configs/glue
 
 ### Important GLUE behavior
 
-- GLUE always runs with SDPA attention in classifier wrappers.
+- GLUE always runs with SDPA attention in classifier wrappers; non-SDPA
+  `model.attn_backend` requests are normalized away with a warning.
 - Pretrained local checkpoints are required unless either
   `glue.allow_random_weights: true` or `model.from_hub: true`.
 - GLUE checkpoints are written to `trainer.output_dir/checkpoints/<step>/`.

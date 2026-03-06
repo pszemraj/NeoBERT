@@ -9,7 +9,10 @@ from types import SimpleNamespace
 import pytest
 from datasets import Dataset, load_from_disk
 
-from neobert.contrastive.datasets import CONTRASTIVE_DATASETS
+from neobert.contrastive.datasets import (
+    CONTRASTIVE_DATASETS,
+    resolve_contrastive_dataset_name,
+)
 
 
 def _load_contrastive_preprocess_module():
@@ -66,6 +69,23 @@ def test_resolve_dataset_names_accepts_hf_dataset_id_alias() -> None:
     )
 
     assert module._resolve_dataset_names(cfg) == ["ALLNLI"]
+
+
+@pytest.mark.parametrize(
+    ("requested", "expected"),
+    [
+        ("embedding-data/QQP_triplets", "QQP"),
+        ("sentence-transformers/trivia-qa-triplet", "TRIVIAQA"),
+        ("WhereIsAI/github-issue-similarity", "GITHUBISSUE"),
+        ("stanfordnlp/concurrentqa-retrieval", "CONCURRENTQA"),
+        ("tomaarsen/gooaq-hard-negatives", "GOOAQ"),
+    ],
+)
+def test_resolve_contrastive_dataset_name_accepts_builtin_hf_ids(
+    requested: str, expected: str
+) -> None:
+    """Built-in wrappers should accept the HF dataset IDs they actually use."""
+    assert resolve_contrastive_dataset_name(requested) == expected
 
 
 def test_resolve_dataset_names_rejects_unknown_selector() -> None:

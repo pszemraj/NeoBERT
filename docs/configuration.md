@@ -277,11 +277,13 @@ Overrides are validated with the same semantic checks as base YAML configs.
 >
 > Contrastive preprocessing accepts an omitted `dataset.name`, `dataset.name:
 > ALL`, canonical registry keys such as `ALLNLI`, or common HF dataset IDs
-> whose trailing path segment matches a built-in wrapper (for example
-> `sentence-transformers/all-nli`). When `dataset.load_all_from_disk=true`,
-> cached split directories under `all/` are loaded only for the requested
-> selection and missing splits fail fast. Subset preprocess refreshes preserve
-> other cached split entries already present under `all/`.
+> from the built-in wrapper registry (for example
+> `sentence-transformers/all-nli`, `embedding-data/QQP_triplets`, or
+> `WhereIsAI/github-issue-similarity`). When
+> `dataset.load_all_from_disk=true`, cached split directories under `all/` are
+> loaded only for the requested selection and missing splits fail fast. Subset
+> preprocess refreshes preserve other cached split entries already present
+> under `all/`.
 
 ---
 
@@ -546,6 +548,7 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 | `scheduler.decay_percent` and `scheduler.decay_steps`                             | **PRECEDENCE**     | `decay_percent` overrides absolute decay steps.                                                                     |
 | `trainer.mixed_precision=bf16` with failing CUDA bf16 linear GEMM                  | **AUTO-ADJUST**    | Runtime probes bf16 on the local rank device, retries with cuBLASLt, then falls back to `mixed_precision='no'` if needed. |
 | `trainer.use_cpu=true` on a CUDA host                                              | **CPU TARGET**     | Runtime skips CUDA bf16 probes and forces `attn_backend='sdpa'` for explicit CPU runs.                               |
+| GLUE task with `model.attn_backend=flash_attn_varlen`                              | **AUTO-ADJUST**    | GLUE classifier wrappers force `attn_backend='sdpa'`; packed flash attention is not part of the supported GLUE path. |
 | `optimizer.name=muonclip` with FSDP v1                                             | **ERROR**          | MuonClip distributed mode requires FSDP2 (`fsdp_version=2`).                                                       |
 | `optimizer.name=muonclip` with FSDP v2 and `muon_config.enable_clipping=true`      | **AUTO-ADJUST**    | QK clipping is auto-disabled with a warning; FSDP2 path runs Muon-only updates.                                   |
 | `optimizer.name=muonclip` with any DeepSpeed runtime                              | **ERROR**          | MuonClip distributed mode is FSDP2-only in this repo; use Accelerate FSDP v2 instead of DeepSpeed.                 |
