@@ -45,7 +45,7 @@ python scripts/pretraining/pretrain.py \
 Use Accelerate with FSDP v2 and transformer-based wrapping:
 
 ```bash
-TORCH_BLAS_PREFER_CUBLASLT=1 CUDA_VISIBLE_DEVICES=0,1 \
+CUDA_VISIBLE_DEVICES=0,1 \
 accelerate launch \
   --multi_gpu --num_processes 2 --num_machines 1 \
   --use_fsdp --fsdp_version 2 \
@@ -64,7 +64,7 @@ DeepSpeed.
 Explicit no-clipping variant:
 
 ```bash
-TORCH_BLAS_PREFER_CUBLASLT=1 CUDA_VISIBLE_DEVICES=0,1 \
+CUDA_VISIBLE_DEVICES=0,1 \
 accelerate launch \
   --multi_gpu --num_processes 2 --num_machines 1 \
   --use_fsdp --fsdp_version 2 \
@@ -136,6 +136,9 @@ Runtime behavior:
 - if `bf16` still fails, trainer falls back to `mixed_precision: no`
 - this startup probe targets the process-local CUDA device (for example
   `LOCAL_RANK`) before Accelerator initialization
+- if your host consistently needs `cuBLASLt`, prefer setting
+  `TORCH_BLAS_PREFER_CUBLASLT=1` for that shell/session or launcher rather than
+  baking it into generic examples
 - explicit CPU runs (`trainer.use_cpu: true`) skip CUDA probes and force
   `attn_backend: sdpa`
 - when mixed precision resolves to `no`, `attn_backend: flash_attn_varlen` is

@@ -59,7 +59,9 @@ Actions:
    extension wheels,
 2. keep `mixed_precision: no` explicitly if your runtime does not support bf16
    GEMM reliably,
-3. reinstall or rebuild flash-attn wheels after CUDA/PyTorch changes.
+3. if the same host/runtime consistently succeeds only with cuBLASLt, export
+   `TORCH_BLAS_PREFER_CUBLASLT=1` in that shell or job launcher,
+4. reinstall or rebuild flash-attn wheels after CUDA/PyTorch changes.
 
 ### `torch.compile` warnings/recompiles
 
