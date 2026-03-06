@@ -1674,7 +1674,9 @@ class ConfigLoader:
         if task != "contrastive" and config.use_deepspeed:
             warnings.warn(
                 "Top-level 'use_deepspeed' only affects contrastive checkpoint loading. "
-                "Runtime backend selection is controlled by Accelerate launch config.",
+                "Runtime backend selection is controlled by Accelerate launch config. "
+                "Install the optional legacy-checkpoints extra when DeepSpeed ZeRO "
+                "conversion is actually needed.",
                 UserWarning,
                 stacklevel=2,
             )
@@ -2246,7 +2248,8 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         type=_parse_cli_bool,
         help=(
             "Legacy toggle for loading DeepSpeed-formatted checkpoints in "
-            "contrastive flows; runtime backend is set by Accelerate launch."
+            "contrastive flows; runtime backend is set by Accelerate launch. "
+            "Requires the optional legacy-checkpoints extra for conversion."
         ),
     )
 

@@ -58,8 +58,9 @@ accelerate launch \
 
 MuonClip's FSDP2 path currently supports only a 1D row-sharded device mesh.
 Do not combine it with tensor/context parallelism or other multi-axis DTensor meshes.
-Distributed MuonClip is FSDP2-only in this repo; do not launch MuonClip runs with
-DeepSpeed.
+DeepSpeed is no longer a supported runtime backend in this repo; use Accelerate
+FSDP v2 for distributed training. Legacy DeepSpeed ZeRO checkpoint conversion
+remains available via the optional `neobert[legacy-checkpoints]` extra.
 
 Explicit no-clipping variant:
 

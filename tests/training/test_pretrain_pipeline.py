@@ -4,7 +4,6 @@
 import os
 import tempfile
 import warnings
-from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -269,34 +268,10 @@ class TestPretrainComponents:
             def unwrap_model(module: torch.nn.Module) -> torch.nn.Module:
                 return module
 
-        with patch("deepspeed.zero.GatheredParameters") as gathered:
-            with _gather_decoder_weight_for_masked_objective(
-                model, _NoDistAccelerator()
-            ) as lm_weight:
-                assert lm_weight is model.decoder.weight
-            gathered.assert_not_called()
-
-        setattr(model.decoder.weight, "ds_id", 123)
-
-        class _DeepSpeedAccelerator:
-            distributed_type = DistributedType.DEEPSPEED
-
-            @staticmethod
-            def unwrap_model(module: torch.nn.Module) -> torch.nn.Module:
-                return module
-
-        with patch(
-            "deepspeed.zero.GatheredParameters",
-            side_effect=lambda *_args, **_kwargs: nullcontext(),
-        ) as gathered:
-            with _gather_decoder_weight_for_masked_objective(
-                model, _DeepSpeedAccelerator()
-            ) as lm_weight:
-                assert lm_weight is model.decoder.weight
-        gathered.assert_called_once()
-        assert gathered.call_args.args[0] == [model.decoder.weight]
-        assert gathered.call_args.kwargs["modifier_rank"] is None
-        assert gathered.call_args.kwargs["fwd_module"] is model
+        with _gather_decoder_weight_for_masked_objective(
+            model, _NoDistAccelerator()
+        ) as lm_weight:
+            assert lm_weight is model.decoder.weight
 
         class _FSDPPluginStub:
             fsdp_version = 1
@@ -481,17 +456,6 @@ class TestPretrainComponents:
         )
         assert _should_backward_inside_gathered_decoder_weight(_FSDP2Accel(), lm_weight)
 
-        class _DeepSpeedBackwardAccel:
-            distributed_type = DistributedType.DEEPSPEED
-
-            def __init__(self, marker: dict[str, bool]) -> None:
-                self._marker = marker
-                self.backward_calls = 0
-
-            def backward(self, _loss: torch.Tensor) -> None:
-                self.backward_calls += 1
-                assert self._marker["active"]
-
         class _FSDP2BackwardAccel:
             distributed_type = DistributedType.FSDP
             state = type(
@@ -508,13 +472,8 @@ class TestPretrainComponents:
                 self.backward_calls += 1
                 assert self._marker["active"]
 
-        for accelerator_cls, zero3 in [
-            (_DeepSpeedBackwardAccel, True),
-            (_FSDP2BackwardAccel, False),
-        ]:
+        for accelerator_cls in [_FSDP2BackwardAccel]:
             model = _ModelStub()
-            if zero3:
-                setattr(model.decoder.weight, "ds_id", 7)
             marker = {"active": False}
             accelerator = accelerator_cls(marker)
             batch = {
@@ -567,35 +526,17 @@ class TestPretrainComponents:
         assert not backward_done
         assert accelerator.backward_calls == 0
 
-    def test_compute_weight_norm_for_logging_deepspeed(self):
-        """Ensure DeepSpeed norm logging handles mapped and unmapped params."""
+    def test_compute_weight_norm_for_logging_uses_model_parameters(self):
+        """Weight-norm logging should operate directly on current model params."""
+        model = torch.nn.Linear(3, 2, bias=True)
+        expected = (sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5).item()
 
         class _AcceleratorStub:
-            distributed_type = DistributedType.DEEPSPEED
+            distributed_type = DistributedType.NO
 
-        model = torch.nn.Linear(3, 2, bias=True)
-        params = list(model.parameters())
-        weight_full = torch.full_like(params[0], 2.0)
-
-        def _fake_safe_get_full_fp32_param(param: torch.nn.Parameter):
-            if param is params[0]:
-                return weight_full
-            return None
-
-        with patch(
-            "neobert.pretraining.trainer.safe_get_full_fp32_param",
-            side_effect=_fake_safe_get_full_fp32_param,
-        ):
-            norm = _compute_weight_norm_for_logging(model, _AcceleratorStub())
+        norm = _compute_weight_norm_for_logging(model, _AcceleratorStub())
         assert norm is not None
-        assert round(abs(norm - weight_full.norm(2).item()), 6) == 0
-
-        with patch(
-            "neobert.pretraining.trainer.safe_get_full_fp32_param",
-            return_value=None,
-        ):
-            norm_none = _compute_weight_norm_for_logging(model, _AcceleratorStub())
-        assert norm_none is None
+        assert round(abs(norm - expected), 6) == 0
 
     def test_resolve_loader_perf_settings_cuda_and_cpu(self):
         """Ensure loader perf settings differ appropriately across CUDA and CPU."""

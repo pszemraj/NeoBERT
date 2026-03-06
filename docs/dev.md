@@ -48,14 +48,17 @@ Status: **stabilized for current training configs**.
 
 ### Distributed runtime policy (FSDP2-first)
 
-Status: **enforced for pretraining**.
+Status: **enforced for current training/eval entrypoints**.
 
 - NeoBERT pretraining is now explicitly **FSDP2-first**.
+- DeepSpeed runtime support has been removed from current entrypoints.
 - FSDP v1 is rejected at runtime with a clear error.
 - Reason: masked-logits-only objective needs decoder-weight unshard/reshard
   semantics that are safe with FSDP2. FSDP1 `summon_full_params` does not allow
   initiating forward/backward inside that context.
 - For Accelerate launches, set FSDP config to `fsdp_version: 2`.
+- Legacy DeepSpeed ZeRO checkpoint conversion remains available as an artifact
+  compatibility path only; it is no longer a training backend.
 - Keep passing model + optimizer together to `accelerate.prepare(...)` in FSDP2
   paths (Accelerate requirement).
 

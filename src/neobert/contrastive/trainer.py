@@ -14,11 +14,9 @@ import numpy
 # PyTorch
 import torch
 import wandb
-from accelerate.utils import DistributedType, ProjectConfiguration, set_seed
+from accelerate.utils import ProjectConfiguration, set_seed
 from datasets import DatasetDict, load_from_disk
 
-# Deepspeed
-from deepspeed.utils import safe_get_full_fp32_param
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -51,6 +49,7 @@ from neobert.training_utils import (
     create_accelerator,
     resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
+    validate_distributed_runtime_policy,
     validate_muon_distributed_compatibility,
     validate_muon_runtime_topology,
 )
@@ -234,6 +233,11 @@ def trainer(cfg: Config) -> None:
         gradient_accumulation_steps=cfg.trainer.gradient_accumulation_steps,
         log_with="wandb" if wandb_enabled else None,
         project_config=project_config,
+    )
+    validate_distributed_runtime_policy(
+        accelerator=accelerator,
+        log=logger,
+        context="contrastive",
     )
     validate_muon_distributed_compatibility(
         accelerator=accelerator,
@@ -520,10 +524,13 @@ def trainer(cfg: Config) -> None:
                         pretrained_checkpoint_dir,
                         tag=str(tag),
                     )
+                except ModuleNotFoundError:
+                    raise
                 except Exception as exc:
                     raise ValueError(
                         f"Expected {MODEL_WEIGHTS_NAME} at {state_dict_path}. "
-                        "Set pretrained_checkpoint_dir or enable DeepSpeed loading."
+                        "Set pretrained_checkpoint_dir or enable legacy DeepSpeed "
+                        "checkpoint loading."
                     ) from exc
                 logger.warning(
                     f"{MODEL_WEIGHTS_NAME} not found at {state_dict_path}; "
@@ -590,9 +597,7 @@ def trainer(cfg: Config) -> None:
     keys = list(dataset.keys())
 
     dataloaders[keys[0]], model, optimizer, scheduler = accelerator.prepare(
-        dataloaders[
-            keys[0]
-        ],  # Accelerate with deepspeed requires at least one dataloader to be passed along with other objects to prepare.
+        dataloaders[keys[0]],
         model,
         optimizer,
         scheduler,
@@ -949,28 +954,13 @@ def trainer(cfg: Config) -> None:
             metrics["train/steps"] += 1
 
             if metrics["train/steps"] % log_interval == 0:
-                # https://deepspeed.readthedocs.io/en/latest/zero3.html#deepspeed.utils.safe_get_full_grad
-                if accelerator.distributed_type is DistributedType.DEEPSPEED:
-                    metrics["train/grad_norm"] = model.get_global_grad_norm()  # .item()
-                    if cfg.trainer.log_weight_norms and accelerator.is_main_process:
-                        metrics["train/weight_norm"] = (
-                            sum(
-                                [
-                                    safe_get_full_fp32_param(p).norm(2) ** 2
-                                    for p in model.parameters()
-                                ]
-                            )
-                            ** 0.5
-                        ).item()
-                # DDP
-                else:
-                    metrics["train/grad_norm"] = (
-                        sum([p.grad.norm(2) ** 2 for p in model.parameters()]) ** 0.5
+                metrics["train/grad_norm"] = (
+                    sum([p.grad.norm(2) ** 2 for p in model.parameters()]) ** 0.5
+                ).item()
+                if cfg.trainer.log_weight_norms and accelerator.is_main_process:
+                    metrics["train/weight_norm"] = (
+                        sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5
                     ).item()
-                    if cfg.trainer.log_weight_norms and accelerator.is_main_process:
-                        metrics["train/weight_norm"] = (
-                            sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5
-                        ).item()
 
                 metrics["train/learning_rate"] = optimizer.param_groups[0]["lr"]
                 metrics.log(accelerator)

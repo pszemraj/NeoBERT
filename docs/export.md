@@ -12,6 +12,9 @@ Point export to a checkpoint directory containing:
 - `tokenizer/` directory (required)
 - `tokenizer_info.json` (recommended; validated when present)
 
+DeepSpeed ZeRO checkpoint conversion is legacy-only and requires the optional
+`neobert[legacy-checkpoints]` install extra.
+
 ## Export Command
 
 ```bash

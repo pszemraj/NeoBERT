@@ -147,7 +147,7 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | `datacollator.mask_all`               | `bool`        | `false`         | `false` uses sampled-token BERT-style 80/10/10 masking.              |
 | `datacollator.pack_sequences`         | `bool`        | `false`         | Enable packed-sequence collation.                                    |
 | `trainer.resume_from_checkpoint`      | `str \| None` | `null`          | Checkpoint to resume from.                                           |
-| `use_deepspeed`                       | `bool`        | `false`         | Legacy hint for loading DeepSpeed-formatted contrastive checkpoints. |
+| `use_deepspeed`                       | `bool`        | `false`         | Legacy hint for loading DeepSpeed-formatted contrastive checkpoints; it does not enable a runtime backend. |
 
 > [!NOTE]
 > Runtime preprocessing synchronizes tokenizer-derived values (including `model.pad_token_id`) and aligns vocab size for model/tokenizer consistency.
@@ -482,7 +482,7 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 | ------------------------ | ---------------- | ------- | ------------------------------------------------------------------------ |
 | `seed`                   | `int`            | `0`     | Global random seed.                                                      |
 | `debug`                  | `bool`           | `false` | Extra debug logging/prints.                                              |
-| `use_deepspeed`          | `bool`           | `false` | Legacy hint for DeepSpeed-formatted contrastive checkpoint loading only. |
+| `use_deepspeed`          | `bool`           | `false` | Legacy hint for DeepSpeed-formatted contrastive checkpoint loading only; requires the optional `legacy-checkpoints` extra when conversion is needed. |
 | `accelerate_config_file` | `str \| None`    | `null`  | Accelerate launch config path.                                           |
 | `pretraining_metadata`   | `dict[str, Any]` | `{}`    | Metadata passed to downstream evaluations.                               |
 | `config_path`            | `str \| None`    | `null`  | Source config path metadata.                                             |
@@ -551,7 +551,7 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 | GLUE task with `model.attn_backend=flash_attn_varlen`                              | **AUTO-ADJUST**    | GLUE classifier wrappers force `attn_backend='sdpa'`; packed flash attention is not part of the supported GLUE path. |
 | `optimizer.name=muonclip` with FSDP v1                                             | **ERROR**          | MuonClip distributed mode requires FSDP2 (`fsdp_version=2`).                                                       |
 | `optimizer.name=muonclip` with FSDP v2 and `muon_config.enable_clipping=true`      | **AUTO-ADJUST**    | QK clipping is auto-disabled with a warning; FSDP2 path runs Muon-only updates.                                   |
-| `optimizer.name=muonclip` with any DeepSpeed runtime                              | **ERROR**          | MuonClip distributed mode is FSDP2-only in this repo; use Accelerate FSDP v2 instead of DeepSpeed.                 |
+| Any DeepSpeed runtime                                                              | **ERROR**          | DeepSpeed execution is unsupported in this repo; use Accelerate FSDP v2 for distributed runs. Legacy DeepSpeed checkpoint conversion remains available separately. |
 | `trainer.mixed_precision='no'` with `model.attn_backend=flash_attn_varlen`         | **AUTO-ADJUST**    | Runtime switches attention backend to `sdpa` with a warning.                                                       |
 | `datacollator.pack_sequences=true` with `model.attn_backend=sdpa`                 | **WARNING**        | Works, but slower than `flash_attn_varlen`; SDPA uses fallback path.                                                |
 | `dataset.path` and `dataset.name` both set                                        | **PRECEDENCE**     | Existing local `dataset.path` is used first; hub dataset acts as fallback.                                          |

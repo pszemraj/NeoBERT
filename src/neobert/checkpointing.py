@@ -205,14 +205,24 @@ def load_deepspeed_fp32_state_dict(
     :param str | Path checkpoint_dir: Checkpoint root or step directory.
     :param str | int | None tag: Optional explicit root-level tag/step.
     :return dict[str, torch.Tensor]: Materialized fp32 model state dict.
+    :raises ModuleNotFoundError:
+        If the optional DeepSpeed checkpoint-conversion dependency is missing.
     :raises ValueError: If conversion returns an empty state dict.
     """
-    from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
-
     resolved_root, resolved_tag = resolve_deepspeed_checkpoint_root_and_tag(
         checkpoint_dir,
         tag=tag,
     )
+    try:
+        from deepspeed.utils.zero_to_fp32 import (
+            get_fp32_state_dict_from_zero_checkpoint,
+        )
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "DeepSpeed checkpoint conversion requires the optional legacy "
+            "checkpoint dependency. Install `neobert[legacy-checkpoints]` "
+            "before loading DeepSpeed ZeRO checkpoints."
+        ) from exc
     state_dict = get_fp32_state_dict_from_zero_checkpoint(
         str(resolved_root),
         tag=str(resolved_tag),

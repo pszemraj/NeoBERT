@@ -403,6 +403,41 @@ def validate_muon_distributed_compatibility(
     )
 
 
+def validate_distributed_runtime_policy(
+    *,
+    accelerator: Accelerator,
+    log: logging.Logger,
+    context: str,
+) -> None:
+    """Reject distributed runtimes that this repo no longer supports.
+
+    DeepSpeed execution support has been removed in favor of Accelerate-managed
+    FSDP2 paths. Legacy DeepSpeed checkpoint conversion remains supported
+    separately via checkpoint-loading helpers.
+
+    :param Accelerator accelerator: Active Accelerator runtime.
+    :param logging.Logger log: Logger for policy warnings/errors.
+    :param str context: Human-readable task context for error messages.
+    :raises RuntimeError: If DeepSpeed is selected as the active runtime backend.
+    """
+    distributed_type = getattr(accelerator, "distributed_type", None)
+    if distributed_type is not DistributedType.DEEPSPEED:
+        return
+
+    deepspeed_plugin = getattr(
+        getattr(accelerator, "state", None), "deepspeed_plugin", None
+    )
+    zero_stage = getattr(deepspeed_plugin, "zero_stage", None)
+    zero_suffix = ""
+    if zero_stage is not None:
+        zero_suffix = f" (ZeRO stage {int(zero_stage)})"
+    raise RuntimeError(
+        "DeepSpeed runtime is unsupported in "
+        f"{context}{zero_suffix}. Use Accelerate FSDP v2 for distributed runs; "
+        "legacy DeepSpeed checkpoint conversion remains available separately."
+    )
+
+
 def validate_muon_runtime_topology(
     *,
     accelerator: Accelerator,
@@ -517,11 +552,6 @@ def _maybe_compile_model(
     if not hasattr(torch, "compile"):
         log.warning(
             "trainer.torch_compile is enabled but torch.compile is unavailable; skipping."
-        )
-        return model
-    if accelerator.distributed_type is DistributedType.DEEPSPEED:
-        log.warning(
-            "trainer.torch_compile is enabled but DeepSpeed is active; skipping torch.compile."
         )
         return model
     compile_backend = str(

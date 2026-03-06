@@ -10,10 +10,8 @@ requires-python = ">= 3.10"
 dependencies = [
     "accelerate",
     "datasets",
-    "deepspeed",
     "einops",
     "evaluate",
-    "libaio",
     "mteb",
     "numpy",
     "pyyaml",
@@ -40,6 +38,7 @@ keywords = []
 [project.optional-dependencies]
 dev = ["ruff", "isort", "pytest", "pytest-cov", "pytest-clarity", "xeger"]
 flash = ["flash-attn>=2.5"]
+legacy-checkpoints = ["deepspeed"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

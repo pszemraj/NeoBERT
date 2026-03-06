@@ -19,6 +19,7 @@ from neobert.training_utils import (
     resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
     stabilize_cuda_mixed_precision,
+    validate_distributed_runtime_policy,
     validate_muon_distributed_compatibility,
     validate_muon_runtime_topology,
 )
@@ -550,6 +551,27 @@ def test_validate_muon_distributed_compatibility_rejects_deepspeed(
         validate_muon_distributed_compatibility(
             accelerator=accelerator,
             optimizer_name="muonclip",
+            log=logging.getLogger("test"),
+            context="unit-test",
+        )
+
+
+@pytest.mark.parametrize("zero_stage", [None, 0, 1, 2, 3])
+def test_validate_distributed_runtime_policy_rejects_deepspeed(
+    zero_stage: int | None,
+) -> None:
+    """Repo runtime policy should reject DeepSpeed regardless of optimizer."""
+    accelerator = SimpleNamespace(
+        distributed_type=DistributedType.DEEPSPEED,
+        state=SimpleNamespace(
+            deepspeed_plugin=SimpleNamespace(zero_stage=zero_stage),
+        ),
+    )
+
+    match = "unsupported" if zero_stage is None else f"ZeRO stage {zero_stage}"
+    with pytest.raises(RuntimeError, match=match):
+        validate_distributed_runtime_policy(
+            accelerator=accelerator,
             log=logging.getLogger("test"),
             context="unit-test",
         )

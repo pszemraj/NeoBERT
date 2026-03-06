@@ -1,13 +1,16 @@
 """Tests for safetensors checkpoint utilities."""
 
+import builtins
 import tempfile
 from pathlib import Path
 
+import pytest
 import torch
 from torch import nn
 
 from neobert.checkpointing import (
     MODEL_WEIGHTS_NAME,
+    load_deepspeed_fp32_state_dict,
     load_model_safetensors,
     model_state_dict_for_safetensors,
     resolve_deepspeed_checkpoint_root_and_tag,
@@ -131,3 +134,26 @@ def test_resolve_deepspeed_checkpoint_root_and_tag_for_nested_accelerate_layout(
 
     assert resolved_root == checkpoints_root / "1000"
     assert resolved_tag == "pytorch_model"
+
+
+def test_load_deepspeed_fp32_state_dict_requires_optional_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing optional DeepSpeed dependency should produce a clear install hint."""
+    original_import = builtins.__import__
+
+    def _fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "deepspeed.utils.zero_to_fp32":
+            raise ModuleNotFoundError("simulated missing deepspeed")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _fake_import)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        tag_dir = root / "123"
+        tag_dir.mkdir(parents=True, exist_ok=True)
+        (tag_dir / "mp_rank_00_model_states.pt").touch()
+
+        with pytest.raises(ModuleNotFoundError, match="legacy-checkpoints"):
+            load_deepspeed_fp32_state_dict(root, tag="123")

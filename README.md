@@ -37,6 +37,8 @@ Optional extras:
 pip install -U -q packaging wheel ninja
 # Packed flash-attn training backend
 pip install -e .[flash] --no-build-isolation
+# Legacy DeepSpeed ZeRO checkpoint conversion only
+pip install -e .[legacy-checkpoints]
 ```
 
 See [docs/troubleshooting.md](docs/troubleshooting.md) for environment issues.

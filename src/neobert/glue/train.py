@@ -54,6 +54,7 @@ from neobert.training_utils import (
     _unwrap_optimizer,
     create_accelerator,
     stabilize_cuda_mixed_precision,
+    validate_distributed_runtime_policy,
     validate_muon_distributed_compatibility,
     validate_muon_runtime_topology,
 )
@@ -653,6 +654,8 @@ def load_pretrained_weights(
         )
         try:
             state_dict = load_deepspeed_fp32_state_dict(checkpoint_path)
+        except ModuleNotFoundError:
+            raise
         except Exception as exc:
             raise FileNotFoundError(
                 f"Unable to load checkpoint {checkpoint_path}: expected either "
@@ -928,6 +931,11 @@ def trainer(cfg: Config) -> None:
         mixed_precision=mixed_precision,
         project_config=project_config,
         gradient_accumulation_steps=int(cfg.trainer.gradient_accumulation_steps),
+    )
+    validate_distributed_runtime_policy(
+        accelerator=accelerator,
+        log=logger,
+        context="glue",
     )
     validate_muon_distributed_compatibility(
         accelerator=accelerator,
