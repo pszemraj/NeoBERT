@@ -4,6 +4,7 @@ Adapted for fused QKV projections, attention hooks, and distributed training.
 References: Kimi K2 report, Muon, MuonClip, DISCO, Polar Express.
 """
 
+import copy
 import logging
 import warnings
 from dataclasses import dataclass, field
@@ -956,6 +957,10 @@ class MuonClipOptimizer(Optimizer):
         """
         payload = dict(state_dict)
         muonclip_step = payload.pop("muonclip_step", None)
+        saved_groups = payload.get("param_groups", None)
+        if saved_groups is not None:
+            payload["param_groups"] = copy.deepcopy(saved_groups)
+            self._restore_missing_group_metadata(payload["param_groups"])
         super().load_state_dict(payload)
         self._validate_loaded_muon_state_topology()
 
@@ -971,6 +976,31 @@ class MuonClipOptimizer(Optimizer):
                 except Exception:
                     continue
         self._step = inferred
+
+    def _restore_missing_group_metadata(
+        self, saved_groups: Sequence[Dict[str, Any]]
+    ) -> None:
+        """Fill in custom group metadata that generic checkpoint loaders may drop.
+
+        Some optimizer checkpoint backends normalize ``param_groups`` down to the
+        standard optimizer fields. MuonClip depends on additional group metadata
+        such as ``use_muon``, ``beta``, and ``param_info`` to restore the correct
+        update path after resume, so merge any missing keys back from the current
+        optimizer groups before calling ``Optimizer.load_state_dict()``.
+
+        :param Sequence[dict[str, Any]] saved_groups: Loaded optimizer param groups.
+        """
+        if len(saved_groups) != len(self.param_groups):
+            return
+
+        for current_group, saved_group in zip(
+            self.param_groups, saved_groups, strict=True
+        ):
+            for key, value in current_group.items():
+                if key == "params":
+                    continue
+                if key not in saved_group:
+                    saved_group[key] = copy.deepcopy(value)
 
     def _muon_step(self, group: Dict[str, Any]) -> None:
         """Apply Muon update with orthogonalization.
@@ -1165,6 +1195,19 @@ class MuonClipOptimizer(Optimizer):
                         f"parameter '{param_name}'. Optimizer state topology does not "
                         "match the current model."
                     )
+
+                param_shape = getattr(param, "shape", None)
+                buffer_shape = getattr(momentum_buffer, "shape", None)
+                if param_shape is not None and buffer_shape is not None:
+                    normalized_param_shape = tuple(int(dim) for dim in param_shape)
+                    normalized_buffer_shape = tuple(int(dim) for dim in buffer_shape)
+                    if normalized_param_shape != normalized_buffer_shape:
+                        raise RuntimeError(
+                            "MuonClip loaded momentum state with shape "
+                            f"{normalized_buffer_shape} for parameter "
+                            f"'{param_name}' with shape {normalized_param_shape}."
+                        )
+
                 if not param_is_dtensor:
                     continue
 

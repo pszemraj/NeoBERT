@@ -199,8 +199,20 @@ Priority order for next performance PR:
   `get_optimizer(...)`, `accelerator.prepare(...)`, one step,
   `accelerator.save_state(...)`, `accelerator.load_state(...)`, and post-resume
   continuation parity against an uninterrupted run.
+- Explicitly verify MuonClip custom param-group metadata (`use_muon`,
+  `param_info`, Muon hyperparameters) survives the save/load path, not just raw
+  optimizer tensors/state.
 - Keep the existing manual owner-compute golden test; this follow-up is
   specifically for the production checkpoint plumbing layer.
+
+1. Normalize MuonClip clipping intent vs runtime support under FSDP2
+
+- Current behavior intentionally disables clipping at optimizer-construction
+  time for FSDP2 runs so hooks do not capture on the first sharded step before
+  the prepared runtime can turn clipping off.
+- If we want to preserve `config.enable_clipping` as user intent while still
+  disabling the actual runtime behavior, add a dedicated post-prepare/runtime
+  toggle instead of just removing the factory-side disable.
 
 ### Contrastive Sweep TODOs
 

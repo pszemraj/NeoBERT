@@ -4,6 +4,8 @@ Unit tests for MuonClip optimizer.
 Run: pytest tests/test_muonclip_unit.py -v
 """
 
+import copy
+
 import pytest
 import torch
 from torch.distributed.checkpoint.state_dict import (
@@ -732,6 +734,75 @@ class TestMuonClipOptimizer:
             f"param={max_name} max_diff={max_diff:.6e}"
         )
 
+    def test_load_state_dict_restores_missing_group_metadata(self, model):
+        """Resumes should restore Muon-specific group metadata before loading."""
+        model_instance, config = model
+        muon_config = MuonClipConfig(enable_clipping=False)
+        optimizer = MuonClipOptimizer(model_instance, config, muon_config)
+
+        for _ in range(2):
+            input_ids = torch.randint(0, 1000, (2, 64))
+            output = model_instance(input_ids)
+            loss = output.sum()
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+
+        stripped_state = copy.deepcopy(optimizer.state_dict())
+        for group in stripped_state["param_groups"]:
+            group.pop("use_muon", None)
+            group.pop("param_info", None)
+            group.pop("beta", None)
+
+        model_ref = NeoBERT(config)
+        model_ref.load_state_dict(model_instance.state_dict())
+        optimizer_ref = MuonClipOptimizer(model_ref, config, muon_config)
+        optimizer_ref.load_state_dict(optimizer.state_dict())
+
+        model_clone = NeoBERT(config)
+        model_clone.load_state_dict(model_instance.state_dict())
+        optimizer_clone = MuonClipOptimizer(model_clone, config, muon_config)
+        optimizer_clone.load_state_dict(stripped_state)
+
+        assert all("use_muon" in group for group in optimizer_clone.param_groups)
+        assert all("param_info" in group for group in optimizer_clone.param_groups)
+        muon_group = next(
+            group for group in optimizer_clone.param_groups if group["use_muon"]
+        )
+        assert "beta" in muon_group
+        assert len(muon_group["param_info"]) == len(muon_group["params"])
+
+        input_ids = torch.randint(0, 1000, (2, 64))
+        ref_output = model_ref(input_ids)
+        ref_loss = ref_output.sum()
+        ref_loss.backward()
+        optimizer_ref.step()
+        optimizer_ref.zero_grad()
+
+        clone_output = model_clone(input_ids)
+        clone_loss = clone_output.sum()
+        clone_loss.backward()
+        optimizer_clone.step()
+        optimizer_clone.zero_grad()
+
+        max_diff = 0.0
+        max_name = ""
+        for (name, param), (clone_name, clone_param) in zip(
+            model_ref.named_parameters(),
+            model_clone.named_parameters(),
+            strict=True,
+        ):
+            assert clone_name == name
+            diff = float((param - clone_param).abs().max().item())
+            if diff > max_diff:
+                max_diff = diff
+                max_name = name
+
+        assert max_diff <= 5e-5, (
+            "MuonClip stripped-group resume drifted on the next update: "
+            f"param={max_name} max_diff={max_diff:.6e}"
+        )
+
     def test_loaded_state_rejects_tensor_momentum_for_dtensor_param(
         self, model, monkeypatch: pytest.MonkeyPatch
     ):
@@ -830,6 +901,58 @@ class TestMuonClipOptimizer:
         )
 
         with pytest.raises(RuntimeError, match="mesh/placement metadata"):
+            optimizer._validate_loaded_muon_state_topology()
+
+    def test_loaded_state_rejects_mismatched_momentum_shape(
+        self, model, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Muon state should fail fast when momentum-buffer shape mismatches param."""
+        model_instance, config = model
+        optimizer = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(enable_clipping=False),
+        )
+
+        class _FakeMesh:
+            def __init__(self, ranks: list[int]):
+                self.ndim = 1
+                self.mesh = torch.tensor(ranks)
+
+        class _FakeShard:
+            def __init__(self, dim: int):
+                self.dim = dim
+
+        class _FakeDTensor:
+            def __init__(self, ranks: list[int], dim: int, shape: tuple[int, int]):
+                self.device_mesh = _FakeMesh(ranks)
+                self.placements = (_FakeShard(dim),)
+                self.shape = torch.Size(shape)
+
+        fake_param = _FakeDTensor([0, 1], 0, (8, 4))
+        fake_buffer = _FakeDTensor([0, 1], 0, (7, 4))
+        optimizer.param_groups = [
+            {
+                "use_muon": True,
+                "params": [fake_param],
+                "param_info": [
+                    {
+                        "name": "transformer_encoder.0.qkv.weight",
+                        "layer_idx": 0,
+                        "is_qkv": True,
+                        "proj_type": "qkv",
+                    }
+                ],
+            }
+        ]
+        optimizer.state = {fake_param: {"momentum_buffer": fake_buffer}}
+        monkeypatch.setattr(
+            optimizer,
+            "_is_dtensor",
+            lambda tensor: isinstance(tensor, _FakeDTensor),
+        )
+
+        with pytest.raises(RuntimeError, match="momentum state with shape"):
             optimizer._validate_loaded_muon_state_topology()
 
     def test_state_dict_param_info_avoids_live_parameter_objects(self, model):

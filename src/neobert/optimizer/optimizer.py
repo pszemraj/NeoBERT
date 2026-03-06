@@ -145,6 +145,11 @@ def get_optimizer(
                 distributed_type is DistributedType.FSDP
                 and muon_clip_cfg.enable_clipping
             ):
+                # Keep this factory-side disable for now. MuonClip hooks are
+                # created before ``accelerator.prepare()``, so preserving
+                # ``config.enable_clipping`` without a dedicated post-prepare
+                # runtime toggle would still capture activations on the first
+                # sharded step. Track the intent/runtime split cleanup separately.
                 muon_clip_cfg.enable_clipping = False
                 if not _WARNED_MUONCLIP_FSDP_CLIPPING_DISABLE:
                     logger.warning(
