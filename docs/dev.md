@@ -190,6 +190,15 @@ Priority order for next performance PR:
   `MuonClipOptimizer._resolve_transformer_stack` and
   `NeoBERTAttentionHooks._resolve_transformer_layers` into one shared utility.
 
+1. Add an Accelerate FSDP2 Muon resume smoke test
+
+- Exercise the shipped path end-to-end:
+  `get_optimizer(...)`, `accelerator.prepare(...)`, one step,
+  `accelerator.save_state(...)`, `accelerator.load_state(...)`, and post-resume
+  continuation parity against an uninterrupted run.
+- Keep the existing manual owner-compute golden test; this follow-up is
+  specifically for the production checkpoint plumbing layer.
+
 ### Contrastive Sweep TODOs
 
 These are explicitly tracked for sweep-readiness follow-up work:

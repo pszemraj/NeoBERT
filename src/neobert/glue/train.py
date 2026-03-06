@@ -1559,6 +1559,13 @@ def trainer(cfg: Config) -> None:
 
         accelerator.print(f"Resuming GLUE run from checkpoint: {resume_checkpoint}")
         accelerator.load_state(str(resume_checkpoint))
+        validate_muon_runtime_topology(
+            accelerator=accelerator,
+            optimizer=optimizer,
+            optimizer_name=cfg.optimizer.name,
+            log=logger,
+            context="glue resume",
+        )
 
         step_from_optimizer = _get_optimizer_update_step(optimizer)
         if step_from_optimizer is not None and step_from_optimizer > 0:

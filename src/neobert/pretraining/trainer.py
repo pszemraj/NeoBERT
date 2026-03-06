@@ -2351,6 +2351,13 @@ def trainer(cfg: Config) -> None:
                 f"resume_from_checkpoint path not found: {resume_checkpoint_path}"
             )
         accelerator.load_state(str(resume_checkpoint))
+        validate_muon_runtime_topology(
+            accelerator=accelerator,
+            optimizer=optimizer,
+            optimizer_name=cfg.optimizer.name,
+            log=logger,
+            context="pretraining resume",
+        )
         if is_streaming and hasattr(train_dataset, "set_epoch"):
             resume_epoch = int(metrics.get("train/epochs", 0))
             train_dataset.set_epoch(resume_epoch)

@@ -281,7 +281,7 @@ class TestMuonClipOptimizer:
 
         optimizer = MuonClipOptimizer(model_instance, config, muon_config)
 
-        assert len(optimizer.param_groups) == 2  # Muon + Adam groups
+        assert len(optimizer.param_groups) >= 2  # Muon + Adam fallback groups
         assert optimizer._step == 0
         assert optimizer.config.orthogonalization == "polar_express"
 
@@ -303,9 +303,9 @@ class TestMuonClipOptimizer:
             assert model_instance.positional_embedding.weight not in muon_params
         assert model_instance.transformer_encoder[0].qkv.weight in muon_params
 
-        # Adam group includes 1D params and non-transformer 2D weights.
-        adam_group = next(g for g in optimizer.param_groups if not g["use_muon"])
-        adam_params = set(adam_group["params"])
+        # Adam groups include 1D params and non-transformer 2D weights.
+        adam_groups = [g for g in optimizer.param_groups if not g["use_muon"]]
+        adam_params = {param for group in adam_groups for param in group["params"]}
         assert model_instance.encoder.weight in adam_params
         if hasattr(model_instance, "positional_embedding"):
             assert model_instance.positional_embedding.weight in adam_params
@@ -332,15 +332,66 @@ class TestMuonClipOptimizer:
         )
 
         muon_group = next(g for g in optimizer.param_groups if g["use_muon"])
-        adam_group = next(g for g in optimizer.param_groups if not g["use_muon"])
         muon_params = set(muon_group["params"])
-        adam_params = set(adam_group["params"])
+        adam_groups = [g for g in optimizer.param_groups if not g["use_muon"]]
+        adam_params = {param for group in adam_groups for param in group["params"]}
 
         assert model.model.encoder.weight not in muon_params
         assert model.model.encoder.weight in adam_params
         assert model.decoder.weight not in muon_params
         assert model.decoder.weight in adam_params
         assert model.model.transformer_encoder[0].qkv.weight in muon_params
+
+    def test_adam_fallback_splits_decay_and_no_decay(self):
+        """MuonClip Adam fallback should mirror the repo's AdamW decay policy."""
+        config = NeoBERTConfig(
+            hidden_size=64,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            intermediate_size=128,
+            vocab_size=257,
+            max_length=64,
+            attn_backend="sdpa",
+            hidden_act="gelu",
+            rope=False,
+            tie_word_embeddings=False,
+        )
+        model = NeoBERTLMHead(config)
+        optimizer = MuonClipOptimizer(
+            model,
+            config,
+            MuonClipConfig(enable_clipping=False, adam_decay=0.1),
+        )
+
+        adam_groups = [
+            group for group in optimizer.param_groups if not group["use_muon"]
+        ]
+        decay_group = next(
+            group
+            for group in adam_groups
+            if group["weight_decay"] == pytest.approx(0.1)
+        )
+        no_decay_group = next(
+            group
+            for group in adam_groups
+            if group["weight_decay"] == pytest.approx(0.0)
+        )
+        decay_params = set(decay_group["params"])
+        no_decay_params = set(no_decay_group["params"])
+
+        assert model.decoder.weight in decay_params
+        assert model.model.encoder.weight in no_decay_params
+
+        bias_params = {
+            param
+            for name, param in model.named_parameters()
+            if name.lower().endswith(".bias")
+        }
+        norm_params = {
+            param for name, param in model.named_parameters() if "norm" in name.lower()
+        }
+        assert bias_params.issubset(no_decay_params)
+        assert norm_params.issubset(no_decay_params)
 
     def test_norm_factor_modes(self):
         """Normalization modes should apply the expected scalar factors."""
@@ -681,6 +732,106 @@ class TestMuonClipOptimizer:
             f"param={max_name} max_diff={max_diff:.6e}"
         )
 
+    def test_loaded_state_rejects_tensor_momentum_for_dtensor_param(
+        self, model, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Sharded Muon params must not accept local Tensor momentum buffers."""
+        model_instance, config = model
+        optimizer = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(enable_clipping=False),
+        )
+
+        class _FakeMesh:
+            ndim = 1
+            mesh = torch.tensor([0, 1])
+
+        class _FakeShard:
+            def __init__(self, dim: int):
+                self.dim = dim
+
+        class _FakeDTensor:
+            def __init__(self):
+                self.device_mesh = _FakeMesh()
+                self.placements = (_FakeShard(0),)
+
+        fake_param = _FakeDTensor()
+        optimizer.param_groups = [
+            {
+                "use_muon": True,
+                "params": [fake_param],
+                "param_info": [
+                    {
+                        "name": "transformer_encoder.0.qkv.weight",
+                        "layer_idx": 0,
+                        "is_qkv": True,
+                        "proj_type": "qkv",
+                    }
+                ],
+            }
+        ]
+        optimizer.state = {fake_param: {"momentum_buffer": torch.zeros(2, 2)}}
+        monkeypatch.setattr(
+            optimizer,
+            "_is_dtensor",
+            lambda tensor: isinstance(tensor, _FakeDTensor),
+        )
+
+        with pytest.raises(RuntimeError, match="local Tensor momentum buffer"):
+            optimizer._validate_loaded_muon_state_topology()
+
+    def test_loaded_state_rejects_mismatched_dtensor_topology(
+        self, model, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Sharded Muon state must match the target DTensor mesh and placement."""
+        model_instance, config = model
+        optimizer = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(enable_clipping=False),
+        )
+
+        class _FakeMesh:
+            def __init__(self, ranks: list[int]):
+                self.ndim = 1
+                self.mesh = torch.tensor(ranks)
+
+        class _FakeShard:
+            def __init__(self, dim: int):
+                self.dim = dim
+
+        class _FakeDTensor:
+            def __init__(self, ranks: list[int], dim: int):
+                self.device_mesh = _FakeMesh(ranks)
+                self.placements = (_FakeShard(dim),)
+
+        fake_param = _FakeDTensor([0, 1], 0)
+        fake_buffer = _FakeDTensor([0, 1], 1)
+        optimizer.param_groups = [
+            {
+                "use_muon": True,
+                "params": [fake_param],
+                "param_info": [
+                    {
+                        "name": "transformer_encoder.0.qkv.weight",
+                        "layer_idx": 0,
+                        "is_qkv": True,
+                        "proj_type": "qkv",
+                    }
+                ],
+            }
+        ]
+        optimizer.state = {fake_param: {"momentum_buffer": fake_buffer}}
+        monkeypatch.setattr(
+            optimizer,
+            "_is_dtensor",
+            lambda tensor: isinstance(tensor, _FakeDTensor),
+        )
+
+        with pytest.raises(RuntimeError, match="mesh/placement metadata"):
+            optimizer._validate_loaded_muon_state_topology()
+
     def test_state_dict_param_info_avoids_live_parameter_objects(self, model):
         """Optimizer checkpoint metadata must not embed live Parameter objects."""
         model_instance, config = model
@@ -754,6 +905,50 @@ class TestMuonClipOptimizer:
                 param=target,
                 group_params=[target],
             )
+
+    def test_owner_rank_tie_breaks_on_param_name(
+        self, model, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Owner assignment should not depend on incidental parameter order."""
+        model_instance, config = model
+        optimizer = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(enable_clipping=False),
+        )
+
+        class _FakeParam:
+            def __init__(self, size: int):
+                self._size = size
+
+            def numel(self) -> int:
+                return self._size
+
+        z_param = _FakeParam(128)
+        a_param = _FakeParam(128)
+        monkeypatch.setattr(
+            optimizer,
+            "_process_group_cache_key",
+            lambda _process_group: (0, 1),
+        )
+
+        owner_a = optimizer._resolve_owner_rank(
+            param=a_param,
+            group_params=[z_param, a_param],
+            group_param_info=[{"name": "z.weight"}, {"name": "a.weight"}],
+            world_size=2,
+            process_group=object(),
+        )
+        owner_z = optimizer._resolve_owner_rank(
+            param=z_param,
+            group_params=[z_param, a_param],
+            group_param_info=[{"name": "z.weight"}, {"name": "a.weight"}],
+            world_size=2,
+            process_group=object(),
+        )
+
+        assert owner_a == 0
+        assert owner_z == 1
 
     def test_clipping_applied(self, model):
         """Test QK-clipping actually modifies weights."""

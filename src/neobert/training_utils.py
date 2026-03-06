@@ -418,7 +418,9 @@ def validate_muon_runtime_topology(
     :param str optimizer_name: Configured optimizer name.
     :param logging.Logger log: Logger for topology warnings.
     :param str context: Human-readable task context for error messages.
-    :raises RuntimeError: If prepared MuonClip params use unsupported DTensor layout.
+    :raises RuntimeError:
+        If prepared MuonClip params use unsupported DTensor layout, or if a
+        multi-process FSDP2 run failed to expose DTensor Muon parameters at all.
     """
     if not _is_muonclip_optimizer(optimizer_name):
         return
@@ -470,10 +472,10 @@ def validate_muon_runtime_topology(
         )
         and not saw_dtensor
     ):
-        log.warning(
-            "MuonClip runtime topology check in %s did not observe any DTensor "
-            "Muon parameters after accelerator.prepare().",
-            context,
+        raise RuntimeError(
+            "MuonClip expected DTensor Muon parameters after accelerator.prepare() "
+            f"in {context}, but none were observed. Refusing to continue because "
+            "the distributed owner-compute path would be inactive."
         )
 
 

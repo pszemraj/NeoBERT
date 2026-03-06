@@ -687,6 +687,31 @@ class MuonClipOptimizer(Optimizer):
 
         logger.debug("Model architecture validation passed")
 
+    def _use_adam_weight_decay(
+        self,
+        *,
+        name: str,
+        param: torch.nn.Parameter,
+        embedding_param_ids: set[int],
+    ) -> bool:
+        """Return whether a non-Muon parameter should receive Adam weight decay.
+
+        This mirrors the repo's standard AdamW grouping policy so MuonClip's
+        Adam fallback does not silently decay embeddings, biases, or norm gains.
+
+        :param str name: Fully qualified parameter name.
+        :param torch.nn.Parameter param: Parameter to classify.
+        :param set[int] embedding_param_ids: IDs belonging to embedding weights.
+        :return bool: ``True`` when decoupled Adam weight decay should apply.
+        """
+        name_lower = name.lower()
+        return not (
+            param.ndim < 2
+            or name_lower.endswith(".bias")
+            or "norm" in name_lower
+            or id(param) in embedding_param_ids
+        )
+
     def _build_param_groups(self, model: torch.nn.Module) -> List[Dict]:
         """Build parameter groups for hybrid Muon+Adam optimization.
 
@@ -695,8 +720,10 @@ class MuonClipOptimizer(Optimizer):
         """
         muon_params: List[torch.nn.Parameter] = []
         muon_param_info: List[Dict[str, Any]] = []
-        adam_params: List[torch.nn.Parameter] = []
-        adam_param_info: List[Dict[str, Any]] = []
+        adam_decay_params: List[torch.nn.Parameter] = []
+        adam_decay_param_info: List[Dict[str, Any]] = []
+        adam_no_decay_params: List[torch.nn.Parameter] = []
+        adam_no_decay_param_info: List[Dict[str, Any]] = []
 
         transformer_param_ids: set[int] = set()
         layer_idx_by_param_id: Dict[int, int] = {}
@@ -782,8 +809,16 @@ class MuonClipOptimizer(Optimizer):
                 muon_params.append(param)
                 muon_param_info.append(param_info)
             else:
-                adam_params.append(param)
-                adam_param_info.append(param_info)
+                if self._use_adam_weight_decay(
+                    name=name,
+                    param=param,
+                    embedding_param_ids=embedding_param_ids,
+                ):
+                    adam_decay_params.append(param)
+                    adam_decay_param_info.append(param_info)
+                else:
+                    adam_no_decay_params.append(param)
+                    adam_no_decay_param_info.append(param_info)
 
         groups = []
 
@@ -800,11 +835,11 @@ class MuonClipOptimizer(Optimizer):
             )
             logger.info(f"Muon group: {len(muon_params)} parameters")
 
-        if adam_params:
+        if adam_decay_params:
             groups.append(
                 {
-                    "params": adam_params,
-                    "param_info": adam_param_info,
+                    "params": adam_decay_params,
+                    "param_info": adam_decay_param_info,
                     "lr": self.config.lr,
                     "betas": self.config.adam_betas,
                     "eps": self.config.adam_eps,
@@ -812,7 +847,26 @@ class MuonClipOptimizer(Optimizer):
                     "use_muon": False,
                 }
             )
-            logger.info(f"Adam group: {len(adam_params)} parameters")
+            logger.info(
+                "Adam decay group: %s parameters",
+                len(adam_decay_params),
+            )
+        if adam_no_decay_params:
+            groups.append(
+                {
+                    "params": adam_no_decay_params,
+                    "param_info": adam_no_decay_param_info,
+                    "lr": self.config.lr,
+                    "betas": self.config.adam_betas,
+                    "eps": self.config.adam_eps,
+                    "weight_decay": 0.0,
+                    "use_muon": False,
+                }
+            )
+            logger.info(
+                "Adam no-decay group: %s parameters",
+                len(adam_no_decay_params),
+            )
 
         if not groups:
             raise ValueError("No trainable parameters found")
@@ -903,6 +957,7 @@ class MuonClipOptimizer(Optimizer):
         payload = dict(state_dict)
         muonclip_step = payload.pop("muonclip_step", None)
         super().load_state_dict(payload)
+        self._validate_loaded_muon_state_topology()
 
         if muonclip_step is not None:
             self._step = int(muonclip_step)
@@ -949,14 +1004,31 @@ class MuonClipOptimizer(Optimizer):
             )
 
             momentum_buffer = state["momentum_buffer"]
-            if self._is_dtensor(momentum_buffer):
+            # Parameter topology is the source of truth; loaded state must match it.
+            param_is_dtensor = self._is_dtensor(param)
+            buffer_is_dtensor = self._is_dtensor(momentum_buffer)
+            if param_is_dtensor:
+                if not buffer_is_dtensor:
+                    raise RuntimeError(
+                        "MuonClip found a local Tensor momentum buffer for DTensor "
+                        "parameter state during a sharded Muon update. Restore this "
+                        "optimizer via Accelerate/DCP state-dict helpers instead of "
+                        "a raw local-tensor load_state_dict path."
+                    )
                 self._disable_clipping_for_sharded_runtime()
                 update = self._orthogonalize_dtensor_update(
                     momentum_buffer=momentum_buffer,
                     param=param,
                     group_params=group["params"],
+                    group_param_info=group.get("param_info"),
                 )
             else:
+                if buffer_is_dtensor:
+                    raise RuntimeError(
+                        "MuonClip found a DTensor momentum buffer attached to a "
+                        "non-DTensor parameter. Optimizer state topology does not "
+                        "match the current model parameters."
+                    )
                 # Orthogonalize 2D gradients using Newton-Schulz/Polar Express.
                 # NOTE: this local path assumes full (non-sharded) parameter tensors.
                 update = self._orthogonalize_update(momentum_buffer)
@@ -1029,6 +1101,83 @@ class MuonClipOptimizer(Optimizer):
         """
         return DTensor is not None and isinstance(tensor, DTensor)
 
+    def _dtensor_mesh_signature(self, tensor: Any) -> Tuple[Any, ...]:
+        """Build a comparable device-mesh signature for a DTensor-like object.
+
+        :param Any tensor: DTensor-like value with ``device_mesh`` metadata.
+        :return tuple[Any, ...]: Mesh ndim plus flattened mesh contents when known.
+        """
+        mesh = getattr(tensor, "device_mesh", None)
+        mesh_ndim = getattr(mesh, "ndim", None)
+        mesh_layout: Tuple[int, ...] = ()
+        mesh_shape: Tuple[int, ...] = ()
+        mesh_tensor = getattr(mesh, "mesh", None)
+        if isinstance(mesh_tensor, torch.Tensor):
+            mesh_shape = tuple(int(dim) for dim in mesh_tensor.shape)
+            mesh_layout = tuple(int(rank) for rank in mesh_tensor.reshape(-1).tolist())
+        return (
+            int(mesh_ndim) if mesh_ndim is not None else None,
+            mesh_shape,
+            mesh_layout,
+        )
+
+    def _dtensor_placement_signature(self, tensor: Any) -> Tuple[Tuple[str, Any], ...]:
+        """Build a comparable placement signature for a DTensor-like object.
+
+        :param Any tensor: DTensor-like value with ``placements`` metadata.
+        :return tuple[tuple[str, Any], ...]: Placement type names and dimensions.
+        """
+        placements = tuple(getattr(tensor, "placements", ()))
+        return tuple(
+            (type(placement).__name__, getattr(placement, "dim", None))
+            for placement in placements
+        )
+
+    def _validate_loaded_muon_state_topology(self) -> None:
+        """Reject Muon state loads whose momentum-buffer topology mismatches params.
+
+        :raises RuntimeError: If sharded Muon params do not have matching DTensor
+            momentum buffers, or if loaded DTensor state targets local params.
+        """
+        for group in self.param_groups:
+            if not group.get("use_muon", False):
+                continue
+
+            for param, info in self._iter_group_params_with_info(group):
+                state = self.state.get(param, {})
+                momentum_buffer = state.get("momentum_buffer")
+                if momentum_buffer is None:
+                    continue
+
+                param_name = str(info.get("name", "<unknown>"))
+                param_is_dtensor = self._is_dtensor(param)
+                buffer_is_dtensor = self._is_dtensor(momentum_buffer)
+                if param_is_dtensor and not buffer_is_dtensor:
+                    raise RuntimeError(
+                        "MuonClip loaded a local Tensor momentum buffer for DTensor "
+                        f"parameter '{param_name}'. Restore sharded Muon state via "
+                        "Accelerate/DCP helpers so optimizer topology matches the "
+                        "prepared FSDP2 model."
+                    )
+                if buffer_is_dtensor and not param_is_dtensor:
+                    raise RuntimeError(
+                        "MuonClip loaded a DTensor momentum buffer for non-sharded "
+                        f"parameter '{param_name}'. Optimizer state topology does not "
+                        "match the current model."
+                    )
+                if not param_is_dtensor:
+                    continue
+
+                param_mesh = self._dtensor_mesh_signature(param)
+                buffer_mesh = self._dtensor_mesh_signature(momentum_buffer)
+                param_placements = self._dtensor_placement_signature(param)
+                buffer_placements = self._dtensor_placement_signature(momentum_buffer)
+                if param_mesh != buffer_mesh or param_placements != buffer_placements:
+                    raise RuntimeError(
+                        "MuonClip loaded DTensor momentum state with mesh/placement "
+                        f"metadata that does not match parameter '{param_name}'."
+                    )
+
     def _disable_clipping_for_sharded_runtime(self) -> None:
         """Disable QK clipping once when sharded Muon updates are detected."""
         if not self._runtime_clipping_enabled:
@@ -1066,6 +1215,7 @@ class MuonClipOptimizer(Optimizer):
         *,
         param: torch.nn.Parameter,
         group_params: Sequence[torch.nn.Parameter],
+        group_param_info: Optional[Sequence[Dict[str, Any]]] = None,
         world_size: int,
         process_group: dist.ProcessGroup,
     ) -> int:
@@ -1073,6 +1223,8 @@ class MuonClipOptimizer(Optimizer):
 
         :param torch.nn.Parameter param: Parameter to assign.
         :param Sequence[torch.nn.Parameter] group_params: Muon parameter group members.
+        :param Sequence[dict[str, Any]] | None group_param_info:
+            Static metadata aligned with ``group_params``.
         :param int world_size: Group-local world size.
         :param dist.ProcessGroup process_group: Process group backing the shard mesh.
         :return int: Owner rank in the process group.
@@ -1082,7 +1234,34 @@ class MuonClipOptimizer(Optimizer):
         if owners is None or id(param) not in owners:
             owners = {}
             loads = [0] * world_size
-            ordered = sorted(group_params, key=lambda p: int(p.numel()), reverse=True)
+            if group_param_info is not None:
+                if len(group_params) != len(group_param_info):
+                    raise RuntimeError(
+                        "MuonClip owner assignment expected param_info to stay "
+                        "aligned with params, but their lengths differ."
+                    )
+                ordered = [
+                    group_param
+                    for _, _, group_param in sorted(
+                        (
+                            (
+                                int(group_param.numel()),
+                                str(info.get("name", "")),
+                                group_param,
+                            )
+                            for group_param, info in zip(
+                                group_params,
+                                group_param_info,
+                                strict=True,
+                            )
+                        ),
+                        key=lambda item: (-item[0], item[1]),
+                    )
+                ]
+            else:
+                ordered = sorted(
+                    group_params, key=lambda p: int(p.numel()), reverse=True
+                )
             for group_param in ordered:
                 owner = min(
                     range(world_size),
@@ -1146,12 +1325,15 @@ class MuonClipOptimizer(Optimizer):
         momentum_buffer: Any,
         param: torch.nn.Parameter,
         group_params: Sequence[torch.nn.Parameter],
+        group_param_info: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> Any:
         """Orthogonalize a row-sharded DTensor via owner-compute gather/scatter.
 
         :param Any momentum_buffer: DTensor momentum buffer (Shard(0)).
         :param torch.nn.Parameter param: Parameter being updated.
         :param Sequence[torch.nn.Parameter] group_params: Muon parameter group members.
+        :param Sequence[dict[str, Any]] | None group_param_info:
+            Static metadata aligned with ``group_params``.
         :return Any: DTensor update with the original placement metadata.
         """
         if DTensor is None or Shard is None:
@@ -1192,6 +1374,7 @@ class MuonClipOptimizer(Optimizer):
         owner_rank = self._resolve_owner_rank(
             param=param,
             group_params=group_params,
+            group_param_info=group_param_info,
             world_size=world_size,
             process_group=process_group,
         )

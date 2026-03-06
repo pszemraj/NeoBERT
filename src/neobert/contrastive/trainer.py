@@ -640,8 +640,22 @@ def trainer(cfg: Config) -> None:
                     f"resume_from_checkpoint path not found: {resume_checkpoint_path}"
                 )
             accelerator.load_state(str(resume_checkpoint))
+            validate_muon_runtime_topology(
+                accelerator=accelerator,
+                optimizer=optimizer,
+                optimizer_name=cfg.optimizer.name,
+                log=logger,
+                context="contrastive resume",
+            )
         elif checkpoint_dir.exists() and any(checkpoint_dir.iterdir()):
             accelerator.load_state()
+            validate_muon_runtime_topology(
+                accelerator=accelerator,
+                optimizer=optimizer,
+                optimizer_name=cfg.optimizer.name,
+                log=logger,
+                context="contrastive resume",
+            )
         else:
             logger.warning(
                 "resume_from_checkpoint is set but no checkpoints were found in "

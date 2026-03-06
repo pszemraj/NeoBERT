@@ -624,6 +624,28 @@ def test_validate_muon_runtime_topology_accepts_row_shard_layout() -> None:
     )
 
 
+def test_validate_muon_runtime_topology_rejects_missing_dtensor_params() -> None:
+    """Prepared multi-rank MuonClip runs must not continue without DTensor params."""
+    accelerator = SimpleNamespace(
+        distributed_type=DistributedType.FSDP,
+        num_processes=2,
+    )
+    optimizer = SimpleNamespace(
+        param_groups=[
+            {"use_muon": True, "params": [torch.nn.Parameter(torch.zeros(1, 1))]}
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="expected DTensor Muon parameters"):
+        validate_muon_runtime_topology(
+            accelerator=accelerator,
+            optimizer=optimizer,
+            optimizer_name="muonclip",
+            log=logging.getLogger("test"),
+            context="unit-test",
+        )
+
+
 def test_get_optimizer_disables_muonclip_clipping_under_fsdp(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
