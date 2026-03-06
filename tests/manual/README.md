@@ -13,7 +13,8 @@ conda run -s --name neobert torchrun --standalone --nproc_per_node=2 tests/manua
 
 ## Notes
 
-- `test_muonclip_fsdp2_golden.py` requires CUDA and 2 ranks.
+- `test_muonclip_fsdp2_golden.py` requires CUDA and 2 ranks; it validates same-batch
+  full-step parity plus same-world-size optimizer resume for the FSDP2 Muon path.
 - `test_muonclip_training.py` can run for multiple minutes and may download datasets.
 - These scripts are for exploratory/perf validation, not fast CI regression checks.
 - `tests/manual/` is excluded from default `pytest -q` discovery.

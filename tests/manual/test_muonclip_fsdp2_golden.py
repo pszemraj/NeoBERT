@@ -1,5 +1,13 @@
 """Manual golden test for MuonClip FSDP2 owner-compute correctness.
 
+This script uses a real forward/backward/step with the same batch on:
+
+- a rank-0 local baseline model, and
+- a 2-rank FSDP2-sharded model.
+
+It compares all trainable parameters after one optimizer step, then verifies
+same-world-size optimizer resume equivalence on the next step.
+
 Run on a CUDA machine with 2 ranks:
 `torchrun --standalone --nproc_per_node=2 tests/manual/test_muonclip_fsdp2_golden.py`
 """
@@ -51,23 +59,6 @@ def _row_counts(dtensor: DTensor) -> list[int]:
     return [int(x.item()) for x in gathered]
 
 
-def _set_dtensor_grad_from_full(param: DTensor, full_grad: torch.Tensor) -> None:
-    local = param.to_local()
-    group = param.device_mesh.get_group()
-    rank = dist.get_rank(group)
-    counts = _row_counts(param)
-    start = sum(counts[:rank])
-    end = start + int(local.shape[0])
-    local_grad = full_grad[start:end].to(device=local.device, dtype=local.dtype)
-    param.grad = DTensor.from_local(
-        local_grad.contiguous(),
-        device_mesh=param.device_mesh,
-        placements=param.placements,
-        run_check=False,
-        shape=param.shape,
-    )
-
-
 def _set_dtensor_param_from_full(param: DTensor, full_value: torch.Tensor) -> None:
     local = param.to_local()
     group = param.device_mesh.get_group()
@@ -97,6 +88,72 @@ def _target_param(model: NeoBERT) -> torch.nn.Parameter | DTensor:
     return model.transformer_encoder[0].qkv.weight
 
 
+def _sample_input_ids(
+    *,
+    batch_size: int,
+    seq_len: int,
+    vocab_size: int,
+    device: torch.device,
+) -> torch.Tensor:
+    input_ids = torch.empty((batch_size, seq_len), device=device, dtype=torch.long)
+    if dist.get_rank() == 0:
+        input_ids.random_(0, vocab_size)
+    dist.broadcast(input_ids, src=0)
+    return input_ids
+
+
+def _run_step(
+    model: NeoBERT,
+    optimizer: MuonClipOptimizer,
+    input_ids: torch.Tensor,
+) -> float:
+    optimizer.zero_grad(set_to_none=True)
+    output = model(input_ids)
+    loss = output.sum()
+    loss.backward()
+    optimizer.step()
+    return float(loss.detach().item())
+
+
+def _full_parameter_state(model: NeoBERT) -> dict[str, torch.Tensor]:
+    state: dict[str, torch.Tensor] = {}
+    for name, param in model.named_parameters():
+        if isinstance(param, DTensor):
+            tensor = param.full_tensor().detach().cpu()
+        else:
+            tensor = param.detach().cpu()
+        state[name] = tensor.clone()
+    return state
+
+
+def _load_parameter_state(
+    model: NeoBERT,
+    state: dict[str, torch.Tensor],
+) -> None:
+    for name, param in model.named_parameters():
+        full_value = state[name]
+        if isinstance(param, DTensor):
+            _set_dtensor_param_from_full(param, full_value)
+        else:
+            with torch.no_grad():
+                param.copy_(full_value.to(device=param.device, dtype=param.dtype))
+
+
+def _max_state_diff(
+    reference: dict[str, torch.Tensor],
+    candidate: dict[str, torch.Tensor],
+) -> tuple[float, str]:
+    max_diff = 0.0
+    max_name = ""
+    for name, ref_tensor in reference.items():
+        candidate_tensor = candidate[name]
+        diff = float((candidate_tensor - ref_tensor).abs().max().item())
+        if diff > max_diff:
+            max_diff = diff
+            max_name = name
+    return max_diff, max_name
+
+
 def main() -> None:
     rank = _get_rank()
     if not torch.cuda.is_available():
@@ -115,10 +172,10 @@ def main() -> None:
         torch.manual_seed(7)
         torch.cuda.manual_seed_all(7)
         config = NeoBERTConfig(
-            hidden_size=32,
+            hidden_size=15,
             num_hidden_layers=2,
-            num_attention_heads=4,
-            intermediate_size=64,
+            num_attention_heads=3,
+            intermediate_size=60,
             vocab_size=257,
             max_length=64,
             attn_backend="sdpa",
@@ -147,11 +204,9 @@ def main() -> None:
             baseline_model = NeoBERT(config).to(device)
             baseline_model.load_state_dict(init_state)
             baseline_optimizer = MuonClipOptimizer(baseline_model, config, muon_cfg)
-            baseline_target = _target_param(baseline_model)
         else:
             baseline_model = None
             baseline_optimizer = None
-            baseline_target = None
 
         # Distributed FSDP2 model and optimizer.
         dist_model = _build_sharded_model(config, device, init_state)
@@ -159,36 +214,48 @@ def main() -> None:
         dist_target = _target_param(dist_model)
         if not isinstance(dist_target, DTensor):
             raise RuntimeError("Expected DTensor parameter under FSDP2 sharding.")
+        if int(dist_target.shape[0]) % world_size == 0:
+            raise RuntimeError(
+                "Golden test expected uneven row sharding for qkv.weight, but "
+                f"shape={tuple(dist_target.shape)} divides evenly across world_size={world_size}."
+            )
 
-        # Step 1: baseline-vs-distributed equivalence.
-        full_grad_1 = torch.empty(tuple(dist_target.shape), device=device)
-        if rank == 0:
-            full_grad_1.normal_()
-        dist.broadcast(full_grad_1, src=0)
+        # Step 1: same-batch local baseline vs distributed FSDP2 equivalence.
+        input_ids_1 = _sample_input_ids(
+            batch_size=3,
+            seq_len=11,
+            vocab_size=config.vocab_size,
+            device=device,
+        )
+        dist_loss_1 = _run_step(dist_model, dist_optimizer, input_ids_1)
+        dist_step1_state = _full_parameter_state(dist_model)
 
-        dist_optimizer.zero_grad(set_to_none=True)
-        _set_dtensor_grad_from_full(dist_target, full_grad_1)
-        dist_optimizer.step()
-        dist_step1_full = dist_target.full_tensor().detach().clone()
-
-        baseline_step1_full = torch.empty_like(dist_step1_full)
+        baseline_step1_state: dict[str, torch.Tensor] | None = None
+        baseline_loss_1 = None
         if rank == 0:
             assert baseline_optimizer is not None
-            assert baseline_target is not None
-            baseline_optimizer.zero_grad(set_to_none=True)
-            baseline_target.grad = full_grad_1.clone()
-            baseline_optimizer.step()
-            baseline_step1_full.copy_(baseline_target.detach())
-        dist.broadcast(baseline_step1_full, src=0)
+            assert baseline_model is not None
+            baseline_loss_1 = _run_step(baseline_model, baseline_optimizer, input_ids_1)
+            baseline_step1_state = _full_parameter_state(baseline_model)
 
-        step1_diff = (dist_step1_full - baseline_step1_full).abs().max()
-        step1_diff_global = step1_diff.clone()
-        dist.all_reduce(step1_diff_global, op=dist.ReduceOp.MAX)
-        if float(step1_diff_global.item()) > 5e-5:
-            raise AssertionError(
-                "FSDP2 Muon step mismatch vs local baseline: "
-                f"max_diff={float(step1_diff_global.item()):.6e}"
+        if rank == 0:
+            assert baseline_step1_state is not None
+            assert baseline_loss_1 is not None
+            if abs(dist_loss_1 - baseline_loss_1) > 1e-6:
+                raise AssertionError(
+                    "FSDP2 Muon forward loss mismatch vs local baseline: "
+                    f"dist_loss={dist_loss_1:.6e} baseline_loss={baseline_loss_1:.6e}"
+                )
+
+            step1_max_diff, step1_name = _max_state_diff(
+                baseline_step1_state, dist_step1_state
             )
+            if step1_max_diff > 5e-5:
+                raise AssertionError(
+                    "FSDP2 Muon step mismatch vs local baseline: "
+                    f"param={step1_name} max_diff={step1_max_diff:.6e}"
+                )
+        dist.barrier()
 
         # Checkpoint/save-load path for same-world-size resume.
         root_obj: list[str | None] = [None]
@@ -208,38 +275,33 @@ def main() -> None:
         loaded_optim_state = torch.load(ckpt_path, map_location=device)
 
         # Continuation path A: no reload.
-        full_grad_2 = torch.empty(tuple(dist_target.shape), device=device)
-        if rank == 0:
-            full_grad_2.normal_()
-        dist.broadcast(full_grad_2, src=0)
-
-        dist_optimizer.zero_grad(set_to_none=True)
-        _set_dtensor_grad_from_full(dist_target, full_grad_2)
-        dist_optimizer.step()
-        final_no_reload = dist_target.full_tensor().detach().clone()
+        input_ids_2 = _sample_input_ids(
+            batch_size=2,
+            seq_len=9,
+            vocab_size=config.vocab_size,
+            device=device,
+        )
+        _ = _run_step(dist_model, dist_optimizer, input_ids_2)
+        final_no_reload = _full_parameter_state(dist_model)
 
         # Continuation path B: reload model+optimizer at step-1 state.
         resume_model = _build_sharded_model(config, device, init_state)
-        resume_target = _target_param(resume_model)
-        if not isinstance(resume_target, DTensor):
-            raise RuntimeError("Expected DTensor parameter under FSDP2 sharding.")
-        _set_dtensor_param_from_full(resume_target, dist_step1_full)
-
         resume_optimizer = MuonClipOptimizer(resume_model, config, muon_cfg)
+        _load_parameter_state(resume_model, dist_step1_state)
         resume_optimizer.load_state_dict(loaded_optim_state)
-        resume_optimizer.zero_grad(set_to_none=True)
-        _set_dtensor_grad_from_full(resume_target, full_grad_2)
-        resume_optimizer.step()
-        final_reloaded = resume_target.full_tensor().detach().clone()
+        _ = _run_step(resume_model, resume_optimizer, input_ids_2)
+        final_reloaded = _full_parameter_state(resume_model)
 
-        resume_diff = (final_no_reload - final_reloaded).abs().max()
-        resume_diff_global = resume_diff.clone()
-        dist.all_reduce(resume_diff_global, op=dist.ReduceOp.MAX)
-        if float(resume_diff_global.item()) > 5e-5:
-            raise AssertionError(
-                "FSDP2 Muon resume mismatch after optimizer load_state_dict: "
-                f"max_diff={float(resume_diff_global.item()):.6e}"
+        if rank == 0:
+            resume_max_diff, resume_name = _max_state_diff(
+                final_no_reload, final_reloaded
             )
+            if resume_max_diff > 5e-5:
+                raise AssertionError(
+                    "FSDP2 Muon resume mismatch after optimizer load_state_dict: "
+                    f"param={resume_name} max_diff={resume_max_diff:.6e}"
+                )
+        dist.barrier()
 
         if rank == 0:
             print("PASS: FSDP2 Muon golden step and resume checks succeeded.")

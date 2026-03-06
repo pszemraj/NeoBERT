@@ -6,6 +6,10 @@ Run: pytest tests/test_muonclip_unit.py -v
 
 import pytest
 import torch
+from torch.distributed.checkpoint.state_dict import (
+    get_optimizer_state_dict,
+    set_optimizer_state_dict,
+)
 
 from neobert.model import NeoBERT, NeoBERTConfig, NeoBERTLMHead
 from neobert.optimizer import MuonClipConfig, MuonClipOptimizer
@@ -621,6 +625,61 @@ class TestMuonClipOptimizer:
         optimizer_clone.load_state_dict(state)
 
         assert optimizer_clone._step == optimizer._step
+
+    def test_distributed_checkpoint_api_restores_step_and_next_update(self, model):
+        """Distributed checkpoint APIs should preserve Muon step semantics."""
+        model_instance, config = model
+        muon_config = MuonClipConfig(enable_clipping=False)
+        optimizer = MuonClipOptimizer(model_instance, config, muon_config)
+
+        for _ in range(3):
+            input_ids = torch.randint(0, 1000, (2, 64))
+            output = model_instance(input_ids)
+            loss = output.sum()
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+
+        model_clone = NeoBERT(config)
+        model_clone.load_state_dict(model_instance.state_dict())
+        optimizer_clone = MuonClipOptimizer(model_clone, config, muon_config)
+
+        optim_state = get_optimizer_state_dict(model_instance, optimizer)
+        assert "muonclip_step" not in optim_state
+
+        set_optimizer_state_dict(model_clone, optimizer_clone, optim_state)
+        assert optimizer_clone._step == optimizer._step
+
+        input_ids = torch.randint(0, 1000, (2, 64))
+        output = model_instance(input_ids)
+        loss = output.sum()
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+        clone_output = model_clone(input_ids)
+        clone_loss = clone_output.sum()
+        clone_loss.backward()
+        optimizer_clone.step()
+        optimizer_clone.zero_grad()
+
+        max_diff = 0.0
+        max_name = ""
+        for (name, param), (clone_name, clone_param) in zip(
+            model_instance.named_parameters(),
+            model_clone.named_parameters(),
+            strict=True,
+        ):
+            assert clone_name == name
+            diff = float((param - clone_param).abs().max().item())
+            if diff > max_diff:
+                max_diff = diff
+                max_name = name
+
+        assert max_diff <= 5e-5, (
+            "Distributed checkpoint optimizer restore drifted on the next update: "
+            f"param={max_name} max_diff={max_diff:.6e}"
+        )
 
     def test_state_dict_param_info_avoids_live_parameter_objects(self, model):
         """Optimizer checkpoint metadata must not embed live Parameter objects."""
