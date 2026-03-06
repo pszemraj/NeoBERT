@@ -63,6 +63,13 @@ Actions:
    `TORCH_BLAS_PREFER_CUBLASLT=1` in that shell or job launcher,
 4. reinstall or rebuild flash-attn wheels after CUDA/PyTorch changes.
 
+> [!TIP]
+> If a specific machine/session reproducibly fails bf16 GEMM with default
+> cuBLAS but succeeds with cuBLASLt, prefer a session- or launcher-local export
+> instead of changing global shell defaults:
+>
+> `export TORCH_BLAS_PREFER_CUBLASLT=1`
+
 ### `torch.compile` warnings/recompiles
 
 Typical warnings:
