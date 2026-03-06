@@ -5,9 +5,12 @@ Run: pytest tests/test_muonclip_unit.py -v
 """
 
 import copy
+import warnings
+from pathlib import Path
 
 import pytest
 import torch
+import torch.distributed.checkpoint as dist_cp
 from torch.distributed.checkpoint.state_dict import (
     get_optimizer_state_dict,
     set_optimizer_state_dict,
@@ -732,6 +735,95 @@ class TestMuonClipOptimizer:
         assert max_diff <= 5e-5, (
             "Distributed checkpoint optimizer restore drifted on the next update: "
             f"param={max_name} max_diff={max_diff:.6e}"
+        )
+
+    def test_distributed_checkpoint_filesystem_roundtrip_restores_muon_state(
+        self,
+        model,
+        tmp_path: Path,
+    ):
+        """Filesystem DCP round-trips should use the FQN optimizer schema."""
+        model_instance, config = model
+        muon_config = MuonClipConfig(enable_clipping=False)
+        optimizer = MuonClipOptimizer(model_instance, config, muon_config)
+
+        for _ in range(3):
+            input_ids = torch.randint(0, 1000, (2, 64))
+            output = model_instance(input_ids)
+            loss = output.sum()
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+
+        model_clone = NeoBERT(config)
+        model_clone.load_state_dict(model_instance.state_dict())
+        optimizer_clone = MuonClipOptimizer(model_clone, config, muon_config)
+
+        checkpoint_dir = tmp_path / "optimizer_dcp"
+        loaded_optim_state = {
+            "optimizer": get_optimizer_state_dict(model_clone, optimizer_clone)
+        }
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=(
+                    "torch.distributed is disabled, unavailable or uninitialized, "
+                    "assuming the intent is to save in a single process."
+                ),
+            )
+            warnings.filterwarnings(
+                "ignore",
+                message=(
+                    "torch.distributed is disabled, unavailable or uninitialized, "
+                    "assuming the intent is to load in a single process."
+                ),
+            )
+            dist_cp.save(
+                state_dict={
+                    "optimizer": get_optimizer_state_dict(model_instance, optimizer)
+                },
+                storage_writer=dist_cp.FileSystemWriter(str(checkpoint_dir)),
+            )
+            dist_cp.load(
+                loaded_optim_state,
+                checkpoint_id=str(checkpoint_dir),
+                storage_reader=dist_cp.FileSystemReader(str(checkpoint_dir)),
+            )
+        set_optimizer_state_dict(
+            model_clone,
+            optimizer_clone,
+            loaded_optim_state["optimizer"],
+        )
+        assert optimizer_clone._step == optimizer._step
+
+        input_ids = torch.randint(0, 1000, (2, 64))
+        output = model_instance(input_ids)
+        loss = output.sum()
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+        clone_output = model_clone(input_ids)
+        clone_loss = clone_output.sum()
+        clone_loss.backward()
+        optimizer_clone.step()
+        optimizer_clone.zero_grad()
+
+        max_diff = 0.0
+        max_name = ""
+        for (name, param), (clone_name, clone_param) in zip(
+            model_instance.named_parameters(),
+            model_clone.named_parameters(),
+            strict=True,
+        ):
+            assert clone_name == name
+            diff = float((param - clone_param).abs().max().item())
+            if diff > max_diff:
+                max_diff = diff
+                max_name = name
+
+        assert max_diff < 1e-6, (
+            f"Next Muon step diverged after DCP reload at {max_name}"
         )
 
     def test_load_state_dict_restores_missing_group_metadata(self, model):

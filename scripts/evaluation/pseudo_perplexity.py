@@ -21,7 +21,6 @@ from neobert.checkpointing import (
     MODEL_WEIGHTS_NAME,
     load_deepspeed_fp32_state_dict,
     load_model_safetensors,
-    resolve_deepspeed_checkpoint_root_and_tag,
 )
 from neobert.model import NeoBERTConfig, NeoBERTLMHead
 
@@ -115,21 +114,24 @@ def _load_neobert_checkpoint_weights(
     if weights_path.is_file():
         state_dict = load_model_safetensors(checkpoint_dir, map_location="cpu")
     else:
-        if checkpoint_dir == checkpoint_root:
-            try:
-                resolve_deepspeed_checkpoint_root_and_tag(checkpoint_dir)
-            except (FileNotFoundError, ValueError):
-                state_dict = load_deepspeed_fp32_state_dict(
-                    checkpoint_root,
-                    tag=str(checkpoint),
-                )
-            else:
-                state_dict = load_deepspeed_fp32_state_dict(checkpoint_dir)
-        else:
+        requested_tag = str(checkpoint).strip()
+        try:
             state_dict = load_deepspeed_fp32_state_dict(
                 checkpoint_root,
-                tag=str(checkpoint),
+                tag=requested_tag,
             )
+        except (FileNotFoundError, ValueError):
+            checkpoint_root = checkpoint_root.resolve()
+            # Only fall back to direct-path resolution when the caller already
+            # pointed at the requested step/tag directory. Otherwise re-raise so
+            # an explicit missing checkpoint cannot silently load ``latest``.
+            if (
+                checkpoint_root.name == requested_tag
+                or checkpoint_root.parent.name == requested_tag
+            ):
+                state_dict = load_deepspeed_fp32_state_dict(checkpoint_root)
+            else:
+                raise
     model.load_state_dict(state_dict)
     return model
 

@@ -101,24 +101,63 @@ def test_load_neobert_checkpoint_weights_falls_back_to_legacy_conversion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Legacy conversion should be called lazily when safetensors is absent."""
+    """Direct step directories should still load through the legacy fallback."""
     module = _load_pseudo_perplexity_module()
+    checkpoint_dir = tmp_path / "456"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
     model = _ModelStub()
     expected = {"weight": torch.zeros(2, 2)}
     seen: list[tuple[Path, str]] = []
 
     def _fake_load_deepspeed(path: Path, *, tag: str | None = None):
-        seen.append((Path(path), "" if tag is None else str(tag)))
+        normalized_path = Path(path).resolve()
+        normalized_tag = "" if tag is None else str(tag)
+        seen.append((normalized_path, normalized_tag))
+        if normalized_tag == "456":
+            raise FileNotFoundError(
+                "explicit root/tag lookup should miss direct step dirs"
+            )
         return expected
 
     monkeypatch.setattr(module, "load_deepspeed_fp32_state_dict", _fake_load_deepspeed)
 
     out = module._load_neobert_checkpoint_weights(
         model,
-        checkpoint_path=tmp_path,
+        checkpoint_path=checkpoint_dir,
         checkpoint="456",
     )
 
     assert out is model
     assert model.loaded_state_dict == expected
-    assert seen == [(tmp_path, "456")]
+    assert seen == [(checkpoint_dir.resolve(), "456"), (checkpoint_dir.resolve(), "")]
+
+
+def test_load_neobert_checkpoint_weights_does_not_ignore_explicit_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing explicit checkpoint tags must not silently fall back to latest."""
+    module = _load_pseudo_perplexity_module()
+    model = _ModelStub()
+    seen: list[tuple[Path, str]] = []
+
+    def _fake_load_deepspeed(path: Path, *, tag: str | None = None):
+        normalized_path = Path(path).resolve()
+        normalized_tag = "" if tag is None else str(tag)
+        seen.append((normalized_path, normalized_tag))
+        if tag is None:
+            raise AssertionError(
+                "direct-path fallback should not run for a missing tag"
+            )
+        raise FileNotFoundError("requested checkpoint missing")
+
+    monkeypatch.setattr(module, "load_deepspeed_fp32_state_dict", _fake_load_deepspeed)
+
+    with pytest.raises(FileNotFoundError, match="requested checkpoint missing"):
+        module._load_neobert_checkpoint_weights(
+            model,
+            checkpoint_path=tmp_path,
+            checkpoint="1000",
+        )
+
+    assert seen == [(tmp_path.resolve(), "1000")]

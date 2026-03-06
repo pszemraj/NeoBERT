@@ -303,7 +303,11 @@ def main() -> None:
         resume_model = _build_sharded_model(config, device, init_state)
         resume_optimizer = MuonClipOptimizer(resume_model, config, muon_cfg)
         _load_parameter_state(resume_model, dist_step1_state)
-        loaded_optim_state = {"optimizer": resume_optimizer.state_dict()}
+        loaded_optim_state = {
+            # DCP save/load must use the same FQN-keyed optimizer schema on both
+            # sides of the checkpoint round-trip.
+            "optimizer": get_optimizer_state_dict(resume_model, resume_optimizer)
+        }
         dist_cp.load(
             loaded_optim_state,
             checkpoint_id=str(ckpt_path),
