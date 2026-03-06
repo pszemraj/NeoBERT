@@ -338,8 +338,9 @@ def validate_muon_distributed_compatibility(
 ) -> None:
     """Validate MuonClip compatibility for the active distributed runtime.
 
-    MuonClip supports FSDP2 owner-compute orthogonalization for single-node
-    sharded training. FSDP v1 and DeepSpeed ZeRO-2/3 remain unsupported.
+    MuonClip supports distributed execution only through the FSDP2
+    owner-compute path used in this repo. FSDP v1 and all DeepSpeed runtimes
+    remain unsupported.
 
     :param Accelerator accelerator: Active Accelerator runtime.
     :param str optimizer_name: Configured optimizer name.
@@ -392,17 +393,14 @@ def validate_muon_distributed_compatibility(
         getattr(accelerator, "state", None), "deepspeed_plugin", None
     )
     zero_stage = getattr(deepspeed_plugin, "zero_stage", None)
-    if zero_stage is None:
-        log.warning(
-            "MuonClip enabled with DeepSpeed in "
-            f"{context}, but ZeRO stage is unknown. Ensure ZeRO stage < 2."
-        )
-        return
-    if int(zero_stage) >= 2:
-        raise RuntimeError(
-            "MuonClip is not compatible with DeepSpeed ZeRO stage >= 2 in "
-            f"{context} (sharded grads/params). Use ZeRO stage 0/1 or disable MuonClip."
-        )
+    zero_suffix = ""
+    if zero_stage is not None:
+        zero_suffix = f" (ZeRO stage {int(zero_stage)})"
+    raise RuntimeError(
+        "MuonClip distributed mode is FSDP2-only in "
+        f"{context}; DeepSpeed{zero_suffix} is not supported. "
+        "Use Accelerate FSDP v2 or switch optimizers."
+    )
 
 
 def validate_muon_runtime_topology(

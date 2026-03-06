@@ -104,6 +104,11 @@ def get_optimizer(
                     "MuonClip requires model_config to be passed. "
                     "Update get_optimizer() call in trainer to include model_config argument."
                 )
+            if distributed_type is DistributedType.DEEPSPEED:
+                raise RuntimeError(
+                    "MuonClip distributed mode is FSDP2-only in this repo; "
+                    "DeepSpeed is not supported."
+                )
 
             # Build MuonClipConfig from kwargs
             lr = kwargs.pop("lr", 1e-4)

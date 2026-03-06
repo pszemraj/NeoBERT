@@ -533,6 +533,28 @@ def test_validate_muon_distributed_compatibility_rejects_unknown_fsdp() -> None:
         )
 
 
+@pytest.mark.parametrize("zero_stage", [None, 0, 1, 2, 3])
+def test_validate_muon_distributed_compatibility_rejects_deepspeed(
+    zero_stage: int | None,
+) -> None:
+    """MuonClip should reject all DeepSpeed runtimes, not just ZeRO-2/3."""
+    accelerator = SimpleNamespace(
+        distributed_type=DistributedType.DEEPSPEED,
+        state=SimpleNamespace(
+            deepspeed_plugin=SimpleNamespace(zero_stage=zero_stage),
+        ),
+    )
+
+    match = "FSDP2-only" if zero_stage is None else f"ZeRO stage {zero_stage}"
+    with pytest.raises(RuntimeError, match=match):
+        validate_muon_distributed_compatibility(
+            accelerator=accelerator,
+            optimizer_name="muonclip",
+            log=logging.getLogger("test"),
+            context="unit-test",
+        )
+
+
 def test_validate_muon_runtime_topology_rejects_multidim_mesh() -> None:
     """Prepared MuonClip DTensor params must reject unsupported mesh rank."""
 
@@ -640,3 +662,32 @@ def test_get_optimizer_disables_muonclip_clipping_under_fsdp(
     assert hasattr(optimizer, "config")
     assert not optimizer.config.enable_clipping
     assert "Auto-disabling clipping" in caplog.text
+
+
+def test_get_optimizer_rejects_muonclip_under_deepspeed() -> None:
+    """Optimizer factory should fail fast on unsupported DeepSpeed MuonClip."""
+    model_cfg = NeoBERTConfig(
+        hidden_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        intermediate_size=64,
+        vocab_size=128,
+        max_length=32,
+        attn_backend="sdpa",
+        hidden_act="gelu",
+        rope=False,
+    )
+    model = NeoBERT(model_cfg)
+
+    with pytest.raises(RuntimeError, match="FSDP2-only"):
+        get_optimizer(
+            model,
+            DistributedType.DEEPSPEED,
+            model_config=model_cfg,
+            name="muonclip",
+            lr=1e-4,
+            weight_decay=0.0,
+            betas=(0.9, 0.95),
+            eps=1e-8,
+            muon_config={"enable_clipping": False},
+        )

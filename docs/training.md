@@ -57,6 +57,8 @@ accelerate launch \
 
 MuonClip's FSDP2 path currently supports only a 1D row-sharded device mesh.
 Do not combine it with tensor/context parallelism or other multi-axis DTensor meshes.
+Distributed MuonClip is FSDP2-only in this repo; do not launch MuonClip runs with
+DeepSpeed.
 
 Explicit no-clipping variant:
 
