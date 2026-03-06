@@ -214,6 +214,14 @@ Priority order for next performance PR:
   disabling the actual runtime behavior, add a dedicated post-prepare/runtime
   toggle instead of just removing the factory-side disable.
 
+1. Pipeline Muon owner-compute collectives across parameters
+
+- Current FSDP2 Muon owner-compute logic gathers, orthogonalizes, and scatters
+  one parameter at a time.
+- Before treating that path as multi-node ready, batch or pipeline those
+  collectives so larger models do not serialize one blocking gather/scatter pair
+  per 2D Muon matrix update.
+
 ### Contrastive Sweep TODOs
 
 These are explicitly tracked for sweep-readiness follow-up work:

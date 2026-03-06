@@ -33,6 +33,10 @@ from torch.distributed.tensor import DTensor
 from neobert.model import NeoBERT, NeoBERTConfig
 from neobert.optimizer import MuonClipConfig, MuonClipOptimizer
 
+_GOLDEN_MAX_DIFF = 5e-5
+# Polar Express intentionally runs orthogonalization in a fast CUDA work dtype
+# (typically bf16), so allow small end-to-end drift in the manual parity check.
+
 
 def _get_rank() -> int:
     return int(os.environ.get("RANK", "0"))
@@ -256,7 +260,7 @@ def main() -> None:
             step1_max_diff, step1_name = _max_state_diff(
                 baseline_step1_state, dist_step1_state
             )
-            if step1_max_diff > 5e-5:
+            if step1_max_diff > _GOLDEN_MAX_DIFF:
                 raise AssertionError(
                     "FSDP2 Muon step mismatch vs local baseline: "
                     f"param={step1_name} max_diff={step1_max_diff:.6e}"
@@ -317,7 +321,7 @@ def main() -> None:
             resume_max_diff, resume_name = _max_state_diff(
                 final_no_reload, final_reloaded
             )
-            if resume_max_diff > 5e-5:
+            if resume_max_diff > _GOLDEN_MAX_DIFF:
                 raise AssertionError(
                     "FSDP2 Muon resume mismatch after DCP optimizer restore: "
                     f"param={resume_name} max_diff={resume_max_diff:.6e}"

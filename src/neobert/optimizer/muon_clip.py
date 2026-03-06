@@ -960,6 +960,8 @@ class MuonClipOptimizer(Optimizer):
 
         :param dict[str, Any] state_dict: Optimizer state dictionary.
         """
+        # Copy the outer mapping so MuonClip can strip its own metadata without
+        # mutating the caller's state_dict object.
         payload = dict(state_dict)
         muonclip_step = payload.pop("muonclip_step", None)
         saved_groups = payload.get("param_groups", None)
@@ -1012,6 +1014,11 @@ class MuonClipOptimizer(Optimizer):
 
         :param dict[str, Any] group: Parameter group metadata.
         """
+        if self._runtime_clipping_enabled and any(
+            self._is_dtensor(param) for param in group["params"]
+        ):
+            self._disable_clipping_for_sharded_runtime()
+
         for param in group["params"]:
             if param.grad is None:
                 continue
@@ -1050,7 +1057,6 @@ class MuonClipOptimizer(Optimizer):
                         "optimizer via Accelerate/DCP state-dict helpers instead of "
                         "a raw local-tensor load_state_dict path."
                     )
-                self._disable_clipping_for_sharded_runtime()
                 update = self._orthogonalize_dtensor_update(
                     momentum_buffer=momentum_buffer,
                     param=param,
@@ -1352,10 +1358,26 @@ class MuonClipOptimizer(Optimizer):
         )
         row_counts = self._dtensor_row_count_cache.get(key)
         local_rows = int(local_shard.shape[0])
-        if row_counts is not None and len(row_counts) == world_size:
-            if int(row_counts[rank]) == local_rows:
-                return row_counts
+        if row_counts is None or len(row_counts) != world_size:
+            total_rows = int(global_shape[0]) if len(global_shape) > 0 else 0
+            base_rows, remainder = divmod(total_rows, world_size)
+            row_counts = [
+                base_rows + (1 if rank_idx < remainder else 0)
+                for rank_idx in range(world_size)
+            ]
+            self._dtensor_row_count_cache[key] = row_counts
 
+        if int(row_counts[rank]) != local_rows:
+            raise RuntimeError(
+                "MuonClip DTensor path expected canonical Shard(0) row counts "
+                f"{row_counts}, but local rank {rank} owns {local_rows} rows."
+            )
+
+        if not self.config.detect_anomalies:
+            return row_counts
+
+        # Debug-only validation path: compare the analytical Shard(0) split
+        # against the runtime shards when anomaly detection is enabled.
         local_row_count = torch.tensor(
             [local_rows],
             device=local_shard.device,
@@ -1363,8 +1385,13 @@ class MuonClipOptimizer(Optimizer):
         )
         gathered_counts = [torch.zeros_like(local_row_count) for _ in range(world_size)]
         dist.all_gather(gathered_counts, local_row_count, group=process_group)
-        row_counts = [int(count.item()) for count in gathered_counts]
-        self._dtensor_row_count_cache[key] = row_counts
+        gathered_row_counts = [int(count.item()) for count in gathered_counts]
+        if gathered_row_counts != row_counts:
+            raise RuntimeError(
+                "MuonClip DTensor path expected analytical row counts "
+                f"{row_counts}, but observed runtime row counts "
+                f"{gathered_row_counts}."
+            )
         return row_counts
 
     def _orthogonalize_dtensor_update(
@@ -1441,6 +1468,7 @@ class MuonClipOptimizer(Optimizer):
             world_size=world_size,
             rank=rank,
         )
+        global_param_shape = torch.Size(momentum_buffer.shape)
         max_rows = max(row_counts)
         pad_rows = max_rows - local_rows
         if pad_rows > 0:
@@ -1454,6 +1482,9 @@ class MuonClipOptimizer(Optimizer):
             gather_list = [torch.empty_like(local_padded) for _ in range(world_size)]
         else:
             gather_list = None
+        # TODO(phase3): pipeline or batch these owner-compute collectives across
+        # Muon parameters so multi-node runs do not serialize one gather/scatter
+        # pair per matrix update.
         dist.gather(
             tensor=local_padded,
             gather_list=gather_list,
@@ -1478,7 +1509,9 @@ class MuonClipOptimizer(Optimizer):
                 full_matrix = local_padded.new_zeros((0, local_padded.shape[1]))
 
             update_full = self._orthogonalize_update(full_matrix)
-            update_full = self._normalize_muon_update(update_full, param.shape)
+            # Muon normalization is defined on the full matrix shape, not the
+            # current rank's local shard shape.
+            update_full = self._normalize_muon_update(update_full, global_param_shape)
 
             scatter_list = []
             row_start = 0
@@ -1584,6 +1617,11 @@ class MuonClipOptimizer(Optimizer):
 
     def _orthogonalize_update(self, grad: torch.Tensor) -> torch.Tensor:
         """Dispatch orthogonalization based on configuration.
+
+        ``orthogonalization`` affects both the iteration scheme and the compute
+        dtype on CUDA. ``polar_express`` prefers a fast CUDA work dtype
+        (typically bf16), while ``newton_schulz`` upcasts bf16 inputs to fp32
+        for the iteration before casting back to the original dtype.
 
         :param torch.Tensor grad: Gradient tensor.
         :return torch.Tensor: Orthogonalized update.

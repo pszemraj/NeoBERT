@@ -1029,6 +1029,161 @@ class TestMuonClipOptimizer:
                 group_params=[target],
             )
 
+    def test_dtensor_newton_schulz_owner_compute_uses_global_shape_without_gather(
+        self, model, monkeypatch: pytest.MonkeyPatch
+    ):
+        """NS DTensor path should use global shape and avoid row-count collectives."""
+        import neobert.optimizer.muon_clip as muon_clip_module
+
+        model_instance, config = model
+        optimizer = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(
+                enable_clipping=False,
+                orthogonalization="newton_schulz",
+                norm_factor="spectral",
+            ),
+        )
+        full_matrix = torch.tensor(
+            [[1.0, 2.0], [3.0, -4.0], [5.0, 6.0]],
+            dtype=torch.float32,
+        )
+        local_shard = full_matrix[:2].clone()
+        remote_shard = full_matrix[2:].clone()
+        process_group = object()
+
+        class _FakeShard:
+            def __init__(self, dim: int):
+                self.dim = dim
+
+        class _FakeMesh:
+            ndim = 1
+
+            def get_group(self):
+                return process_group
+
+        class _FakeDTensor:
+            def __init__(
+                self,
+                local: torch.Tensor,
+                *,
+                device_mesh: _FakeMesh,
+                placements: tuple[_FakeShard, ...],
+                shape: torch.Size,
+            ):
+                self._local = local
+                self.device_mesh = device_mesh
+                self.placements = placements
+                self.shape = torch.Size(shape)
+
+            def to_local(self) -> torch.Tensor:
+                return self._local
+
+            @staticmethod
+            def from_local(
+                local: torch.Tensor,
+                *,
+                device_mesh: _FakeMesh,
+                placements: tuple[_FakeShard, ...],
+                run_check: bool = False,
+                shape: torch.Size,
+            ) -> "_FakeDTensor":
+                assert not run_check
+                return _FakeDTensor(
+                    local,
+                    device_mesh=device_mesh,
+                    placements=placements,
+                    shape=shape,
+                )
+
+        class _FakeParam:
+            shape = torch.Size([2, 2])
+
+            @staticmethod
+            def numel() -> int:
+                return int(full_matrix.numel())
+
+        fake_mesh = _FakeMesh()
+        fake_placements = (_FakeShard(0),)
+        momentum_buffer = _FakeDTensor(
+            local_shard,
+            device_mesh=fake_mesh,
+            placements=fake_placements,
+            shape=full_matrix.shape,
+        )
+        fake_param = _FakeParam()
+        remote_padded = torch.cat(
+            (remote_shard, torch.zeros_like(local_shard[:1])),
+            dim=0,
+        )
+
+        monkeypatch.setattr(muon_clip_module, "DTensor", _FakeDTensor)
+        monkeypatch.setattr(muon_clip_module, "Shard", _FakeShard)
+        monkeypatch.setattr(muon_clip_module.dist, "is_available", lambda: True)
+        monkeypatch.setattr(muon_clip_module.dist, "is_initialized", lambda: True)
+        monkeypatch.setattr(
+            muon_clip_module.dist,
+            "get_process_group_ranks",
+            lambda _group: [0, 1],
+        )
+        monkeypatch.setattr(
+            muon_clip_module.dist,
+            "get_world_size",
+            lambda _group=None: 2,
+        )
+        monkeypatch.setattr(
+            muon_clip_module.dist,
+            "get_rank",
+            lambda _group=None: 0,
+        )
+
+        def _unexpected_all_gather(*args, **kwargs):
+            del args, kwargs
+            raise AssertionError("row-count all_gather should not run in normal mode")
+
+        def _fake_gather(
+            tensor: torch.Tensor,
+            gather_list: list[torch.Tensor] | None,
+            *,
+            group: object,
+            group_dst: int,
+        ) -> None:
+            assert group is process_group
+            assert group_dst == 0
+            assert gather_list is not None
+            gather_list[0].copy_(tensor)
+            gather_list[1].copy_(remote_padded)
+
+        def _fake_scatter(
+            tensor: torch.Tensor,
+            scatter_list: list[torch.Tensor] | None,
+            *,
+            group: object,
+            group_src: int,
+        ) -> None:
+            assert group is process_group
+            assert group_src == 0
+            assert scatter_list is not None
+            tensor.copy_(scatter_list[0])
+
+        monkeypatch.setattr(muon_clip_module.dist, "all_gather", _unexpected_all_gather)
+        monkeypatch.setattr(muon_clip_module.dist, "gather", _fake_gather)
+        monkeypatch.setattr(muon_clip_module.dist, "scatter", _fake_scatter)
+
+        update = optimizer._orthogonalize_dtensor_update(
+            momentum_buffer=momentum_buffer,
+            param=fake_param,
+            group_params=[fake_param],
+        )
+
+        expected_full = optimizer._orthogonalize_update(full_matrix)
+        expected_full = optimizer._normalize_muon_update(
+            expected_full, full_matrix.shape
+        )
+        torch.testing.assert_close(update.to_local(), expected_full[:2])
+        assert tuple(update.shape) == tuple(full_matrix.shape)
+
     def test_owner_rank_tie_breaks_on_param_name(
         self, model, monkeypatch: pytest.MonkeyPatch
     ):
