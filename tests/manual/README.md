@@ -15,9 +15,13 @@ conda run -s --name neobert torchrun --standalone --nproc_per_node=2 tests/manua
 
 - `test_muonclip_fsdp2_golden.py` requires CUDA and 2 ranks; it validates same-batch
   full-step parity plus same-world-size optimizer resume for the FSDP2 Muon path.
-- That golden test validates the raw FSDP2 owner-compute path directly; it does
-  not replace a dedicated Accelerate `save_state` / `load_state` smoke test for
-  the production checkpoint integration.
+- That golden test validates the raw FSDP2 owner-compute update path directly,
+  but it saves and restores sharded optimizer state through the supported DCP
+  (`get_optimizer_state_dict` / `set_optimizer_state_dict`) flow.
+- Raw local-shard `optimizer.state_dict()` round-trips are intentionally not
+  treated as a supported FSDP2 Muon resume surface; production checkpointing
+  should go through Accelerate `save_state` / `load_state` or the underlying
+  DCP helpers.
 - `test_muonclip_training.py` can run for multiple minutes and may download datasets.
 - These scripts are for exploratory/perf validation, not fast CI regression checks.
 - `tests/manual/` is excluded from default `pytest -q` discovery.

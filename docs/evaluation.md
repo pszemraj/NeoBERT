@@ -62,6 +62,13 @@ python scripts/evaluation/run_mteb.py \
   `outputs/<run>/mteb/<ckpt>/<max_length>/`.
 - If using a local tokenizer, point `tokenizer.name` to that path.
 
+## Pseudo-Perplexity Utility
+
+`scripts/evaluation/pseudo_perplexity.py` can load NeoBERT checkpoints from the
+current portable step layout (`checkpoints/<step>/model.safetensors`) and falls
+back to legacy DeepSpeed ZeRO conversion only when portable weights are absent.
+That legacy fallback requires the optional `neobert[legacy-checkpoints]` extra.
+
 ## Common Evaluation Pitfalls
 
 1. Wrong checkpoint path

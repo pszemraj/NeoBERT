@@ -6,7 +6,8 @@ This script uses a real forward/backward/step with the same batch on:
 - a 2-rank FSDP2-sharded model.
 
 It compares all trainable parameters after one optimizer step, then verifies
-same-world-size optimizer resume equivalence on the next step.
+same-world-size optimizer resume equivalence on the next step using the
+supported distributed-checkpoint optimizer-state APIs.
 
 Run on a CUDA machine with 2 ranks:
 `torchrun --standalone --nproc_per_node=2 tests/manual/test_muonclip_fsdp2_golden.py`
@@ -20,8 +21,13 @@ import tempfile
 from pathlib import Path
 
 import torch
+import torch.distributed.checkpoint as dist_cp
 import torch.distributed as dist
 from torch.distributed.fsdp import fully_shard
+from torch.distributed.checkpoint.state_dict import (
+    get_optimizer_state_dict,
+    set_optimizer_state_dict,
+)
 from torch.distributed.tensor import DTensor
 
 from neobert.model import NeoBERT, NeoBERTConfig
@@ -267,12 +273,17 @@ def main() -> None:
         if ckpt_root is None:
             raise RuntimeError("Failed to resolve checkpoint directory path.")
 
-        # Save/load optimizer state per-rank because DTensor momentum buffers are
-        # stored as local shards in optimizer.state_dict().
-        ckpt_path = ckpt_root / f"optimizer_state_rank{rank}.pt"
-        torch.save(dist_optimizer.state_dict(), ckpt_path)
+        # Save/load the sharded optimizer state through DCP so DTensor topology
+        # is preserved across resume. Raw ``optimizer.state_dict()`` tensors are
+        # intentionally unsupported for FSDP2 Muon restores.
+        ckpt_path = ckpt_root / "optimizer_dcp"
+        dist_cp.save(
+            state_dict={
+                "optimizer": get_optimizer_state_dict(dist_model, dist_optimizer)
+            },
+            storage_writer=dist_cp.FileSystemWriter(str(ckpt_path)),
+        )
         dist.barrier()
-        loaded_optim_state = torch.load(ckpt_path, map_location=device)
 
         # Continuation path A: no reload.
         input_ids_2 = _sample_input_ids(
@@ -288,7 +299,17 @@ def main() -> None:
         resume_model = _build_sharded_model(config, device, init_state)
         resume_optimizer = MuonClipOptimizer(resume_model, config, muon_cfg)
         _load_parameter_state(resume_model, dist_step1_state)
-        resume_optimizer.load_state_dict(loaded_optim_state)
+        loaded_optim_state = {"optimizer": resume_optimizer.state_dict()}
+        dist_cp.load(
+            loaded_optim_state,
+            checkpoint_id=str(ckpt_path),
+            storage_reader=dist_cp.FileSystemReader(str(ckpt_path)),
+        )
+        set_optimizer_state_dict(
+            resume_model,
+            resume_optimizer,
+            loaded_optim_state["optimizer"],
+        )
         _ = _run_step(resume_model, resume_optimizer, input_ids_2)
         final_reloaded = _full_parameter_state(resume_model)
 
@@ -298,7 +319,7 @@ def main() -> None:
             )
             if resume_max_diff > 5e-5:
                 raise AssertionError(
-                    "FSDP2 Muon resume mismatch after optimizer load_state_dict: "
+                    "FSDP2 Muon resume mismatch after DCP optimizer restore: "
                     f"param={resume_name} max_diff={resume_max_diff:.6e}"
                 )
         dist.barrier()
@@ -306,7 +327,8 @@ def main() -> None:
         if rank == 0:
             print("PASS: FSDP2 Muon golden step and resume checks succeeded.")
     finally:
-        dist.barrier()
+        if dist.is_initialized():
+            dist.barrier()
         if rank == 0 and ckpt_root is not None and ckpt_root.exists():
             shutil.rmtree(ckpt_root, ignore_errors=True)
         if dist.is_initialized():

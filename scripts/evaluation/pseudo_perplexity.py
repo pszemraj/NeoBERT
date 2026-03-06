@@ -8,7 +8,6 @@ from typing import Any, Iterator, Tuple
 import numpy as np
 import torch
 from datasets import concatenate_datasets, load_dataset
-from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
 from tqdm import tqdm
 from transformers import (
     AutoConfig,
@@ -18,6 +17,12 @@ from transformers import (
 )
 from transformers.models.roberta.modeling_roberta import RobertaEmbeddings
 
+from neobert.checkpointing import (
+    MODEL_WEIGHTS_NAME,
+    load_deepspeed_fp32_state_dict,
+    load_model_safetensors,
+    resolve_deepspeed_checkpoint_root_and_tag,
+)
 from neobert.model import NeoBERTConfig, NeoBERTLMHead
 
 
@@ -64,6 +69,69 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Te
     t = torch.arange(end, device=freqs.device)  # type: ignore
     freqs = torch.outer(t, freqs).float()  # type: ignore
     return torch.polar(torch.ones_like(freqs), freqs)  # complex64
+
+
+def _resolve_neobert_checkpoint_dir(
+    checkpoint_path: str | Path,
+    checkpoint: str,
+) -> Path:
+    """Resolve a NeoBERT checkpoint directory for portable weight loading.
+
+    ``checkpoint_path`` may point either at a checkpoint root containing
+    ``<tag>/`` subdirectories or at a single step directory already.
+
+    :param str | Path checkpoint_path: User-provided checkpoint path.
+    :param str checkpoint: Requested checkpoint tag/step.
+    :return Path: Resolved candidate checkpoint directory.
+    """
+    checkpoint_root = Path(checkpoint_path)
+    candidate = checkpoint_root / str(checkpoint)
+    if candidate.is_dir():
+        return candidate
+    return checkpoint_root
+
+
+def _load_neobert_checkpoint_weights(
+    model: NeoBERTLMHead,
+    *,
+    checkpoint_path: str | Path,
+    checkpoint: str,
+) -> NeoBERTLMHead:
+    """Load NeoBERT MLM weights from portable or legacy checkpoint formats.
+
+    Portable ``model.safetensors`` payloads are preferred when present.
+    Legacy DeepSpeed ZeRO checkpoints remain supported through the optional
+    ``neobert[legacy-checkpoints]`` dependency.
+
+    :param NeoBERTLMHead model: Model instance to populate.
+    :param str | Path checkpoint_path: Checkpoint root or step directory.
+    :param str checkpoint: Requested checkpoint tag/step.
+    :return NeoBERTLMHead: Model with loaded weights.
+    """
+    checkpoint_root = Path(checkpoint_path)
+    checkpoint_dir = _resolve_neobert_checkpoint_dir(checkpoint_root, checkpoint)
+    weights_path = checkpoint_dir / MODEL_WEIGHTS_NAME
+
+    if weights_path.is_file():
+        state_dict = load_model_safetensors(checkpoint_dir, map_location="cpu")
+    else:
+        if checkpoint_dir == checkpoint_root:
+            try:
+                resolve_deepspeed_checkpoint_root_and_tag(checkpoint_dir)
+            except (FileNotFoundError, ValueError):
+                state_dict = load_deepspeed_fp32_state_dict(
+                    checkpoint_root,
+                    tag=str(checkpoint),
+                )
+            else:
+                state_dict = load_deepspeed_fp32_state_dict(checkpoint_dir)
+        else:
+            state_dict = load_deepspeed_fp32_state_dict(
+                checkpoint_root,
+                tag=str(checkpoint),
+            )
+    model.load_state_dict(state_dict)
+    return model
 
 
 if __name__ == "__main__":
@@ -122,6 +190,11 @@ if __name__ == "__main__":
         # Import our new config system
         from neobert.config import ConfigLoader
 
+        if not args.config_path:
+            raise ValueError("NeoBERT evaluation requires --config_path.")
+        if not args.checkpoint_path:
+            raise ValueError("NeoBERT evaluation requires --checkpoint_path.")
+
         model_pretraining_config = ConfigLoader.load(args.config_path)
         model_pretraining_config.model.max_position_embeddings = args.max_length
         model = NeoBERTLMHead(
@@ -143,8 +216,10 @@ if __name__ == "__main__":
                 pad_token_id=model_pretraining_config.model.pad_token_id,
             )
         )
-        model = load_state_dict_from_zero_checkpoint(
-            model, args.checkpoint_path, tag=args.checkpoint
+        model = _load_neobert_checkpoint_weights(
+            model,
+            checkpoint_path=args.checkpoint_path,
+            checkpoint=args.checkpoint,
         )
         model.model.freqs_cis = precompute_freqs_cis(
             model.config.hidden_size // model.config.num_attention_heads,

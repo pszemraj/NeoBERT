@@ -953,6 +953,11 @@ class MuonClipOptimizer(Optimizer):
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         """Load optimizer state including the MuonClip update counter.
 
+        Sharded FSDP2 Muon resumes must materialize optimizer state via
+        Accelerate/DCP helpers before calling into this optimizer. A raw
+        ``optimizer.state_dict()`` checkpoint for DTensor params does not
+        preserve DTensor metadata and is rejected below.
+
         :param dict[str, Any] state_dict: Optimizer state dictionary.
         """
         payload = dict(state_dict)
