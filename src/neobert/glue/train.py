@@ -695,18 +695,17 @@ def _save_portable_glue_checkpoint_weights(
     accelerator: Accelerator,
     checkpoint_path: Path,
 ) -> bool:
-    """Ensure a portable ``model.safetensors`` exists in a GLUE step checkpoint.
+    """Refresh the portable ``model.safetensors`` in a GLUE step checkpoint.
 
     :param torch.nn.Module model: Prepared GLUE model.
     :param Accelerator accelerator: Active accelerator runtime.
     :param Path checkpoint_path: Checkpoint directory ``checkpoints/<step>/``.
-    :return bool: True when portable weights exist (written or already present).
+    :return bool: True when portable weights were saved.
     """
     return save_portable_checkpoint_weights(
         model,
         accelerator,
         checkpoint_path,
-        skip_if_exists=True,
     )
 
 

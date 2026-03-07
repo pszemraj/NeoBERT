@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from safetensors.torch import save_file
 from torch import nn
 
 from neobert.checkpointing import (
@@ -101,6 +102,45 @@ def test_save_state_dict_safetensors_roundtrip() -> None:
 
     assert "model.encoder.weight" in loaded_state
     assert all(not key.startswith("_orig_mod.") for key in loaded_state)
+
+
+def test_load_model_safetensors_strips_runtime_prefixes_on_read() -> None:
+    """Loading should canonicalize wrapper-prefixed keys from generic save paths."""
+    weight = torch.arange(6, dtype=torch.float32).view(3, 2)
+    bias = torch.arange(3, dtype=torch.float32)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint_dir = Path(tmpdir)
+        save_file(
+            {
+                "_orig_mod.weight": weight,
+                "module.bias": bias,
+            },
+            str(checkpoint_dir / MODEL_WEIGHTS_NAME),
+            metadata={"format": "pt"},
+        )
+        loaded_state = load_model_safetensors(checkpoint_dir, map_location="cpu")
+
+    assert set(loaded_state) == {"weight", "bias"}
+    torch.testing.assert_close(loaded_state["weight"], weight)
+    torch.testing.assert_close(loaded_state["bias"], bias)
+
+
+def test_load_model_safetensors_rejects_normalized_key_collisions() -> None:
+    """Loading should fail fast when multiple keys collapse to one parameter name."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint_dir = Path(tmpdir)
+        save_file(
+            {
+                "weight": torch.ones(2, 2),
+                "_orig_mod.weight": torch.zeros(2, 2),
+            },
+            str(checkpoint_dir / MODEL_WEIGHTS_NAME),
+            metadata={"format": "pt"},
+        )
+
+        with pytest.raises(ValueError, match="normalize to 'weight'"):
+            load_model_safetensors(checkpoint_dir, map_location="cpu")
 
 
 def test_resolve_deepspeed_checkpoint_root_and_tag_for_direct_tag_dir() -> None:

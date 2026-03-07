@@ -68,6 +68,31 @@ def _state_dict_for_safetensors(
     return payload
 
 
+def _canonicalize_loaded_state_dict(
+    raw_state_dict: Mapping[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """Canonicalize loaded state-dict keys by stripping runtime wrapper prefixes.
+
+    This keeps checkpoint loading tolerant of portable weight files created by
+    generic save paths that may have preserved prefixes such as ``_orig_mod.``
+    or ``module.``.
+
+    :param Mapping[str, torch.Tensor] raw_state_dict: Loaded tensor mapping.
+    :return dict[str, torch.Tensor]: Canonicalized state dict.
+    :raises ValueError: If multiple raw keys normalize to the same canonical key.
+    """
+    payload: dict[str, torch.Tensor] = {}
+    for raw_key, value in raw_state_dict.items():
+        normalized_key = _strip_runtime_prefixes(str(raw_key))
+        if normalized_key in payload:
+            raise ValueError(
+                "Loaded state dict contains multiple keys that normalize to "
+                f"'{normalized_key}' (for example '{raw_key}')."
+            )
+        payload[normalized_key] = value
+    return payload
+
+
 def model_state_dict_for_safetensors(model: nn.Module) -> dict[str, torch.Tensor]:
     """Create a safetensors-ready CPU state dict from a model.
 
@@ -242,6 +267,10 @@ def load_model_safetensors(
 ) -> dict[str, torch.Tensor]:
     """Load model weights from ``model.safetensors``.
 
+    Runtime wrapper prefixes such as ``_orig_mod.`` and ``module.`` are stripped
+    on read so callers can consume portable weights produced by either repo
+    helpers or generic runtime save paths.
+
     :param str | Path checkpoint_dir: Checkpoint directory path.
     :param str | torch.device map_location: Device for loaded tensors.
     :return dict[str, torch.Tensor]: Loaded state dict.
@@ -255,7 +284,7 @@ def load_model_safetensors(
     state_dict = load_file(str(weights_path), device=str(map_location))
     if not state_dict:
         raise ValueError(f"Loaded state dict is empty from {weights_path}")
-    return state_dict
+    return _canonicalize_loaded_state_dict(state_dict)
 
 
 def resolve_checkpoint_retention_limit(cfg: Any) -> int:
