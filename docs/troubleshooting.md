@@ -134,6 +134,8 @@ Actions:
 ## Checkpointing Notes
 
 - Training checkpoints are safetensors-first (`model.safetensors`).
+- Portable checkpoint loading recursively strips known runtime wrappers such as
+  `_orig_mod.` and `module.` from generic compiled/distributed saves.
 - Warning about removing shared tensors during save can be expected when tied
   weights are de-duplicated; validate by reloading checkpoint and running a
   forward pass.

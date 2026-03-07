@@ -11,6 +11,7 @@ from torch import nn
 
 MODEL_WEIGHTS_NAME = "model.safetensors"
 logger = logging.getLogger(__name__)
+_RUNTIME_PREFIXES = ("_orig_mod.", "module.")
 _DEEPSPEED_TAG_DIR_PATTERNS = (
     "mp_rank_*_model_states.pt",
     "zero_pp_rank_*_mp_rank_*_optim_states.pt",
@@ -37,10 +38,13 @@ def _strip_runtime_prefixes(key: str) -> str:
     :param str key: Raw state-dict key.
     :return str: Canonicalized key.
     """
-    for prefix in ("_orig_mod.", "module."):
-        while key.startswith(prefix):
-            key = key[len(prefix) :]
-    return key
+    while True:
+        for prefix in _RUNTIME_PREFIXES:
+            if key.startswith(prefix):
+                key = key[len(prefix) :]
+                break
+        else:
+            return key
 
 
 def _state_dict_for_safetensors(
@@ -50,12 +54,19 @@ def _state_dict_for_safetensors(
 
     :param Mapping[str, Any] raw_state_dict: Raw model/state-dict mapping.
     :return dict[str, torch.Tensor]: Canonicalized contiguous CPU tensor payload.
+    :raises ValueError: If multiple raw keys normalize to the same canonical key.
     """
     payload: dict[str, torch.Tensor] = {}
     seen_storage_ptrs: set[int] = set()
     for key, value in raw_state_dict.items():
         if not torch.is_tensor(value):
             continue
+        normalized_key = _strip_runtime_prefixes(str(key))
+        if normalized_key in payload:
+            raise ValueError(
+                "State dict contains multiple keys that normalize to "
+                f"'{normalized_key}' (for example '{key}')."
+            )
         tensor = value.detach().cpu().contiguous()
         storage_ptr = tensor.untyped_storage().data_ptr()
         if storage_ptr in seen_storage_ptrs:
@@ -64,7 +75,7 @@ def _state_dict_for_safetensors(
             tensor = tensor.clone()
             storage_ptr = tensor.untyped_storage().data_ptr()
         seen_storage_ptrs.add(storage_ptr)
-        payload[_strip_runtime_prefixes(str(key))] = tensor
+        payload[normalized_key] = tensor
     return payload
 
 
@@ -101,6 +112,7 @@ def model_state_dict_for_safetensors(model: nn.Module) -> dict[str, torch.Tensor
 
     :param nn.Module model: Model to serialize.
     :return dict[str, torch.Tensor]: Safetensors payload.
+    :raises ValueError: If runtime wrapper prefixes collapse multiple keys.
     """
     base_model = _unwrap_compile_wrappers(model)
     return _state_dict_for_safetensors(base_model.state_dict())
@@ -118,7 +130,8 @@ def save_state_dict_safetensors(
     :param str | Path checkpoint_dir: Target checkpoint directory.
     :param Mapping[str, str] | None metadata: Optional safetensors metadata.
     :return Path: Path to the saved safetensors file.
-    :raises ValueError: If no tensors are present in ``state_dict``.
+    :raises ValueError:
+        If no tensors are present in ``state_dict`` or canonicalization collides.
     """
     checkpoint_dir = Path(checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -142,6 +155,7 @@ def save_model_safetensors(
     :param str | Path checkpoint_dir: Target checkpoint directory.
     :param Mapping[str, str] | None metadata: Optional safetensors metadata.
     :return Path: Path to the saved safetensors file.
+    :raises ValueError: If runtime wrapper prefixes collapse multiple keys.
     """
     return save_state_dict_safetensors(
         model_state_dict_for_safetensors(model),

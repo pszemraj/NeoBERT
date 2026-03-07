@@ -126,6 +126,28 @@ def test_load_model_safetensors_strips_runtime_prefixes_on_read() -> None:
     torch.testing.assert_close(loaded_state["bias"], bias)
 
 
+def test_load_model_safetensors_strips_stacked_runtime_prefixes_on_read() -> None:
+    """Loading should strip stacked runtime prefixes until keys are stable."""
+    weight = torch.arange(6, dtype=torch.float32).view(3, 2)
+    bias = torch.arange(3, dtype=torch.float32)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint_dir = Path(tmpdir)
+        save_file(
+            {
+                "module._orig_mod.weight": weight,
+                "_orig_mod.module.bias": bias,
+            },
+            str(checkpoint_dir / MODEL_WEIGHTS_NAME),
+            metadata={"format": "pt"},
+        )
+        loaded_state = load_model_safetensors(checkpoint_dir, map_location="cpu")
+
+    assert set(loaded_state) == {"weight", "bias"}
+    torch.testing.assert_close(loaded_state["weight"], weight)
+    torch.testing.assert_close(loaded_state["bias"], bias)
+
+
 def test_load_model_safetensors_rejects_normalized_key_collisions() -> None:
     """Loading should fail fast when multiple keys collapse to one parameter name."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -141,6 +163,21 @@ def test_load_model_safetensors_rejects_normalized_key_collisions() -> None:
 
         with pytest.raises(ValueError, match="normalize to 'weight'"):
             load_model_safetensors(checkpoint_dir, map_location="cpu")
+
+
+def test_save_state_dict_safetensors_rejects_normalized_key_collisions() -> None:
+    """Saving should fail fast when canonicalization would overwrite a key."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint_dir = Path(tmpdir)
+
+        with pytest.raises(ValueError, match="normalize to 'weight'"):
+            save_state_dict_safetensors(
+                {
+                    "weight": torch.ones(2, 2),
+                    "module._orig_mod.weight": torch.zeros(2, 2),
+                },
+                checkpoint_dir,
+            )
 
 
 def test_resolve_deepspeed_checkpoint_root_and_tag_for_direct_tag_dir() -> None:
