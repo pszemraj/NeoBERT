@@ -68,6 +68,9 @@ python scripts/evaluation/run_mteb.py \
 current portable step layout (`checkpoints/<step>/model.safetensors`) and falls
 back to legacy DeepSpeed ZeRO conversion only when portable weights are absent.
 That legacy fallback requires the optional `neobert[legacy-checkpoints]` extra.
+If `checkpoint_path` already points at a specific step directory, pass the
+matching `--checkpoint` tag; explicit missing tags now fail fast instead of
+silently loading the direct path.
 
 ## Common Evaluation Pitfalls
 

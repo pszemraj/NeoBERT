@@ -59,6 +59,7 @@ from neobert.pretraining.masked_objective import (
 from neobert.scheduler import get_scheduler, resolve_scheduler_steps
 from neobert.tokenizer import get_tokenizer, resolve_text_column
 from neobert.training_utils import (
+    _compute_l2_norm_for_logging,
     _maybe_compile_model,
     _maybe_prepare_for_forward,
     _resolve_resume_checkpoint,
@@ -1077,8 +1078,7 @@ def _compute_weight_norm_for_logging(
     :param Accelerator accelerator: Active accelerator runtime.
     :return float | None: L2 weight norm or ``None`` when unavailable.
     """
-    del accelerator
-    return (sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5).item()
+    return _compute_l2_norm_for_logging(model.parameters(), accelerator)
 
 
 def _clear_stored_batch(stored_batch: BatchEncoding) -> None:

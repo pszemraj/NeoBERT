@@ -82,12 +82,41 @@ def _resolve_neobert_checkpoint_dir(
     :param str | Path checkpoint_path: User-provided checkpoint path.
     :param str checkpoint: Requested checkpoint tag/step.
     :return Path: Resolved candidate checkpoint directory.
+    :raises FileNotFoundError:
+        If an explicit checkpoint tag is missing beneath a direct checkpoint path
+        that already contains portable weights.
     """
     checkpoint_root = Path(checkpoint_path)
-    candidate = checkpoint_root / str(checkpoint)
+    requested_tag = str(checkpoint).strip()
+    candidate = checkpoint_root / requested_tag
     if candidate.is_dir():
         return candidate
+    if _checkpoint_path_matches_tag(checkpoint_root, requested_tag):
+        return checkpoint_root
+    if (checkpoint_root / MODEL_WEIGHTS_NAME).is_file():
+        raise FileNotFoundError(
+            f"Requested checkpoint '{requested_tag}' was not found under "
+            f"{checkpoint_root}. Refusing to silently load portable weights from "
+            f"the root path instead."
+        )
     return checkpoint_root
+
+
+def _checkpoint_path_matches_tag(checkpoint_path: Path, checkpoint: str) -> bool:
+    """Return whether ``checkpoint_path`` already points at ``checkpoint``.
+
+    This accepts both direct step directories (``.../<tag>``) and nested
+    Accelerate DeepSpeed layouts (``.../<tag>/pytorch_model``).
+
+    :param Path checkpoint_path: Candidate direct checkpoint path.
+    :param str checkpoint: Requested checkpoint tag/step.
+    :return bool: ``True`` when the path already targets the requested tag.
+    """
+    requested_tag = str(checkpoint).strip()
+    return bool(requested_tag) and (
+        checkpoint_path.name == requested_tag
+        or checkpoint_path.parent.name == requested_tag
+    )
 
 
 def _load_neobert_checkpoint_weights(
@@ -125,10 +154,7 @@ def _load_neobert_checkpoint_weights(
             # Only fall back to direct-path resolution when the caller already
             # pointed at the requested step/tag directory. Otherwise re-raise so
             # an explicit missing checkpoint cannot silently load ``latest``.
-            if (
-                checkpoint_root.name == requested_tag
-                or checkpoint_root.parent.name == requested_tag
-            ):
+            if _checkpoint_path_matches_tag(checkpoint_root, requested_tag):
                 state_dict = load_deepspeed_fp32_state_dict(checkpoint_root)
             else:
                 raise

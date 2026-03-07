@@ -161,3 +161,26 @@ def test_load_neobert_checkpoint_weights_does_not_ignore_explicit_checkpoint(
         )
 
     assert seen == [(tmp_path.resolve(), "1000")]
+
+
+def test_load_neobert_checkpoint_weights_rejects_missing_tag_for_direct_weights(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct portable checkpoint paths must not mask an explicit missing tag."""
+    module = _load_pseudo_perplexity_module()
+    model = _ModelStub()
+    (tmp_path / module.MODEL_WEIGHTS_NAME).touch()
+
+    def _fake_load_model_safetensors(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("portable root weights should not load for a missing tag")
+
+    monkeypatch.setattr(module, "load_model_safetensors", _fake_load_model_safetensors)
+
+    with pytest.raises(FileNotFoundError, match="Requested checkpoint 'final'"):
+        module._load_neobert_checkpoint_weights(
+            model,
+            checkpoint_path=tmp_path,
+            checkpoint="final",
+        )

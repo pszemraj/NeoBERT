@@ -4,7 +4,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Iterable, Optional, Tuple
 
 import torch
 from accelerate import Accelerator
@@ -270,6 +270,128 @@ def _is_row_shard_placement(placement: Any) -> bool:
         return placement_name.endswith("shard") and int(shard_dim) == 0
     except (TypeError, ValueError):
         return False
+
+
+def _placement_requires_norm_reduction(placement: Any) -> bool:
+    """Return whether a DTensor placement contributes only a local partial norm.
+
+    :param Any placement: DTensor placement descriptor.
+    :return bool: ``True`` when values must be reduced across ranks.
+    """
+    if _is_row_shard_placement(placement):
+        return True
+
+    placement_name = type(placement).__name__.lower()
+    return placement_name.endswith("shard") or placement_name.endswith("partial")
+
+
+def _dtensor_requires_norm_reduction(value: Any) -> bool:
+    """Return whether a DTensor-like value needs cross-rank norm reduction.
+
+    :param Any value: DTensor-like tensor or parameter.
+    :return bool: ``True`` when local values represent only a shard/partial.
+    """
+    placements = tuple(getattr(value, "placements", ()))
+    return any(
+        _placement_requires_norm_reduction(placement) for placement in placements
+    )
+
+
+def _tensor_l2_sumsq(value: torch.Tensor) -> torch.Tensor:
+    """Compute a numerically stable squared L2 contribution for one local tensor.
+
+    :param torch.Tensor value: Local tensor or shard to accumulate.
+    :return torch.Tensor: Scalar squared-norm contribution on ``value.device``.
+    """
+    tensor = value.detach()
+    if tensor.is_sparse:
+        tensor = tensor.coalesce().values()
+    return tensor.double().pow(2).sum()
+
+
+def _accumulate_scalar_norm(
+    accumulator: Optional[torch.Tensor],
+    contribution: torch.Tensor,
+) -> torch.Tensor:
+    """Accumulate scalar norm contributions while preserving device placement.
+
+    :param torch.Tensor | None accumulator: Existing scalar accumulator.
+    :param torch.Tensor contribution: New scalar contribution to add.
+    :return torch.Tensor: Updated accumulator tensor.
+    """
+    if accumulator is None:
+        return contribution
+    return accumulator + contribution.to(device=accumulator.device)
+
+
+def _compute_l2_norm_for_logging(
+    parameters: Iterable[Any],
+    accelerator: Accelerator,
+    *,
+    grad: bool = False,
+) -> Optional[float]:
+    """Compute a global L2 norm for parameters or gradients in logging paths.
+
+    FSDP2 exposes sharded parameters as DTensors. Their local tensor values are
+    only partial shards, so logging must sum squared local contributions and
+    reduce only the sharded subset across ranks. Replicated tensors are kept
+    local so their contributions are not over-counted.
+
+    :param Iterable[Any] parameters: Parameter-like objects to inspect.
+    :param Accelerator accelerator: Active accelerator runtime.
+    :param bool grad: Whether to read ``param.grad`` instead of the parameter.
+    :return float | None: Global L2 norm or ``None`` when no tensors are present.
+    """
+    fsdp_multi_process = (
+        getattr(accelerator, "distributed_type", None) is DistributedType.FSDP
+        and int(getattr(accelerator, "num_processes", 1)) > 1
+    )
+    local_sumsq: Optional[torch.Tensor] = None
+    sharded_sumsq: Optional[torch.Tensor] = None
+    saw_tensor = False
+
+    for param in parameters:
+        value = getattr(param, "grad", None) if grad else param
+        if value is None:
+            continue
+
+        local_value = value.to_local() if _looks_like_dtensor(value) else value.detach()
+        if not torch.is_tensor(local_value):
+            continue
+
+        saw_tensor = True
+        contribution = _tensor_l2_sumsq(local_value)
+        requires_reduction = False
+        if _looks_like_dtensor(value):
+            requires_reduction = _dtensor_requires_norm_reduction(value)
+        elif _looks_like_dtensor(param):
+            # FSDP2 gradients are typically local tensors attached to DTensor params.
+            requires_reduction = _dtensor_requires_norm_reduction(param)
+        elif fsdp_multi_process:
+            requires_reduction = True
+
+        if requires_reduction:
+            sharded_sumsq = _accumulate_scalar_norm(sharded_sumsq, contribution)
+        else:
+            local_sumsq = _accumulate_scalar_norm(local_sumsq, contribution)
+
+    if not saw_tensor:
+        return None
+
+    if sharded_sumsq is not None and fsdp_multi_process:
+        reduce_fn = getattr(accelerator, "reduce", None)
+        if callable(reduce_fn):
+            sharded_sumsq = reduce_fn(sharded_sumsq, reduction="sum")
+        elif torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.all_reduce(sharded_sumsq)
+
+    total_sumsq = local_sumsq
+    if sharded_sumsq is not None:
+        total_sumsq = _accumulate_scalar_norm(total_sumsq, sharded_sumsq)
+
+    if total_sumsq is None:
+        return None
+    return float(total_sumsq.sqrt().item())
 
 
 def _is_accelerator_state_reinit_error(exc: Exception) -> bool:

@@ -43,6 +43,7 @@ from neobert.optimizer import get_optimizer
 from neobert.scheduler import get_scheduler, resolve_scheduler_steps
 from neobert.tokenizer import get_tokenizer
 from neobert.training_utils import (
+    _compute_l2_norm_for_logging,
     _maybe_compile_model,
     _maybe_prepare_for_forward,
     _resolve_resume_checkpoint,
@@ -954,13 +955,22 @@ def trainer(cfg: Config) -> None:
             metrics["train/steps"] += 1
 
             if metrics["train/steps"] % log_interval == 0:
-                metrics["train/grad_norm"] = (
-                    sum([p.grad.norm(2) ** 2 for p in model.parameters()]) ** 0.5
-                ).item()
+                grad_norm_value = _compute_l2_norm_for_logging(
+                    model.parameters(),
+                    accelerator,
+                    grad=True,
+                )
+                if grad_norm_value is not None:
+                    metrics["train/grad_norm"] = grad_norm_value
                 if cfg.trainer.log_weight_norms and accelerator.is_main_process:
-                    metrics["train/weight_norm"] = (
-                        sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5
-                    ).item()
+                    weight_norm_value = _compute_l2_norm_for_logging(
+                        model.parameters(),
+                        accelerator,
+                    )
+                    if weight_norm_value is not None:
+                        metrics["train/weight_norm"] = weight_norm_value
+                    else:
+                        metrics.pop("train/weight_norm", None)
 
                 metrics["train/learning_rate"] = optimizer.param_groups[0]["lr"]
                 metrics.log(accelerator)

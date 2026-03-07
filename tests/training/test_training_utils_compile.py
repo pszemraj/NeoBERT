@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,7 @@ from neobert.config import Config
 from neobert.model import NeoBERT, NeoBERTConfig
 from neobert.optimizer import get_optimizer
 from neobert.training_utils import (
+    _compute_l2_norm_for_logging,
     _maybe_compile_model,
     create_accelerator,
     resolve_runtime_mixed_precision_and_attn_backend,
@@ -666,6 +668,84 @@ def test_validate_muon_runtime_topology_rejects_missing_dtensor_params() -> None
             log=logging.getLogger("test"),
             context="unit-test",
         )
+
+
+def test_compute_l2_norm_for_logging_reduces_only_sharded_dtensors() -> None:
+    """Global logged norms must reduce shard contributions without double-counting replicas."""
+
+    class _FakeShard:
+        def __init__(self, dim: int):
+            self.dim = dim
+
+    class _FakeReplicate:
+        pass
+
+    class _FakeDTensor:
+        device_mesh = SimpleNamespace(ndim=1)
+
+        def __init__(self, local_value: torch.Tensor, placements: tuple[object, ...]):
+            self._local_value = local_value
+            self.placements = placements
+
+        def to_local(self) -> torch.Tensor:
+            return self._local_value
+
+    reduce_calls: list[tuple[float, str]] = []
+
+    accelerator = SimpleNamespace(
+        distributed_type=DistributedType.FSDP,
+        num_processes=2,
+        reduce=lambda tensor, reduction="sum": (
+            reduce_calls.append((float(tensor.item()), str(reduction))) or tensor * 2
+        ),
+    )
+    parameters = [
+        _FakeDTensor(torch.tensor([3.0, 4.0]), (_FakeShard(0),)),
+        _FakeDTensor(torch.tensor([1.0, 2.0]), (_FakeReplicate(),)),
+    ]
+
+    norm = _compute_l2_norm_for_logging(parameters, accelerator)
+
+    assert norm is not None
+    assert math.isclose(norm, math.sqrt(55.0), rel_tol=0.0, abs_tol=1e-8)
+    assert reduce_calls == [(25.0, "sum")]
+
+
+def test_compute_l2_norm_for_logging_uses_dtensor_owner_for_gradients() -> None:
+    """Gradient logging must reduce local grads when the owning param is sharded."""
+
+    class _FakeShard:
+        def __init__(self, dim: int):
+            self.dim = dim
+
+    class _FakeShardedParam:
+        device_mesh = SimpleNamespace(ndim=1)
+        placements = (_FakeShard(0),)
+
+        def __init__(self, grad: torch.Tensor):
+            self.grad = grad
+
+        def to_local(self) -> torch.Tensor:
+            return torch.zeros(0)
+
+    reduce_calls: list[tuple[float, str]] = []
+    accelerator = SimpleNamespace(
+        distributed_type=DistributedType.FSDP,
+        num_processes=2,
+        reduce=lambda tensor, reduction="sum": (
+            reduce_calls.append((float(tensor.item()), str(reduction))) or tensor * 2
+        ),
+    )
+
+    norm = _compute_l2_norm_for_logging(
+        [_FakeShardedParam(torch.tensor([6.0, 8.0]))],
+        accelerator,
+        grad=True,
+    )
+
+    assert norm is not None
+    assert math.isclose(norm, math.sqrt(200.0), rel_tol=0.0, abs_tol=1e-8)
+    assert reduce_calls == [(100.0, "sum")]
 
 
 def test_get_optimizer_disables_muonclip_clipping_under_fsdp(
