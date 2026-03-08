@@ -43,7 +43,6 @@ from neobert.optimizer import get_optimizer
 from neobert.scheduler import get_scheduler, resolve_scheduler_steps
 from neobert.tokenizer import get_tokenizer
 from neobert.training_utils import (
-    _compute_l2_norm_for_logging,
     _maybe_compile_model,
     _maybe_prepare_for_forward,
     _resolve_resume_checkpoint,
@@ -304,6 +303,7 @@ def trainer(cfg: Config) -> None:
     metrics = Metrics()
     accelerator.register_for_checkpointing(metrics)
     log_interval = max(1, cfg.trainer.logging_steps)
+    log_grad_norm = bool(getattr(cfg.trainer, "log_grad_norm", False))
     save_strategy = str(getattr(cfg.trainer, "save_strategy", "steps"))
     save_model = bool(getattr(cfg.trainer, "save_model", True))
 
@@ -938,6 +938,15 @@ def trainer(cfg: Config) -> None:
         metrics["train/local_sum_loss"] += train_loss.item()
 
         if is_last_microbatch:
+            should_log = (metrics["train/steps"] + 1) % log_interval == 0
+            _update_global_norm_metric_for_logging(
+                metrics,
+                key="train/grad_norm",
+                parameters=model.parameters(),
+                accelerator=accelerator,
+                enabled=bool(should_log and log_grad_norm),
+                grad=True,
+            )
             # Apply clipping before optimizer step when syncing gradients
             if (
                 cfg.trainer.gradient_clipping is not None
@@ -956,13 +965,6 @@ def trainer(cfg: Config) -> None:
             metrics["train/steps"] += 1
 
             if metrics["train/steps"] % log_interval == 0:
-                grad_norm_value = _compute_l2_norm_for_logging(
-                    model.parameters(),
-                    accelerator,
-                    grad=True,
-                )
-                if grad_norm_value is not None:
-                    metrics["train/grad_norm"] = grad_norm_value
                 _update_global_norm_metric_for_logging(
                     metrics,
                     key="train/weight_norm",

@@ -2519,33 +2519,20 @@ def trainer(cfg: Config) -> None:
                         "pathological amplification."
                     )
 
-                grad_norm_value = None
-
                 # Optional gradient clipping for stability on deep/long-context runs.
                 # Keep clipping after token-mean scaling so thresholds apply to the
                 # final effective update magnitude.
                 max_grad_norm = cfg.trainer.gradient_clipping
-
+                _update_global_norm_metric_for_logging(
+                    metrics,
+                    key="train/grad_norm",
+                    parameters=model.parameters(),
+                    accelerator=accelerator,
+                    enabled=bool(should_log and log_grad_norm),
+                    grad=True,
+                )
                 if max_grad_norm is not None and max_grad_norm > 0:
-                    grad_norm_pre_clip = accelerator.clip_grad_norm_(
-                        model.parameters(), max_grad_norm
-                    )
-                    if should_log and grad_norm_pre_clip is not None:
-                        grad_norm_value = float(
-                            grad_norm_pre_clip.item()
-                            if isinstance(grad_norm_pre_clip, torch.Tensor)
-                            else grad_norm_pre_clip
-                        )
-                elif should_log and log_grad_norm:
-                    grad_norm = accelerator.clip_grad_norm_(
-                        model.parameters(), float("inf")
-                    )
-                    if grad_norm is not None:
-                        grad_norm_value = float(
-                            grad_norm.item()
-                            if isinstance(grad_norm, torch.Tensor)
-                            else grad_norm
-                        )
+                    accelerator.clip_grad_norm_(model.parameters(), max_grad_norm)
 
                 # Log metrics
                 pbar.update(1)
@@ -2557,9 +2544,6 @@ def trainer(cfg: Config) -> None:
                 accum_tokens.zero_()
 
                 if metrics["train/steps"] % log_interval == 0:
-                    if grad_norm_value is not None:
-                        metrics["train/grad_norm"] = grad_norm_value
-
                     _update_global_norm_metric_for_logging(
                         metrics,
                         key="train/weight_norm",

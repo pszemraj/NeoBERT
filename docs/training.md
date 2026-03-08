@@ -310,6 +310,9 @@ Ensure `dataset.path` points to output from `scripts/contrastive/preprocess.py`.
 
 - Use `gradient_checkpointing` for memory headroom on long contexts.
 - Use `gradient_clipping` for stability on deep/long runs.
+- `train/grad_norm` is logged as the global pre-clip norm after accumulation
+  and any token-based scaling, so clipping does not hide overshoot in tracker
+  plots.
 - For paper-style NeoBERT masking strategy, set `datacollator.mask_all: true`.
   Default `false` uses sampled-token 80/10/10 corruption.
   For `p = datacollator.mlm_probability`, global token mix is:
