@@ -1,6 +1,7 @@
 """Shared helpers for training loops (pretraining, GLUE, contrastive)."""
 
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Tuple
@@ -290,6 +291,28 @@ def _reset_accelerate_runtime_state() -> None:
     AcceleratorState._reset_state(reset_partial_state=True)
 
 
+def _maybe_set_local_cuda_device(*, use_cpu: bool, log: logging.Logger) -> None:
+    """Bind the current process to its LOCAL_RANK CUDA device before init.
+
+    :param bool use_cpu: Whether the run is explicitly targeting CPU execution.
+    :param logging.Logger log: Logger for malformed-rank warnings.
+    """
+    if use_cpu or not torch.cuda.is_available():
+        return
+
+    local_rank_raw = os.environ.get("LOCAL_RANK")
+    if local_rank_raw is None:
+        return
+
+    try:
+        torch.cuda.set_device(int(local_rank_raw))
+    except (TypeError, ValueError):
+        log.warning(
+            "Ignoring invalid LOCAL_RANK=%r while binding the CUDA device.",
+            local_rank_raw,
+        )
+
+
 def create_accelerator(
     *,
     use_cpu: bool,
@@ -314,6 +337,7 @@ def create_accelerator(
     accelerator_kwargs = dict(kwargs)
     if use_cpu:
         accelerator_kwargs["cpu"] = True
+    _maybe_set_local_cuda_device(use_cpu=use_cpu, log=log)
     try:
         return accelerator_factory(**accelerator_kwargs)
     except ValueError as exc:

@@ -2164,6 +2164,11 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     parser.add_argument(
         "--trainer.gradient_clipping", type=float, help="Gradient clipping"
     )
+    parser.add_argument(
+        "--trainer.use_cpu",
+        type=_parse_cli_bool,
+        help="Force CPU execution",
+    )
     parser.add_argument("--trainer.mixed_precision", type=str, help="Mixed precision")
     parser.add_argument(
         "--trainer.masked_logits_only_loss",

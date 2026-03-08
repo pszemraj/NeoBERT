@@ -267,6 +267,33 @@ def test_create_accelerator_reraises_unrelated_value_errors() -> None:
         )
 
 
+def test_create_accelerator_binds_local_cuda_device_before_init(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CUDA runs should bind LOCAL_RANK before constructing Accelerator."""
+    import neobert.training_utils as training_utils
+
+    bound_devices: list[int] = []
+
+    monkeypatch.setenv("LOCAL_RANK", "3")
+    monkeypatch.setattr(training_utils.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(
+        training_utils.torch.cuda,
+        "set_device",
+        lambda device: bound_devices.append(int(device)),
+    )
+
+    out = create_accelerator(
+        use_cpu=False,
+        log=logging.getLogger("test"),
+        accelerator_factory=lambda **kwargs: SimpleNamespace(**kwargs),
+        mixed_precision="bf16",
+    )
+
+    assert out.mixed_precision == "bf16"
+    assert bound_devices == [3]
+
+
 def test_resolve_runtime_mixed_precision_and_attn_backend_forces_sdpa_on_cpu(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
