@@ -37,6 +37,8 @@ Optional extras:
 pip install -U -q packaging wheel ninja
 # Packed flash-attn training backend
 pip install -e .[flash] --no-build-isolation
+# Legacy DeepSpeed ZeRO checkpoint conversion only
+pip install -e .[legacy-checkpoints]
 ```
 
 See [docs/troubleshooting.md](docs/troubleshooting.md) for environment issues.
@@ -64,7 +66,7 @@ python tests/run_tests.py
 
 ## Documentation
 
-- [docs/README.md](docs/README.md) (index + source-of-truth map)
+- [docs/README.md](docs/README.md)
 - [Training Guide](docs/training.md)
 - [Configuration Reference](docs/configuration.md)
 - [Evaluation Guide](docs/evaluation.md)
@@ -74,8 +76,8 @@ python tests/run_tests.py
 - [Testing](docs/testing.md)
 - [Dev Notes](docs/dev.md)
 
-Directory READMEs under `configs/`, `scripts/`, `tests/`, and `jobs/` are
-entrypoint-oriented; runtime semantics are canonical in `docs/`.
+Directory READMEs under `configs/`, `scripts/`, `tests/`, and `jobs/` focus on
+entrypoints and quick usage.
 
 ## Repository Layout
 

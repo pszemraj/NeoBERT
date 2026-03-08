@@ -38,6 +38,53 @@ Checklist:
 2. keep `trainer.mixed_precision: bf16` (or `no` if bf16 unsupported),
 3. use `gradient_checkpointing: true` for additional memory headroom.
 
+### `bf16` CUDA GEMM/runtime failures
+
+Symptoms:
+
+- PyTorch raises a CUDA/bf16 GEMM error soon after startup
+- bf16 matmuls fail on one PyTorch build but succeed on another
+- flash-attn may need to be disabled manually by setting `mixed_precision: no`
+
+What happens:
+
+1. this is usually an environment/runtime issue rather than a NeoBERT config
+   issue,
+2. NeoBERT does not override PyTorch BLAS library selection at startup,
+3. if bf16 is broken on the current stack, the failing PyTorch operation will
+   still fail until you change the environment or disable bf16.
+
+Actions:
+
+1. pin a known-good PyTorch build for the affected host/GPU combination,
+2. verify CUDA/driver/PyTorch compatibility and rebuild extension wheels after
+   version changes,
+3. set `trainer.mixed_precision: no` if that environment cannot run bf16
+   reliably,
+4. if you disable bf16, keep `attn_backend: sdpa` for supported execution.
+
+### Accelerate launch warnings about mixed precision or dynamo
+
+Symptoms:
+
+- `accelerate launch` says its default `--mixed_precision` is `no`
+- `accelerate launch` says its default `--dynamo_backend` is `no`
+
+What happens:
+
+1. those warnings describe omitted launcher flags, not a NeoBERT override,
+2. NeoBERT still constructs `Accelerator(...)` from `trainer.mixed_precision`
+   and the repo's compile settings,
+3. passing matching launcher flags keeps the startup output aligned with the
+   actual runtime policy.
+
+Actions:
+
+1. pass `accelerate launch --mixed_precision bf16` when the config uses bf16,
+2. keep `--dynamo_backend no` unless you are intentionally testing launcher-side
+   dynamo,
+3. use `--wandb.name ...` for run naming; `--wandb.run` is not a NeoBERT CLI key.
+
 ### `torch.compile` warnings/recompiles
 
 Typical warnings:
@@ -102,6 +149,8 @@ Actions:
 ## Checkpointing Notes
 
 - Training checkpoints are safetensors-first (`model.safetensors`).
+- Portable checkpoint loading recursively strips known runtime wrappers such as
+  `_orig_mod.` and `module.` from generic compiled/distributed saves.
 - Warning about removing shared tensors during save can be expected when tied
   weights are de-duplicated; validate by reloading checkpoint and running a
   forward pass.
@@ -116,11 +165,11 @@ Actions:
 
 ```bash
 # Validate exported model
-python scripts/export-hf/validate.py /path/to/exported/model
+conda run -s --name neobert python scripts/export-hf/validate.py /path/to/exported/model
 
 # Tiny pretraining smoke test
-python scripts/pretraining/pretrain.py tests/configs/pretraining/test_tiny_pretrain.yaml
+conda run -s --name neobert python scripts/pretraining/pretrain.py tests/configs/pretraining/test_tiny_pretrain.yaml
 
 # Focused tests for packed attention path
-pytest tests/kernels/test_attention.py tests/test_model_forward.py -q
+conda run -s --name neobert pytest tests/kernels/test_attention.py tests/test_model_forward.py -q
 ```

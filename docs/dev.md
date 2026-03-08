@@ -3,23 +3,6 @@
 This page tracks the current engineering status and near-term TODOs for NeoBERT
 training performance and stability work.
 
----
-
-- [Current Status](#current-status)
-  - [Pretraining packed path](#pretraining-packed-path)
-  - [Compile and runtime behavior](#compile-and-runtime-behavior)
-  - [Distributed runtime policy (FSDP2-first)](#distributed-runtime-policy-fsdp2-first)
-  - [Checkpointing and serialization](#checkpointing-and-serialization)
-- [Recently Landed](#recently-landed)
-- [Lessons Learned](#lessons-learned)
-- [Known Gaps](#known-gaps)
-- [Next PR TODOs](#next-pr-todos)
-  - [Contrastive Sweep TODOs](#contrastive-sweep-todos)
-  - [Config Loader Architecture TODOs (Separate PR)](#config-loader-architecture-todos-separate-pr)
-- [Longer-Term Backlog](#longer-term-backlog)
-
----
-
 ## Current Status
 
 ### Pretraining packed path
@@ -48,28 +31,24 @@ Status: **stabilized for current training configs**.
 
 ### Distributed runtime policy (FSDP2-first)
 
-Status: **enforced for pretraining**.
+Status: **enforced for current training/eval entrypoints**.
 
-- NeoBERT pretraining is now explicitly **FSDP2-first**.
-- FSDP v1 is rejected at runtime with a clear error.
-- Reason: masked-logits-only objective needs decoder-weight unshard/reshard
-  semantics that are safe with FSDP2. FSDP1 `summon_full_params` does not allow
-  initiating forward/backward inside that context.
-- For Accelerate launches, set FSDP config to `fsdp_version: 2`.
-- Keep passing model + optimizer together to `accelerate.prepare(...)` in FSDP2
-  paths (Accelerate requirement).
+- Pretraining uses Accelerate FSDP2 as the maintained distributed path.
+- FSDP v1 is rejected at runtime; masked-logits-only loss depends on FSDP2-safe
+  unshard/reshard behavior around the decoder weight.
+- DeepSpeed runtime support has been removed from entrypoints; legacy ZeRO
+  checkpoint conversion remains artifact-only.
+- Multi-rank Muon validation now covers both the raw FSDP2 owner-compute path
+  and the shipped Accelerate `save_state` / `load_state` resume path.
 
 ### Checkpointing and serialization
 
 Status: **standardized**.
 
-- Training checkpoints have been standardized on `safetensors`.
-- This is compatible with the current pretraining flow and keeps export paths
-  straightforward.
-- **Breaking change (2026-02):** pretraining now writes a single checkpoint tree
-  at `output_dir/checkpoints/<step>/` that contains both resumable Accelerate
-  state and export assets (`model.safetensors`, `config.yaml`, tokenizer files).
-  The previous parallel `model_checkpoints/` tree is no longer written.
+- Training checkpoints are `safetensors`-first.
+- **Breaking change (2026-02):** pretraining writes one checkpoint tree at
+  `output_dir/checkpoints/<step>/` with resumable Accelerate state and export
+  assets together. The old parallel `model_checkpoints/` tree is gone.
 
 ## Recently Landed
 
@@ -80,6 +59,8 @@ Key landed changes from recent engineering cycles include:
 - Liger integration and kernel backend cleanup.
 - Runtime import cleanup (remove `sys.path` hacks / normalize imports).
 - Safetensors checkpoint standardization.
+- Manual Accelerate FSDP2 Muon save/load smoke coverage for the production
+  `prepare` / `save_state` / `load_state` resume path.
 - Optional full packed-batch enforcement:
   `trainer.enforce_full_packed_batches`.
 - Training-loop overhead reductions:
@@ -183,6 +164,29 @@ Priority order for next performance PR:
 
 - Collect recompile reasons under the harness above.
 - Remove avoidable dynamic guards and static-attribute churn in hot modules.
+
+1. MuonClip helper deduplication
+
+- Consolidate duplicated transformer-layer resolution logic between
+  `MuonClipOptimizer._resolve_transformer_stack` and
+  `NeoBERTAttentionHooks._resolve_transformer_layers` into one shared utility.
+
+1. Normalize MuonClip clipping intent vs runtime support under FSDP2
+
+- Current behavior intentionally disables clipping at optimizer-construction
+  time for FSDP2 runs so hooks do not capture on the first sharded step before
+  the prepared runtime can turn clipping off.
+- If we want to preserve `config.enable_clipping` as user intent while still
+  disabling the actual runtime behavior, add a dedicated post-prepare/runtime
+  toggle instead of just removing the factory-side disable.
+
+1. Pipeline Muon owner-compute collectives across parameters
+
+- Current FSDP2 Muon owner-compute logic gathers, orthogonalizes, and scatters
+  one parameter at a time.
+- Before treating that path as multi-node ready, batch or pipeline those
+  collectives so larger models do not serialize one blocking gather/scatter pair
+  per 2D Muon matrix update.
 
 ### Contrastive Sweep TODOs
 

@@ -6,7 +6,6 @@ import math
 import os
 import random
 import re
-import shutil
 import warnings
 from contextlib import nullcontext
 from copy import deepcopy
@@ -36,8 +35,11 @@ from neobert.checkpointing import (
     MODEL_WEIGHTS_NAME,
     load_deepspeed_fp32_state_dict,
     load_model_safetensors,
-    save_state_dict_safetensors,
+    prune_step_checkpoints as _prune_step_checkpoints,
+    resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
+    save_portable_checkpoint_weights,
 )
+from neobert.kernels.attention import canonicalize_attn_backend
 from neobert.model import NeoBERTConfig, NeoBERTForSequenceClassification
 from neobert.tokenizer import get_tokenizer
 
@@ -51,12 +53,15 @@ from neobert.training_utils import (
     _resolve_resume_checkpoint,
     _unwrap_optimizer,
     create_accelerator,
+    validate_distributed_runtime_policy,
     validate_muon_distributed_compatibility,
+    validate_muon_runtime_topology,
 )
 from neobert.utils import configure_tf32, format_resolved_config, prepare_wandb_config
 from neobert.validation import ValidationError, validate_glue_config
 
 logger = get_logger(__name__)
+_bootstrap_logger = logging.getLogger(__name__)
 
 TASK_TO_METRIC = {
     "stsb": "eval_pearson",
@@ -224,6 +229,34 @@ def _resolve_glue_task(cfg: Any) -> str:
     :return str: Normalized GLUE task name.
     """
     return str(getattr(cfg.glue, "task_name", getattr(cfg, "task", "glue"))).strip()
+
+
+def _resolve_glue_runtime_policy(cfg: Config) -> tuple[str, str]:
+    """Resolve GLUE runtime precision and attention backend policy.
+
+    GLUE classifiers in this repo intentionally run with SDPA attention only.
+    Packed flash-attn kernels are a pretraining/contrastive optimization and
+    are not part of the supported GLUE runtime surface.
+
+    :param Config cfg: Runtime GLUE config.
+    :return tuple[str, str]: Effective ``(mixed_precision, attn_backend)``.
+    """
+    requested_backend = canonicalize_attn_backend(
+        getattr(cfg.model, "attn_backend", "sdpa")
+    )
+    mixed_precision = resolve_mixed_precision(
+        cfg.trainer.mixed_precision,
+        task="glue",
+    )
+
+    if requested_backend != "sdpa":
+        _bootstrap_logger.warning(
+            "GLUE classifier wrappers run with SDPA attention only; ignoring "
+            "model.attn_backend=%r and forcing attn_backend='sdpa'.",
+            requested_backend,
+        )
+
+    return mixed_precision, "sdpa"
 
 
 def _load_glue_metric(glue_task: str, meta_task: str, experiment_id: str) -> Any:
@@ -615,6 +648,8 @@ def load_pretrained_weights(
         )
         try:
             state_dict = load_deepspeed_fp32_state_dict(checkpoint_path)
+        except ModuleNotFoundError:
+            raise
         except Exception as exc:
             raise FileNotFoundError(
                 f"Unable to load checkpoint {checkpoint_path}: expected either "
@@ -649,96 +684,23 @@ def load_pretrained_weights(
     return model
 
 
-def _resolve_checkpoint_retention_limit(cfg: Config) -> int:
-    """Resolve effective checkpoint retention limit from trainer config.
-
-    :param Config cfg: Runtime GLUE training configuration.
-    :return int: Maximum number of retained checkpoints (0 disables pruning).
-    """
-    save_total_limit = getattr(cfg.trainer, "save_total_limit", None)
-    if save_total_limit is not None:
-        return max(0, int(save_total_limit))
-    max_ckpt = getattr(cfg.trainer, "max_ckpt", None)
-    if max_ckpt is not None:
-        return max(0, int(max_ckpt))
-    return 0
-
-
-def _prune_step_checkpoints(checkpoint_dir: Path, retention_limit: int) -> None:
-    """Prune old numeric step checkpoint folders in ``checkpoint_dir``.
-
-    :param Path checkpoint_dir: Root directory containing ``<step>/`` folders.
-    :param int retention_limit: Number of newest numeric checkpoints to keep.
-    """
-    if retention_limit <= 0 or not checkpoint_dir.exists():
-        return
-
-    checkpoints: list[tuple[int, Path]] = []
-    for item_path in checkpoint_dir.iterdir():
-        if not item_path.is_dir():
-            continue
-        try:
-            checkpoints.append((int(item_path.name), item_path))
-        except ValueError:
-            continue
-
-    if len(checkpoints) <= retention_limit:
-        return
-
-    checkpoints.sort(key=lambda item: item[0])
-    for _, old_path in checkpoints[: len(checkpoints) - retention_limit]:
-        shutil.rmtree(old_path)
-        logger.info(f"Removed old checkpoint: {old_path} (limit={retention_limit})")
-
-
 def _save_portable_glue_checkpoint_weights(
     model: torch.nn.Module,
     accelerator: Accelerator,
     checkpoint_path: Path,
 ) -> bool:
-    """Ensure a portable ``model.safetensors`` exists in a GLUE step checkpoint.
+    """Refresh the portable ``model.safetensors`` in a GLUE step checkpoint.
 
     :param torch.nn.Module model: Prepared GLUE model.
     :param Accelerator accelerator: Active accelerator runtime.
     :param Path checkpoint_path: Checkpoint directory ``checkpoints/<step>/``.
-    :return bool: True when portable weights exist (written or already present).
+    :return bool: True when portable weights were saved.
     """
-    weights_path = checkpoint_path / MODEL_WEIGHTS_NAME
-    if weights_path.exists():
-        return True
-
-    try:
-        # Some distributed backends require all ranks to participate in
-        # state-dict collection even if only rank 0 writes the file.
-        state_dict = accelerator.get_state_dict(model, unwrap=True)
-    except Exception as exc:
-        if accelerator.is_main_process:
-            logger.warning(
-                "Unable to export portable GLUE weights to %s: %s. "
-                "Resumable state was still saved.",
-                weights_path,
-                exc,
-            )
-        return False
-
-    if not accelerator.is_main_process:
-        return False
-
-    try:
-        save_state_dict_safetensors(
-            state_dict,
-            checkpoint_path,
-            metadata={"format": "pt", "source": "accelerate.get_state_dict"},
-        )
-    except Exception as exc:
-        logger.warning(
-            "Failed to persist portable GLUE weights at %s: %s. "
-            "Resumable state was still saved.",
-            weights_path,
-            exc,
-        )
-        return False
-    return True
+    return save_portable_checkpoint_weights(
+        model,
+        accelerator,
+        checkpoint_path,
+    )
 
 
 def _should_save_glue_checkpoint(
@@ -951,11 +913,7 @@ def trainer(cfg: Config) -> None:
         cfg.trainer.output_dir,
         automatic_checkpoint_naming=False,
     )
-    # Handle mixed precision setting (could be bool or string)
-    mixed_precision = resolve_mixed_precision(
-        cfg.trainer.mixed_precision,
-        task="glue",
-    )
+    mixed_precision, cfg.model.attn_backend = _resolve_glue_runtime_policy(cfg)
     cfg.trainer.mixed_precision = mixed_precision
 
     wandb_enabled = cfg.wandb.enabled and cfg.wandb.mode != "disabled"
@@ -966,6 +924,11 @@ def trainer(cfg: Config) -> None:
         mixed_precision=mixed_precision,
         project_config=project_config,
         gradient_accumulation_steps=int(cfg.trainer.gradient_accumulation_steps),
+    )
+    validate_distributed_runtime_policy(
+        accelerator=accelerator,
+        log=logger,
+        context="glue",
     )
     validate_muon_distributed_compatibility(
         accelerator=accelerator,
@@ -987,14 +950,6 @@ def trainer(cfg: Config) -> None:
                     file_path.unlink()
         output_dir.mkdir(parents=True, exist_ok=True)
     accelerator.wait_for_everyone()
-
-    # Force SDPA for GLUE - variable-length batches are incompatible with packed attention
-    if hasattr(cfg.model, "attn_backend") and cfg.model.attn_backend != "sdpa":
-        logger.warning(
-            "Packed attention is not supported for GLUE evaluation due to "
-            "variable-length sequences. Forcing attn_backend='sdpa'."
-        )
-    # Always use SDPA (eager) attention for GLUE.
 
     # Check from_hub in raw model dict for GLUE tasks
     from_hub = False
@@ -1450,6 +1405,14 @@ def trainer(cfg: Config) -> None:
         eval_dataloader,
     )
 
+    validate_muon_runtime_topology(
+        accelerator=accelerator,
+        optimizer=optimizer,
+        optimizer_name=cfg.optimizer.name,
+        log=logger,
+        context="glue",
+    )
+
     if glue_task == "mnli":
         mm_eval_dataloader = accelerator.prepare(mm_eval_dataloader)
 
@@ -1597,6 +1560,13 @@ def trainer(cfg: Config) -> None:
 
         accelerator.print(f"Resuming GLUE run from checkpoint: {resume_checkpoint}")
         accelerator.load_state(str(resume_checkpoint))
+        validate_muon_runtime_topology(
+            accelerator=accelerator,
+            optimizer=optimizer,
+            optimizer_name=cfg.optimizer.name,
+            log=logger,
+            context="glue resume",
+        )
 
         step_from_optimizer = _get_optimizer_update_step(optimizer)
         if step_from_optimizer is not None and step_from_optimizer > 0:

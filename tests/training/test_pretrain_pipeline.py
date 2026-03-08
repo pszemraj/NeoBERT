@@ -4,7 +4,6 @@
 import os
 import tempfile
 import warnings
-from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -31,7 +30,6 @@ from neobert.pretraining.trainer import (
     _split_train_dataset_for_eval_samples,
     _should_backward_inside_gathered_decoder_weight,
     _sync_tokenizer_derived_config,
-    _write_deepspeed_latest_file,
     trainer,
 )
 
@@ -205,15 +203,6 @@ class TestPretrainComponents:
         assert cfg.tokenizer.vocab_size == 128
         assert cfg.model.pad_token_id == tokenizer.pad_token_id
 
-    def test_write_deepspeed_latest_file(self):
-        """Ensure DeepSpeed root latest indirection is refreshed correctly."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            _write_deepspeed_latest_file(root, "12345")
-            latest_path = root / "latest"
-            assert latest_path.exists()
-            assert latest_path.read_text(encoding="utf-8") == "12345\n"
-
     def test_save_portable_checkpoint_weights_paths(self):
         """Ensure portable checkpoint save behavior for success/failure/rank paths."""
 
@@ -279,34 +268,10 @@ class TestPretrainComponents:
             def unwrap_model(module: torch.nn.Module) -> torch.nn.Module:
                 return module
 
-        with patch("deepspeed.zero.GatheredParameters") as gathered:
-            with _gather_decoder_weight_for_masked_objective(
-                model, _NoDistAccelerator()
-            ) as lm_weight:
-                assert lm_weight is model.decoder.weight
-            gathered.assert_not_called()
-
-        setattr(model.decoder.weight, "ds_id", 123)
-
-        class _DeepSpeedAccelerator:
-            distributed_type = DistributedType.DEEPSPEED
-
-            @staticmethod
-            def unwrap_model(module: torch.nn.Module) -> torch.nn.Module:
-                return module
-
-        with patch(
-            "deepspeed.zero.GatheredParameters",
-            side_effect=lambda *_args, **_kwargs: nullcontext(),
-        ) as gathered:
-            with _gather_decoder_weight_for_masked_objective(
-                model, _DeepSpeedAccelerator()
-            ) as lm_weight:
-                assert lm_weight is model.decoder.weight
-        gathered.assert_called_once()
-        assert gathered.call_args.args[0] == [model.decoder.weight]
-        assert gathered.call_args.kwargs["modifier_rank"] is None
-        assert gathered.call_args.kwargs["fwd_module"] is model
+        with _gather_decoder_weight_for_masked_objective(
+            model, _NoDistAccelerator()
+        ) as lm_weight:
+            assert lm_weight is model.decoder.weight
 
         class _FSDPPluginStub:
             fsdp_version = 1
@@ -491,17 +456,6 @@ class TestPretrainComponents:
         )
         assert _should_backward_inside_gathered_decoder_weight(_FSDP2Accel(), lm_weight)
 
-        class _DeepSpeedBackwardAccel:
-            distributed_type = DistributedType.DEEPSPEED
-
-            def __init__(self, marker: dict[str, bool]) -> None:
-                self._marker = marker
-                self.backward_calls = 0
-
-            def backward(self, _loss: torch.Tensor) -> None:
-                self.backward_calls += 1
-                assert self._marker["active"]
-
         class _FSDP2BackwardAccel:
             distributed_type = DistributedType.FSDP
             state = type(
@@ -518,13 +472,8 @@ class TestPretrainComponents:
                 self.backward_calls += 1
                 assert self._marker["active"]
 
-        for accelerator_cls, zero3 in [
-            (_DeepSpeedBackwardAccel, True),
-            (_FSDP2BackwardAccel, False),
-        ]:
+        for accelerator_cls in [_FSDP2BackwardAccel]:
             model = _ModelStub()
-            if zero3:
-                setattr(model.decoder.weight, "ds_id", 7)
             marker = {"active": False}
             accelerator = accelerator_cls(marker)
             batch = {
@@ -577,35 +526,17 @@ class TestPretrainComponents:
         assert not backward_done
         assert accelerator.backward_calls == 0
 
-    def test_compute_weight_norm_for_logging_deepspeed(self):
-        """Ensure DeepSpeed norm logging handles mapped and unmapped params."""
+    def test_compute_weight_norm_for_logging_uses_model_parameters(self):
+        """Weight-norm logging should operate directly on current model params."""
+        model = torch.nn.Linear(3, 2, bias=True)
+        expected = (sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5).item()
 
         class _AcceleratorStub:
-            distributed_type = DistributedType.DEEPSPEED
+            distributed_type = DistributedType.NO
 
-        model = torch.nn.Linear(3, 2, bias=True)
-        params = list(model.parameters())
-        weight_full = torch.full_like(params[0], 2.0)
-
-        def _fake_safe_get_full_fp32_param(param: torch.nn.Parameter):
-            if param is params[0]:
-                return weight_full
-            return None
-
-        with patch(
-            "neobert.pretraining.trainer.safe_get_full_fp32_param",
-            side_effect=_fake_safe_get_full_fp32_param,
-        ):
-            norm = _compute_weight_norm_for_logging(model, _AcceleratorStub())
+        norm = _compute_weight_norm_for_logging(model, _AcceleratorStub())
         assert norm is not None
-        assert round(abs(norm - weight_full.norm(2).item()), 6) == 0
-
-        with patch(
-            "neobert.pretraining.trainer.safe_get_full_fp32_param",
-            return_value=None,
-        ):
-            norm_none = _compute_weight_norm_for_logging(model, _AcceleratorStub())
-        assert norm_none is None
+        assert round(abs(norm - expected), 6) == 0
 
     def test_resolve_loader_perf_settings_cuda_and_cpu(self):
         """Ensure loader perf settings differ appropriately across CUDA and CPU."""
@@ -786,26 +717,6 @@ class TestPretrainComponents:
         }
         _clear_stored_batch(stored_batch)
         assert all(value is None for value in stored_batch.values())
-
-    def test_promote_tmp_checkpoint_dir_keeps_old_until_swap(self):
-        """Ensure tmp checkpoint promotion does not delete final dir pre-swap."""
-        from neobert.pretraining.trainer import _promote_tmp_checkpoint_dir
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            tmp_ckpt = root / "100.tmp"
-            final_ckpt = root / "100"
-            tmp_ckpt.mkdir()
-            final_ckpt.mkdir()
-            (tmp_ckpt / "model.safetensors").write_text("new")
-            (final_ckpt / "model.safetensors").write_text("old")
-
-            _promote_tmp_checkpoint_dir(tmp_ckpt, final_ckpt)
-
-            assert not tmp_ckpt.exists()
-            assert final_ckpt.exists()
-            assert (final_ckpt / "model.safetensors").read_text() == "new"
-            assert not (root / "100.old").exists()
 
     def test_optimizer_and_scheduler_creation_with_decay_name_normalization(self):
         """Ensure optimizer grouping and scheduler decay-name normalization both work."""

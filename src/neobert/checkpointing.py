@@ -1,5 +1,7 @@
 """Checkpoint I/O helpers for NeoBERT training and evaluation."""
 
+import logging
+import shutil
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -8,6 +10,8 @@ from safetensors.torch import load_file, save_file
 from torch import nn
 
 MODEL_WEIGHTS_NAME = "model.safetensors"
+logger = logging.getLogger(__name__)
+_RUNTIME_PREFIXES = ("_orig_mod.", "module.")
 _DEEPSPEED_TAG_DIR_PATTERNS = (
     "mp_rank_*_model_states.pt",
     "zero_pp_rank_*_mp_rank_*_optim_states.pt",
@@ -34,10 +38,13 @@ def _strip_runtime_prefixes(key: str) -> str:
     :param str key: Raw state-dict key.
     :return str: Canonicalized key.
     """
-    for prefix in ("_orig_mod.", "module."):
-        while key.startswith(prefix):
-            key = key[len(prefix) :]
-    return key
+    while True:
+        for prefix in _RUNTIME_PREFIXES:
+            if key.startswith(prefix):
+                key = key[len(prefix) :]
+                break
+        else:
+            return key
 
 
 def _state_dict_for_safetensors(
@@ -47,12 +54,19 @@ def _state_dict_for_safetensors(
 
     :param Mapping[str, Any] raw_state_dict: Raw model/state-dict mapping.
     :return dict[str, torch.Tensor]: Canonicalized contiguous CPU tensor payload.
+    :raises ValueError: If multiple raw keys normalize to the same canonical key.
     """
     payload: dict[str, torch.Tensor] = {}
     seen_storage_ptrs: set[int] = set()
     for key, value in raw_state_dict.items():
         if not torch.is_tensor(value):
             continue
+        normalized_key = _strip_runtime_prefixes(str(key))
+        if normalized_key in payload:
+            raise ValueError(
+                "State dict contains multiple keys that normalize to "
+                f"'{normalized_key}' (for example '{key}')."
+            )
         tensor = value.detach().cpu().contiguous()
         storage_ptr = tensor.untyped_storage().data_ptr()
         if storage_ptr in seen_storage_ptrs:
@@ -61,7 +75,32 @@ def _state_dict_for_safetensors(
             tensor = tensor.clone()
             storage_ptr = tensor.untyped_storage().data_ptr()
         seen_storage_ptrs.add(storage_ptr)
-        payload[_strip_runtime_prefixes(str(key))] = tensor
+        payload[normalized_key] = tensor
+    return payload
+
+
+def _canonicalize_loaded_state_dict(
+    raw_state_dict: Mapping[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """Canonicalize loaded state-dict keys by stripping runtime wrapper prefixes.
+
+    This keeps checkpoint loading tolerant of portable weight files created by
+    generic save paths that may have preserved prefixes such as ``_orig_mod.``
+    or ``module.``.
+
+    :param Mapping[str, torch.Tensor] raw_state_dict: Loaded tensor mapping.
+    :return dict[str, torch.Tensor]: Canonicalized state dict.
+    :raises ValueError: If multiple raw keys normalize to the same canonical key.
+    """
+    payload: dict[str, torch.Tensor] = {}
+    for raw_key, value in raw_state_dict.items():
+        normalized_key = _strip_runtime_prefixes(str(raw_key))
+        if normalized_key in payload:
+            raise ValueError(
+                "Loaded state dict contains multiple keys that normalize to "
+                f"'{normalized_key}' (for example '{raw_key}')."
+            )
+        payload[normalized_key] = value
     return payload
 
 
@@ -73,6 +112,7 @@ def model_state_dict_for_safetensors(model: nn.Module) -> dict[str, torch.Tensor
 
     :param nn.Module model: Model to serialize.
     :return dict[str, torch.Tensor]: Safetensors payload.
+    :raises ValueError: If runtime wrapper prefixes collapse multiple keys.
     """
     base_model = _unwrap_compile_wrappers(model)
     return _state_dict_for_safetensors(base_model.state_dict())
@@ -90,7 +130,8 @@ def save_state_dict_safetensors(
     :param str | Path checkpoint_dir: Target checkpoint directory.
     :param Mapping[str, str] | None metadata: Optional safetensors metadata.
     :return Path: Path to the saved safetensors file.
-    :raises ValueError: If no tensors are present in ``state_dict``.
+    :raises ValueError:
+        If no tensors are present in ``state_dict`` or canonicalization collides.
     """
     checkpoint_dir = Path(checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -114,6 +155,7 @@ def save_model_safetensors(
     :param str | Path checkpoint_dir: Target checkpoint directory.
     :param Mapping[str, str] | None metadata: Optional safetensors metadata.
     :return Path: Path to the saved safetensors file.
+    :raises ValueError: If runtime wrapper prefixes collapse multiple keys.
     """
     return save_state_dict_safetensors(
         model_state_dict_for_safetensors(model),
@@ -202,14 +244,24 @@ def load_deepspeed_fp32_state_dict(
     :param str | Path checkpoint_dir: Checkpoint root or step directory.
     :param str | int | None tag: Optional explicit root-level tag/step.
     :return dict[str, torch.Tensor]: Materialized fp32 model state dict.
+    :raises ModuleNotFoundError:
+        If the optional DeepSpeed checkpoint-conversion dependency is missing.
     :raises ValueError: If conversion returns an empty state dict.
     """
-    from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
-
     resolved_root, resolved_tag = resolve_deepspeed_checkpoint_root_and_tag(
         checkpoint_dir,
         tag=tag,
     )
+    try:
+        from deepspeed.utils.zero_to_fp32 import (
+            get_fp32_state_dict_from_zero_checkpoint,
+        )
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "DeepSpeed checkpoint conversion requires the optional legacy "
+            "checkpoint dependency. Install `neobert[legacy-checkpoints]` "
+            "before loading DeepSpeed ZeRO checkpoints."
+        ) from exc
     state_dict = get_fp32_state_dict_from_zero_checkpoint(
         str(resolved_root),
         tag=str(resolved_tag),
@@ -229,6 +281,10 @@ def load_model_safetensors(
 ) -> dict[str, torch.Tensor]:
     """Load model weights from ``model.safetensors``.
 
+    Runtime wrapper prefixes such as ``_orig_mod.`` and ``module.`` are stripped
+    on read so callers can consume portable weights produced by either repo
+    helpers or generic runtime save paths.
+
     :param str | Path checkpoint_dir: Checkpoint directory path.
     :param str | torch.device map_location: Device for loaded tensors.
     :return dict[str, torch.Tensor]: Loaded state dict.
@@ -242,4 +298,118 @@ def load_model_safetensors(
     state_dict = load_file(str(weights_path), device=str(map_location))
     if not state_dict:
         raise ValueError(f"Loaded state dict is empty from {weights_path}")
-    return state_dict
+    return _canonicalize_loaded_state_dict(state_dict)
+
+
+def resolve_checkpoint_retention_limit(cfg: Any) -> int:
+    """Resolve effective checkpoint retention limit from trainer config.
+
+    ``trainer.save_total_limit`` is preferred. Deprecated ``trainer.max_ckpt``
+    is used only as a fallback when ``save_total_limit`` is unset.
+
+    :param Any cfg: Runtime config object or ``cfg.trainer``.
+    :return int: Maximum number of retained checkpoints (0 disables pruning).
+    """
+    trainer_cfg = getattr(cfg, "trainer", cfg)
+    save_total_limit = getattr(trainer_cfg, "save_total_limit", None)
+    if save_total_limit is not None:
+        return max(0, int(save_total_limit))
+    max_ckpt = getattr(trainer_cfg, "max_ckpt", None)
+    if max_ckpt is not None:
+        return max(0, int(max_ckpt))
+    return 0
+
+
+def prune_step_checkpoints(checkpoint_dir: str | Path, retention_limit: int) -> None:
+    """Prune old numeric step checkpoint folders in ``checkpoint_dir``.
+
+    This helper is best-effort and resilient to concurrent filesystem mutations.
+    It never raises on a missing/deleted checkpoint directory.
+
+    :param str | Path checkpoint_dir: Root directory containing ``<step>/`` folders.
+    :param int retention_limit: Number of newest numeric checkpoints to keep.
+    """
+    checkpoint_dir = Path(checkpoint_dir)
+    if retention_limit <= 0 or not checkpoint_dir.exists():
+        return
+
+    checkpoints: list[tuple[int, Path]] = []
+    for item_path in checkpoint_dir.iterdir():
+        if not item_path.is_dir():
+            continue
+        try:
+            checkpoints.append((int(item_path.name), item_path))
+        except ValueError:
+            continue
+
+    if len(checkpoints) <= retention_limit:
+        return
+
+    checkpoints.sort(key=lambda item: item[0])
+    for _, old_path in checkpoints[: len(checkpoints) - retention_limit]:
+        try:
+            shutil.rmtree(old_path)
+            logger.info(
+                "Removed old checkpoint: %s (limit=%d)", old_path, retention_limit
+            )
+        except FileNotFoundError:
+            logger.warning("Checkpoint already removed before prune: %s", old_path)
+        except OSError as exc:
+            logger.warning("Failed to remove old checkpoint %s: %s", old_path, exc)
+
+
+def save_portable_checkpoint_weights(
+    model: nn.Module,
+    accelerator: Any,
+    checkpoint_path: str | Path,
+    *,
+    skip_if_exists: bool = False,
+) -> bool:
+    """Save backend-agnostic ``model.safetensors`` into a step checkpoint.
+
+    :param nn.Module model: Prepared training model.
+    :param Any accelerator: Active accelerator runtime.
+    :param str | Path checkpoint_path: Step checkpoint directory path.
+    :param bool skip_if_exists: Return early when a portable file already exists.
+    :return bool: True when portable weights were saved (or already existed).
+    """
+    checkpoint_path = Path(checkpoint_path)
+    weights_path = checkpoint_path / MODEL_WEIGHTS_NAME
+    if skip_if_exists and weights_path.exists():
+        return True
+
+    try:
+        # Distributed backends (FSDP/FSDP2/DeepSpeed) may require all ranks to
+        # participate in state-dict collection collectives even when only rank 0
+        # persists the portable safetensors payload.
+        state_dict = accelerator.get_state_dict(model, unwrap=True)
+    except Exception as exc:
+        if getattr(accelerator, "is_main_process", True):
+            logger.warning(
+                "Unable to export portable checkpoint weights to %s: %s. "
+                "Resumable state was still saved.",
+                weights_path,
+                exc,
+            )
+        return False
+
+    if not getattr(accelerator, "is_main_process", True):
+        return False
+
+    try:
+        weights_path = save_state_dict_safetensors(
+            state_dict,
+            checkpoint_path,
+            metadata={"format": "pt", "source": "accelerate.get_state_dict"},
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to persist portable checkpoint weights at %s: %s. "
+            "Resumable state was still saved.",
+            weights_path,
+            exc,
+        )
+        return False
+
+    logger.info("Saved portable model weights to %s.", weights_path)
+    return True

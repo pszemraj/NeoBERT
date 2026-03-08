@@ -38,7 +38,7 @@ datacollator:
   pack_sequences: true
 
 trainer:
-  output_dir: "./outputs/neobert-100m-wordpc_msp_32k_tok-muonclip"
+  output_dir: "./outputs/neobert-100m-wordpc_msp_32k_tok-muonclip-noclip"
   max_steps: 100000
   per_device_train_batch_size: 16
   per_device_eval_batch_size: 16
@@ -77,7 +77,8 @@ optimizer:
     ns_steps: 5 # Newton-Schulz iterations (3-9 recommended)
 
     # QK-Clipping parameters
-    enable_clipping: true # Enable attention stability clipping
+    # Explicitly disabled for deterministic Muon-only runs and FSDP2 parity.
+    enable_clipping: false
     clipping_threshold: 50.0 # Conservative for encoders (decoder default: 100)
     clipping_alpha: 0.5 # Q/K scaling balance (0.5 = equal)
     clipping_warmup_steps: 0 # Steps before enabling clipping
@@ -96,7 +97,7 @@ scheduler:
 wandb:
   enabled: true
   project: "neobert-pretraining"
-  name: "neobert-100m-wordpc_msp_32k_tok-muonclip"
+  name: "neobert-100m-wordpc_msp_32k_tok-muonclip-noclip"
   mode: "online"
 
 # Additional settings

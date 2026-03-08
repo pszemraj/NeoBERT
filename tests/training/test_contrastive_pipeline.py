@@ -95,8 +95,6 @@ class TestContrastivePipeline:
         )
 
         def _fake_load_from_disk(path: str):
-            if Path(path).name == "all":
-                return dataset_dict
             return pretraining_dataset
 
         def _make_tokenizer() -> PreTrainedTokenizerFast:
@@ -115,12 +113,18 @@ class TestContrastivePipeline:
                 side_effect=_fake_load_from_disk,
             ),
             mock.patch(
+                "neobert.contrastive.trainer.load_cached_contrastive_datasets",
+                return_value=dataset_dict,
+            ) as cached_loader,
+            mock.patch(
                 "neobert.contrastive.trainer.get_tokenizer",
                 return_value=_make_tokenizer(),
             ),
         ):
             trainer(config)
 
+        cached_loader.assert_called_once()
+        assert cached_loader.call_args.kwargs["selected_names"] == ["ALLNLI"]
         step_dir = Path(temp_output_dir) / "checkpoints" / "1"
         assert step_dir.is_dir()
         assert (step_dir / "model.safetensors").is_file()
@@ -147,8 +151,6 @@ class TestContrastivePipeline:
             pretraining_dataset = Dataset.from_dict({"dummy": ["x"]})
 
             def _fake_load_from_disk(path: str):
-                if path.endswith("all"):
-                    return dataset_dict
                 return pretraining_dataset
 
             def _make_tokenizer() -> PreTrainedTokenizerFast:
@@ -173,6 +175,10 @@ class TestContrastivePipeline:
                 mock.patch(
                     "neobert.contrastive.trainer.load_from_disk",
                     side_effect=_fake_load_from_disk,
+                ),
+                mock.patch(
+                    "neobert.contrastive.trainer.load_cached_contrastive_datasets",
+                    return_value=dataset_dict,
                 ),
                 mock.patch(
                     "neobert.contrastive.trainer.get_tokenizer",

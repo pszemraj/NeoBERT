@@ -1,15 +1,62 @@
 """Shared helpers for training loops (pretraining, GLUE, contrastive)."""
 
 import logging
+import os
 import re
 from pathlib import Path
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Iterable, Optional, Tuple
 
 import torch
 from accelerate import Accelerator
+from accelerate.state import AcceleratorState, GradientState
 from accelerate.utils import DistributedType
 
 logger = logging.getLogger(__name__)
+
+try:
+    from torch.distributed.tensor import DTensor
+    from torch.distributed.tensor.placement_types import Shard
+except Exception:  # pragma: no cover - older torch builds without DTensor APIs
+    DTensor = None  # type: ignore[assignment]
+    Shard = None  # type: ignore[assignment]
+
+_ACCELERATOR_STATE_REINIT_PREFIX = (
+    "AcceleratorState has already been initialized and cannot be changed"
+)
+
+
+def resolve_runtime_mixed_precision_and_attn_backend(
+    *,
+    mixed_precision: str,
+    attn_backend: str,
+    log: logging.Logger,
+    use_cpu: bool = False,
+) -> tuple[str, str]:
+    """Resolve attention backend policy that depends on runtime precision/CPU.
+
+    :param str mixed_precision: Requested mixed precision mode.
+    :param str attn_backend: Requested attention backend.
+    :param logging.Logger log: Logger for runtime warnings.
+    :param bool use_cpu: Whether the run is explicitly targeting CPU execution.
+    :return tuple[str, str]: Effective ``(mixed_precision, attn_backend)``.
+    """
+    effective_precision = str(mixed_precision)
+    effective_backend = str(attn_backend)
+    normalized_backend = effective_backend.strip().lower()
+    if use_cpu and normalized_backend == "flash_attn_varlen":
+        log.warning(
+            "attn_backend='flash_attn_varlen' requires CUDA tensors, but "
+            "trainer.use_cpu=true; falling back to attn_backend='sdpa'."
+        )
+        effective_backend = "sdpa"
+        normalized_backend = "sdpa"
+    if effective_precision == "no" and normalized_backend == "flash_attn_varlen":
+        log.warning(
+            "attn_backend='flash_attn_varlen' with mixed_precision='no' is unsupported; "
+            "falling back to attn_backend='sdpa'."
+        )
+        effective_backend = "sdpa"
+    return effective_precision, effective_backend
 
 
 def resolve_wandb_watch_mode(
@@ -63,6 +110,245 @@ def _unwrap_optimizer(opt: Any) -> Any:
     return getattr(opt, "optimizer", opt)
 
 
+def _is_muonclip_optimizer(optimizer_name: str) -> bool:
+    """Return whether ``optimizer_name`` selects MuonClip.
+
+    :param str optimizer_name: Configured optimizer name.
+    :return bool: ``True`` when MuonClip is selected.
+    """
+    optimizer_key = str(optimizer_name).strip().lower()
+    return optimizer_key in {"muonclip", "muon-clip", "muon_clip"}
+
+
+def _looks_like_dtensor(param: Any) -> bool:
+    """Return whether ``param`` exposes DTensor-like metadata.
+
+    :param Any param: Parameter candidate.
+    :return bool: ``True`` when the object behaves like a DTensor.
+    """
+    if DTensor is not None and isinstance(param, DTensor):
+        return True
+    return (
+        hasattr(param, "device_mesh")
+        and hasattr(param, "placements")
+        and callable(getattr(param, "to_local", None))
+    )
+
+
+def _is_row_shard_placement(placement: Any) -> bool:
+    """Return whether ``placement`` represents ``Shard(0)``.
+
+    :param Any placement: DTensor placement descriptor.
+    :return bool: ``True`` when the placement is a row shard.
+    """
+    if Shard is not None and isinstance(placement, Shard):
+        return int(getattr(placement, "dim", -1)) == 0
+
+    placement_name = type(placement).__name__.lower()
+    shard_dim = getattr(placement, "dim", None)
+    try:
+        return placement_name.endswith("shard") and int(shard_dim) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _placement_requires_norm_reduction(placement: Any) -> bool:
+    """Return whether a DTensor placement contributes only a local partial norm.
+
+    :param Any placement: DTensor placement descriptor.
+    :return bool: ``True`` when values must be reduced across ranks.
+    """
+    if _is_row_shard_placement(placement):
+        return True
+
+    placement_name = type(placement).__name__.lower()
+    return placement_name.endswith("shard") or placement_name.endswith("partial")
+
+
+def _dtensor_requires_norm_reduction(value: Any) -> bool:
+    """Return whether a DTensor-like value needs cross-rank norm reduction.
+
+    :param Any value: DTensor-like tensor or parameter.
+    :return bool: ``True`` when local values represent only a shard/partial.
+    """
+    placements = tuple(getattr(value, "placements", ()))
+    return any(
+        _placement_requires_norm_reduction(placement) for placement in placements
+    )
+
+
+def _tensor_l2_sumsq(value: torch.Tensor) -> torch.Tensor:
+    """Compute a numerically stable squared L2 contribution for one local tensor.
+
+    :param torch.Tensor value: Local tensor or shard to accumulate.
+    :return torch.Tensor: Scalar squared-norm contribution on ``value.device``.
+    """
+    tensor = value.detach()
+    if tensor.is_sparse:
+        tensor = tensor.coalesce().values()
+    return tensor.double().pow(2).sum()
+
+
+def _accumulate_scalar_norm(
+    accumulator: Optional[torch.Tensor],
+    contribution: torch.Tensor,
+) -> torch.Tensor:
+    """Accumulate scalar norm contributions while preserving device placement.
+
+    :param torch.Tensor | None accumulator: Existing scalar accumulator.
+    :param torch.Tensor contribution: New scalar contribution to add.
+    :return torch.Tensor: Updated accumulator tensor.
+    """
+    if accumulator is None:
+        return contribution
+    return accumulator + contribution.to(device=accumulator.device)
+
+
+def _compute_l2_norm_for_logging(
+    parameters: Iterable[Any],
+    accelerator: Accelerator,
+    *,
+    grad: bool = False,
+) -> Optional[float]:
+    """Compute a global L2 norm for parameters or gradients in logging paths.
+
+    FSDP2 exposes sharded parameters as DTensors. Their local tensor values are
+    only partial shards, so logging must sum squared local contributions and
+    reduce only the sharded subset across ranks. Replicated tensors are kept
+    local so their contributions are not over-counted.
+
+    :param Iterable[Any] parameters: Parameter-like objects to inspect.
+    :param Accelerator accelerator: Active accelerator runtime.
+    :param bool grad: Whether to read ``param.grad`` instead of the parameter.
+    :return float | None: Global L2 norm or ``None`` when no tensors are present.
+    """
+    fsdp_multi_process = (
+        getattr(accelerator, "distributed_type", None) is DistributedType.FSDP
+        and int(getattr(accelerator, "num_processes", 1)) > 1
+    )
+    local_sumsq: Optional[torch.Tensor] = None
+    sharded_sumsq: Optional[torch.Tensor] = None
+    saw_tensor = False
+
+    for param in parameters:
+        value = getattr(param, "grad", None) if grad else param
+        if value is None:
+            continue
+
+        local_value = value.to_local() if _looks_like_dtensor(value) else value.detach()
+        if not torch.is_tensor(local_value):
+            continue
+
+        saw_tensor = True
+        contribution = _tensor_l2_sumsq(local_value)
+        requires_reduction = False
+        if _looks_like_dtensor(value):
+            requires_reduction = _dtensor_requires_norm_reduction(value)
+        elif _looks_like_dtensor(param):
+            # FSDP2 gradients are typically local tensors attached to DTensor params.
+            requires_reduction = _dtensor_requires_norm_reduction(param)
+        elif fsdp_multi_process:
+            requires_reduction = True
+
+        if requires_reduction:
+            sharded_sumsq = _accumulate_scalar_norm(sharded_sumsq, contribution)
+        else:
+            local_sumsq = _accumulate_scalar_norm(local_sumsq, contribution)
+
+    if not saw_tensor:
+        return None
+
+    if sharded_sumsq is not None and fsdp_multi_process:
+        reduce_fn = getattr(accelerator, "reduce", None)
+        if callable(reduce_fn):
+            sharded_sumsq = reduce_fn(sharded_sumsq, reduction="sum")
+        elif torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.all_reduce(sharded_sumsq)
+
+    total_sumsq = local_sumsq
+    if sharded_sumsq is not None:
+        total_sumsq = _accumulate_scalar_norm(total_sumsq, sharded_sumsq)
+
+    if total_sumsq is None:
+        return None
+    return float(total_sumsq.sqrt().item())
+
+
+def _update_global_norm_metric_for_logging(
+    metrics: dict[str, Any],
+    *,
+    key: str,
+    parameters: Iterable[Any],
+    accelerator: Accelerator,
+    enabled: bool,
+    grad: bool = False,
+) -> None:
+    """Collect a norm metric on all ranks but only emit it on the main process.
+
+    FSDP-aware norm helpers may execute collectives, so every rank must
+    participate even when only rank 0 should publish the resulting metric.
+
+    :param dict[str, Any] metrics: Mutable metrics mapping to update in place.
+    :param str key: Metric key to populate or clear.
+    :param Iterable[Any] parameters: Parameters/gradients to inspect.
+    :param Accelerator accelerator: Active accelerator runtime.
+    :param bool enabled: Whether this metric is enabled for the current window.
+    :param bool grad: Whether to read gradients instead of parameter values.
+    """
+    if not enabled:
+        metrics.pop(key, None)
+        return
+
+    norm_value = _compute_l2_norm_for_logging(
+        parameters,
+        accelerator,
+        grad=grad,
+    )
+    if accelerator.is_main_process and norm_value is not None:
+        metrics[key] = norm_value
+    else:
+        metrics.pop(key, None)
+
+
+def _is_accelerator_state_reinit_error(exc: Exception) -> bool:
+    """Return whether ``exc`` indicates stale Accelerate singleton state.
+
+    :param Exception exc: Exception raised while constructing ``Accelerator``.
+    :return bool: ``True`` when Accelerate requests a runtime restart.
+    """
+    return isinstance(exc, ValueError) and (
+        _ACCELERATOR_STATE_REINIT_PREFIX in str(exc)
+    )
+
+
+def _reset_accelerate_runtime_state() -> None:
+    """Reset Accelerate singleton state for sequential in-process trainer reuse."""
+    GradientState._reset_state()
+    AcceleratorState._reset_state(reset_partial_state=True)
+
+
+def _maybe_set_local_cuda_device(*, use_cpu: bool, log: logging.Logger) -> None:
+    """Bind the current process to its LOCAL_RANK CUDA device before init.
+
+    :param bool use_cpu: Whether the run is explicitly targeting CPU execution.
+    :param logging.Logger log: Logger for malformed-rank warnings.
+    """
+    if use_cpu or not torch.cuda.is_available():
+        return
+
+    local_rank_raw = os.environ.get("LOCAL_RANK")
+    if local_rank_raw is None:
+        return
+
+    try:
+        torch.cuda.set_device(int(local_rank_raw))
+    except (TypeError, ValueError):
+        log.warning(
+            "Ignoring invalid LOCAL_RANK=%r while binding the CUDA device.",
+            local_rank_raw,
+        )
+
+
 def create_accelerator(
     *,
     use_cpu: bool,
@@ -70,12 +356,13 @@ def create_accelerator(
     accelerator_factory: Callable[..., Accelerator] = Accelerator,
     **kwargs: Any,
 ) -> Accelerator:
-    """Create an Accelerator and gracefully handle mixed cpu/cuda test processes.
+    """Create an Accelerator and handle stale Accelerate singleton state.
 
-    When ``use_cpu=True`` is requested after Accelerate has already initialized a
-    CUDA-backed shared state (common in unit-test suites), Accelerate raises a
-    ValueError about changing ``cpu=True``. In that case we warn once and retry
-    without forcing CPU so the existing process state remains usable.
+    In long-lived processes (tests, notebooks, agent loops), a previous trainer
+    invocation may leave Accelerate singleton state initialized with different
+    runtime settings such as ``cpu=True`` or ``mixed_precision='bf16'``. When
+    that happens, we reset Accelerate's shared state and recreate the
+    accelerator so the new run honors its requested runtime policy.
 
     :param bool use_cpu: Whether to request CPU execution.
     :param logging.Logger log: Logger for fallback warnings.
@@ -86,16 +373,19 @@ def create_accelerator(
     accelerator_kwargs = dict(kwargs)
     if use_cpu:
         accelerator_kwargs["cpu"] = True
+    _maybe_set_local_cuda_device(use_cpu=use_cpu, log=log)
     try:
         return accelerator_factory(**accelerator_kwargs)
     except ValueError as exc:
-        if use_cpu and "cpu=True" in str(exc):
+        if _is_accelerator_state_reinit_error(exc):
             log.warning(
-                "trainer.use_cpu=true requested but AcceleratorState is already "
-                "initialized on a non-CPU device in this process; continuing with "
-                "the existing Accelerate device state."
+                "AcceleratorState is already initialized with incompatible runtime "
+                "settings for this process (requested cpu=%s, mixed_precision=%r). "
+                "Resetting Accelerate singleton state and recreating the accelerator.",
+                bool(accelerator_kwargs.get("cpu", False)),
+                accelerator_kwargs.get("mixed_precision"),
             )
-            accelerator_kwargs.pop("cpu", None)
+            _reset_accelerate_runtime_state()
             return accelerator_factory(**accelerator_kwargs)
         raise
 
@@ -109,9 +399,9 @@ def validate_muon_distributed_compatibility(
 ) -> None:
     """Validate MuonClip compatibility for the active distributed runtime.
 
-    MuonClip orthogonalizes full 2D tensors. Sharded-parameter modes (notably
-    FSDP and DeepSpeed ZeRO-2/3) violate this assumption because each rank holds
-    only slices of the matrix.
+    MuonClip supports distributed execution only through the FSDP2
+    owner-compute path used in this repo. FSDP v1 and all DeepSpeed runtimes
+    remain unsupported.
 
     :param Accelerator accelerator: Active Accelerator runtime.
     :param str optimizer_name: Configured optimizer name.
@@ -119,16 +409,43 @@ def validate_muon_distributed_compatibility(
     :param str context: Human-readable task context for error messages.
     :raises RuntimeError: If MuonClip is enabled with incompatible sharding.
     """
-    optimizer_key = str(optimizer_name).strip().lower()
-    if optimizer_key not in {"muonclip", "muon-clip", "muon_clip"}:
+    if not _is_muonclip_optimizer(optimizer_name):
         return
 
     distributed_type = getattr(accelerator, "distributed_type", None)
     if distributed_type is DistributedType.FSDP:
-        raise RuntimeError(
-            "MuonClip is not compatible with FSDP sharded parameters in "
-            f"{context}. Use AdamW or disable FSDP for MuonClip runs."
-        )
+        state = getattr(accelerator, "state", None)
+        fsdp_plugin = getattr(state, "fsdp_plugin", None) if state is not None else None
+        raw_version = getattr(fsdp_plugin, "fsdp_version", None)
+        try:
+            fsdp_version = int(raw_version) if raw_version is not None else 1
+        except (TypeError, ValueError):
+            fsdp_version = 1
+
+        if fsdp_version < 2:
+            raise RuntimeError(
+                "MuonClip requires FSDP v2 in "
+                f"{context}. Detected FSDP v{fsdp_version}; set fsdp_version=2."
+            )
+
+        parallelism_config = getattr(accelerator, "parallelism_config", None)
+        if parallelism_config is None and state is not None:
+            parallelism_config = getattr(state, "parallelism_config", None)
+        enabled_axes = [
+            axis_name
+            for axis_name, attr_name in (
+                ("tensor parallelism", "tp_enabled"),
+                ("context parallelism", "cp_enabled"),
+            )
+            if bool(getattr(parallelism_config, attr_name, False))
+        ]
+        if enabled_axes:
+            axes = ", ".join(enabled_axes)
+            raise RuntimeError(
+                "MuonClip FSDP v2 currently supports only a 1D row-sharded device "
+                f"mesh in {context}. Disable {axes} for MuonClip runs."
+            )
+        return
 
     if distributed_type is not DistributedType.DEEPSPEED:
         return
@@ -137,16 +454,124 @@ def validate_muon_distributed_compatibility(
         getattr(accelerator, "state", None), "deepspeed_plugin", None
     )
     zero_stage = getattr(deepspeed_plugin, "zero_stage", None)
-    if zero_stage is None:
-        log.warning(
-            "MuonClip enabled with DeepSpeed in "
-            f"{context}, but ZeRO stage is unknown. Ensure ZeRO stage < 2."
-        )
+    zero_suffix = ""
+    if zero_stage is not None:
+        zero_suffix = f" (ZeRO stage {int(zero_stage)})"
+    raise RuntimeError(
+        "MuonClip distributed mode is FSDP2-only in "
+        f"{context}; DeepSpeed{zero_suffix} is not supported. "
+        "Use Accelerate FSDP v2 or switch optimizers."
+    )
+
+
+def validate_distributed_runtime_policy(
+    *,
+    accelerator: Accelerator,
+    log: logging.Logger,
+    context: str,
+) -> None:
+    """Reject distributed runtimes that this repo no longer supports.
+
+    DeepSpeed execution support has been removed in favor of Accelerate-managed
+    FSDP2 paths. Legacy DeepSpeed checkpoint conversion remains supported
+    separately via checkpoint-loading helpers.
+
+    :param Accelerator accelerator: Active Accelerator runtime.
+    :param logging.Logger log: Logger for policy warnings/errors.
+    :param str context: Human-readable task context for error messages.
+    :raises RuntimeError: If DeepSpeed is selected as the active runtime backend.
+    """
+    distributed_type = getattr(accelerator, "distributed_type", None)
+    if distributed_type is not DistributedType.DEEPSPEED:
         return
-    if int(zero_stage) >= 2:
+
+    deepspeed_plugin = getattr(
+        getattr(accelerator, "state", None), "deepspeed_plugin", None
+    )
+    zero_stage = getattr(deepspeed_plugin, "zero_stage", None)
+    zero_suffix = ""
+    if zero_stage is not None:
+        zero_suffix = f" (ZeRO stage {int(zero_stage)})"
+    raise RuntimeError(
+        "DeepSpeed runtime is unsupported in "
+        f"{context}{zero_suffix}. Use Accelerate FSDP v2 for distributed runs; "
+        "legacy DeepSpeed checkpoint conversion remains available separately."
+    )
+
+
+def validate_muon_runtime_topology(
+    *,
+    accelerator: Accelerator,
+    optimizer: Any,
+    optimizer_name: str,
+    log: logging.Logger,
+    context: str,
+) -> None:
+    """Validate prepared MuonClip DTensor topology after ``accelerator.prepare()``.
+
+    :param Accelerator accelerator: Active Accelerator runtime.
+    :param Any optimizer: Prepared optimizer (possibly wrapped by Accelerate).
+    :param str optimizer_name: Configured optimizer name.
+    :param logging.Logger log: Logger for topology warnings.
+    :param str context: Human-readable task context for error messages.
+    :raises RuntimeError:
+        If prepared MuonClip params use unsupported DTensor layout, or if a
+        multi-process FSDP2 run failed to expose DTensor Muon parameters at all.
+    """
+    if not _is_muonclip_optimizer(optimizer_name):
+        return
+    if getattr(accelerator, "distributed_type", None) is not DistributedType.FSDP:
+        return
+
+    inner = _unwrap_optimizer(optimizer)
+    saw_dtensor = False
+    for group in getattr(inner, "param_groups", ()):
+        if not group.get("use_muon", False):
+            continue
+
+        for param in group.get("params", ()):
+            if not _looks_like_dtensor(param):
+                continue
+            saw_dtensor = True
+
+            mesh = getattr(param, "device_mesh", None)
+            if mesh is None:
+                raise RuntimeError(
+                    "MuonClip encountered a DTensor-like FSDP2 parameter without a "
+                    f"device mesh in {context}."
+                )
+
+            mesh_ndim = getattr(mesh, "ndim", None)
+            if mesh_ndim is None:
+                log.warning(
+                    "MuonClip could not determine FSDP2 device_mesh.ndim in %s; "
+                    "continuing because runtime topology metadata is incomplete.",
+                    context,
+                )
+            elif int(mesh_ndim) != 1:
+                raise RuntimeError(
+                    "MuonClip FSDP v2 currently supports only 1D row-sharded device "
+                    f"meshes in {context}; got device_mesh.ndim={int(mesh_ndim)}."
+                )
+
+            placements = tuple(getattr(param, "placements", ()))
+            if len(placements) != 1 or not _is_row_shard_placement(placements[0]):
+                raise RuntimeError(
+                    "MuonClip FSDP v2 currently supports only Shard(0) DTensor "
+                    f"placements in {context}; got placements={placements!r}."
+                )
+
+    if (
+        getattr(accelerator, "num_processes", 1) > 1
+        and any(
+            group.get("use_muon", False) for group in getattr(inner, "param_groups", ())
+        )
+        and not saw_dtensor
+    ):
         raise RuntimeError(
-            "MuonClip is not compatible with DeepSpeed ZeRO stage >= 2 in "
-            f"{context} (sharded grads/params). Use ZeRO stage 0/1 or disable MuonClip."
+            "MuonClip expected DTensor Muon parameters after accelerator.prepare() "
+            f"in {context}, but none were observed. Refusing to continue because "
+            "the distributed owner-compute path would be inactive."
         )
 
 
@@ -188,11 +613,6 @@ def _maybe_compile_model(
     if not hasattr(torch, "compile"):
         log.warning(
             "trainer.torch_compile is enabled but torch.compile is unavailable; skipping."
-        )
-        return model
-    if accelerator.distributed_type is DistributedType.DEEPSPEED:
-        log.warning(
-            "trainer.torch_compile is enabled but DeepSpeed is active; skipping torch.compile."
         )
         return model
     compile_backend = str(

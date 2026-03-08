@@ -14,6 +14,7 @@ from neobert.optimizer.muon_clip import MuonClipConfig, MuonClipOptimizer
 # from .soap.soap import SOAP  # TODO: Add SOAP optimizer implementation
 
 logger = logging.getLogger(__name__)
+_WARNED_MUONCLIP_FSDP_CLIPPING_DISABLE = False
 
 
 def _build_adamw_param_groups(
@@ -97,10 +98,16 @@ def get_optimizer(
             return optimizer
 
         case "muonclip" | "muon-clip" | "muon_clip":
+            global _WARNED_MUONCLIP_FSDP_CLIPPING_DISABLE
             if model_config is None:
                 raise ValueError(
                     "MuonClip requires model_config to be passed. "
                     "Update get_optimizer() call in trainer to include model_config argument."
+                )
+            if distributed_type is DistributedType.DEEPSPEED:
+                raise RuntimeError(
+                    "MuonClip distributed mode is FSDP2-only in this repo; "
+                    "DeepSpeed is not supported."
                 )
 
             # Build MuonClipConfig from kwargs
@@ -109,7 +116,7 @@ def get_optimizer(
             betas = kwargs.pop("betas", (0.9, 0.98))
             eps = kwargs.pop("eps", 1e-10)
 
-            extra_args = {k: v for k, v in kwargs.items()}
+            extra_args = dict(kwargs)
             if extra_args:
                 logger.warning(
                     "Ignoring unused optimizer kwargs for MuonClip: "
@@ -134,6 +141,22 @@ def get_optimizer(
                 adam_eps=eps,
                 **muon_kwargs,
             )
+            if (
+                distributed_type is DistributedType.FSDP
+                and muon_clip_cfg.enable_clipping
+            ):
+                # Keep this factory-side disable for now. MuonClip hooks are
+                # created before ``accelerator.prepare()``, so preserving
+                # ``config.enable_clipping`` without a dedicated post-prepare
+                # runtime toggle would still capture activations on the first
+                # sharded step. Track the intent/runtime split cleanup separately.
+                muon_clip_cfg.enable_clipping = False
+                if not _WARNED_MUONCLIP_FSDP_CLIPPING_DISABLE:
+                    logger.warning(
+                        "MuonClip QK clipping is not supported under FSDP2 sharded Muon "
+                        "updates. Auto-disabling clipping for this run."
+                    )
+                    _WARNED_MUONCLIP_FSDP_CLIPPING_DISABLE = True
 
             logger.info(
                 f"MuonClip configuration:\n"
@@ -145,7 +168,8 @@ def get_optimizer(
                 f"  - Capture last microbatch only: {muon_clip_cfg.capture_last_microbatch_only}\n"
                 f"  - Newton-Schulz steps: {muon_clip_cfg.ns_steps}\n"
                 f"  - Alpha (Q/K balance): {muon_clip_cfg.clipping_alpha}\n"
-                f"  - Orthogonalization: {muon_clip_cfg.orthogonalization}"
+                f"  - Orthogonalization: {muon_clip_cfg.orthogonalization}\n"
+                f"  - Norm factor: {muon_clip_cfg.norm_factor}"
             )
 
             return MuonClipOptimizer(model, model_config, muon_clip_cfg)

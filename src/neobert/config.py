@@ -170,6 +170,7 @@ class MuonConfig:
     capture_last_microbatch_only: bool = True
     detect_anomalies: bool = False
     orthogonalization: str = "polar_express"
+    norm_factor: str = "spectral"
     algorithm: Optional[str] = None  # Alias for orthogonalization
     polar_express: Optional[bool] = None  # Legacy toggle
     clipping_layers_mapping: Dict[str, str] = field(default_factory=dict)
@@ -1673,7 +1674,9 @@ class ConfigLoader:
         if task != "contrastive" and config.use_deepspeed:
             warnings.warn(
                 "Top-level 'use_deepspeed' only affects contrastive checkpoint loading. "
-                "Runtime backend selection is controlled by Accelerate launch config.",
+                "Runtime backend selection is controlled by Accelerate launch config. "
+                "Install the optional legacy-checkpoints extra when DeepSpeed ZeRO "
+                "conversion is actually needed.",
                 UserWarning,
                 stacklevel=2,
             )
@@ -2161,6 +2164,11 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     parser.add_argument(
         "--trainer.gradient_clipping", type=float, help="Gradient clipping"
     )
+    parser.add_argument(
+        "--trainer.use_cpu",
+        type=_parse_cli_bool,
+        help="Force CPU execution",
+    )
     parser.add_argument("--trainer.mixed_precision", type=str, help="Mixed precision")
     parser.add_argument(
         "--trainer.masked_logits_only_loss",
@@ -2245,7 +2253,8 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         type=_parse_cli_bool,
         help=(
             "Legacy toggle for loading DeepSpeed-formatted checkpoints in "
-            "contrastive flows; runtime backend is set by Accelerate launch."
+            "contrastive flows; runtime backend is set by Accelerate launch. "
+            "Requires the optional legacy-checkpoints extra for conversion."
         ),
     )
 

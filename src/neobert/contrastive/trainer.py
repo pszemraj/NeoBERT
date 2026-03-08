@@ -2,7 +2,6 @@
 
 import logging
 import os
-import shutil
 import signal
 import sys
 from contextlib import nullcontext
@@ -15,11 +14,9 @@ import numpy
 # PyTorch
 import torch
 import wandb
-from accelerate.utils import DistributedType, ProjectConfiguration, set_seed
+from accelerate.utils import ProjectConfiguration, set_seed
 from datasets import DatasetDict, load_from_disk
 
-# Deepspeed
-from deepspeed.utils import safe_get_full_fp32_param
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -31,7 +28,9 @@ from neobert.checkpointing import (
     MODEL_WEIGHTS_NAME,
     load_deepspeed_fp32_state_dict,
     load_model_safetensors,
-    save_state_dict_safetensors,
+    prune_step_checkpoints as _prune_step_checkpoints,
+    resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
+    save_portable_checkpoint_weights as _save_portable_checkpoint_weights,
 )
 from neobert.collator.collator import (
     _is_right_padded_mask,
@@ -47,66 +46,24 @@ from neobert.training_utils import (
     _maybe_compile_model,
     _maybe_prepare_for_forward,
     _resolve_resume_checkpoint,
+    _update_global_norm_metric_for_logging,
     create_accelerator,
+    resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
+    validate_distributed_runtime_policy,
     validate_muon_distributed_compatibility,
+    validate_muon_runtime_topology,
 )
-from neobert.contrastive.datasets import get_bsz
+from neobert.contrastive.datasets import (
+    get_bsz,
+    load_cached_contrastive_datasets,
+    resolve_contrastive_dataset_names,
+)
 from neobert.contrastive.loss import SupConLoss
 from neobert.contrastive.metrics import Metrics
 from neobert.utils import configure_tf32, format_resolved_config, prepare_wandb_config
 
 logger = logging.getLogger(__name__)
-
-
-def _resolve_checkpoint_retention_limit(cfg: Config) -> int:
-    """Resolve effective checkpoint retention limit from trainer config.
-
-    ``trainer.save_total_limit`` is preferred; deprecated ``trainer.max_ckpt``
-    is used only as a fallback when ``save_total_limit`` is unset.
-
-    :param Config cfg: Runtime training configuration.
-    :return int: Maximum number of retained checkpoints (0 disables pruning).
-    """
-    save_total_limit = getattr(cfg.trainer, "save_total_limit", None)
-    if save_total_limit is not None:
-        return max(0, int(save_total_limit))
-    max_ckpt = getattr(cfg.trainer, "max_ckpt", None)
-    if max_ckpt is not None:
-        return max(0, int(max_ckpt))
-    return 0
-
-
-def _prune_step_checkpoints(checkpoint_dir: Path, retention_limit: int) -> None:
-    """Prune old numeric step checkpoint folders in ``checkpoint_dir``.
-
-    :param Path checkpoint_dir: Root directory containing ``<step>/`` folders.
-    :param int retention_limit: Number of newest numeric checkpoints to keep.
-    """
-    if retention_limit <= 0 or not checkpoint_dir.exists():
-        return
-
-    checkpoints: list[tuple[int, Path]] = []
-    for item_path in checkpoint_dir.iterdir():
-        if not item_path.is_dir():
-            continue
-        try:
-            checkpoints.append((int(item_path.name), item_path))
-        except ValueError:
-            continue
-
-    if len(checkpoints) <= retention_limit:
-        return
-
-    checkpoints.sort(key=lambda item: item[0])
-    for _, old_path in checkpoints[: len(checkpoints) - retention_limit]:
-        try:
-            shutil.rmtree(old_path)
-            logger.info(f"Removed old checkpoint: {old_path} (limit={retention_limit})")
-        except FileNotFoundError:
-            logger.warning(f"Checkpoint already removed before prune: {old_path}")
-        except OSError as exc:
-            logger.warning(f"Failed to remove old checkpoint {old_path}: {exc}")
 
 
 def _normalize_contrastive_pretrained_checkpoint_root(
@@ -135,50 +92,6 @@ def _normalize_contrastive_pretrained_checkpoint_root(
             f"{root}. Contrastive expects 'checkpoints/<step>/' checkpoints."
         )
     return root / "checkpoints"
-
-
-def _save_portable_checkpoint_weights(
-    model: torch.nn.Module,
-    accelerator: Any,
-    checkpoint_path: Path,
-) -> bool:
-    """Save backend-agnostic ``model.safetensors`` into a step checkpoint.
-
-    :param torch.nn.Module model: Prepared training model.
-    :param Accelerator accelerator: Active accelerator runtime.
-    :param Path checkpoint_path: Step checkpoint directory path.
-    :return bool: True when portable weights were saved.
-    """
-    try:
-        state_dict = accelerator.get_state_dict(model, unwrap=True)
-    except Exception as exc:
-        if accelerator.is_main_process:
-            logger.warning(
-                "Unable to export portable checkpoint weights to "
-                f"{checkpoint_path / MODEL_WEIGHTS_NAME}: {exc}. "
-                "Resumable state was still saved."
-            )
-        return False
-
-    if not accelerator.is_main_process:
-        return False
-
-    try:
-        weights_path = save_state_dict_safetensors(
-            state_dict,
-            checkpoint_path,
-            metadata={"format": "pt", "source": "accelerate.get_state_dict"},
-        )
-    except Exception as exc:
-        logger.warning(
-            "Failed to persist portable checkpoint weights at "
-            f"{checkpoint_path / MODEL_WEIGHTS_NAME}: {exc}. "
-            "Resumable state was still saved."
-        )
-        return False
-
-    logger.info(f"Saved portable model weights to {weights_path}.")
-    return True
 
 
 def _build_packed_seqlens(attention_mask: torch.Tensor, *, name: str) -> torch.Tensor:
@@ -303,6 +216,14 @@ def trainer(cfg: Config) -> None:
         cfg.trainer.mixed_precision,
         task="contrastive",
     )
+    mixed_precision, cfg.model.attn_backend = (
+        resolve_runtime_mixed_precision_and_attn_backend(
+            mixed_precision=mixed_precision,
+            attn_backend=cfg.model.attn_backend,
+            log=logger,
+            use_cpu=bool(getattr(cfg.trainer, "use_cpu", False)),
+        )
+    )
     cfg.trainer.mixed_precision = mixed_precision
     wandb_enabled = cfg.wandb.enabled and cfg.wandb.mode != "disabled"
     accelerator = create_accelerator(
@@ -313,6 +234,11 @@ def trainer(cfg: Config) -> None:
         gradient_accumulation_steps=cfg.trainer.gradient_accumulation_steps,
         log_with="wandb" if wandb_enabled else None,
         project_config=project_config,
+    )
+    validate_distributed_runtime_policy(
+        accelerator=accelerator,
+        log=logger,
+        context="contrastive",
     )
     validate_muon_distributed_compatibility(
         accelerator=accelerator,
@@ -377,6 +303,7 @@ def trainer(cfg: Config) -> None:
     metrics = Metrics()
     accelerator.register_for_checkpointing(metrics)
     log_interval = max(1, cfg.trainer.logging_steps)
+    log_grad_norm = bool(getattr(cfg.trainer, "log_grad_norm", False))
     save_strategy = str(getattr(cfg.trainer, "save_strategy", "steps"))
     save_model = bool(getattr(cfg.trainer, "save_model", True))
 
@@ -398,7 +325,16 @@ def trainer(cfg: Config) -> None:
 
     # Dataset
     dataset_path = Path(cfg.dataset.path)
-    dataset = load_from_disk(os.fspath(dataset_path / "all"))
+    selected_dataset_names = resolve_contrastive_dataset_names(cfg.dataset.name)
+    dataset = load_cached_contrastive_datasets(
+        dataset_path / "all",
+        selected_names=selected_dataset_names,
+    )
+    logger.info(
+        "Loaded contrastive dataset selection %s from %s.",
+        list(dataset.keys()),
+        dataset_path / "all",
+    )
     pretraining_dataset_raw = load_from_disk(
         os.fspath(dataset_path)
     )  # Base dataset for pretraining SimCSE
@@ -590,10 +526,13 @@ def trainer(cfg: Config) -> None:
                         pretrained_checkpoint_dir,
                         tag=str(tag),
                     )
+                except ModuleNotFoundError:
+                    raise
                 except Exception as exc:
                     raise ValueError(
                         f"Expected {MODEL_WEIGHTS_NAME} at {state_dict_path}. "
-                        "Set pretrained_checkpoint_dir or enable DeepSpeed loading."
+                        "Set pretrained_checkpoint_dir or enable legacy DeepSpeed "
+                        "checkpoint loading."
                     ) from exc
                 logger.warning(
                     f"{MODEL_WEIGHTS_NAME} not found at {state_dict_path}; "
@@ -660,9 +599,7 @@ def trainer(cfg: Config) -> None:
     keys = list(dataset.keys())
 
     dataloaders[keys[0]], model, optimizer, scheduler = accelerator.prepare(
-        dataloaders[
-            keys[0]
-        ],  # Accelerate with deepspeed requires at least one dataloader to be passed along with other objects to prepare.
+        dataloaders[keys[0]],
         model,
         optimizer,
         scheduler,
@@ -670,6 +607,14 @@ def trainer(cfg: Config) -> None:
 
     for key in keys[1:]:
         dataloaders[key] = accelerator.prepare(dataloaders[key])
+
+    validate_muon_runtime_topology(
+        accelerator=accelerator,
+        optimizer=optimizer,
+        optimizer_name=cfg.optimizer.name,
+        log=logger,
+        context="contrastive",
+    )
 
     if wandb_enabled and accelerator.is_main_process:
         watch_mode, watch_warning = resolve_wandb_watch_mode(
@@ -702,8 +647,22 @@ def trainer(cfg: Config) -> None:
                     f"resume_from_checkpoint path not found: {resume_checkpoint_path}"
                 )
             accelerator.load_state(str(resume_checkpoint))
+            validate_muon_runtime_topology(
+                accelerator=accelerator,
+                optimizer=optimizer,
+                optimizer_name=cfg.optimizer.name,
+                log=logger,
+                context="contrastive resume",
+            )
         elif checkpoint_dir.exists() and any(checkpoint_dir.iterdir()):
             accelerator.load_state()
+            validate_muon_runtime_topology(
+                accelerator=accelerator,
+                optimizer=optimizer,
+                optimizer_name=cfg.optimizer.name,
+                log=logger,
+                context="contrastive resume",
+            )
         else:
             logger.warning(
                 "resume_from_checkpoint is set but no checkpoints were found in "
@@ -836,7 +795,17 @@ def trainer(cfg: Config) -> None:
         pad_mask_negatives: torch.Tensor | None,
         packed_negatives: torch.Tensor | None,
     ) -> torch.Tensor:
-        """Run a forward pass and compute contrastive loss for one microbatch."""
+        """Run a forward pass and compute contrastive loss for one microbatch.
+
+        :param dict[str, torch.Tensor] batch: Contrastive microbatch tensors.
+        :param torch.Tensor | None pad_mask_queries: Query attention mask.
+        :param torch.Tensor | None packed_queries: Query packed sequence lengths.
+        :param torch.Tensor | None pad_mask_corpus: Corpus attention mask.
+        :param torch.Tensor | None packed_corpus: Corpus packed sequence lengths.
+        :param torch.Tensor | None pad_mask_negatives: Negative attention mask.
+        :param torch.Tensor | None packed_negatives: Negative packed sequence lengths.
+        :return torch.Tensor: Microbatch contrastive loss.
+        """
         queries = model(
             batch["input_ids_queries"],
             pad_mask_queries,
@@ -969,6 +938,15 @@ def trainer(cfg: Config) -> None:
         metrics["train/local_sum_loss"] += train_loss.item()
 
         if is_last_microbatch:
+            should_log = (metrics["train/steps"] + 1) % log_interval == 0
+            _update_global_norm_metric_for_logging(
+                metrics,
+                key="train/grad_norm",
+                parameters=model.parameters(),
+                accelerator=accelerator,
+                enabled=bool(should_log and log_grad_norm),
+                grad=True,
+            )
             # Apply clipping before optimizer step when syncing gradients
             if (
                 cfg.trainer.gradient_clipping is not None
@@ -987,28 +965,13 @@ def trainer(cfg: Config) -> None:
             metrics["train/steps"] += 1
 
             if metrics["train/steps"] % log_interval == 0:
-                # https://deepspeed.readthedocs.io/en/latest/zero3.html#deepspeed.utils.safe_get_full_grad
-                if accelerator.distributed_type is DistributedType.DEEPSPEED:
-                    metrics["train/grad_norm"] = model.get_global_grad_norm()  # .item()
-                    if cfg.trainer.log_weight_norms and accelerator.is_main_process:
-                        metrics["train/weight_norm"] = (
-                            sum(
-                                [
-                                    safe_get_full_fp32_param(p).norm(2) ** 2
-                                    for p in model.parameters()
-                                ]
-                            )
-                            ** 0.5
-                        ).item()
-                # DDP
-                else:
-                    metrics["train/grad_norm"] = (
-                        sum([p.grad.norm(2) ** 2 for p in model.parameters()]) ** 0.5
-                    ).item()
-                    if cfg.trainer.log_weight_norms and accelerator.is_main_process:
-                        metrics["train/weight_norm"] = (
-                            sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5
-                        ).item()
+                _update_global_norm_metric_for_logging(
+                    metrics,
+                    key="train/weight_norm",
+                    parameters=model.parameters(),
+                    accelerator=accelerator,
+                    enabled=bool(cfg.trainer.log_weight_norms),
+                )
 
                 metrics["train/learning_rate"] = optimizer.param_groups[0]["lr"]
                 metrics.log(accelerator)

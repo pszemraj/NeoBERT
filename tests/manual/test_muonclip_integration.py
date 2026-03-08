@@ -187,7 +187,8 @@ def test_distributed_compatibility():
     try:
         MuonClipOptimizer(model, config, muon_config)
         print("✓ MuonClip optimizer created successfully")
-        print("✓ Ready for distributed training (DDP/DeepSpeed)")
+        print("✓ Local optimizer init succeeded")
+        print("✓ Distributed MuonClip path is validated separately under FSDP2")
     except Exception as e:
         print(f"✗ Failed to create optimizer: {e}")
         raise AssertionError("Failed to create MuonClip optimizer") from e

@@ -1,13 +1,17 @@
 """Tests for safetensors checkpoint utilities."""
 
+import builtins
 import tempfile
 from pathlib import Path
 
+import pytest
 import torch
+from safetensors.torch import save_file
 from torch import nn
 
 from neobert.checkpointing import (
     MODEL_WEIGHTS_NAME,
+    load_deepspeed_fp32_state_dict,
     load_model_safetensors,
     model_state_dict_for_safetensors,
     resolve_deepspeed_checkpoint_root_and_tag,
@@ -100,6 +104,82 @@ def test_save_state_dict_safetensors_roundtrip() -> None:
     assert all(not key.startswith("_orig_mod.") for key in loaded_state)
 
 
+def test_load_model_safetensors_strips_runtime_prefixes_on_read() -> None:
+    """Loading should canonicalize wrapper-prefixed keys from generic save paths."""
+    weight = torch.arange(6, dtype=torch.float32).view(3, 2)
+    bias = torch.arange(3, dtype=torch.float32)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint_dir = Path(tmpdir)
+        save_file(
+            {
+                "_orig_mod.weight": weight,
+                "module.bias": bias,
+            },
+            str(checkpoint_dir / MODEL_WEIGHTS_NAME),
+            metadata={"format": "pt"},
+        )
+        loaded_state = load_model_safetensors(checkpoint_dir, map_location="cpu")
+
+    assert set(loaded_state) == {"weight", "bias"}
+    torch.testing.assert_close(loaded_state["weight"], weight)
+    torch.testing.assert_close(loaded_state["bias"], bias)
+
+
+def test_load_model_safetensors_strips_stacked_runtime_prefixes_on_read() -> None:
+    """Loading should strip stacked runtime prefixes until keys are stable."""
+    weight = torch.arange(6, dtype=torch.float32).view(3, 2)
+    bias = torch.arange(3, dtype=torch.float32)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint_dir = Path(tmpdir)
+        save_file(
+            {
+                "module._orig_mod.weight": weight,
+                "_orig_mod.module.bias": bias,
+            },
+            str(checkpoint_dir / MODEL_WEIGHTS_NAME),
+            metadata={"format": "pt"},
+        )
+        loaded_state = load_model_safetensors(checkpoint_dir, map_location="cpu")
+
+    assert set(loaded_state) == {"weight", "bias"}
+    torch.testing.assert_close(loaded_state["weight"], weight)
+    torch.testing.assert_close(loaded_state["bias"], bias)
+
+
+def test_load_model_safetensors_rejects_normalized_key_collisions() -> None:
+    """Loading should fail fast when multiple keys collapse to one parameter name."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint_dir = Path(tmpdir)
+        save_file(
+            {
+                "weight": torch.ones(2, 2),
+                "_orig_mod.weight": torch.zeros(2, 2),
+            },
+            str(checkpoint_dir / MODEL_WEIGHTS_NAME),
+            metadata={"format": "pt"},
+        )
+
+        with pytest.raises(ValueError, match="normalize to 'weight'"):
+            load_model_safetensors(checkpoint_dir, map_location="cpu")
+
+
+def test_save_state_dict_safetensors_rejects_normalized_key_collisions() -> None:
+    """Saving should fail fast when canonicalization would overwrite a key."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint_dir = Path(tmpdir)
+
+        with pytest.raises(ValueError, match="normalize to 'weight'"):
+            save_state_dict_safetensors(
+                {
+                    "weight": torch.ones(2, 2),
+                    "module._orig_mod.weight": torch.zeros(2, 2),
+                },
+                checkpoint_dir,
+            )
+
+
 def test_resolve_deepspeed_checkpoint_root_and_tag_for_direct_tag_dir() -> None:
     """Ensure direct DeepSpeed tag directories resolve to (parent, tag)."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -131,3 +211,26 @@ def test_resolve_deepspeed_checkpoint_root_and_tag_for_nested_accelerate_layout(
 
     assert resolved_root == checkpoints_root / "1000"
     assert resolved_tag == "pytorch_model"
+
+
+def test_load_deepspeed_fp32_state_dict_requires_optional_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing optional DeepSpeed dependency should produce a clear install hint."""
+    original_import = builtins.__import__
+
+    def _fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "deepspeed.utils.zero_to_fp32":
+            raise ModuleNotFoundError("simulated missing deepspeed")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _fake_import)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        tag_dir = root / "123"
+        tag_dir.mkdir(parents=True, exist_ok=True)
+        (tag_dir / "mp_rank_00_model_states.pt").touch()
+
+        with pytest.raises(ModuleNotFoundError, match="legacy-checkpoints"):
+            load_deepspeed_fp32_state_dict(root, tag="123")

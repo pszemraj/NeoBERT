@@ -1,7 +1,6 @@
 # Testing Guide
 
 This guide covers running and extending the NeoBERT regression suite.
-It is the canonical reference for test process and authoring conventions.
 
 ## Run Tests
 
@@ -43,8 +42,7 @@ conda run --name neobert python tests/run_tests.py --no-pytest
 `tests/manual/` contains opt-in validation/benchmark scripts and is excluded from
 default `pytest -q` discovery.
 
-Canonical command list for those scripts is maintained in
-[tests/manual/README.md](../tests/manual/README.md).
+Manual script commands are in [tests/manual/README.md](../tests/manual/README.md).
 
 ## Test Authoring Guidelines
 

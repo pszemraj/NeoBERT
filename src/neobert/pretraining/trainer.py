@@ -6,7 +6,6 @@ import logging
 import math
 import os
 import re
-import shutil
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional, Tuple
@@ -33,12 +32,14 @@ from datasets import (
     load_from_disk,
 )
 
-# Deepspeed
-from deepspeed.utils import safe_get_full_fp32_param
 from tqdm import tqdm
 from transformers import BatchEncoding, PreTrainedTokenizerBase
 
-from neobert.checkpointing import MODEL_WEIGHTS_NAME, save_state_dict_safetensors
+from neobert.checkpointing import (
+    prune_step_checkpoints as _prune_step_checkpoints,
+    resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
+    save_portable_checkpoint_weights as _save_portable_checkpoint_weights,
+)
 from neobert.config import (
     Config,
     ConfigLoader,
@@ -58,12 +59,17 @@ from neobert.pretraining.masked_objective import (
 from neobert.scheduler import get_scheduler, resolve_scheduler_steps
 from neobert.tokenizer import get_tokenizer, resolve_text_column
 from neobert.training_utils import (
+    _compute_l2_norm_for_logging,
     _maybe_compile_model,
     _maybe_prepare_for_forward,
     _resolve_resume_checkpoint,
+    _update_global_norm_metric_for_logging,
     create_accelerator,
+    resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
+    validate_distributed_runtime_policy,
     validate_muon_distributed_compatibility,
+    validate_muon_runtime_topology,
 )
 from neobert.utils import (
     configure_tf32,
@@ -204,7 +210,7 @@ def _gather_decoder_weight_for_masked_objective(
     """Yield decoder weights, gathering sharded parameters when required.
 
     Masked-only loss computes logits from ``decoder.weight`` outside the decoder
-    module forward. Under FSDP2 and DeepSpeed ZeRO-3 this parameter can be
+    module forward. Under FSDP2 this parameter can be
     partitioned, so we must materialize the full tensor for the objective path.
 
     :param torch.nn.Module model: Prepared training model (possibly wrapped).
@@ -339,28 +345,7 @@ def _gather_decoder_weight_for_masked_objective(
             )
         return
 
-    lm_weight = _resolve_decoder_weight()
-    if accelerator.distributed_type is not DistributedType.DEEPSPEED:
-        yield lm_weight
-        return
-    if getattr(lm_weight, "ds_id", None) is None:
-        yield lm_weight
-        return
-
-    import deepspeed
-
-    fwd_module = None
-    unwrap_model = getattr(accelerator, "unwrap_model", None)
-    if callable(unwrap_model):
-        try:
-            fwd_module = unwrap_model(model)
-        except Exception:
-            fwd_module = None
-
-    with deepspeed.zero.GatheredParameters(
-        [lm_weight], modifier_rank=None, fwd_module=fwd_module
-    ):
-        yield lm_weight
+    yield _resolve_decoder_weight()
 
 
 def _should_backward_inside_gathered_decoder_weight(
@@ -369,9 +354,9 @@ def _should_backward_inside_gathered_decoder_weight(
 ) -> bool:
     """Return whether backward must run while decoder weight is gathered.
 
-    In FSDP2 and DeepSpeed ZeRO-3, masked-objective fallback paths can touch
-    decoder weights during backward recomputation. Keep backward under gather
-    when ``decoder.weight`` may otherwise be partitioned.
+    In FSDP2, masked-objective fallback paths can touch decoder weights during
+    backward recomputation. Keep backward under gather when ``decoder.weight``
+    may otherwise be partitioned.
 
     :param Accelerator accelerator: Active accelerator runtime.
     :param torch.Tensor lm_weight: Decoder projection weight.
@@ -379,9 +364,7 @@ def _should_backward_inside_gathered_decoder_weight(
     """
     if accelerator.distributed_type is DistributedType.FSDP:
         return _resolve_fsdp_version(accelerator) >= 2
-    if accelerator.distributed_type is not DistributedType.DEEPSPEED:
-        return False
-    return getattr(lm_weight, "ds_id", None) is not None
+    return False
 
 
 def _run_masked_objective_step(
@@ -501,50 +484,6 @@ def _ensure_pinned_cpu_batch(batch: BatchEncoding) -> BatchEncoding:
     if not repinned:
         return batch
     return pinned_batch
-
-
-def _promote_tmp_checkpoint_dir(tmp_path: Path, final_path: Path) -> None:
-    """Promote ``tmp_path`` to ``final_path`` with crash-safe replacement.
-
-    Keep the previous final checkpoint as ``*.old`` until the tmp->final rename
-    succeeds. This avoids deleting the prior checkpoint before the new one is in
-    place when running on shared filesystems.
-
-    Note: active pretraining writes directly to ``checkpoints/<step>/`` and does
-    not currently call this helper; it is kept for legacy/manual migration paths.
-
-    :param Path tmp_path: Newly written temporary checkpoint directory.
-    :param Path final_path: Final checkpoint directory path.
-    """
-    backup_path = final_path.with_name(f"{final_path.name}.old")
-    if backup_path.exists():
-        shutil.rmtree(backup_path)
-
-    if final_path.exists():
-        final_path.replace(backup_path)
-
-    try:
-        tmp_path.replace(final_path)
-    except Exception:
-        if backup_path.exists() and not final_path.exists():
-            backup_path.replace(final_path)
-        raise
-
-    if backup_path.exists():
-        shutil.rmtree(backup_path)
-
-
-def _write_deepspeed_latest_file(checkpoint_root: Path, tag: str) -> None:
-    """Write DeepSpeed ``latest`` indirection for a checkpoint root.
-
-    DeepSpeed's fp32 conversion helper resolves ``tag=None`` via this file, so
-    we keep it updated after tmp->final tag promotion.
-
-    :param Path checkpoint_root: DeepSpeed checkpoint root directory.
-    :param str tag: Active checkpoint tag directory name.
-    """
-    latest_path = checkpoint_root / "latest"
-    latest_path.write_text(f"{tag}\n", encoding="utf-8")
 
 
 def _pad_tokenizer_to_multiple(
@@ -1134,28 +1073,13 @@ def _compute_weight_norm_for_logging(
     model: torch.nn.Module,
     accelerator: Accelerator,
 ) -> Optional[float]:
-    """Compute model weight norm for logging across distributed backends.
-
-    DeepSpeed helper ``safe_get_full_fp32_param`` can return ``None`` (for
-    example on params without ZeRO/FP32 mappings), so we skip those tensors
-    rather than failing during logging.
+    """Compute model weight norm for logging.
 
     :param torch.nn.Module model: Training model (possibly wrapped).
     :param Accelerator accelerator: Active accelerator runtime.
     :return float | None: L2 weight norm or ``None`` when unavailable.
     """
-    if accelerator.distributed_type is DistributedType.DEEPSPEED:
-        squared_norms: list[torch.Tensor] = []
-        for param in model.parameters():
-            full_param = safe_get_full_fp32_param(param)
-            if full_param is None:
-                continue
-            squared_norms.append(full_param.norm(2) ** 2)
-        if not squared_norms:
-            return None
-        return (sum(squared_norms) ** 0.5).item()
-
-    return (sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5).item()
+    return _compute_l2_norm_for_logging(model.parameters(), accelerator)
 
 
 def _clear_stored_batch(stored_batch: BatchEncoding) -> None:
@@ -1553,111 +1477,6 @@ def _safe_len(dataloader: torch.utils.data.DataLoader) -> Optional[int]:
         return None
 
 
-def _resolve_checkpoint_retention_limit(cfg: Config) -> int:
-    """Resolve effective checkpoint retention limit from trainer config.
-
-    ``trainer.save_total_limit`` is the canonical knob. Deprecated
-    ``trainer.max_ckpt`` is only used as a fallback when save_total_limit is unset.
-
-    :param Config cfg: Runtime training configuration.
-    :return int: Maximum number of retained checkpoints (0 disables pruning).
-    """
-    save_total_limit = getattr(cfg.trainer, "save_total_limit", None)
-    if save_total_limit is not None:
-        return max(0, int(save_total_limit))
-    max_ckpt = getattr(cfg.trainer, "max_ckpt", None)
-    if max_ckpt is not None:
-        return max(0, int(max_ckpt))
-    return 0
-
-
-def _prune_step_checkpoints(checkpoint_dir: Path, retention_limit: int) -> None:
-    """Prune old numeric step checkpoint folders in ``checkpoint_dir``.
-
-    This helper is best-effort and resilient to concurrent filesystem mutations.
-    It never raises on a missing/deleted checkpoint directory.
-
-    :param Path checkpoint_dir: Root directory containing ``<step>/`` folders.
-    :param int retention_limit: Number of newest numeric checkpoints to keep.
-    """
-    if retention_limit <= 0 or not checkpoint_dir.exists():
-        return
-
-    checkpoints: list[tuple[int, Path]] = []
-    for item_path in checkpoint_dir.iterdir():
-        if not item_path.is_dir():
-            continue
-        try:
-            checkpoints.append((int(item_path.name), item_path))
-        except ValueError:
-            continue
-
-    if len(checkpoints) <= retention_limit:
-        return
-
-    checkpoints.sort(key=lambda item: item[0])
-    for _, old_path in checkpoints[: len(checkpoints) - retention_limit]:
-        try:
-            shutil.rmtree(old_path)
-            logger.info(f"Removed old checkpoint: {old_path} (limit={retention_limit})")
-        except FileNotFoundError:
-            logger.warning(f"Checkpoint already removed before prune: {old_path}")
-        except OSError as exc:
-            logger.warning(f"Failed to remove old checkpoint {old_path}: {exc}")
-
-
-def _save_portable_checkpoint_weights(
-    model: torch.nn.Module,
-    accelerator: Accelerator,
-    checkpoint_path: Path,
-) -> bool:
-    """Save backend-agnostic ``model.safetensors`` into a step checkpoint.
-
-    The resumable Accelerate state remains the source of truth for restart; this
-    helper adds a portable inference/export payload for downstream consumers.
-
-    :param torch.nn.Module model: Prepared training model.
-    :param Accelerator accelerator: Active accelerator runtime.
-    :param Path checkpoint_path: Step checkpoint directory path.
-    :return bool: True when portable weights were saved.
-    """
-    try:
-        # Distributed backends (FSDP/FSDP2/DeepSpeed) may require all ranks to
-        # participate in state-dict collection collectives even when only rank 0
-        # ultimately persists the portable safetensors payload.
-        state_dict = accelerator.get_state_dict(model, unwrap=True)
-    except Exception as exc:
-        if accelerator.is_main_process:
-            logger.warning(
-                "Unable to export portable checkpoint weights to "
-                f"{checkpoint_path / MODEL_WEIGHTS_NAME}: {exc}. "
-                "Resumable state was still saved. For DeepSpeed ZeRO-3, enable "
-                "`stage3_gather_16bit_weights_on_model_save`/`zero3_save_16bit_model` "
-                "to emit consolidated portable weights automatically."
-            )
-        return False
-
-    if not accelerator.is_main_process:
-        return False
-
-    try:
-        weights_path = save_state_dict_safetensors(
-            state_dict,
-            checkpoint_path,
-            metadata={"format": "pt", "source": "accelerate.get_state_dict"},
-        )
-    except Exception as exc:
-        logger.warning(
-            "Failed to persist portable checkpoint weights at "
-            f"{checkpoint_path / MODEL_WEIGHTS_NAME}: {exc}. "
-            "Resumable state was still saved."
-        )
-        return False
-
-    logger.info(f"Saved portable model weights to {weights_path}.")
-    return True
-
-
 def trainer(cfg: Config) -> None:
     """Run the pretraining loop.
 
@@ -1705,6 +1524,14 @@ def trainer(cfg: Config) -> None:
         cfg.trainer.mixed_precision,
         task="pretraining",
     )
+    mixed_precision, cfg.model.attn_backend = (
+        resolve_runtime_mixed_precision_and_attn_backend(
+            mixed_precision=mixed_precision,
+            attn_backend=cfg.model.attn_backend,
+            log=logger,
+            use_cpu=bool(getattr(cfg.trainer, "use_cpu", False)),
+        )
+    )
     cfg.trainer.mixed_precision = mixed_precision
 
     accelerator = create_accelerator(
@@ -1722,8 +1549,13 @@ def trainer(cfg: Config) -> None:
     if accelerator.distributed_type is DistributedType.MEGATRON_LM:
         raise RuntimeError(
             "Megatron-LM backend is not supported by this training loop. "
-            "Use DDP or DeepSpeed instead."
+            "Use DDP or Accelerate FSDP v2 instead."
         )
+    validate_distributed_runtime_policy(
+        accelerator=accelerator,
+        log=logger,
+        context="pretraining",
+    )
     if getattr(accelerator, "is_main_process", True):
         logger.info(
             "Pretraining checkpoint layout: writing resumable + export artifacts to "
@@ -2263,6 +2095,7 @@ def trainer(cfg: Config) -> None:
         logger.info(f"Clipping threshold: {muon_cfg.clipping_threshold}")
         logger.info(f"Newton-Schulz iterations: {muon_cfg.ns_steps}")
         logger.info(f"Orthogonalization: {muon_cfg.orthogonalization}")
+        logger.info(f"Norm factor: {muon_cfg.norm_factor}")
         logger.info(f"Clipping warmup steps: {muon_cfg.clipping_warmup_steps}")
         logger.info(f"Clipping interval: {muon_cfg.clipping_interval}")
         logger.info(f"QK chunk size: {muon_cfg.clipping_qk_chunk_size}")
@@ -2339,56 +2172,37 @@ def trainer(cfg: Config) -> None:
                 "Accelerate version too old to configure dispatch_batches. "
                 "Upgrade accelerate when using packed_seqlens."
             )
-        if accelerator.distributed_type is DistributedType.DEEPSPEED:
-            logger.warning(
-                "Accelerate backend does not support per-object device placement; "
-                "falling back to default dataloader placement."
+        if eval_dataloader is not None:
+            (
+                train_dataloader,
+                eval_dataloader,
+                model,
+                optimizer,
+                scheduler,
+            ) = accelerator.prepare(
+                train_dataloader,
+                eval_dataloader,
+                model,
+                optimizer,
+                scheduler,
+                device_placement=[False, False, True, True, True],
             )
-            if eval_dataloader is not None:
-                (
-                    train_dataloader,
-                    eval_dataloader,
-                    model,
-                    optimizer,
-                    scheduler,
-                ) = accelerator.prepare(
-                    train_dataloader,
-                    eval_dataloader,
-                    model,
-                    optimizer,
-                    scheduler,
-                )
-            else:
-                train_dataloader, model, optimizer, scheduler = accelerator.prepare(
-                    train_dataloader,
-                    model,
-                    optimizer,
-                    scheduler,
-                )
         else:
-            if eval_dataloader is not None:
-                (
-                    train_dataloader,
-                    eval_dataloader,
-                    model,
-                    optimizer,
-                    scheduler,
-                ) = accelerator.prepare(
-                    train_dataloader,
-                    eval_dataloader,
-                    model,
-                    optimizer,
-                    scheduler,
-                    device_placement=[False, False, True, True, True],
-                )
-            else:
-                train_dataloader, model, optimizer, scheduler = accelerator.prepare(
-                    train_dataloader,
-                    model,
-                    optimizer,
-                    scheduler,
-                    device_placement=[False, True, True, True],
-                )
+            train_dataloader, model, optimizer, scheduler = accelerator.prepare(
+                train_dataloader,
+                model,
+                optimizer,
+                scheduler,
+                device_placement=[False, True, True, True],
+            )
+
+    validate_muon_runtime_topology(
+        accelerator=accelerator,
+        optimizer=optimizer,
+        optimizer_name=cfg.optimizer.name,
+        log=logger,
+        context="pretraining",
+    )
 
     # Packed mode keeps manual batch transfers; non-packed mode uses Accelerate
     # device placement for lower Python overhead and better overlap.
@@ -2478,6 +2292,13 @@ def trainer(cfg: Config) -> None:
                 f"resume_from_checkpoint path not found: {resume_checkpoint_path}"
             )
         accelerator.load_state(str(resume_checkpoint))
+        validate_muon_runtime_topology(
+            accelerator=accelerator,
+            optimizer=optimizer,
+            optimizer_name=cfg.optimizer.name,
+            log=logger,
+            context="pretraining resume",
+        )
         if is_streaming and hasattr(train_dataset, "set_epoch"):
             resume_epoch = int(metrics.get("train/epochs", 0))
             train_dataset.set_epoch(resume_epoch)
@@ -2587,7 +2408,7 @@ def trainer(cfg: Config) -> None:
                 else batch.get("attention_mask", None)
             )
 
-            # Keep all accumulation semantics backend-agnostic (DDP/FSDP/DeepSpeed).
+            # Keep all accumulation semantics backend-agnostic across supported runtimes.
             with accelerator.accumulate(model):
                 sync_gradients = bool(accelerator.sync_gradients)
                 _maybe_prepare_for_forward(
@@ -2698,42 +2519,20 @@ def trainer(cfg: Config) -> None:
                         "pathological amplification."
                     )
 
-                grad_norm_value = None
-
                 # Optional gradient clipping for stability on deep/long-context runs.
                 # Keep clipping after token-mean scaling so thresholds apply to the
                 # final effective update magnitude.
                 max_grad_norm = cfg.trainer.gradient_clipping
-
+                _update_global_norm_metric_for_logging(
+                    metrics,
+                    key="train/grad_norm",
+                    parameters=model.parameters(),
+                    accelerator=accelerator,
+                    enabled=bool(should_log and log_grad_norm),
+                    grad=True,
+                )
                 if max_grad_norm is not None and max_grad_norm > 0:
-                    grad_norm_pre_clip = accelerator.clip_grad_norm_(
-                        model.parameters(), max_grad_norm
-                    )
-                    if should_log and grad_norm_pre_clip is not None:
-                        grad_norm_value = float(
-                            grad_norm_pre_clip.item()
-                            if isinstance(grad_norm_pre_clip, torch.Tensor)
-                            else grad_norm_pre_clip
-                        )
-                elif should_log and log_grad_norm:
-                    if accelerator.distributed_type is DistributedType.DEEPSPEED:
-                        get_global_grad = getattr(model, "get_global_grad_norm", None)
-                        if callable(get_global_grad):
-                            grad_norm = get_global_grad()
-                            if isinstance(grad_norm, torch.Tensor):
-                                grad_norm_value = float(grad_norm.item())
-                            elif grad_norm is not None:
-                                grad_norm_value = float(grad_norm)
-                    else:
-                        grad_norm = accelerator.clip_grad_norm_(
-                            model.parameters(), float("inf")
-                        )
-                        if grad_norm is not None:
-                            grad_norm_value = float(
-                                grad_norm.item()
-                                if isinstance(grad_norm, torch.Tensor)
-                                else grad_norm
-                            )
+                    accelerator.clip_grad_norm_(model.parameters(), max_grad_norm)
 
                 # Log metrics
                 pbar.update(1)
@@ -2745,17 +2544,13 @@ def trainer(cfg: Config) -> None:
                 accum_tokens.zero_()
 
                 if metrics["train/steps"] % log_interval == 0:
-                    if grad_norm_value is not None:
-                        metrics["train/grad_norm"] = grad_norm_value
-
-                    if cfg.trainer.log_weight_norms and accelerator.is_main_process:
-                        weight_norm_value = _compute_weight_norm_for_logging(
-                            model, accelerator
-                        )
-                        if weight_norm_value is not None:
-                            metrics["train/weight_norm"] = weight_norm_value
-                        else:
-                            metrics.pop("train/weight_norm", None)
+                    _update_global_norm_metric_for_logging(
+                        metrics,
+                        key="train/weight_norm",
+                        parameters=model.parameters(),
+                        accelerator=accelerator,
+                        enabled=bool(cfg.trainer.log_weight_norms),
+                    )
 
                     # Add MuonClip metrics if available
                     if hasattr(optimizer, "get_metrics"):

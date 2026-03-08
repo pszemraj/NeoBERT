@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from safetensors.torch import save_file
 
 from neobert.checkpointing import MODEL_WEIGHTS_NAME
 from neobert.glue.train import (
@@ -117,6 +118,36 @@ def test_load_pretrained_weights_filters_only_head_prefixes(
     assert "pre_classifier_norm.weight" in captured
     assert "classifier.weight" not in captured
     assert "decoder.weight" not in captured
+
+
+def test_load_pretrained_weights_strips_stacked_runtime_prefixes(
+    tmp_path: Path,
+) -> None:
+    """GLUE loading should accept generic compiled/distributed safetensors keys."""
+    checkpoint_dir = tmp_path / "100"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    model = torch.nn.Linear(4, 2)
+    expected_weight = torch.full_like(model.weight, 4.0)
+    expected_bias = torch.full_like(model.bias, -0.25)
+    save_file(
+        {
+            "module._orig_mod.weight": expected_weight,
+            "module._orig_mod.bias": expected_bias,
+        },
+        str(checkpoint_dir / MODEL_WEIGHTS_NAME),
+        metadata={"format": "pt"},
+    )
+
+    load_pretrained_weights(
+        model,
+        checkpoint_dir=str(tmp_path),
+        checkpoint_id="100",
+        logger=logging.getLogger("test.glue.checkpoint_loading"),
+    )
+
+    torch.testing.assert_close(model.weight, expected_weight)
+    torch.testing.assert_close(model.bias, expected_bias)
 
 
 def test_load_pretrained_weights_falls_back_to_deepspeed(

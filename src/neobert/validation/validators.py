@@ -2,13 +2,8 @@
 
 import logging
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
-from neobert.checkpointing import (
-    MODEL_WEIGHTS_NAME,
-    load_model_safetensors,
-    resolve_deepspeed_checkpoint_root_and_tag,
-)
 from neobert.config import resolve_mixed_precision
 
 logger = logging.getLogger(__name__)
@@ -49,7 +44,11 @@ def validate_glue_config(cfg: Any) -> None:
         errors.append(f"Invalid task: {task}. Must be one of {valid_tasks}")
 
     def _is_missing(value: Any) -> bool:
-        """Return True when a config value should be treated as unset."""
+        """Return True when a config value should be treated as unset.
+
+        :param Any value: Candidate config value.
+        :return bool: ``True`` when the value is effectively unset.
+        """
         if value is None:
             return True
         if isinstance(value, str):
@@ -218,49 +217,3 @@ def validate_glue_config(cfg: Any) -> None:
         raise ValidationError(error_msg)
 
     logger.info("✓ Configuration validation passed")
-
-
-def validate_checkpoint_compatibility(
-    model_config: Dict[str, Any], checkpoint_path: str
-) -> None:
-    """Validate that a checkpoint matches the model configuration.
-
-    :param dict[str, Any] model_config: Model configuration dictionary.
-    :param str checkpoint_path: Path to checkpoint directory.
-    :raises ValidationError: If checkpoint is incompatible.
-    """
-    checkpoint_dir = Path(checkpoint_path)
-    if not checkpoint_dir.exists():
-        raise ValidationError(f"Checkpoint not found: {checkpoint_path}")
-
-    try:
-        resolved_root, resolved_tag = resolve_deepspeed_checkpoint_root_and_tag(
-            checkpoint_dir
-        )
-    except (FileNotFoundError, ValueError):
-        resolved_root = None
-        resolved_tag = None
-
-    if resolved_root is not None and resolved_tag is not None:
-        logger.info(
-            "Detected DeepSpeed checkpoint layout at "
-            f"{resolved_root} (tag={resolved_tag})."
-        )
-    else:
-        state_dict_path = checkpoint_dir / MODEL_WEIGHTS_NAME
-        if not state_dict_path.exists():
-            raise ValidationError(f"No {MODEL_WEIGHTS_NAME} found at {state_dict_path}")
-
-        try:
-            state_dict = load_model_safetensors(checkpoint_dir, map_location="cpu")
-
-            has_embeddings = any("embeddings" in k for k in state_dict.keys())
-            has_encoder = any("encoder" in k for k in state_dict.keys())
-
-            if not has_embeddings and not has_encoder:
-                logger.warning("Checkpoint may not contain expected model weights")
-
-            logger.info(f"Checkpoint contains {len(state_dict)} parameters")
-
-        except Exception as e:
-            raise ValidationError(f"Failed to load checkpoint: {e}")

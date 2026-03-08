@@ -8,29 +8,10 @@ Scripts for exporting and validating NeoBERT checkpoints in HF format.
 - `validate.py` - run structural + forward-pass validation on exported folder
 - `mlm_predict.py` - quick local masked-token inference sanity check for exports
 
-## Typical Flow
-
-```bash
-python scripts/export-hf/export.py outputs/<run>/checkpoints/<step>
-python scripts/export-hf/validate.py outputs/<run>/hf/<export_name>
-```
-
-Optional legacy PyTorch bin export:
-
-```bash
-python scripts/export-hf/export.py outputs/<run>/checkpoints/<step> --include-pytorch-bin
-```
-
-## Notes
-
-- Detailed export constraints and compatibility notes live in
-  [docs/export.md](../../docs/export.md).
-- Legacy checkpoints that still contain a decoder bias require explicit opt-in:
-  use `--allow-decoder-bias-drop` with `export.py`.
-- Keep this README focused on script entry points.
+`export.py` takes a checkpoint directory. `validate.py` and `mlm_predict.py`
+take an exported HF model directory.
 
 ## Related Docs
 
-- [docs/README.md](../../docs/README.md)
-- [docs/export.md](../../docs/export.md)
-- [docs/troubleshooting.md](../../docs/troubleshooting.md)
+- [Export](../../docs/export.md)
+- [Troubleshooting](../../docs/troubleshooting.md)

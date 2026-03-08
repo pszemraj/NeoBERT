@@ -1,8 +1,7 @@
 # Hugging Face Export Guide
 
 Export NeoBERT training checkpoints to a Hugging Face-compatible folder.
-This is the canonical reference for export behavior and constraints.
-`scripts/export-hf/README.md` is intentionally command/script oriented.
+Helper scripts live under [Hugging Face Export Scripts](../scripts/export-hf/README.md).
 
 ## Supported Inputs
 
@@ -12,6 +11,9 @@ Point export to a checkpoint directory containing:
 - either `model.safetensors` (native) or DeepSpeed ZeRO checkpoint state
 - `tokenizer/` directory (required)
 - `tokenizer_info.json` (recommended; validated when present)
+
+DeepSpeed ZeRO checkpoint conversion is legacy-only and requires the optional
+`neobert[legacy-checkpoints]` install extra.
 
 ## Export Command
 

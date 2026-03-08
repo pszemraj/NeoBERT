@@ -3,17 +3,27 @@
 from __future__ import annotations
 
 import logging
+import math
 from types import SimpleNamespace
 
 import pytest
 import torch
-from accelerate.utils import DistributedType
+from accelerate.state import AcceleratorState, GradientState
+from accelerate.utils import DataLoaderConfiguration, DistributedType
 
 from neobert.config import Config
+from neobert.model import NeoBERT, NeoBERTConfig
+from neobert.optimizer import get_optimizer
 from neobert.training_utils import (
+    _compute_l2_norm_for_logging,
     _maybe_compile_model,
+    _update_global_norm_metric_for_logging,
+    create_accelerator,
+    resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
+    validate_distributed_runtime_policy,
     validate_muon_distributed_compatibility,
+    validate_muon_runtime_topology,
 )
 
 
@@ -168,13 +178,578 @@ def test_resolve_wandb_watch_mode_matrix() -> None:
             assert warning is None
 
 
-def test_validate_muon_distributed_compatibility_rejects_fsdp() -> None:
-    """MuonClip must fail fast under FSDP-sharded training."""
-    accelerator = SimpleNamespace(distributed_type=DistributedType.FSDP)
-    with pytest.raises(RuntimeError, match="not compatible with FSDP"):
+def test_create_accelerator_recreates_state_for_mixed_precision_reuse() -> None:
+    """Sequential trainer runs should honor updated mixed precision settings."""
+    GradientState._reset_state()
+    AcceleratorState._reset_state(reset_partial_state=True)
+
+    try:
+        first = create_accelerator(
+            use_cpu=True,
+            log=logging.getLogger("test"),
+            mixed_precision="bf16",
+        )
+        assert first.device.type == "cpu"
+        assert first.state.mixed_precision == "bf16"
+
+        second = create_accelerator(
+            use_cpu=True,
+            log=logging.getLogger("test"),
+            mixed_precision="no",
+        )
+        assert second.device.type == "cpu"
+        assert second.state.mixed_precision == "no"
+    finally:
+        GradientState._reset_state()
+        AcceleratorState._reset_state(reset_partial_state=True)
+
+
+def test_create_accelerator_resets_on_state_mismatch_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """State-mismatch errors should reset Accelerate and retry once."""
+    import neobert.training_utils as training_utils
+
+    reset_calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        training_utils.AcceleratorState,
+        "_reset_state",
+        lambda reset_partial_state=False: reset_calls.append(
+            ("accelerator", bool(reset_partial_state))
+        ),
+    )
+    monkeypatch.setattr(
+        training_utils.GradientState,
+        "_reset_state",
+        lambda: reset_calls.append(("gradient", None)),
+    )
+
+    calls: list[dict[str, object]] = []
+
+    def _fake_factory(**kwargs: object) -> SimpleNamespace:
+        calls.append(dict(kwargs))
+        if len(calls) == 1:
+            raise ValueError(
+                "AcceleratorState has already been initialized and cannot be "
+                "changed, restart your runtime completely and pass `cpu=True` "
+                "to `Accelerator()`."
+            )
+        return SimpleNamespace(**kwargs)
+
+    out = create_accelerator(
+        use_cpu=True,
+        log=logging.getLogger("test"),
+        accelerator_factory=_fake_factory,
+        mixed_precision="bf16",
+    )
+
+    assert out.cpu is True
+    assert out.mixed_precision == "bf16"
+    assert calls == [
+        {"mixed_precision": "bf16", "cpu": True},
+        {"mixed_precision": "bf16", "cpu": True},
+    ]
+    assert reset_calls == [("gradient", None), ("accelerator", True)]
+
+
+def test_create_accelerator_reraises_unrelated_value_errors() -> None:
+    """Non-state errors from Accelerator construction must propagate unchanged."""
+
+    def _boom(**_: object) -> SimpleNamespace:
+        raise ValueError("different accelerator failure")
+
+    with pytest.raises(ValueError, match="different accelerator failure"):
+        create_accelerator(
+            use_cpu=False,
+            log=logging.getLogger("test"),
+            accelerator_factory=_boom,
+            mixed_precision="bf16",
+        )
+
+
+def test_create_accelerator_binds_local_cuda_device_before_init(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CUDA runs should bind LOCAL_RANK before constructing Accelerator."""
+    import neobert.training_utils as training_utils
+
+    bound_devices: list[int] = []
+
+    monkeypatch.setenv("LOCAL_RANK", "3")
+    monkeypatch.setattr(training_utils.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(
+        training_utils.torch.cuda,
+        "set_device",
+        lambda device: bound_devices.append(int(device)),
+    )
+
+    out = create_accelerator(
+        use_cpu=False,
+        log=logging.getLogger("test"),
+        accelerator_factory=lambda **kwargs: SimpleNamespace(**kwargs),
+        mixed_precision="bf16",
+    )
+
+    assert out.mixed_precision == "bf16"
+    assert bound_devices == [3]
+
+
+def test_create_accelerator_preserves_dataloader_config() -> None:
+    """Explicit dataloader config should be forwarded unchanged."""
+    dataloader_config = DataLoaderConfiguration(even_batches=False)
+
+    out = create_accelerator(
+        use_cpu=True,
+        log=logging.getLogger("test"),
+        accelerator_factory=lambda **kwargs: SimpleNamespace(**kwargs),
+        dataloader_config=dataloader_config,
+    )
+
+    assert out.cpu is True
+    assert out.dataloader_config is dataloader_config
+    assert out.dataloader_config.even_batches is False
+
+
+def test_update_global_norm_metric_for_logging_computes_on_non_main_rank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FSDP norm logging must run on every rank even if only rank 0 emits."""
+    import neobert.training_utils as training_utils
+
+    calls: list[tuple[tuple[object, ...], bool]] = []
+
+    def _fake_compute(
+        parameters: object,
+        accelerator: object,
+        *,
+        grad: bool = False,
+    ) -> float:
+        del accelerator
+        calls.append((tuple(parameters), grad))
+        return 12.5
+
+    monkeypatch.setattr(
+        training_utils,
+        "_compute_l2_norm_for_logging",
+        _fake_compute,
+    )
+
+    metrics = {"train/weight_norm": 99.0}
+    accelerator = SimpleNamespace(is_main_process=False)
+    params = (object(), object())
+
+    _update_global_norm_metric_for_logging(
+        metrics,
+        key="train/weight_norm",
+        parameters=params,
+        accelerator=accelerator,
+        enabled=True,
+    )
+
+    assert calls == [(params, False)]
+    assert "train/weight_norm" not in metrics
+
+
+def test_update_global_norm_metric_for_logging_sets_main_process_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Main rank should publish the already-collected global norm."""
+    import neobert.training_utils as training_utils
+
+    monkeypatch.setattr(
+        training_utils,
+        "_compute_l2_norm_for_logging",
+        lambda *args, **kwargs: 8.5,
+    )
+
+    metrics: dict[str, float] = {}
+    accelerator = SimpleNamespace(is_main_process=True)
+
+    _update_global_norm_metric_for_logging(
+        metrics,
+        key="train/weight_norm",
+        parameters=(object(),),
+        accelerator=accelerator,
+        enabled=True,
+    )
+
+    assert metrics["train/weight_norm"] == 8.5
+
+
+def test_resolve_runtime_mixed_precision_and_attn_backend_forces_sdpa_on_cpu(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Explicit CPU runs must disable flash-attn even when CUDA is present."""
+    with caplog.at_level(logging.WARNING):
+        mixed_precision, attn_backend = (
+            resolve_runtime_mixed_precision_and_attn_backend(
+                mixed_precision="bf16",
+                attn_backend="flash_attn_varlen",
+                log=logging.getLogger("test"),
+                use_cpu=True,
+            )
+        )
+
+    assert mixed_precision == "bf16"
+    assert attn_backend == "sdpa"
+    assert "trainer.use_cpu=true" in caplog.text
+
+
+def test_resolve_runtime_mixed_precision_and_attn_backend_forces_sdpa_on_fp32(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Flash attention should be disabled when the run is explicitly fp32."""
+    with caplog.at_level(logging.WARNING):
+        mixed_precision, attn_backend = (
+            resolve_runtime_mixed_precision_and_attn_backend(
+                mixed_precision="no",
+                attn_backend="flash_attn_varlen",
+                log=logging.getLogger("test"),
+                use_cpu=False,
+            )
+        )
+
+    assert mixed_precision == "no"
+    assert attn_backend == "sdpa"
+    assert "mixed_precision='no'" in caplog.text
+
+
+def test_validate_muon_distributed_compatibility_rejects_fsdp1() -> None:
+    """MuonClip must fail fast when FSDP v1 is active."""
+    accelerator = SimpleNamespace(
+        distributed_type=DistributedType.FSDP,
+        state=SimpleNamespace(fsdp_plugin=SimpleNamespace(fsdp_version=1)),
+    )
+    with pytest.raises(RuntimeError, match="requires FSDP v2"):
         validate_muon_distributed_compatibility(
             accelerator=accelerator,
             optimizer_name="muonclip",
             log=logging.getLogger("test"),
             context="unit-test",
+        )
+
+
+def test_validate_muon_distributed_compatibility_allows_fsdp2() -> None:
+    """MuonClip should allow FSDP2 runtime."""
+    accelerator = SimpleNamespace(
+        distributed_type=DistributedType.FSDP,
+        state=SimpleNamespace(fsdp_plugin=SimpleNamespace(fsdp_version=2)),
+    )
+    validate_muon_distributed_compatibility(
+        accelerator=accelerator,
+        optimizer_name="muonclip",
+        log=logging.getLogger("test"),
+        context="unit-test",
+    )
+
+
+def test_validate_muon_distributed_compatibility_rejects_fsdp2_tp_mesh() -> None:
+    """MuonClip should fail fast when FSDP2 is combined with extra mesh axes."""
+    accelerator = SimpleNamespace(
+        distributed_type=DistributedType.FSDP,
+        state=SimpleNamespace(
+            fsdp_plugin=SimpleNamespace(fsdp_version=2),
+            parallelism_config=SimpleNamespace(tp_enabled=True, cp_enabled=False),
+        ),
+    )
+    with pytest.raises(RuntimeError, match="1D row-sharded device mesh"):
+        validate_muon_distributed_compatibility(
+            accelerator=accelerator,
+            optimizer_name="muonclip",
+            log=logging.getLogger("test"),
+            context="unit-test",
+        )
+
+
+def test_validate_muon_distributed_compatibility_rejects_unknown_fsdp() -> None:
+    """Unknown FSDP version metadata should default to v1-style rejection."""
+    accelerator = SimpleNamespace(distributed_type=DistributedType.FSDP)
+    with pytest.raises(RuntimeError, match="requires FSDP v2"):
+        validate_muon_distributed_compatibility(
+            accelerator=accelerator,
+            optimizer_name="muonclip",
+            log=logging.getLogger("test"),
+            context="unit-test",
+        )
+
+
+@pytest.mark.parametrize("zero_stage", [None, 0, 1, 2, 3])
+def test_validate_muon_distributed_compatibility_rejects_deepspeed(
+    zero_stage: int | None,
+) -> None:
+    """MuonClip should reject all DeepSpeed runtimes, not just ZeRO-2/3."""
+    accelerator = SimpleNamespace(
+        distributed_type=DistributedType.DEEPSPEED,
+        state=SimpleNamespace(
+            deepspeed_plugin=SimpleNamespace(zero_stage=zero_stage),
+        ),
+    )
+
+    match = "FSDP2-only" if zero_stage is None else f"ZeRO stage {zero_stage}"
+    with pytest.raises(RuntimeError, match=match):
+        validate_muon_distributed_compatibility(
+            accelerator=accelerator,
+            optimizer_name="muonclip",
+            log=logging.getLogger("test"),
+            context="unit-test",
+        )
+
+
+@pytest.mark.parametrize("zero_stage", [None, 0, 1, 2, 3])
+def test_validate_distributed_runtime_policy_rejects_deepspeed(
+    zero_stage: int | None,
+) -> None:
+    """Repo runtime policy should reject DeepSpeed regardless of optimizer."""
+    accelerator = SimpleNamespace(
+        distributed_type=DistributedType.DEEPSPEED,
+        state=SimpleNamespace(
+            deepspeed_plugin=SimpleNamespace(zero_stage=zero_stage),
+        ),
+    )
+
+    match = "unsupported" if zero_stage is None else f"ZeRO stage {zero_stage}"
+    with pytest.raises(RuntimeError, match=match):
+        validate_distributed_runtime_policy(
+            accelerator=accelerator,
+            log=logging.getLogger("test"),
+            context="unit-test",
+        )
+
+
+def test_validate_muon_runtime_topology_rejects_multidim_mesh() -> None:
+    """Prepared MuonClip DTensor params must reject unsupported mesh rank."""
+
+    class _FakeShard:
+        def __init__(self, dim: int):
+            self.dim = dim
+
+    class _FakeMesh:
+        ndim = 2
+
+    class _FakeDTensorParam:
+        device_mesh = _FakeMesh()
+        placements = (_FakeShard(0),)
+
+        def to_local(self) -> torch.Tensor:
+            return torch.zeros(1, 1)
+
+    accelerator = SimpleNamespace(
+        distributed_type=DistributedType.FSDP,
+        num_processes=2,
+    )
+    optimizer = SimpleNamespace(
+        param_groups=[{"use_muon": True, "params": [_FakeDTensorParam()]}]
+    )
+
+    with pytest.raises(RuntimeError, match="device_mesh.ndim=2"):
+        validate_muon_runtime_topology(
+            accelerator=accelerator,
+            optimizer=optimizer,
+            optimizer_name="muonclip",
+            log=logging.getLogger("test"),
+            context="unit-test",
+        )
+
+
+def test_validate_muon_runtime_topology_accepts_row_shard_layout() -> None:
+    """Prepared MuonClip DTensor params should allow 1D Shard(0) layouts."""
+
+    class _FakeShard:
+        def __init__(self, dim: int):
+            self.dim = dim
+
+    class _FakeMesh:
+        ndim = 1
+
+    class _FakeDTensorParam:
+        device_mesh = _FakeMesh()
+        placements = (_FakeShard(0),)
+
+        def to_local(self) -> torch.Tensor:
+            return torch.zeros(1, 1)
+
+    accelerator = SimpleNamespace(
+        distributed_type=DistributedType.FSDP,
+        num_processes=2,
+    )
+    optimizer = SimpleNamespace(
+        param_groups=[{"use_muon": True, "params": [_FakeDTensorParam()]}]
+    )
+
+    validate_muon_runtime_topology(
+        accelerator=accelerator,
+        optimizer=optimizer,
+        optimizer_name="muonclip",
+        log=logging.getLogger("test"),
+        context="unit-test",
+    )
+
+
+def test_validate_muon_runtime_topology_rejects_missing_dtensor_params() -> None:
+    """Prepared multi-rank MuonClip runs must not continue without DTensor params."""
+    accelerator = SimpleNamespace(
+        distributed_type=DistributedType.FSDP,
+        num_processes=2,
+    )
+    optimizer = SimpleNamespace(
+        param_groups=[
+            {"use_muon": True, "params": [torch.nn.Parameter(torch.zeros(1, 1))]}
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="expected DTensor Muon parameters"):
+        validate_muon_runtime_topology(
+            accelerator=accelerator,
+            optimizer=optimizer,
+            optimizer_name="muonclip",
+            log=logging.getLogger("test"),
+            context="unit-test",
+        )
+
+
+def test_compute_l2_norm_for_logging_reduces_only_sharded_dtensors() -> None:
+    """Global logged norms must reduce shard contributions without double-counting replicas."""
+
+    class _FakeShard:
+        def __init__(self, dim: int):
+            self.dim = dim
+
+    class _FakeReplicate:
+        pass
+
+    class _FakeDTensor:
+        device_mesh = SimpleNamespace(ndim=1)
+
+        def __init__(self, local_value: torch.Tensor, placements: tuple[object, ...]):
+            self._local_value = local_value
+            self.placements = placements
+
+        def to_local(self) -> torch.Tensor:
+            return self._local_value
+
+    reduce_calls: list[tuple[float, str]] = []
+
+    accelerator = SimpleNamespace(
+        distributed_type=DistributedType.FSDP,
+        num_processes=2,
+        reduce=lambda tensor, reduction="sum": (
+            reduce_calls.append((float(tensor.item()), str(reduction))) or tensor * 2
+        ),
+    )
+    parameters = [
+        _FakeDTensor(torch.tensor([3.0, 4.0]), (_FakeShard(0),)),
+        _FakeDTensor(torch.tensor([1.0, 2.0]), (_FakeReplicate(),)),
+    ]
+
+    norm = _compute_l2_norm_for_logging(parameters, accelerator)
+
+    assert norm is not None
+    assert math.isclose(norm, math.sqrt(55.0), rel_tol=0.0, abs_tol=1e-8)
+    assert reduce_calls == [(25.0, "sum")]
+
+
+def test_compute_l2_norm_for_logging_uses_dtensor_owner_for_gradients() -> None:
+    """Gradient logging must reduce local grads when the owning param is sharded."""
+
+    class _FakeShard:
+        def __init__(self, dim: int):
+            self.dim = dim
+
+    class _FakeShardedParam:
+        device_mesh = SimpleNamespace(ndim=1)
+        placements = (_FakeShard(0),)
+
+        def __init__(self, grad: torch.Tensor):
+            self.grad = grad
+
+        def to_local(self) -> torch.Tensor:
+            return torch.zeros(0)
+
+    reduce_calls: list[tuple[float, str]] = []
+    accelerator = SimpleNamespace(
+        distributed_type=DistributedType.FSDP,
+        num_processes=2,
+        reduce=lambda tensor, reduction="sum": (
+            reduce_calls.append((float(tensor.item()), str(reduction))) or tensor * 2
+        ),
+    )
+
+    norm = _compute_l2_norm_for_logging(
+        [_FakeShardedParam(torch.tensor([6.0, 8.0]))],
+        accelerator,
+        grad=True,
+    )
+
+    assert norm is not None
+    assert math.isclose(norm, math.sqrt(200.0), rel_tol=0.0, abs_tol=1e-8)
+    assert reduce_calls == [(100.0, "sum")]
+
+
+def test_get_optimizer_disables_muonclip_clipping_under_fsdp(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """FSDP MuonClip builds must force clipping off and emit a warning once."""
+    import neobert.optimizer.optimizer as optimizer_module
+
+    monkeypatch.setattr(
+        optimizer_module, "_WARNED_MUONCLIP_FSDP_CLIPPING_DISABLE", False
+    )
+    model_cfg = NeoBERTConfig(
+        hidden_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        intermediate_size=64,
+        vocab_size=128,
+        max_length=32,
+        attn_backend="sdpa",
+        hidden_act="gelu",
+        rope=False,
+    )
+    model = NeoBERT(model_cfg)
+
+    with caplog.at_level(logging.WARNING):
+        optimizer = get_optimizer(
+            model,
+            DistributedType.FSDP,
+            model_config=model_cfg,
+            name="muonclip",
+            lr=1e-4,
+            weight_decay=0.0,
+            betas=(0.9, 0.95),
+            eps=1e-8,
+            muon_config={"enable_clipping": True},
+        )
+
+    assert hasattr(optimizer, "config")
+    assert not optimizer.config.enable_clipping
+    assert "Auto-disabling clipping" in caplog.text
+
+
+def test_get_optimizer_rejects_muonclip_under_deepspeed() -> None:
+    """Optimizer factory should fail fast on unsupported DeepSpeed MuonClip."""
+    model_cfg = NeoBERTConfig(
+        hidden_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        intermediate_size=64,
+        vocab_size=128,
+        max_length=32,
+        attn_backend="sdpa",
+        hidden_act="gelu",
+        rope=False,
+    )
+    model = NeoBERT(model_cfg)
+
+    with pytest.raises(RuntimeError, match="FSDP2-only"):
+        get_optimizer(
+            model,
+            DistributedType.DEEPSPEED,
+            model_config=model_cfg,
+            name="muonclip",
+            lr=1e-4,
+            weight_decay=0.0,
+            betas=(0.9, 0.95),
+            eps=1e-8,
+            muon_config={"enable_clipping": False},
         )
