@@ -72,17 +72,12 @@ class TestGLUETaskSpecific:
         cfg.model.attn_backend = "flash_attn_varlen"
         with (
             mock.patch(
-                "neobert.glue.train.stabilize_cuda_mixed_precision",
-                return_value="no",
-            ) as mixed_precision_resolver,
-            mock.patch(
                 "neobert.glue.train._bootstrap_logger.warning"
             ) as warning_logger,
         ):
             mixed_precision, attn_backend = _resolve_glue_runtime_policy(cfg)
-        mixed_precision_resolver.assert_called_once()
         warning_logger.assert_called_once()
-        assert mixed_precision == "no"
+        assert mixed_precision == "bf16"
         assert attn_backend == "sdpa"
 
     def test_hf_logits_and_attention_mask_passthrough_helpers(self):

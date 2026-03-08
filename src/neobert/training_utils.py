@@ -1,7 +1,6 @@
 """Shared helpers for training loops (pretraining, GLUE, contrastive)."""
 
 import logging
-import os
 import re
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Tuple
@@ -20,125 +19,9 @@ except Exception:  # pragma: no cover - older torch builds without DTensor APIs
     DTensor = None  # type: ignore[assignment]
     Shard = None  # type: ignore[assignment]
 
-_LOW_PRECISION_LINEAR_PROBE_CACHE: dict[tuple[int, str, str], bool] = {}
-_LOCAL_RANK_ENV_VARS = ("LOCAL_RANK", "SLURM_LOCALID", "MPI_LOCALRANKID")
 _ACCELERATOR_STATE_REINIT_PREFIX = (
     "AcceleratorState has already been initialized and cannot be changed"
 )
-
-
-def _resolve_cuda_probe_device_index() -> int:
-    """Resolve a stable CUDA device index for startup dtype probes.
-
-    Before Accelerate initializes per-rank devices, ``torch.cuda.current_device()``
-    often defaults to ``0`` on every rank. Prefer rank-local environment metadata
-    so probes run on the GPU owned by this process.
-
-    :return int: CUDA device index to probe.
-    """
-    device_count = int(torch.cuda.device_count())
-    if device_count <= 0:
-        return 0
-
-    for env_var in _LOCAL_RANK_ENV_VARS:
-        raw_value = os.environ.get(env_var)
-        if raw_value is None:
-            continue
-        try:
-            local_rank = int(raw_value)
-        except ValueError:
-            continue
-        if 0 <= local_rank < device_count:
-            return local_rank
-
-    try:
-        current_device = int(torch.cuda.current_device())
-    except Exception:
-        current_device = 0
-    if 0 <= current_device < device_count:
-        return current_device
-    return 0
-
-
-def _probe_cuda_linear_dtype(dtype: torch.dtype) -> bool:
-    """Probe whether CUDA linear GEMM works for a low-precision dtype.
-
-    :param torch.dtype dtype: Probe dtype (typically ``torch.bfloat16``).
-    :return bool: ``True`` when a tiny linear op succeeds end-to-end.
-    """
-    if not torch.cuda.is_available():
-        return False
-    device_index = _resolve_cuda_probe_device_index()
-    probe_device = torch.device("cuda", device_index)
-    preferred_blas = getattr(torch.backends.cuda, "preferred_blas_library", None)
-    blas_tag = "unknown"
-    if callable(preferred_blas):
-        try:
-            blas_tag = str(preferred_blas())
-        except Exception:
-            blas_tag = "unknown"
-    cache_key = (int(device_index), str(dtype), blas_tag)
-    cached = _LOW_PRECISION_LINEAR_PROBE_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
-
-    try:
-        with torch.no_grad():
-            x = torch.randn((16, 64), device=probe_device, dtype=dtype)
-            w = torch.randn((128, 64), device=probe_device, dtype=dtype)
-            _ = torch.nn.functional.linear(x, w)
-            torch.cuda.synchronize(device=probe_device)
-        _LOW_PRECISION_LINEAR_PROBE_CACHE[cache_key] = True
-        return True
-    except RuntimeError:
-        _LOW_PRECISION_LINEAR_PROBE_CACHE[cache_key] = False
-        return False
-
-
-def stabilize_cuda_mixed_precision(
-    *,
-    mixed_precision: str,
-    log: logging.Logger,
-    use_cpu: bool = False,
-) -> str:
-    """Stabilize mixed precision policy for CUDA runtimes with broken bf16 GEMM.
-
-    Some driver/toolchain/GPU combinations report bf16 support but fail at
-    runtime in default cuBLAS GEMM. We first probe bf16 linear; on failure we
-    try switching to cuBLASLt, and only then fall back to fp32.
-
-    :param str mixed_precision: Requested mixed precision mode.
-    :param logging.Logger log: Logger for runtime policy warnings.
-    :param bool use_cpu: Whether the run is explicitly targeting CPU execution.
-    :return str: Effective mixed precision mode (``"bf16"`` or ``"no"``).
-    """
-    if use_cpu or mixed_precision != "bf16" or not torch.cuda.is_available():
-        return mixed_precision
-
-    if _probe_cuda_linear_dtype(torch.bfloat16):
-        return mixed_precision
-
-    preferred_blas = getattr(torch.backends.cuda, "preferred_blas_library", None)
-    if callable(preferred_blas):
-        try:
-            preferred_blas("cublaslt")
-            if _probe_cuda_linear_dtype(torch.bfloat16):
-                log.warning(
-                    "bf16 CUDA linear GEMM failed with default cuBLAS on this runtime; "
-                    "switched torch.backends.cuda.preferred_blas_library('cublaslt')."
-                )
-                return mixed_precision
-        except Exception as exc:
-            log.warning(
-                "Failed to switch CUDA BLAS backend to cuBLASLt for bf16 stability: "
-                f"{exc}"
-            )
-
-    log.warning(
-        "bf16 CUDA linear GEMM is unavailable on this runtime; "
-        "falling back to mixed_precision='no' to avoid immediate crashes."
-    )
-    return "no"
 
 
 def resolve_runtime_mixed_precision_and_attn_backend(
@@ -148,7 +31,7 @@ def resolve_runtime_mixed_precision_and_attn_backend(
     log: logging.Logger,
     use_cpu: bool = False,
 ) -> tuple[str, str]:
-    """Resolve stable mixed precision and attention backend policy for CUDA.
+    """Resolve attention backend policy that depends on runtime precision/CPU.
 
     :param str mixed_precision: Requested mixed precision mode.
     :param str attn_backend: Requested attention backend.
@@ -156,11 +39,7 @@ def resolve_runtime_mixed_precision_and_attn_backend(
     :param bool use_cpu: Whether the run is explicitly targeting CPU execution.
     :return tuple[str, str]: Effective ``(mixed_precision, attn_backend)``.
     """
-    effective_precision = stabilize_cuda_mixed_precision(
-        mixed_precision=mixed_precision,
-        log=log,
-        use_cpu=use_cpu,
-    )
+    effective_precision = str(mixed_precision)
     effective_backend = str(attn_backend)
     normalized_backend = effective_backend.strip().lower()
     if use_cpu and normalized_backend == "flash_attn_varlen":

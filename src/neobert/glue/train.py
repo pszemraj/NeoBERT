@@ -53,7 +53,6 @@ from neobert.training_utils import (
     _resolve_resume_checkpoint,
     _unwrap_optimizer,
     create_accelerator,
-    stabilize_cuda_mixed_precision,
     validate_distributed_runtime_policy,
     validate_muon_distributed_compatibility,
     validate_muon_runtime_topology,
@@ -248,11 +247,6 @@ def _resolve_glue_runtime_policy(cfg: Config) -> tuple[str, str]:
     mixed_precision = resolve_mixed_precision(
         cfg.trainer.mixed_precision,
         task="glue",
-    )
-    mixed_precision = stabilize_cuda_mixed_precision(
-        mixed_precision=mixed_precision,
-        log=logger,
-        use_cpu=bool(getattr(cfg.trainer, "use_cpu", False)),
     )
 
     if requested_backend != "sdpa":

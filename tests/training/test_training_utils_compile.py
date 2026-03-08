@@ -20,7 +20,6 @@ from neobert.training_utils import (
     create_accelerator,
     resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
-    stabilize_cuda_mixed_precision,
     validate_distributed_runtime_policy,
     validate_muon_distributed_compatibility,
     validate_muon_runtime_topology,
@@ -178,94 +177,6 @@ def test_resolve_wandb_watch_mode_matrix() -> None:
             assert warning is None
 
 
-def test_probe_cuda_linear_dtype_uses_local_rank_device(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Probe must use rank-local CUDA device before Accelerator initialization."""
-    import neobert.training_utils as training_utils
-
-    training_utils._LOW_PRECISION_LINEAR_PROBE_CACHE.clear()
-    monkeypatch.setenv("LOCAL_RANK", "2")
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "device_count", lambda: 4)
-    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
-    monkeypatch.setattr(
-        torch.backends.cuda, "preferred_blas_library", lambda _requested=None: "cublas"
-    )
-
-    seen_devices: list[str] = []
-    sync_devices: list[str] = []
-
-    def _fake_randn(
-        shape: tuple[int, int], *, device: object = None, dtype: object = None
-    ) -> torch.Tensor:
-        seen_devices.append(str(torch.device(device)))
-        return torch.zeros(shape, dtype=dtype)
-
-    monkeypatch.setattr(torch, "randn", _fake_randn)
-    monkeypatch.setattr(
-        torch.nn.functional,
-        "linear",
-        lambda x, w: torch.zeros((x.shape[0], w.shape[0]), dtype=x.dtype),
-    )
-    monkeypatch.setattr(
-        torch.cuda,
-        "synchronize",
-        lambda device=None: sync_devices.append(str(torch.device(device))),
-    )
-
-    assert training_utils._probe_cuda_linear_dtype(torch.bfloat16)
-    assert seen_devices == ["cuda:2", "cuda:2"]
-    assert sync_devices == ["cuda:2"]
-
-
-def test_probe_cuda_linear_dtype_falls_back_to_current_device(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """If local-rank metadata is invalid, probe should use current CUDA device."""
-    import neobert.training_utils as training_utils
-
-    training_utils._LOW_PRECISION_LINEAR_PROBE_CACHE.clear()
-    monkeypatch.setenv("LOCAL_RANK", "99")
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
-    monkeypatch.setattr(torch.cuda, "current_device", lambda: 1)
-    monkeypatch.setattr(
-        torch.backends.cuda, "preferred_blas_library", lambda _requested=None: "cublas"
-    )
-
-    seen_devices: list[str] = []
-
-    def _fake_randn(
-        shape: tuple[int, int], *, device: object = None, dtype: object = None
-    ) -> torch.Tensor:
-        seen_devices.append(str(torch.device(device)))
-        return torch.zeros(shape, dtype=dtype)
-
-    monkeypatch.setattr(torch, "randn", _fake_randn)
-    monkeypatch.setattr(
-        torch.nn.functional,
-        "linear",
-        lambda x, w: torch.zeros((x.shape[0], w.shape[0]), dtype=x.dtype),
-    )
-    monkeypatch.setattr(torch.cuda, "synchronize", lambda device=None: None)
-
-    assert training_utils._probe_cuda_linear_dtype(torch.bfloat16)
-    assert seen_devices == ["cuda:1", "cuda:1"]
-
-
-def test_stabilize_cuda_mixed_precision_passthrough_no_cuda(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Non-CUDA runtimes must keep the configured mixed precision unchanged."""
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    out = stabilize_cuda_mixed_precision(
-        mixed_precision="bf16",
-        log=logging.getLogger("test"),
-    )
-    assert out == "bf16"
-
-
 def test_create_accelerator_recreates_state_for_mixed_precision_reuse() -> None:
     """Sequential trainer runs should honor updated mixed precision settings."""
     GradientState._reset_state()
@@ -356,44 +267,10 @@ def test_create_accelerator_reraises_unrelated_value_errors() -> None:
         )
 
 
-def test_stabilize_cuda_mixed_precision_skips_probe_for_explicit_cpu(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """CPU-targeted runs should not touch CUDA probe paths on GPU hosts."""
-    called = {"probe": 0}
-
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-
-    def _boom(_dtype: torch.dtype) -> bool:
-        called["probe"] += 1
-        raise AssertionError("CUDA probe should not run for trainer.use_cpu=true")
-
-    monkeypatch.setattr("neobert.training_utils._probe_cuda_linear_dtype", _boom)
-
-    out = stabilize_cuda_mixed_precision(
-        mixed_precision="bf16",
-        log=logging.getLogger("test"),
-        use_cpu=True,
-    )
-
-    assert out == "bf16"
-    assert called["probe"] == 0
-
-
 def test_resolve_runtime_mixed_precision_and_attn_backend_forces_sdpa_on_cpu(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Explicit CPU runs must disable flash-attn even when CUDA is present."""
-    called = {"probe": 0}
-
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-
-    def _boom(_dtype: torch.dtype) -> bool:
-        called["probe"] += 1
-        raise AssertionError("CUDA probe should not run for trainer.use_cpu=true")
-
-    monkeypatch.setattr("neobert.training_utils._probe_cuda_linear_dtype", _boom)
-
     with caplog.at_level(logging.WARNING):
         mixed_precision, attn_backend = (
             resolve_runtime_mixed_precision_and_attn_backend(
@@ -406,75 +283,26 @@ def test_resolve_runtime_mixed_precision_and_attn_backend_forces_sdpa_on_cpu(
 
     assert mixed_precision == "bf16"
     assert attn_backend == "sdpa"
-    assert called["probe"] == 0
     assert "trainer.use_cpu=true" in caplog.text
 
 
-def test_stabilize_cuda_mixed_precision_switches_to_cublaslt(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+def test_resolve_runtime_mixed_precision_and_attn_backend_forces_sdpa_on_fp32(
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """When default bf16 probe fails, helper should switch to cuBLASLt."""
-    import neobert.training_utils as training_utils
-
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    probe_results = iter([False, True])
-    monkeypatch.setattr(
-        training_utils,
-        "_probe_cuda_linear_dtype",
-        lambda _dtype: next(probe_results),
-    )
-
-    backend_state = {"name": "cublas"}
-
-    def _preferred_blas_library(
-        requested: str | None = None,
-    ) -> object:
-        if requested is None:
-            return backend_state["name"]
-        backend_state["name"] = str(requested).lower()
-        return backend_state["name"]
-
-    monkeypatch.setattr(
-        torch.backends.cuda, "preferred_blas_library", _preferred_blas_library
-    )
-
+    """Flash attention should be disabled when the run is explicitly fp32."""
     with caplog.at_level(logging.WARNING):
-        out = stabilize_cuda_mixed_precision(
-            mixed_precision="bf16",
-            log=logging.getLogger("test"),
+        mixed_precision, attn_backend = (
+            resolve_runtime_mixed_precision_and_attn_backend(
+                mixed_precision="no",
+                attn_backend="flash_attn_varlen",
+                log=logging.getLogger("test"),
+                use_cpu=False,
+            )
         )
 
-    assert out == "bf16"
-    assert backend_state["name"] == "cublaslt"
-    assert "switched torch.backends.cuda.preferred_blas_library('cublaslt')" in (
-        caplog.text
-    )
-
-
-def test_stabilize_cuda_mixed_precision_falls_back_to_fp32(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """If bf16 probe still fails after switch, helper must disable bf16."""
-    import neobert.training_utils as training_utils
-
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(
-        training_utils, "_probe_cuda_linear_dtype", lambda _dtype: False
-    )
-    monkeypatch.setattr(
-        torch.backends.cuda,
-        "preferred_blas_library",
-        lambda _requested=None: "cublaslt",
-    )
-
-    with caplog.at_level(logging.WARNING):
-        out = stabilize_cuda_mixed_precision(
-            mixed_precision="bf16",
-            log=logging.getLogger("test"),
-        )
-
-    assert out == "no"
-    assert "falling back to mixed_precision='no'" in caplog.text
+    assert mixed_precision == "no"
+    assert attn_backend == "sdpa"
+    assert "mixed_precision='no'" in caplog.text
 
 
 def test_validate_muon_distributed_compatibility_rejects_fsdp1() -> None:

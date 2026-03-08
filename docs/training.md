@@ -132,15 +132,9 @@ Runtime behavior:
 - `trainer.mixed_precision`: `no | fp32 | bf16` (`bf16` recommended default)
 - runtime normalization: `fp32 -> no`, `true -> bf16`, `false -> no`
 - `fp16` is unsupported in NeoBERT training paths
-- if `bf16` linear GEMM fails at runtime, trainer retries with
-  `torch.backends.cuda.preferred_blas_library("cublaslt")`
-- if `bf16` still fails, trainer falls back to `mixed_precision: no`
-- this startup probe targets the process-local CUDA device (for example
-  `LOCAL_RANK`) before Accelerator initialization
-- if your host consistently needs `cuBLASLt`, prefer setting
-  `TORCH_BLAS_PREFER_CUBLASLT=1` for that shell/session or launcher rather than
-  baking it into generic examples
-- explicit CPU runs (`trainer.use_cpu: true`) skip CUDA probes and force
+- if bf16 is unstable on a specific host, prefer a known-good PyTorch build for
+  that machine rather than repo-local BLAS workarounds
+- explicit CPU runs (`trainer.use_cpu: true`) force
   `attn_backend: sdpa`
 - when mixed precision resolves to `no`, `attn_backend: flash_attn_varlen` is
   auto-switched to `sdpa`

@@ -38,37 +38,30 @@ Checklist:
 2. keep `trainer.mixed_precision: bf16` (or `no` if bf16 unsupported),
 3. use `gradient_checkpointing: true` for additional memory headroom.
 
-### `bf16` startup probe warnings or fallback to fp32
+### `bf16` CUDA GEMM/runtime failures
 
 Symptoms:
 
-- warning that bf16 CUDA linear GEMM failed with default cuBLAS
-- warning that mixed precision fell back to `no`
-- flash-attn backend changed to `sdpa` at startup
+- PyTorch raises a CUDA/bf16 GEMM error soon after startup
+- bf16 matmuls fail on one PyTorch build but succeed on another
+- flash-attn may need to be disabled manually by setting `mixed_precision: no`
 
 What happens:
 
-1. startup runs a tiny bf16 linear probe on the process-local CUDA device,
-2. if default cuBLAS fails, runtime retries with cuBLASLt,
-3. if probe still fails, runtime switches `trainer.mixed_precision` to `no`,
-4. if backend is `flash_attn_varlen`, runtime switches to `sdpa`.
+1. this is usually an environment/runtime issue rather than a NeoBERT config
+   issue,
+2. NeoBERT does not override PyTorch BLAS library selection at startup,
+3. if bf16 is broken on the current stack, the failing PyTorch operation will
+   still fail until you change the environment or disable bf16.
 
 Actions:
 
-1. if fallback is unexpected, verify CUDA/driver/PyTorch compatibility and
-   extension wheels,
-2. keep `mixed_precision: no` explicitly if your runtime does not support bf16
-   GEMM reliably,
-3. if the same host/runtime consistently succeeds only with cuBLASLt, export
-   `TORCH_BLAS_PREFER_CUBLASLT=1` in that shell or job launcher,
-4. reinstall or rebuild flash-attn wheels after CUDA/PyTorch changes.
-
-> [!TIP]
-> If a specific machine/session reproducibly fails bf16 GEMM with default
-> cuBLAS but succeeds with cuBLASLt, prefer a session- or launcher-local export
-> instead of changing global shell defaults:
->
-> `export TORCH_BLAS_PREFER_CUBLASLT=1`
+1. pin a known-good PyTorch build for the affected host/GPU combination,
+2. verify CUDA/driver/PyTorch compatibility and rebuild extension wheels after
+   version changes,
+3. set `trainer.mixed_precision: no` if that environment cannot run bf16
+   reliably,
+4. if you disable bf16, keep `attn_backend: sdpa` for supported execution.
 
 ### `torch.compile` warnings/recompiles
 
