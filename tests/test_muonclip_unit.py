@@ -1163,14 +1163,19 @@ class TestMuonClipOptimizer:
                 device_mesh: _FakeMesh,
                 placements: tuple[_FakeShard, ...],
                 shape: torch.Size,
+                stride: tuple[int, ...],
             ):
                 self._local = local
                 self.device_mesh = device_mesh
                 self.placements = placements
                 self.shape = torch.Size(shape)
+                self._stride = tuple(stride)
 
             def to_local(self) -> torch.Tensor:
                 return self._local
+
+            def stride(self) -> tuple[int, ...]:
+                return self._stride
 
             @staticmethod
             def from_local(
@@ -1180,13 +1185,17 @@ class TestMuonClipOptimizer:
                 placements: tuple[_FakeShard, ...],
                 run_check: bool = False,
                 shape: torch.Size,
+                stride: tuple[int, ...],
             ) -> "_FakeDTensor":
                 assert not run_check
+                assert tuple(shape) == tuple(full_matrix.shape)
+                assert tuple(stride) == tuple(full_matrix.stride())
                 return _FakeDTensor(
                     local,
                     device_mesh=device_mesh,
                     placements=placements,
                     shape=shape,
+                    stride=stride,
                 )
 
         class _FakeParam:
@@ -1203,6 +1212,7 @@ class TestMuonClipOptimizer:
             device_mesh=fake_mesh,
             placements=fake_placements,
             shape=full_matrix.shape,
+            stride=full_matrix.stride(),
         )
         fake_param = _FakeParam()
         remote_padded = torch.cat(
@@ -1275,6 +1285,7 @@ class TestMuonClipOptimizer:
         )
         torch.testing.assert_close(update.to_local(), expected_full[:2])
         assert tuple(update.shape) == tuple(full_matrix.shape)
+        assert tuple(update.stride()) == tuple(full_matrix.stride())
 
     def test_owner_rank_tie_breaks_on_param_name(
         self, model, monkeypatch: pytest.MonkeyPatch

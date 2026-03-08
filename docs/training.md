@@ -46,8 +46,10 @@ Use Accelerate with FSDP v2 and transformer-based wrapping:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 \
-accelerate launch \
+conda run -s --name neobert accelerate launch \
   --multi_gpu --num_processes 2 --num_machines 1 \
+  --mixed_precision bf16 \
+  --dynamo_backend no \
   --use_fsdp --fsdp_version 2 \
   --fsdp_auto_wrap_policy TRANSFORMER_BASED_WRAP \
   --fsdp_transformer_layer_cls_to_wrap EncoderBlock \
@@ -66,8 +68,10 @@ Explicit no-clipping variant:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 \
-accelerate launch \
+conda run -s --name neobert accelerate launch \
   --multi_gpu --num_processes 2 --num_machines 1 \
+  --mixed_precision bf16 \
+  --dynamo_backend no \
   --use_fsdp --fsdp_version 2 \
   --fsdp_auto_wrap_policy TRANSFORMER_BASED_WRAP \
   --fsdp_transformer_layer_cls_to_wrap EncoderBlock \
@@ -75,6 +79,22 @@ accelerate launch \
   configs/pretraining/pretrain_neobert100m_smollm2data_muonclip_noclip.yaml \
   --wandb.enabled false
 ```
+
+Distributed launch policy for this repo:
+
+- Accelerate launch flags control process topology and FSDP plugin selection
+  (`--num_processes`, `--use_fsdp`, `--fsdp_version`, wrap policy).
+- NeoBERT config controls the actual training precision through
+  `trainer.mixed_precision`. Pass a matching `accelerate launch --mixed_precision`
+  value only to keep launcher output quiet; if you omit it, Accelerate may warn
+  about its CLI default even though the trainer still constructs
+  `Accelerator(mixed_precision=...)` from config.
+- NeoBERT owns `torch.compile` through `trainer.torch_compile` and
+  `trainer.torch_compile_backend`. Leave Accelerate dynamo disabled
+  (`--dynamo_backend no`, or omit it and accept the warning) rather than trying
+  to compile the model through the launcher as well.
+- Use `--wandb.name <run-name>` for the W&B run name override; `--wandb.run`
+  is not a NeoBERT config key.
 
 ## Packed Training
 

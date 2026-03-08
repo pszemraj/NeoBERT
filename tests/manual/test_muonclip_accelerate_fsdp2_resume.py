@@ -55,11 +55,13 @@ def _get_local_rank() -> int:
 
 
 def _init_dist() -> tuple[int, int]:
+    local_rank = _get_local_rank()
+    device = torch.device("cuda", local_rank)
+    torch.cuda.set_device(device)
     if not dist.is_initialized():
-        dist.init_process_group(backend="nccl")
+        dist.init_process_group(backend="nccl", device_id=device)
     rank = dist.get_rank()
     world_size = dist.get_world_size()
-    torch.cuda.set_device(_get_local_rank())
     return rank, world_size
 
 

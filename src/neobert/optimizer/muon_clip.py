@@ -1469,6 +1469,15 @@ class MuonClipOptimizer(Optimizer):
             rank=rank,
         )
         global_param_shape = torch.Size(momentum_buffer.shape)
+        try:
+            global_param_stride = tuple(
+                int(dim_stride) for dim_stride in momentum_buffer.stride()
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "MuonClip DTensor path failed to resolve global stride metadata "
+                "for DTensor reconstruction."
+            ) from exc
         max_rows = max(row_counts)
         pad_rows = max_rows - local_rows
         if pad_rows > 0:
@@ -1541,7 +1550,8 @@ class MuonClipOptimizer(Optimizer):
             device_mesh=mesh,
             placements=placements,
             run_check=False,
-            shape=momentum_buffer.shape,
+            shape=global_param_shape,
+            stride=global_param_stride,
         )
 
     def _newton_schulz_update(self, grad: torch.Tensor, steps: int = 5) -> torch.Tensor:
