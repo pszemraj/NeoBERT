@@ -9,6 +9,7 @@ conda run -s --name neobert pytest -q tests/manual/test_muonclip_integration.py 
 conda run -s --name neobert python tests/manual/test_muonclip_training.py
 conda run -s --name neobert python tests/manual/validate_muonclip.py
 conda run -s --name neobert torchrun --standalone --nproc_per_node=2 tests/manual/test_muonclip_fsdp2_golden.py
+conda run -s --name neobert torchrun --standalone --nproc_per_node=2 tests/manual/test_muonclip_accelerate_fsdp2_resume.py
 ```
 
 ## Notes
@@ -22,6 +23,10 @@ conda run -s --name neobert torchrun --standalone --nproc_per_node=2 tests/manua
   treated as a supported FSDP2 Muon resume surface; production checkpointing
   should go through Accelerate `save_state` / `load_state` or the underlying
   DCP helpers.
+- `test_muonclip_accelerate_fsdp2_resume.py` covers that production checkpoint
+  plumbing explicitly: prepared model/optimizer/scheduler/dataloader, one saved
+  step, fresh-object restore through `Accelerator.load_state`, then continuation
+  parity on the next step.
 - `test_muonclip_training.py` can run for multiple minutes and may download datasets.
 - These scripts are for exploratory/perf validation, not fast CI regression checks.
 - `tests/manual/` is excluded from default `pytest -q` discovery.

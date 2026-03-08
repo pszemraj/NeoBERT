@@ -12,7 +12,6 @@ from tqdm import tqdm
 from transformers import (
     AutoConfig,
     AutoModelForMaskedLM,
-    AutoModelWithLMHead,
     AutoTokenizer,
 )
 from transformers.models.roberta.modeling_roberta import RobertaEmbeddings
@@ -220,6 +219,37 @@ def _load_neobert_checkpoint_weights(
     return model
 
 
+def _load_hub_masked_lm(model_name: str, *, max_length: int) -> Any:
+    """Load a hub-backed masked-language-model for pseudo-perplexity.
+
+    Keep hub loading on ``AutoModelForMaskedLM`` so the script does not rely on
+    deprecated or optional MLM auto-class aliases.
+
+    :param str model_name: Hub model identifier/path.
+    :param int max_length: Requested evaluation context length.
+    :return Any: Loaded masked-language-model instance.
+    """
+    config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+    if hasattr(config, "max_position_embeddings"):
+        config.max_position_embeddings = max(max_length, config.max_position_embeddings)
+
+    model = AutoModelForMaskedLM.from_pretrained(
+        model_name,
+        trust_remote_code=True,
+    )
+    if "roberta" in model_name.lower():
+        model.roberta.embeddings = RobertaEmbeddings(config)
+
+    if hasattr(model.config, "max_position_embeddings"):
+        model.config.max_position_embeddings = max(
+            max_length,
+            model.config.max_position_embeddings,
+        )
+    if hasattr(model.config, "max_length"):
+        model.config.max_length = max(max_length, model.config.max_length)
+    return model
+
+
 if __name__ == "__main__":
     parser = ArgumentParser()
     # Model
@@ -249,29 +279,10 @@ if __name__ == "__main__":
 
     # Get model and tokenizer
     if args.from_hub:
-        config = AutoConfig.from_pretrained(args.model_name, trust_remote_code=True)
-        config.max_position_embeddings = max(
-            args.max_length, config.max_position_embeddings
+        model = _load_hub_masked_lm(
+            args.model_name,
+            max_length=args.max_length,
         )
-        if "roberta" in args.model_name.lower():
-            model = AutoModelWithLMHead.from_pretrained(
-                args.model_name, trust_remote_code=True
-            )
-            model.roberta.embeddings = RobertaEmbeddings(config)
-        elif "modern" in args.model_name.lower():
-            model = AutoModelForMaskedLM.from_pretrained(
-                args.model_name, trust_remote_code=True
-            )
-        else:
-            model = AutoModelWithLMHead.from_pretrained(
-                args.model_name, trust_remote_code=True
-            )
-        if hasattr(model.config, "max_position_embeddings"):
-            model.config.max_position_embeddings = max(
-                args.max_length, model.config.max_position_embeddings
-            )
-        if hasattr(model.config, "max_length"):
-            model.config.max_length = max(args.max_length, model.config.max_length)
     if "neobert" in args.model_name:
         # Import our new config system
         from neobert.config import ConfigLoader

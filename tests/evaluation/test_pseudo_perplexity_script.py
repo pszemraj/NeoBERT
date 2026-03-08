@@ -5,6 +5,7 @@ from __future__ import annotations
 import builtins
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -56,6 +57,57 @@ def test_pseudo_perplexity_module_imports_without_deepspeed(
     module = _load_pseudo_perplexity_module()
 
     assert hasattr(module, "_load_neobert_checkpoint_weights")
+    assert not hasattr(module, "AutoModelWithLMHead")
+
+
+def test_load_hub_masked_lm_uses_masked_lm_auto_class(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hub MLM loading should not depend on deprecated auto-class aliases."""
+    module = _load_pseudo_perplexity_module()
+    config = SimpleNamespace(max_position_embeddings=128)
+    model = SimpleNamespace(
+        config=SimpleNamespace(max_position_embeddings=256, max_length=64),
+        roberta=SimpleNamespace(embeddings="original"),
+    )
+    calls: list[tuple[str, bool]] = []
+
+    def _fake_config_from_pretrained(
+        model_name: str, *, trust_remote_code: bool = False
+    ):
+        assert model_name == "roberta-base"
+        assert trust_remote_code is True
+        return config
+
+    def _fake_model_from_pretrained(
+        model_name: str, *, trust_remote_code: bool = False
+    ):
+        calls.append((model_name, trust_remote_code))
+        return model
+
+    monkeypatch.setattr(
+        module.AutoConfig,
+        "from_pretrained",
+        _fake_config_from_pretrained,
+    )
+    monkeypatch.setattr(
+        module.AutoModelForMaskedLM,
+        "from_pretrained",
+        _fake_model_from_pretrained,
+    )
+    monkeypatch.setattr(
+        module,
+        "RobertaEmbeddings",
+        lambda cfg: ("roberta-embeddings", cfg.max_position_embeddings),
+    )
+
+    out = module._load_hub_masked_lm("roberta-base", max_length=512)
+
+    assert out is model
+    assert calls == [("roberta-base", True)]
+    assert model.roberta.embeddings == ("roberta-embeddings", 512)
+    assert model.config.max_position_embeddings == 512
+    assert model.config.max_length == 512
 
 
 def test_load_neobert_checkpoint_weights_prefers_safetensors(
@@ -233,24 +285,28 @@ def test_load_neobert_checkpoint_weights_does_not_ignore_explicit_checkpoint(
     assert seen == [(tmp_path.resolve(), "1000")]
 
 
-def test_load_neobert_checkpoint_weights_rejects_missing_tag_for_direct_weights(
+def test_load_neobert_checkpoint_weights_rejects_missing_tag_for_direct_step_weights(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Direct portable checkpoint paths must not mask an explicit missing tag."""
+    """Direct step dirs must not ignore an explicit mismatched checkpoint tag."""
     module = _load_pseudo_perplexity_module()
     model = _ModelStub()
-    (tmp_path / module.MODEL_WEIGHTS_NAME).touch()
+    checkpoint_dir = tmp_path / "123"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    (checkpoint_dir / module.MODEL_WEIGHTS_NAME).touch()
 
     def _fake_load_model_safetensors(*args, **kwargs):
         del args, kwargs
-        raise AssertionError("portable root weights should not load for a missing tag")
+        raise AssertionError(
+            "direct step weights should not load for a mismatched explicit tag"
+        )
 
     monkeypatch.setattr(module, "load_model_safetensors", _fake_load_model_safetensors)
 
-    with pytest.raises(FileNotFoundError, match="Requested checkpoint 'final'"):
+    with pytest.raises(FileNotFoundError, match="Requested checkpoint '456'"):
         module._load_neobert_checkpoint_weights(
             model,
-            checkpoint_path=tmp_path,
-            checkpoint="final",
+            checkpoint_path=checkpoint_dir,
+            checkpoint="456",
         )
