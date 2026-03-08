@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from accelerate.state import AcceleratorState, GradientState
-from accelerate.utils import DistributedType
+from accelerate.utils import DataLoaderConfiguration, DistributedType
 
 from neobert.config import Config
 from neobert.model import NeoBERT, NeoBERTConfig
@@ -292,6 +292,22 @@ def test_create_accelerator_binds_local_cuda_device_before_init(
 
     assert out.mixed_precision == "bf16"
     assert bound_devices == [3]
+
+
+def test_create_accelerator_preserves_dataloader_config() -> None:
+    """Explicit dataloader config should be forwarded unchanged."""
+    dataloader_config = DataLoaderConfiguration(even_batches=False)
+
+    out = create_accelerator(
+        use_cpu=True,
+        log=logging.getLogger("test"),
+        accelerator_factory=lambda **kwargs: SimpleNamespace(**kwargs),
+        dataloader_config=dataloader_config,
+    )
+
+    assert out.cpu is True
+    assert out.dataloader_config is dataloader_config
+    assert out.dataloader_config.even_batches is False
 
 
 def test_resolve_runtime_mixed_precision_and_attn_backend_forces_sdpa_on_cpu(

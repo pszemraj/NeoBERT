@@ -26,7 +26,9 @@ conda run -s --name neobert torchrun --standalone --nproc_per_node=2 tests/manua
 - `test_muonclip_accelerate_fsdp2_resume.py` covers that production checkpoint
   plumbing explicitly: prepared model/optimizer/scheduler/dataloader, one saved
   step, fresh-object restore through `Accelerator.load_state`, then continuation
-  parity on the next step.
+  parity on the next step. The smoke uses a synthetic pre-batched dataloader,
+  so it opts into Accelerate `even_batches=False` for compatibility with recent
+  Accelerate releases.
 - `test_muonclip_training.py` can run for multiple minutes and may download datasets.
 - These scripts are for exploratory/perf validation, not fast CI regression checks.
 - `tests/manual/` is excluded from default `pytest -q` discovery.

@@ -26,6 +26,7 @@ from typing import Any
 import torch
 import torch.distributed as dist
 from accelerate.utils import (
+    DataLoaderConfiguration,
     DistributedType,
     FullyShardedDataParallelPlugin,
     ProjectConfiguration,
@@ -107,6 +108,9 @@ def _build_accelerator(project_dir: Path):
         transformer_cls_names_to_wrap=["EncoderBlock"],
         state_dict_type="SHARDED_STATE_DICT",
     )
+    # This smoke feeds Accelerate pre-batched dict samples (batch_size=None), so
+    # newer Accelerate releases require even_batches=False when sharding it.
+    dataloader_config = DataLoaderConfiguration(even_batches=False)
     project_config = ProjectConfiguration(
         project_dir=str(project_dir),
         automatic_checkpoint_naming=False,
@@ -114,6 +118,7 @@ def _build_accelerator(project_dir: Path):
     accelerator = create_accelerator(
         use_cpu=False,
         log=logger,
+        dataloader_config=dataloader_config,
         project_config=project_config,
         fsdp_plugin=fsdp_plugin,
         step_scheduler_with_optimizer=False,
@@ -320,13 +325,17 @@ def main() -> None:
         if rank == 0:
             print("PASS: Accelerate FSDP2 Muon save/load smoke succeeded.")
     finally:
-        if dist.is_initialized():
-            dist.barrier()
-        _reset_accelerate_runtime_state()
-        if rank == 0:
-            shutil.rmtree(ckpt_root, ignore_errors=True)
-        if dist.is_initialized():
-            dist.barrier()
+        try:
+            if dist.is_initialized():
+                dist.barrier()
+            _reset_accelerate_runtime_state()
+            if rank == 0:
+                shutil.rmtree(ckpt_root, ignore_errors=True)
+            if dist.is_initialized():
+                dist.barrier()
+        finally:
+            if dist.is_initialized():
+                dist.destroy_process_group()
 
 
 if __name__ == "__main__":
