@@ -132,15 +132,13 @@ def resolve_contrastive_dataset_name(requested: Any) -> str:
                 aliases.setdefault(normalized, key)
 
     raw_value = str(requested).strip()
-    candidates = [raw_value]
-    if "/" in raw_value:
-        candidates.append(raw_value.rsplit("/", maxsplit=1)[-1])
-
-    for candidate in candidates:
-        normalized = normalize_contrastive_dataset_name_token(candidate)
-        resolved = aliases.get(normalized)
-        if resolved is not None:
-            return resolved
+    normalized = normalize_contrastive_dataset_name_token(raw_value)
+    # Preserve explicit Hub namespaces in the user request. Built-in wrapper
+    # aliases already include their trailing slugs, so request-side namespace
+    # stripping would incorrectly redirect custom/private repos.
+    resolved = aliases.get(normalized)
+    if resolved is not None:
+        return resolved
 
     raise ValueError(
         "Unknown contrastive dataset name "

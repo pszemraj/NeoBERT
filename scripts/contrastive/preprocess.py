@@ -32,8 +32,7 @@ def _resolve_single_dataset_name(requested: Any) -> str:
     """Resolve one dataset selector to a canonical contrastive registry key.
 
     Accepts canonical keys (for example ``ALLNLI``), class names, and common
-    Hugging Face dataset IDs such as ``sentence-transformers/all-nli`` by
-    matching on the trailing path segment.
+    built-in Hugging Face dataset IDs such as ``sentence-transformers/all-nli``.
 
     :param Any requested: Raw selector value.
     :return str: Canonical registry key.

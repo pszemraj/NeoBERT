@@ -88,6 +88,15 @@ def test_resolve_contrastive_dataset_name_accepts_builtin_hf_ids(
     assert resolve_contrastive_dataset_name(requested) == expected
 
 
+@pytest.mark.parametrize("requested", ["my-org/all-nli", "private/QQP_triplets"])
+def test_resolve_contrastive_dataset_name_preserves_hf_namespaces(
+    requested: str,
+) -> None:
+    """Unknown namespaced Hub repos must not silently collapse to built-ins."""
+    with pytest.raises(ValueError, match="Unknown contrastive dataset name"):
+        resolve_contrastive_dataset_name(requested)
+
+
 def test_resolve_dataset_names_rejects_unknown_selector() -> None:
     """Unknown selectors should fail fast instead of preprocessing everything."""
     module = _load_contrastive_preprocess_module()

@@ -69,7 +69,8 @@ current portable step layout (`checkpoints/<step>/model.safetensors`) and falls
 back to legacy DeepSpeed ZeRO conversion only when portable weights are absent.
 That legacy fallback requires the optional `neobert[legacy-checkpoints]` extra.
 When `checkpoint_path` points at a checkpoint root, `--checkpoint latest`
-resolves to the newest loadable numbered step before loading. If
+first honors a legacy DeepSpeed `latest` file when present; otherwise it
+resolves to the newest loadable numbered step. If
 `checkpoint_path` already points at a specific step directory, pass the matching
 `--checkpoint` tag; explicit missing non-`latest` tags fail fast instead of
 silently loading the direct path.

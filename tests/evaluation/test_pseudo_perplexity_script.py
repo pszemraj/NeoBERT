@@ -193,12 +193,21 @@ def test_load_neobert_checkpoint_weights_resolves_latest_file_for_legacy_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`latest` should resolve through legacy DeepSpeed indirection files."""
+    """`latest` files must remain authoritative for legacy DeepSpeed roots."""
     module = _load_pseudo_perplexity_module()
     model = _ModelStub()
     expected = {"weight": torch.zeros(2, 2)}
     (tmp_path / "latest").write_text("456\n", encoding="utf-8")
+    portable_step = tmp_path / "999"
+    portable_step.mkdir(parents=True, exist_ok=True)
+    (portable_step / module.MODEL_WEIGHTS_NAME).touch()
     seen: list[tuple[Path, str]] = []
+
+    def _fake_load_model_safetensors(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError(
+            "Portable numbered steps should not override a legacy latest file"
+        )
 
     def _fake_load_deepspeed(path: Path, *, tag: str | None = None):
         normalized_path = Path(path).resolve()
@@ -206,6 +215,7 @@ def test_load_neobert_checkpoint_weights_resolves_latest_file_for_legacy_root(
         seen.append((normalized_path, normalized_tag))
         return expected
 
+    monkeypatch.setattr(module, "load_model_safetensors", _fake_load_model_safetensors)
     monkeypatch.setattr(module, "load_deepspeed_fp32_state_dict", _fake_load_deepspeed)
 
     out = module._load_neobert_checkpoint_weights(

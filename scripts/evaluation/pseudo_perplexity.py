@@ -125,9 +125,9 @@ def _resolve_neobert_checkpoint_selector(
 ) -> str:
     """Resolve ``checkpoint`` to a concrete checkpoint tag for loading.
 
-    ``latest`` prefers the highest loadable numbered step beneath a checkpoint
-    root. When no numbered steps exist, a legacy DeepSpeed ``latest`` file is
-    used as a fallback selector.
+    ``latest`` honors a root-level DeepSpeed ``latest`` file when present. When
+    no such file exists, scan for the highest loadable numbered step so
+    portable checkpoint roots without DeepSpeed metadata still work.
 
     :param Path checkpoint_root: Root directory or direct checkpoint path.
     :param str checkpoint: Requested checkpoint selector.
@@ -137,6 +137,13 @@ def _resolve_neobert_checkpoint_selector(
     requested_tag = str(checkpoint).strip()
     if requested_tag.lower() != "latest":
         return requested_tag
+
+    latest_path = checkpoint_root / "latest"
+    if latest_path.is_file():
+        latest_tag = latest_path.read_text(encoding="utf-8").strip()
+        if not latest_tag:
+            raise ValueError(f"DeepSpeed latest file is empty: {latest_path}")
+        return latest_tag
 
     candidates = sorted(
         (
@@ -149,13 +156,6 @@ def _resolve_neobert_checkpoint_selector(
     for step in candidates:
         if _is_loadable_neobert_step(checkpoint_root, step):
             return str(step)
-
-    latest_path = checkpoint_root / "latest"
-    if latest_path.is_file():
-        latest_tag = latest_path.read_text(encoding="utf-8").strip()
-        if not latest_tag:
-            raise ValueError(f"DeepSpeed latest file is empty: {latest_path}")
-        return latest_tag
     return requested_tag
 
 
