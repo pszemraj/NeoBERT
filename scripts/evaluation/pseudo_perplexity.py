@@ -21,6 +21,7 @@ from neobert.checkpointing import (
     MODEL_WEIGHTS_NAME,
     load_deepspeed_fp32_state_dict,
     load_model_safetensors,
+    resolve_deepspeed_checkpoint_root_and_tag,
 )
 from neobert.model import NeoBERTConfig, NeoBERTLMHead
 
@@ -102,6 +103,63 @@ def _resolve_neobert_checkpoint_dir(
     return checkpoint_root
 
 
+def _is_loadable_neobert_step(checkpoint_root: Path, step: int) -> bool:
+    """Return whether ``step`` can be loaded for pseudo-perplexity evaluation.
+
+    :param Path checkpoint_root: Root directory containing checkpoint steps.
+    :param int step: Numeric checkpoint step to validate.
+    :return bool: ``True`` when either portable or legacy weights are loadable.
+    """
+    step_dir = checkpoint_root / str(step)
+    if (step_dir / MODEL_WEIGHTS_NAME).is_file():
+        return True
+    try:
+        resolve_deepspeed_checkpoint_root_and_tag(checkpoint_root, tag=str(step))
+    except (FileNotFoundError, ValueError):
+        return False
+    return True
+
+
+def _resolve_neobert_checkpoint_selector(
+    checkpoint_root: Path,
+    checkpoint: str,
+) -> str:
+    """Resolve ``checkpoint`` to a concrete checkpoint tag for loading.
+
+    ``latest`` prefers the highest loadable numbered step beneath a checkpoint
+    root. When no numbered steps exist, a legacy DeepSpeed ``latest`` file is
+    used as a fallback selector.
+
+    :param Path checkpoint_root: Root directory or direct checkpoint path.
+    :param str checkpoint: Requested checkpoint selector.
+    :return str: Concrete checkpoint tag to load.
+    :raises ValueError: If a legacy DeepSpeed ``latest`` file is empty.
+    """
+    requested_tag = str(checkpoint).strip()
+    if requested_tag.lower() != "latest":
+        return requested_tag
+
+    candidates = sorted(
+        (
+            int(path.name)
+            for path in checkpoint_root.iterdir()
+            if path.is_dir() and path.name.isdigit()
+        ),
+        reverse=True,
+    )
+    for step in candidates:
+        if _is_loadable_neobert_step(checkpoint_root, step):
+            return str(step)
+
+    latest_path = checkpoint_root / "latest"
+    if latest_path.is_file():
+        latest_tag = latest_path.read_text(encoding="utf-8").strip()
+        if not latest_tag:
+            raise ValueError(f"DeepSpeed latest file is empty: {latest_path}")
+        return latest_tag
+    return requested_tag
+
+
 def _checkpoint_path_matches_tag(checkpoint_path: Path, checkpoint: str) -> bool:
     """Return whether ``checkpoint_path`` already points at ``checkpoint``.
 
@@ -137,13 +195,13 @@ def _load_neobert_checkpoint_weights(
     :return NeoBERTLMHead: Model with loaded weights.
     """
     checkpoint_root = Path(checkpoint_path)
-    checkpoint_dir = _resolve_neobert_checkpoint_dir(checkpoint_root, checkpoint)
+    requested_tag = _resolve_neobert_checkpoint_selector(checkpoint_root, checkpoint)
+    checkpoint_dir = _resolve_neobert_checkpoint_dir(checkpoint_root, requested_tag)
     weights_path = checkpoint_dir / MODEL_WEIGHTS_NAME
 
     if weights_path.is_file():
         state_dict = load_model_safetensors(checkpoint_dir, map_location="cpu")
     else:
-        requested_tag = str(checkpoint).strip()
         try:
             state_dict = load_deepspeed_fp32_state_dict(
                 checkpoint_root,

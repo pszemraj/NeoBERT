@@ -97,6 +97,76 @@ def test_load_neobert_checkpoint_weights_prefers_safetensors(
     assert calls == {"safetensors": 1, "deepspeed": 0}
 
 
+def test_load_neobert_checkpoint_weights_resolves_latest_numbered_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`latest` should resolve to the highest loadable numbered checkpoint step."""
+    module = _load_pseudo_perplexity_module()
+    (tmp_path / "100").mkdir(parents=True, exist_ok=True)
+    step_dir = tmp_path / "300"
+    step_dir.mkdir(parents=True, exist_ok=True)
+    (step_dir / module.MODEL_WEIGHTS_NAME).touch()
+    (tmp_path / "500").mkdir(parents=True, exist_ok=True)
+    model = _ModelStub()
+    expected = {"weight": torch.full((2, 2), 3.0)}
+    seen_paths: list[Path] = []
+
+    def _fake_load_model_safetensors(path: Path, *, map_location: str = "cpu"):
+        del map_location
+        seen_paths.append(path)
+        return expected
+
+    def _fake_load_deepspeed(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError(
+            "Legacy DeepSpeed loader should not run for portable latest"
+        )
+
+    monkeypatch.setattr(module, "load_model_safetensors", _fake_load_model_safetensors)
+    monkeypatch.setattr(module, "load_deepspeed_fp32_state_dict", _fake_load_deepspeed)
+
+    out = module._load_neobert_checkpoint_weights(
+        model,
+        checkpoint_path=tmp_path,
+        checkpoint="latest",
+    )
+
+    assert out is model
+    assert model.loaded_state_dict == expected
+    assert seen_paths == [step_dir]
+
+
+def test_load_neobert_checkpoint_weights_resolves_latest_file_for_legacy_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`latest` should resolve through legacy DeepSpeed indirection files."""
+    module = _load_pseudo_perplexity_module()
+    model = _ModelStub()
+    expected = {"weight": torch.zeros(2, 2)}
+    (tmp_path / "latest").write_text("456\n", encoding="utf-8")
+    seen: list[tuple[Path, str]] = []
+
+    def _fake_load_deepspeed(path: Path, *, tag: str | None = None):
+        normalized_path = Path(path).resolve()
+        normalized_tag = "" if tag is None else str(tag)
+        seen.append((normalized_path, normalized_tag))
+        return expected
+
+    monkeypatch.setattr(module, "load_deepspeed_fp32_state_dict", _fake_load_deepspeed)
+
+    out = module._load_neobert_checkpoint_weights(
+        model,
+        checkpoint_path=tmp_path,
+        checkpoint="latest",
+    )
+
+    assert out is model
+    assert model.loaded_state_dict == expected
+    assert seen == [(tmp_path.resolve(), "456")]
+
+
 def test_load_neobert_checkpoint_weights_falls_back_to_legacy_conversion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
