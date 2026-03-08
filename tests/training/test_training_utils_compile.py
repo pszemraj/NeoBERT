@@ -17,6 +17,7 @@ from neobert.optimizer import get_optimizer
 from neobert.training_utils import (
     _compute_l2_norm_for_logging,
     _maybe_compile_model,
+    _update_global_norm_metric_for_logging,
     create_accelerator,
     resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
@@ -308,6 +309,72 @@ def test_create_accelerator_preserves_dataloader_config() -> None:
     assert out.cpu is True
     assert out.dataloader_config is dataloader_config
     assert out.dataloader_config.even_batches is False
+
+
+def test_update_global_norm_metric_for_logging_computes_on_non_main_rank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FSDP norm logging must run on every rank even if only rank 0 emits."""
+    import neobert.training_utils as training_utils
+
+    calls: list[tuple[tuple[object, ...], bool]] = []
+
+    def _fake_compute(
+        parameters: object,
+        accelerator: object,
+        *,
+        grad: bool = False,
+    ) -> float:
+        del accelerator
+        calls.append((tuple(parameters), grad))
+        return 12.5
+
+    monkeypatch.setattr(
+        training_utils,
+        "_compute_l2_norm_for_logging",
+        _fake_compute,
+    )
+
+    metrics = {"train/weight_norm": 99.0}
+    accelerator = SimpleNamespace(is_main_process=False)
+    params = (object(), object())
+
+    _update_global_norm_metric_for_logging(
+        metrics,
+        key="train/weight_norm",
+        parameters=params,
+        accelerator=accelerator,
+        enabled=True,
+    )
+
+    assert calls == [(params, False)]
+    assert "train/weight_norm" not in metrics
+
+
+def test_update_global_norm_metric_for_logging_sets_main_process_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Main rank should publish the already-collected global norm."""
+    import neobert.training_utils as training_utils
+
+    monkeypatch.setattr(
+        training_utils,
+        "_compute_l2_norm_for_logging",
+        lambda *args, **kwargs: 8.5,
+    )
+
+    metrics: dict[str, float] = {}
+    accelerator = SimpleNamespace(is_main_process=True)
+
+    _update_global_norm_metric_for_logging(
+        metrics,
+        key="train/weight_norm",
+        parameters=(object(),),
+        accelerator=accelerator,
+        enabled=True,
+    )
+
+    assert metrics["train/weight_norm"] == 8.5
 
 
 def test_resolve_runtime_mixed_precision_and_attn_backend_forces_sdpa_on_cpu(

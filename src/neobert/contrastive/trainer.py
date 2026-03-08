@@ -47,6 +47,7 @@ from neobert.training_utils import (
     _maybe_compile_model,
     _maybe_prepare_for_forward,
     _resolve_resume_checkpoint,
+    _update_global_norm_metric_for_logging,
     create_accelerator,
     resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
@@ -962,15 +963,13 @@ def trainer(cfg: Config) -> None:
                 )
                 if grad_norm_value is not None:
                     metrics["train/grad_norm"] = grad_norm_value
-                if cfg.trainer.log_weight_norms and accelerator.is_main_process:
-                    weight_norm_value = _compute_l2_norm_for_logging(
-                        model.parameters(),
-                        accelerator,
-                    )
-                    if weight_norm_value is not None:
-                        metrics["train/weight_norm"] = weight_norm_value
-                    else:
-                        metrics.pop("train/weight_norm", None)
+                _update_global_norm_metric_for_logging(
+                    metrics,
+                    key="train/weight_norm",
+                    parameters=model.parameters(),
+                    accelerator=accelerator,
+                    enabled=bool(cfg.trainer.log_weight_norms),
+                )
 
                 metrics["train/learning_rate"] = optimizer.param_groups[0]["lr"]
                 metrics.log(accelerator)

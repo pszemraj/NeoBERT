@@ -274,6 +274,42 @@ def _compute_l2_norm_for_logging(
     return float(total_sumsq.sqrt().item())
 
 
+def _update_global_norm_metric_for_logging(
+    metrics: dict[str, Any],
+    *,
+    key: str,
+    parameters: Iterable[Any],
+    accelerator: Accelerator,
+    enabled: bool,
+    grad: bool = False,
+) -> None:
+    """Collect a norm metric on all ranks but only emit it on the main process.
+
+    FSDP-aware norm helpers may execute collectives, so every rank must
+    participate even when only rank 0 should publish the resulting metric.
+
+    :param dict[str, Any] metrics: Mutable metrics mapping to update in place.
+    :param str key: Metric key to populate or clear.
+    :param Iterable[Any] parameters: Parameters/gradients to inspect.
+    :param Accelerator accelerator: Active accelerator runtime.
+    :param bool enabled: Whether this metric is enabled for the current window.
+    :param bool grad: Whether to read gradients instead of parameter values.
+    """
+    if not enabled:
+        metrics.pop(key, None)
+        return
+
+    norm_value = _compute_l2_norm_for_logging(
+        parameters,
+        accelerator,
+        grad=grad,
+    )
+    if accelerator.is_main_process and norm_value is not None:
+        metrics[key] = norm_value
+    else:
+        metrics.pop(key, None)
+
+
 def _is_accelerator_state_reinit_error(exc: Exception) -> bool:
     """Return whether ``exc`` indicates stale Accelerate singleton state.
 
