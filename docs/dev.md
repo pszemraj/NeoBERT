@@ -3,23 +3,6 @@
 This page tracks the current engineering status and near-term TODOs for NeoBERT
 training performance and stability work.
 
----
-
-- [Current Status](#current-status)
-  - [Pretraining packed path](#pretraining-packed-path)
-  - [Compile and runtime behavior](#compile-and-runtime-behavior)
-  - [Distributed runtime policy (FSDP2-first)](#distributed-runtime-policy-fsdp2-first)
-  - [Checkpointing and serialization](#checkpointing-and-serialization)
-- [Recently Landed](#recently-landed)
-- [Lessons Learned](#lessons-learned)
-- [Known Gaps](#known-gaps)
-- [Next PR TODOs](#next-pr-todos)
-  - [Contrastive Sweep TODOs](#contrastive-sweep-todos)
-  - [Config Loader Architecture TODOs (Separate PR)](#config-loader-architecture-todos-separate-pr)
-- [Longer-Term Backlog](#longer-term-backlog)
-
----
-
 ## Current Status
 
 ### Pretraining packed path
@@ -50,29 +33,22 @@ Status: **stabilized for current training configs**.
 
 Status: **enforced for current training/eval entrypoints**.
 
-- NeoBERT pretraining is now explicitly **FSDP2-first**.
-- DeepSpeed runtime support has been removed from current entrypoints.
-- FSDP v1 is rejected at runtime with a clear error.
-- Reason: masked-logits-only objective needs decoder-weight unshard/reshard
-  semantics that are safe with FSDP2. FSDP1 `summon_full_params` does not allow
-  initiating forward/backward inside that context.
-- For Accelerate launches, set FSDP config to `fsdp_version: 2`.
-- Legacy DeepSpeed ZeRO checkpoint conversion remains available as an artifact
-  compatibility path only; it is no longer a training backend.
-- Keep passing model + optimizer together to `accelerate.prepare(...)` in FSDP2
-  paths (Accelerate requirement).
+- Pretraining uses Accelerate FSDP2 as the maintained distributed path.
+- FSDP v1 is rejected at runtime; masked-logits-only loss depends on FSDP2-safe
+  unshard/reshard behavior around the decoder weight.
+- DeepSpeed runtime support has been removed from entrypoints; legacy ZeRO
+  checkpoint conversion remains artifact-only.
+- Multi-rank Muon validation now covers both the raw FSDP2 owner-compute path
+  and the shipped Accelerate `save_state` / `load_state` resume path.
 
 ### Checkpointing and serialization
 
 Status: **standardized**.
 
-- Training checkpoints have been standardized on `safetensors`.
-- This is compatible with the current pretraining flow and keeps export paths
-  straightforward.
-- **Breaking change (2026-02):** pretraining now writes a single checkpoint tree
-  at `output_dir/checkpoints/<step>/` that contains both resumable Accelerate
-  state and export assets (`model.safetensors`, `config.yaml`, tokenizer files).
-  The previous parallel `model_checkpoints/` tree is no longer written.
+- Training checkpoints are `safetensors`-first.
+- **Breaking change (2026-02):** pretraining writes one checkpoint tree at
+  `output_dir/checkpoints/<step>/` with resumable Accelerate state and export
+  assets together. The old parallel `model_checkpoints/` tree is gone.
 
 ## Recently Landed
 

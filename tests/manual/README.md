@@ -14,21 +14,17 @@ conda run -s --name neobert torchrun --standalone --nproc_per_node=2 tests/manua
 
 ## Notes
 
-- `test_muonclip_fsdp2_golden.py` requires CUDA and 2 ranks; it validates same-batch
-  full-step parity plus same-world-size optimizer resume for the FSDP2 Muon path.
-- That golden test validates the raw FSDP2 owner-compute update path directly,
-  but it saves and restores sharded optimizer state through the supported DCP
-  (`get_optimizer_state_dict` / `set_optimizer_state_dict`) flow.
-- Raw local-shard `optimizer.state_dict()` round-trips are intentionally not
-  treated as a supported FSDP2 Muon resume surface; production checkpointing
-  should go through Accelerate `save_state` / `load_state` or the underlying
-  DCP helpers.
-- `test_muonclip_accelerate_fsdp2_resume.py` covers that production checkpoint
-  plumbing explicitly: prepared model/optimizer/scheduler/dataloader, one saved
-  step, fresh-object restore through `Accelerator.load_state`, then continuation
-  parity on the next step. The smoke uses a synthetic pre-batched dataloader,
-  so it opts into Accelerate `even_batches=False` for compatibility with recent
-  Accelerate releases.
+- Distributed launch policy, topology, and gradient/norm logging behavior are in
+  [docs/training.md](../../docs/training.md#distributed-topology) and
+  [docs/training.md](../../docs/training.md#gradient-accumulation-and-norm-logging).
+- `test_muonclip_fsdp2_golden.py` requires CUDA and 2 ranks; it validates the
+  raw FSDP2 owner-compute update path and sharded DCP optimizer-state round-trip.
+- `test_muonclip_accelerate_fsdp2_resume.py` validates the shipped Accelerate
+  `prepare(...) -> save_state(...) -> load_state(...)` resume path. The smoke
+  uses a synthetic pre-batched dataloader and opts into `even_batches=False`
+  internally for recent Accelerate releases.
+- Raw local-shard `optimizer.state_dict()` round-trips are not a supported
+  FSDP2 Muon resume surface.
 - `test_muonclip_training.py` can run for multiple minutes and may download datasets.
 - These scripts are for exploratory/perf validation, not fast CI regression checks.
 - `tests/manual/` is excluded from default `pytest -q` discovery.

@@ -6,49 +6,8 @@
 
 NeoBERT YAML config schema (`src/neobert/config.py`) and defaults.
 
----
-
-- [How To Use This Page](#how-to-use-this-page)
-- [Variables and Dot Overrides](#variables-and-dot-overrides)
-  - [YAML variables](#yaml-variables)
-  - [Dot-path overrides in Python](#dot-path-overrides-in-python)
-- [High-Impact Settings](#high-impact-settings)
-- [Model Architecture](#model-architecture)
-  - [Core](#core)
-  - [Advanced](#advanced)
-- [Positional Encoding](#positional-encoding)
-- [Tokenizer](#tokenizer)
-- [Data Source](#data-source)
-  - [Core](#core-1)
-  - [Performance and Preprocessing](#performance-and-preprocessing)
-  - [Contrastive-Only Data Fields](#contrastive-only-data-fields)
-- [Training Loop](#training-loop)
-  - [Core](#core-2)
-  - [Stability and Performance](#stability-and-performance)
-  - [Control and Legacy Compatibility](#control-and-legacy-compatibility)
-- [LR Schedule](#lr-schedule)
-- [Optimizer](#optimizer)
-  - [Base Optimizer](#base-optimizer)
-  - [MuonClip (`optimizer.muon_config`)](#muonclip-optimizermuon_config)
-- [Data Collator](#data-collator)
-- [Checkpointing and Resume](#checkpointing-and-resume)
-- [Logging and Tracking](#logging-and-tracking)
-  - [Weights and Biases](#weights-and-biases)
-  - [Top-Level Runtime Metadata](#top-level-runtime-metadata)
-- [Task-Specific Sections](#task-specific-sections)
-  - [GLUE (`glue`)](#glue-glue)
-  - [Contrastive (`contrastive`)](#contrastive-contrastive)
-  - [MTEB Top-Level Keys](#mteb-top-level-keys)
-- [Constraints, Requirements, and Gotchas](#constraints-requirements-and-gotchas)
-- [Legacy Key Mapping (Still Normalized)](#legacy-key-mapping-still-normalized)
-- [Practical YAML Presets](#practical-yaml-presets)
-  - [1) Base Pretraining (Balanced)](#1-base-pretraining-balanced)
-  - [2) Memory-Constrained Single GPU](#2-memory-constrained-single-gpu)
-  - [3) Resumable Local-Data Run](#3-resumable-local-data-run)
-  - [4) Full Logging + Frequent Eval](#4-full-logging--frequent-eval)
-- [Related Docs](#related-docs)
-
----
+Use the sections below in this order: variables/overrides, high-impact knobs,
+field tables, task-specific sections, constraints, then presets.
 
 ## How To Use This Page
 
@@ -295,20 +254,20 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | ------------------------------------- | ----- | ------------ | --------------------------------------------- |
 | `trainer.per_device_train_batch_size` | `int` | `16`         | Train microbatch size per device.             |
 | `trainer.per_device_eval_batch_size`  | `int` | `32`         | Eval microbatch size per device.              |
-| `trainer.gradient_accumulation_steps` | `int` | `1`          | Accumulation steps per optimizer update.      |
+| `trainer.gradient_accumulation_steps` | `int` | `1`          | Microbatches per optimizer update.            |
 | `trainer.max_steps`                   | `int` | `1000000`    | Max optimizer steps.                          |
 | `trainer.save_steps`                  | `int` | `10000`      | Save interval in steps.                       |
 | `trainer.eval_steps`                  | `int` | `10000`      | Eval interval in steps.                       |
 | `trainer.logging_steps`               | `int` | `100`        | Logging interval in steps.                    |
 | `trainer.output_dir`                  | `str` | `"./output"` | Output root for checkpoints and artifacts.    |
-| `trainer.mixed_precision`             | `str` | `"bf16"`     | `no`, `fp32`, or `bf16` (`fp16` unsupported; runtime may auto-adjust to `no` if bf16 GEMM is unavailable). |
+| `trainer.mixed_precision`             | `str` | `"bf16"`     | `no`, `fp32`, or `bf16` (`fp16` unsupported; `fp32` normalizes to `no`). |
 
 ### Stability and Performance
 
 | Key                                   | Type            | Default      | Description                                                                                                                                                 |
 | ------------------------------------- | --------------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `trainer.gradient_checkpointing`      | `bool`          | `false`      | Activation checkpointing for lower memory usage.                                                                                                            |
-| `trainer.gradient_clipping`           | `float \| None` | `null`       | Clip the global gradient norm after accumulation/scaling when set.                                                                                          |
+| `trainer.gradient_clipping`           | `float \| None` | `null`       | Clip the global gradient norm after accumulation; pretraining applies it after masked-token rescaling.                                                      |
 | `trainer.torch_compile`               | `bool`          | `false`      | Enable `torch.compile`.                                                                                                                                     |
 | `trainer.torch_compile_dynamic`       | `bool \| None`  | `null`       | Dynamic-shape compile toggle when supported.                                                                                                                |
 | `trainer.torch_compile_backend`       | `str`           | `"inductor"` | Compile backend name.                                                                                                                                       |
@@ -316,7 +275,7 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | `trainer.eval_max_batches`            | `int \| None`   | `null`       | Optional eval cap; required for streaming eval when `dataset.eval_samples` is unset.                                                                        |
 | `trainer.log_train_accuracy`          | `bool`          | `false`      | Log MLM masked-token train accuracy (enable only for focused diagnostics; disabling improves throughput).                                                   |
 | `trainer.log_grad_norm`               | `bool`          | `true`       | Log the global pre-clip gradient norm at each logging interval.                                                                                             |
-| `trainer.log_weight_norms`            | `bool`          | `true`       | Log parameter norms (main-process overhead).                                                                                                                |
+| `trainer.log_weight_norms`            | `bool`          | `true`       | Log the global parameter L2 norm on logging steps after the optimizer update.                                                                               |
 | `trainer.tf32`                        | `bool`          | `true`       | Enable TF32 on supported CUDA GPUs.                                                                                                                         |
 | `trainer.masked_logits_only_loss`     | `bool`          | `true`       | Pretraining MLM loss path selector: `true` = masked-logits-only path (default/recommended), `false` = original full-logits CE path (legacy ablation/debug). |
 
@@ -325,6 +284,9 @@ Overrides are validated with the same semantic checks as base YAML configs.
 > multi-objective mixing interface. Choose one path for the run.
 > The project default is `true`; use `false` only when intentionally running a
 > legacy full-logits baseline.
+>
+> Gradient-accumulation, effective-batch, and norm-logging behavior is detailed
+> in [training.md](training.md#gradient-accumulation-and-norm-logging).
 
 ### Control and Legacy Compatibility
 
@@ -388,7 +350,7 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | `muon_beta`                    | `float`          | `0.95`            | Muon momentum coefficient.                                   |
 | `muon_decay`                   | `float`          | `0.0`             | Muon weight decay.                                           |
 | `ns_steps`                     | `int`            | `5`               | Newton-Schulz/Polar iterations.                              |
-| `enable_clipping`              | `bool`           | `true`            | Enable QK clipping path.                                     |
+| `enable_clipping`              | `bool`           | `true`            | Enable MuonClip's QK clipping path (separate from `trainer.gradient_clipping`). |
 | `clipping_threshold`           | `float`          | `50.0`            | QK clipping threshold.                                       |
 | `clipping_alpha`               | `float`          | `0.5`             | Q/K scaling balance parameter.                               |
 | `clipping_warmup_steps`        | `int`            | `0`               | Disable clipping before this many steps.                     |
@@ -407,6 +369,10 @@ Overrides are validated with the same semantic checks as base YAML configs.
 > `newton_schulz` upcasts BF16 gradients to FP32 for the iteration and casts
 > back; `polar_express` runs in BF16 work dtype (when available) for higher
 > throughput.
+>
+> Under sharded FSDP2 Muon runs, `enable_clipping=true` is auto-disabled at
+> optimizer construction time because the current owner-compute path does not
+> support the activation-hook capture flow used by QK clipping.
 
 ---
 
@@ -550,7 +516,6 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 | `trainer.use_cpu=true` on a CUDA host                                              | **CPU TARGET**     | Runtime preserves the requested precision policy and forces `attn_backend='sdpa'` for explicit CPU runs.            |
 | GLUE task with `model.attn_backend=flash_attn_varlen`                              | **AUTO-ADJUST**    | GLUE classifier wrappers force `attn_backend='sdpa'`; packed flash attention is not part of the supported GLUE path. |
 | `optimizer.name=muonclip` with FSDP v1                                             | **ERROR**          | MuonClip distributed mode requires FSDP2 (`fsdp_version=2`).                                                       |
-| `optimizer.name=muonclip` with FSDP v2 and `muon_config.enable_clipping=true`      | **AUTO-ADJUST**    | QK clipping is auto-disabled with a warning; FSDP2 path runs Muon-only updates.                                   |
 | Any DeepSpeed runtime                                                              | **ERROR**          | DeepSpeed execution is unsupported in this repo; use Accelerate FSDP v2 for distributed runs. Legacy DeepSpeed checkpoint conversion remains available separately. |
 | `trainer.mixed_precision='no'` with `model.attn_backend=flash_attn_varlen`         | **AUTO-ADJUST**    | Runtime switches attention backend to `sdpa` with a warning.                                                       |
 | `datacollator.pack_sequences=true` with `model.attn_backend=sdpa`                 | **WARNING**        | Works, but slower than `flash_attn_varlen`; SDPA uses fallback path.                                                |

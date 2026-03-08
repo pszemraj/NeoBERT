@@ -63,6 +63,28 @@ Actions:
    reliably,
 4. if you disable bf16, keep `attn_backend: sdpa` for supported execution.
 
+### Accelerate launch warnings about mixed precision or dynamo
+
+Symptoms:
+
+- `accelerate launch` says its default `--mixed_precision` is `no`
+- `accelerate launch` says its default `--dynamo_backend` is `no`
+
+What happens:
+
+1. those warnings describe omitted launcher flags, not a NeoBERT override,
+2. NeoBERT still constructs `Accelerator(...)` from `trainer.mixed_precision`
+   and the repo's compile settings,
+3. passing matching launcher flags keeps the startup output aligned with the
+   actual runtime policy.
+
+Actions:
+
+1. pass `accelerate launch --mixed_precision bf16` when the config uses bf16,
+2. keep `--dynamo_backend no` unless you are intentionally testing launcher-side
+   dynamo,
+3. use `--wandb.name ...` for run naming; `--wandb.run` is not a NeoBERT CLI key.
+
 ### `torch.compile` warnings/recompiles
 
 Typical warnings:
@@ -143,11 +165,11 @@ Actions:
 
 ```bash
 # Validate exported model
-python scripts/export-hf/validate.py /path/to/exported/model
+conda run -s --name neobert python scripts/export-hf/validate.py /path/to/exported/model
 
 # Tiny pretraining smoke test
-python scripts/pretraining/pretrain.py tests/configs/pretraining/test_tiny_pretrain.yaml
+conda run -s --name neobert python scripts/pretraining/pretrain.py tests/configs/pretraining/test_tiny_pretrain.yaml
 
 # Focused tests for packed attention path
-pytest tests/kernels/test_attention.py tests/test_model_forward.py -q
+conda run -s --name neobert pytest tests/kernels/test_attention.py tests/test_model_forward.py -q
 ```

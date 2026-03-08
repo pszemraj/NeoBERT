@@ -40,6 +40,25 @@ python scripts/pretraining/pretrain.py \
   --trainer.max_steps 100000
 ```
 
+### Distributed topology
+
+| Topology | Launch shape | Model layout | Typical use |
+| -------- | ------------ | ------------ | ----------- |
+| Single process | `python ...` | one full model on one device | local debugging and smoke tests |
+| Replicated multi-GPU | `accelerate launch --num_processes N ...` | one full model replica per rank | Adam/AdamW scale-out or launcher sanity checks |
+| Sharded multi-GPU | `accelerate launch --use_fsdp --fsdp_version 2 ...` | model and optimizer state sharded across ranks | primary distributed pretraining path |
+
+The maintained multi-rank MuonClip path is the sharded one: Accelerate FSDP2
+with a 1D row-sharded DTensor mesh. Do not combine MuonClip with tensor
+parallelism, context parallelism, or other multi-axis DTensor layouts.
+
+### Distributed validation
+
+Use the commands in [`tests/manual/README.md`](../tests/manual/README.md)
+before long multi-rank MuonClip runs. The two distributed smokes cover the raw
+FSDP2 owner-compute path and the shipped Accelerate `save_state/load_state`
+resume path.
+
 ### 2-GPU FSDP2 launch (MuonClip)
 
 Use Accelerate with FSDP v2 and transformer-based wrapping:
@@ -64,21 +83,9 @@ DeepSpeed is no longer a supported runtime backend in this repo; use Accelerate
 FSDP v2 for distributed training. Legacy DeepSpeed ZeRO checkpoint conversion
 remains available via the optional `neobert[legacy-checkpoints]` extra.
 
-Explicit no-clipping variant:
-
-```bash
-CUDA_VISIBLE_DEVICES=0,1 \
-conda run -s --name neobert accelerate launch \
-  --multi_gpu --num_processes 2 --num_machines 1 \
-  --mixed_precision bf16 \
-  --dynamo_backend no \
-  --use_fsdp --fsdp_version 2 \
-  --fsdp_auto_wrap_policy TRANSFORMER_BASED_WRAP \
-  --fsdp_transformer_layer_cls_to_wrap EncoderBlock \
-  scripts/pretraining/pretrain.py \
-  configs/pretraining/pretrain_neobert100m_smollm2data_muonclip_noclip.yaml \
-  --wandb.enabled false
-```
+For the explicit no-clipping variant, keep the same launch flags and replace
+the config path with
+`configs/pretraining/pretrain_neobert100m_smollm2data_muonclip_noclip.yaml`.
 
 Distributed launch policy for this repo:
 
@@ -95,6 +102,35 @@ Distributed launch policy for this repo:
   to compile the model through the launcher as well.
 - Use `--wandb.name <run-name>` for the W&B run name override; `--wandb.run`
   is not a NeoBERT config key.
+
+## Gradient Accumulation and Norm Logging
+
+- `trainer.gradient_accumulation_steps` counts microbatches per optimizer update.
+- For GLUE and contrastive training, the effective sample batch per optimizer
+  step is:
+  `per_device_train_batch_size * world_size * gradient_accumulation_steps`.
+- Pretraining uses the same sample-count formula when microbatches are full, but
+  packed batches can vary token counts per update. For packed runs, compare
+  `train/tokens_per_sec` and token counts rather than only `steps/sec`.
+
+Pretraining applies one extra scaling step after accumulation: gradients are
+rescaled by the global masked-token count for the just-finished update. That
+keeps the effective loss normalization aligned with a full masked-token mean
+even when masking density or packing makes per-rank token counts uneven.
+
+Current logging semantics:
+
+- `train/grad_norm` is the global L2 gradient norm after accumulation and, in
+  pretraining, after masked-token rescaling.
+- `train/grad_norm` is measured before `trainer.gradient_clipping`.
+- `trainer.gradient_clipping` clips the final accumulated gradient; in
+  pretraining that means after token-based rescaling.
+- `train/weight_norm` is the global L2 parameter norm on logging steps after
+  the optimizer update.
+
+`trainer.gradient_clipping` clips gradients. MuonClip's
+`optimizer.muon_config.enable_clipping` toggles its separate QK activation
+clipping path, which is auto-disabled for sharded FSDP2 Muon runs.
 
 ## Packed Training
 
@@ -203,22 +239,9 @@ python scripts/pretraining/pretrain.py \
   --trainer.resume_from_checkpoint latest
 ```
 
-### Crash Recovery Playbook (step 69,420 example)
+### Crash recovery
 
-Scenario:
-
-- you launched `configs/pretraining/pretrain_neobert100m_smollm2data_muonclip.yaml`
-- run crashed around step `69420`
-- target is to continue to `trainer.max_steps: 100000`
-
-1. Find the last saved checkpoint step:
-
-```bash
-find outputs/neobert-100m-wordpc_msp_32k_tok-muonclip/checkpoints \
-  -mindepth 1 -maxdepth 1 -type d -printf "%f\n" | sort -n | tail -n 1
-```
-
-1. Resume from latest checkpoint:
+Resume from the newest saved checkpoint:
 
 ```bash
 python scripts/pretraining/pretrain.py \
@@ -226,25 +249,13 @@ python scripts/pretraining/pretrain.py \
   --trainer.resume_from_checkpoint latest
 ```
 
-1. Confirm resume in logs:
+Confirm in logs that startup loads `outputs/.../checkpoints/<step>/` and that
+training resumes from the saved global step instead of step 0.
 
-- startup prints checkpoint loading from
-  `outputs/.../checkpoints/<step>/`
-- first train progress resumes from prior global step (not step 0)
-- run continues until `trainer.max_steps` (100000 in this config)
-
-Important for this exact config:
-
-- `pretrain_neobert100m_smollm2data_muonclip.yaml` sets
-  `dataset.streaming: true`
-- streaming resume is supported as best-effort recovery:
-  trainer restores checkpoint state and advances the stream by consumed batches
-  before continuing
-
-Streaming resume caveat:
-
-- stream advancement can take significant wall time for late checkpoints
-- with shuffled streams, exact sample continuity is not guaranteed
+For the streaming SmolLM2 configs in this repo, resume is best-effort:
+trainer restores checkpoint state and advances the stream by the consumed
+batches before continuing. Late checkpoints can take noticeable time to
+replay, and shuffled streams do not guarantee exact sample continuity.
 
 For strict deterministic continuation, switch to a non-streaming tokenized
 dataset and resume there:
