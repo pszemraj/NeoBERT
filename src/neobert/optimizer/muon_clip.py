@@ -76,9 +76,10 @@ class MuonClipConfig:
     # Monitoring and debugging
     detect_anomalies: bool = False  # Enable gradient anomaly detection
 
-    # Orthogonalization control
+    # Orthogonalization / routing control
     orthogonalization: str = "polar_express"
-    norm_factor: str = "spectral"
+    norm_factor: str = "legacy_compat"
+    param_policy: str = "all_2d"
     algorithm: Optional[str] = None  # Alias for orthogonalization
     polar_express: Optional[bool] = None  # Legacy toggle
 
@@ -202,10 +203,10 @@ class MuonClipConfig:
 
         norm_factor = str(self.norm_factor).strip().replace("-", "_").lower()
         valid_norm_factors = {
+            "legacy_compat",
             "spectral",
             "match_rms_adamw",
             "none",
-            "legacy_compat",
         }
         if norm_factor not in valid_norm_factors:
             raise ValueError(
@@ -213,8 +214,17 @@ class MuonClipConfig:
                 f"Valid options: {', '.join(sorted(valid_norm_factors))}"
             )
 
+        param_policy = str(self.param_policy).strip().replace("-", "_").lower()
+        valid_param_policies = {"all_2d", "transformer_only"}
+        if param_policy not in valid_param_policies:
+            raise ValueError(
+                f"Unsupported param_policy '{self.param_policy}'. "
+                f"Valid options: {', '.join(sorted(valid_param_policies))}"
+            )
+
         self.orthogonalization = algo
         self.norm_factor = norm_factor
+        self.param_policy = param_policy
         self.algorithm = algo
         # Reset explicit toggle to prevent downstream confusion
         self.polar_express = None
@@ -716,6 +726,12 @@ class MuonClipOptimizer(Optimizer):
     def _build_param_groups(self, model: torch.nn.Module) -> List[Dict]:
         """Build parameter groups for hybrid Muon+Adam optimization.
 
+        Policies:
+        - ``all_2d``: route every trainable rank-2 parameter to Muon. This
+          restores the v0.1.3 scope and is the baseline-compat default.
+        - ``transformer_only``: route only transformer-layer rank-2 weights to
+          Muon. Embeddings / output matrices fall back to AdamW-style grouping.
+
         :param torch.nn.Module model: Model to inspect.
         :return list[dict]: Parameter groups for the optimizer.
         """
@@ -725,6 +741,15 @@ class MuonClipOptimizer(Optimizer):
         adam_decay_param_info: List[Dict[str, Any]] = []
         adam_no_decay_params: List[torch.nn.Parameter] = []
         adam_no_decay_param_info: List[Dict[str, Any]] = []
+
+        param_policy = str(getattr(self.config, "param_policy", "all_2d")).strip()
+        param_policy = param_policy.replace("-", "_").lower()
+        valid_param_policies = {"all_2d", "transformer_only"}
+        if param_policy not in valid_param_policies:
+            raise ValueError(
+                f"Unsupported param_policy '{param_policy}'. "
+                f"Valid options: {', '.join(sorted(valid_param_policies))}"
+            )
 
         transformer_param_ids: set[int] = set()
         layer_idx_by_param_id: Dict[int, int] = {}
@@ -801,11 +826,14 @@ class MuonClipOptimizer(Optimizer):
                 "proj_type": proj_type,
             }
 
-            use_muon = (
-                param.ndim == 2
-                and param_id in transformer_param_ids
-                and param_id not in embedding_param_ids
-            )
+            if param_policy == "all_2d":
+                use_muon = param.ndim == 2
+            else:
+                use_muon = (
+                    param.ndim == 2
+                    and param_id in transformer_param_ids
+                    and param_id not in embedding_param_ids
+                )
             if use_muon:
                 muon_params.append(param)
                 muon_param_info.append(param_info)
@@ -832,9 +860,14 @@ class MuonClipOptimizer(Optimizer):
                     "beta": self.config.muon_beta,
                     "weight_decay": self.config.muon_decay,
                     "use_muon": True,
+                    "param_policy": param_policy,
                 }
             )
-            logger.info(f"Muon group: {len(muon_params)} parameters")
+            logger.info(
+                "Muon group: %s parameters (policy=%s)",
+                len(muon_params),
+                param_policy,
+            )
 
         if adam_decay_params:
             groups.append(
@@ -1600,6 +1633,12 @@ class MuonClipOptimizer(Optimizer):
     ) -> torch.Tensor:
         """Normalize orthogonalized update magnitude before applying it.
 
+        Named modes:
+        - ``legacy_compat``: pre-0.1.4 Muon scaling
+        - ``spectral``: scale by sqrt(d_out / d_in)
+        - ``match_rms_adamw``: reduced legacy-style scale
+        - ``none``: no extra scaling
+
         :param torch.Tensor update: Orthogonalized update tensor.
         :param torch.Size param_shape: Shape of the owning parameter.
         :return torch.Tensor: Normalized update tensor.
@@ -1608,7 +1647,12 @@ class MuonClipOptimizer(Optimizer):
             return update
 
         d_out, d_in = int(param_shape[0]), int(param_shape[1])
-        norm_factor = getattr(self.config, "norm_factor", "spectral")
+        norm_factor = (
+            str(getattr(self.config, "norm_factor", "legacy_compat"))
+            .strip()
+            .replace("-", "_")
+            .lower()
+        )
         if norm_factor == "none":
             scale = 1.0
         elif norm_factor == "spectral":
@@ -1620,7 +1664,7 @@ class MuonClipOptimizer(Optimizer):
         else:
             raise ValueError(
                 f"Unsupported norm_factor '{norm_factor}'. "
-                "Expected one of: spectral, match_rms_adamw, none, legacy_compat."
+                "Expected one of: legacy_compat, spectral, match_rms_adamw, none."
             )
 
         return update * scale

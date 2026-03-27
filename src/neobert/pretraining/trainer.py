@@ -2096,6 +2096,7 @@ def trainer(cfg: Config) -> None:
         logger.info(f"Newton-Schulz iterations: {muon_cfg.ns_steps}")
         logger.info(f"Orthogonalization: {muon_cfg.orthogonalization}")
         logger.info(f"Norm factor: {muon_cfg.norm_factor}")
+        logger.info(f"Param policy: {muon_cfg.param_policy}")
         logger.info(f"Clipping warmup steps: {muon_cfg.clipping_warmup_steps}")
         logger.info(f"Clipping interval: {muon_cfg.clipping_interval}")
         logger.info(f"QK chunk size: {muon_cfg.clipping_qk_chunk_size}")

@@ -131,6 +131,9 @@ Current logging semantics:
 `trainer.gradient_clipping` clips gradients. MuonClip's
 `optimizer.muon_config.enable_clipping` toggles its separate QK activation
 clipping path, which is auto-disabled for sharded FSDP2 Muon runs.
+Muon baseline-compatible defaults are `norm_factor=legacy_compat` and
+`param_policy=all_2d`; use `transformer_only` explicitly for FSDP2 policy
+experiments.
 
 ## Packed Training
 

@@ -170,19 +170,43 @@ class MuonConfig:
     capture_last_microbatch_only: bool = True
     detect_anomalies: bool = False
     orthogonalization: str = "polar_express"
-    norm_factor: str = "spectral"
+    norm_factor: str = "legacy_compat"
+    param_policy: str = "all_2d"
     algorithm: Optional[str] = None  # Alias for orthogonalization
     polar_express: Optional[bool] = None  # Legacy toggle
     clipping_layers_mapping: Dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Warn on legacy alias usage."""
+        """Warn on legacy alias usage and normalize enum-like fields."""
         if self.algorithm is not None:
             warnings.warn(
                 "MuonConfig.algorithm is deprecated; use orthogonalization instead.",
                 UserWarning,
                 stacklevel=2,
             )
+
+        norm_factor = str(self.norm_factor).strip().replace("-", "_").lower()
+        valid_norm_factors = {
+            "legacy_compat",
+            "spectral",
+            "match_rms_adamw",
+            "none",
+        }
+        if norm_factor not in valid_norm_factors:
+            raise ValueError(
+                f"Unsupported norm_factor '{self.norm_factor}'. "
+                f"Valid options: {', '.join(sorted(valid_norm_factors))}"
+            )
+        self.norm_factor = norm_factor
+
+        param_policy = str(self.param_policy).strip().replace("-", "_").lower()
+        valid_param_policies = {"all_2d", "transformer_only"}
+        if param_policy not in valid_param_policies:
+            raise ValueError(
+                f"Unsupported param_policy '{self.param_policy}'. "
+                f"Valid options: {', '.join(sorted(valid_param_policies))}"
+            )
+        self.param_policy = param_policy
         if self.polar_express is not None:
             warnings.warn(
                 "MuonConfig.polar_express is deprecated; use orthogonalization instead.",

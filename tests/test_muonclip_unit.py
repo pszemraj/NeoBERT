@@ -84,6 +84,8 @@ class TestMuonClipConfig:
         config = MuonClipConfig()
         assert config.lr > 0
         assert 0 <= config.muon_beta < 1
+        assert config.norm_factor == "legacy_compat"
+        assert config.param_policy == "all_2d"
 
     def test_invalid_numeric_fields_raise(self):
         """Test invalid numeric config values fail fast."""
@@ -96,6 +98,7 @@ class TestMuonClipConfig:
             {"clipping_interval": -3},
             {"clipping_qk_chunk_size": 0},
             {"norm_factor": "unsupported"},
+            {"param_policy": "unsupported"},
         ]
         for kwargs in cases:
             with pytest.raises(ValueError):
@@ -270,6 +273,7 @@ class TestMuonClipOptimizer:
             max_length=128,
             attn_backend="sdpa",
             hidden_act="gelu",
+            dropout=0.0,
             rope=False,
         )
         return NeoBERT(config), config
@@ -291,32 +295,31 @@ class TestMuonClipOptimizer:
         assert optimizer.config.orthogonalization == "polar_express"
 
     def test_parameter_grouping(self, model):
-        """Test parameters are correctly grouped."""
+        """Default grouping should route all trainable 2D params to Muon."""
         model_instance, config = model
 
         muon_config = MuonClipConfig(enable_clipping=False)
         optimizer = MuonClipOptimizer(model_instance, config, muon_config)
 
-        # Muon should only see transformer 2D weights.
         muon_group = next(g for g in optimizer.param_groups if g["use_muon"])
         muon_params = set(muon_group["params"])
         for p in muon_group["params"]:
             assert p.ndim == 2
 
-        assert model_instance.encoder.weight not in muon_params
+        assert muon_group["param_policy"] == "all_2d"
+        assert model_instance.encoder.weight in muon_params
         if hasattr(model_instance, "positional_embedding"):
-            assert model_instance.positional_embedding.weight not in muon_params
+            assert model_instance.positional_embedding.weight in muon_params
         assert model_instance.transformer_encoder[0].qkv.weight in muon_params
 
-        # Adam groups include 1D params and non-transformer 2D weights.
         adam_groups = [g for g in optimizer.param_groups if not g["use_muon"]]
         adam_params = {param for group in adam_groups for param in group["params"]}
-        assert model_instance.encoder.weight in adam_params
+        assert model_instance.encoder.weight not in adam_params
         if hasattr(model_instance, "positional_embedding"):
-            assert model_instance.positional_embedding.weight in adam_params
+            assert model_instance.positional_embedding.weight not in adam_params
 
-    def test_grouping_excludes_embeddings_and_lm_head(self):
-        """Embeddings/output projection must stay in Adam, never Muon."""
+    def test_grouping_all_2d_routes_embeddings_and_lm_head_to_muon(self):
+        """all_2d should restore v0.1.3-style Muon scope."""
         config = NeoBERTConfig(
             hidden_size=64,
             num_hidden_layers=2,
@@ -333,7 +336,7 @@ class TestMuonClipOptimizer:
         optimizer = MuonClipOptimizer(
             model,
             config,
-            MuonClipConfig(enable_clipping=False),
+            MuonClipConfig(enable_clipping=False, param_policy="all_2d"),
         )
 
         muon_group = next(g for g in optimizer.param_groups if g["use_muon"])
@@ -341,6 +344,39 @@ class TestMuonClipOptimizer:
         adam_groups = [g for g in optimizer.param_groups if not g["use_muon"]]
         adam_params = {param for group in adam_groups for param in group["params"]}
 
+        assert model.model.encoder.weight in muon_params
+        assert model.decoder.weight in muon_params
+        assert model.model.encoder.weight not in adam_params
+        assert model.decoder.weight not in adam_params
+        assert model.model.transformer_encoder[0].qkv.weight in muon_params
+
+    def test_grouping_transformer_only_excludes_embeddings_and_lm_head(self):
+        """transformer_only should keep embeddings/output projection in Adam."""
+        config = NeoBERTConfig(
+            hidden_size=64,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            intermediate_size=128,
+            vocab_size=257,
+            max_length=64,
+            attn_backend="sdpa",
+            hidden_act="gelu",
+            rope=False,
+            tie_word_embeddings=False,
+        )
+        model = NeoBERTLMHead(config)
+        optimizer = MuonClipOptimizer(
+            model,
+            config,
+            MuonClipConfig(enable_clipping=False, param_policy="transformer_only"),
+        )
+
+        muon_group = next(g for g in optimizer.param_groups if g["use_muon"])
+        muon_params = set(muon_group["params"])
+        adam_groups = [g for g in optimizer.param_groups if not g["use_muon"]]
+        adam_params = {param for group in adam_groups for param in group["params"]}
+
+        assert muon_group["param_policy"] == "transformer_only"
         assert model.model.encoder.weight not in muon_params
         assert model.model.encoder.weight in adam_params
         assert model.decoder.weight not in muon_params
@@ -365,7 +401,11 @@ class TestMuonClipOptimizer:
         optimizer = MuonClipOptimizer(
             model,
             config,
-            MuonClipConfig(enable_clipping=False, adam_decay=0.1),
+            MuonClipConfig(
+                enable_clipping=False,
+                adam_decay=0.1,
+                param_policy="transformer_only",
+            ),
         )
 
         adam_groups = [
@@ -430,8 +470,8 @@ class TestMuonClipOptimizer:
             normalized = optimizer._normalize_muon_update(update, param_shape)
             assert torch.allclose(normalized, update * expected_scale)
 
-    def test_legacy_compat_matches_pre_refactor_polar_step(self):
-        """Legacy normalization should match pre-refactor local Polar Express math."""
+    def test_default_norm_factor_matches_pre_refactor_polar_step(self):
+        """Default normalization should match pre-refactor local Polar Express math."""
         torch.manual_seed(0)
         config = NeoBERTConfig(
             hidden_size=16,
@@ -453,8 +493,8 @@ class TestMuonClipOptimizer:
             ns_steps=5,
             enable_clipping=False,
             orthogonalization="polar_express",
-            norm_factor="legacy_compat",
         )
+        assert muon_config.norm_factor == "legacy_compat"
         optimizer = MuonClipOptimizer(model, config, muon_config)
 
         target = model.transformer_encoder[0].qkv.weight
@@ -685,7 +725,10 @@ class TestMuonClipOptimizer:
     def test_distributed_checkpoint_api_restores_step_and_next_update(self, model):
         """Distributed checkpoint APIs should preserve Muon step semantics."""
         model_instance, config = model
-        muon_config = MuonClipConfig(enable_clipping=False)
+        muon_config = MuonClipConfig(
+            enable_clipping=False,
+            param_policy="transformer_only",
+        )
         optimizer = MuonClipOptimizer(model_instance, config, muon_config)
 
         for _ in range(3):
@@ -744,7 +787,10 @@ class TestMuonClipOptimizer:
     ):
         """Filesystem DCP round-trips should use the FQN optimizer schema."""
         model_instance, config = model
-        muon_config = MuonClipConfig(enable_clipping=False)
+        muon_config = MuonClipConfig(
+            enable_clipping=False,
+            param_policy="transformer_only",
+        )
         optimizer = MuonClipOptimizer(model_instance, config, muon_config)
 
         for _ in range(3):

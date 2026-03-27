@@ -359,12 +359,17 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | `capture_last_microbatch_only` | `bool`           | `true`            | Capture activations only for final microbatch in GA window.  |
 | `detect_anomalies`             | `bool`           | `false`           | Enable anomaly checks in optimizer step.                     |
 | `orthogonalization`            | `str`            | `"polar_express"` | Orthogonalization algorithm selector.                        |
-| `norm_factor`                  | `str`            | `"spectral"`      | Post-orthogonalization normalization (`spectral`, `match_rms_adamw`, `none`, `legacy_compat`). |
+| `norm_factor`                  | `str`            | `"legacy_compat"` | Post-orthogonalization normalization (`legacy_compat`, `spectral`, `match_rms_adamw`, `none`). |
+| `param_policy`                 | `str`            | `"all_2d"`        | Muon routing policy (`all_2d` for v0.1.3-compatible scope, `transformer_only` for explicit distributed/perf experiments). |
 | `algorithm`                    | `str \| None`    | `null`            | Deprecated alias of `orthogonalization`.                     |
 | `polar_express`                | `bool \| None`   | `null`            | Deprecated legacy toggle.                                    |
 | `clipping_layers_mapping`      | `dict[str, str]` | `{}`              | Projection-name overrides for non-standard attention blocks. |
 
 > [!NOTE]
+> The baseline-compatible defaults are `norm_factor=legacy_compat` and
+> `param_policy=all_2d`. Use `transformer_only` explicitly when you want the
+> newer transformer-only routing policy, especially for FSDP2 scaling studies.
+>
 > `orthogonalization` changes compute precision behavior on CUDA:
 > `newton_schulz` upcasts BF16 gradients to FP32 for the iteration and casts
 > back; `polar_express` runs in BF16 work dtype (when available) for higher

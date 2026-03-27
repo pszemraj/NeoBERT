@@ -149,7 +149,8 @@ def _build_prepared_run(project_dir: Path):
         muon_config={
             "enable_clipping": False,
             "orthogonalization": "polar_express",
-            "norm_factor": "spectral",
+            "norm_factor": "legacy_compat",
+            "param_policy": "transformer_only",
         },
     )
     scheduler = torch.optim.lr_scheduler.LinearLR(

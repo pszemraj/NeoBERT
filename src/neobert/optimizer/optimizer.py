@@ -158,6 +158,17 @@ def get_optimizer(
                     )
                     _WARNED_MUONCLIP_FSDP_CLIPPING_DISABLE = True
 
+            if (
+                distributed_type is DistributedType.FSDP
+                and muon_clip_cfg.param_policy == "all_2d"
+            ):
+                logger.warning(
+                    "MuonClip param_policy=all_2d preserves the v0.1.3 optimizer "
+                    "scope. Under FSDP2 it will also owner-compute embeddings/"
+                    "output matrices, so expect materially higher communication "
+                    "cost than transformer_only."
+                )
+
             logger.info(
                 f"MuonClip configuration:\n"
                 f"  - Learning rate: {muon_clip_cfg.lr}\n"
@@ -169,7 +180,8 @@ def get_optimizer(
                 f"  - Newton-Schulz steps: {muon_clip_cfg.ns_steps}\n"
                 f"  - Alpha (Q/K balance): {muon_clip_cfg.clipping_alpha}\n"
                 f"  - Orthogonalization: {muon_clip_cfg.orthogonalization}\n"
-                f"  - Norm factor: {muon_clip_cfg.norm_factor}"
+                f"  - Norm factor: {muon_clip_cfg.norm_factor}\n"
+                f"  - Param policy: {muon_clip_cfg.param_policy}"
             )
 
             return MuonClipOptimizer(model, model_config, muon_clip_cfg)
