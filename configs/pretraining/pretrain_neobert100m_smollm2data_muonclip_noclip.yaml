@@ -72,7 +72,7 @@ optimizer:
     # Muon-specific parameters
     orthogonalization: polar_express # Options: polar_express (default), newton_schulz
     norm_factor: legacy_compat # legacy_compat, spectral, match_rms_adamw, or none
-    param_policy: all_2d # all_2d restores the v0.1.3 baseline; transformer_only is an explicit FSDP2 policy experiment
+    param_policy: transformer_only # shipped default after short regression ablation; set all_2d only for exact v0.1.3-scope compatibility checks
     muon_beta: 0.95 # Momentum coefficient for Muon
     muon_decay: 0.01 # Weight decay for 2D params
     ns_steps: 5 # Newton-Schulz iterations (3-9 recommended)

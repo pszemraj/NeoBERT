@@ -85,7 +85,7 @@ class TestMuonClipConfig:
         assert config.lr > 0
         assert 0 <= config.muon_beta < 1
         assert config.norm_factor == "legacy_compat"
-        assert config.param_policy == "all_2d"
+        assert config.param_policy == "transformer_only"
 
     def test_invalid_numeric_fields_raise(self):
         """Test invalid numeric config values fail fast."""
@@ -295,7 +295,7 @@ class TestMuonClipOptimizer:
         assert optimizer.config.orthogonalization == "polar_express"
 
     def test_parameter_grouping(self, model):
-        """Default grouping should route all trainable 2D params to Muon."""
+        """Default grouping should keep embeddings/output weights on Adam."""
         model_instance, config = model
 
         muon_config = MuonClipConfig(enable_clipping=False)
@@ -306,17 +306,17 @@ class TestMuonClipOptimizer:
         for p in muon_group["params"]:
             assert p.ndim == 2
 
-        assert muon_group["param_policy"] == "all_2d"
-        assert model_instance.encoder.weight in muon_params
+        assert muon_group["param_policy"] == "transformer_only"
+        assert model_instance.encoder.weight not in muon_params
         if hasattr(model_instance, "positional_embedding"):
-            assert model_instance.positional_embedding.weight in muon_params
+            assert model_instance.positional_embedding.weight not in muon_params
         assert model_instance.transformer_encoder[0].qkv.weight in muon_params
 
         adam_groups = [g for g in optimizer.param_groups if not g["use_muon"]]
         adam_params = {param for group in adam_groups for param in group["params"]}
-        assert model_instance.encoder.weight not in adam_params
+        assert model_instance.encoder.weight in adam_params
         if hasattr(model_instance, "positional_embedding"):
-            assert model_instance.positional_embedding.weight not in adam_params
+            assert model_instance.positional_embedding.weight in adam_params
 
     def test_grouping_all_2d_routes_embeddings_and_lm_head_to_muon(self):
         """all_2d should restore v0.1.3-style Muon scope."""

@@ -79,7 +79,7 @@ class MuonClipConfig:
     # Orthogonalization / routing control
     orthogonalization: str = "polar_express"
     norm_factor: str = "legacy_compat"
-    param_policy: str = "all_2d"
+    param_policy: str = "transformer_only"
     algorithm: Optional[str] = None  # Alias for orthogonalization
     polar_express: Optional[bool] = None  # Legacy toggle
 
@@ -728,9 +728,11 @@ class MuonClipOptimizer(Optimizer):
 
         Policies:
         - ``all_2d``: route every trainable rank-2 parameter to Muon. This
-          restores the v0.1.3 scope and is the baseline-compat default.
+          restores the v0.1.3 scope and remains available as an explicit
+          compatibility mode.
         - ``transformer_only``: route only transformer-layer rank-2 weights to
           Muon. Embeddings / output matrices fall back to AdamW-style grouping.
+          This is the runtime default after the short regression ablation.
 
         :param torch.nn.Module model: Model to inspect.
         :return list[dict]: Parameter groups for the optimizer.
@@ -742,7 +744,9 @@ class MuonClipOptimizer(Optimizer):
         adam_no_decay_params: List[torch.nn.Parameter] = []
         adam_no_decay_param_info: List[Dict[str, Any]] = []
 
-        param_policy = str(getattr(self.config, "param_policy", "all_2d")).strip()
+        param_policy = str(
+            getattr(self.config, "param_policy", "transformer_only")
+        ).strip()
         param_policy = param_policy.replace("-", "_").lower()
         valid_param_policies = {"all_2d", "transformer_only"}
         if param_policy not in valid_param_policies:

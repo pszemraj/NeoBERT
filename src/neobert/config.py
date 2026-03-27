@@ -171,7 +171,7 @@ class MuonConfig:
     detect_anomalies: bool = False
     orthogonalization: str = "polar_express"
     norm_factor: str = "legacy_compat"
-    param_policy: str = "all_2d"
+    param_policy: str = "transformer_only"
     algorithm: Optional[str] = None  # Alias for orthogonalization
     polar_express: Optional[bool] = None  # Legacy toggle
     clipping_layers_mapping: Dict[str, str] = field(default_factory=dict)
