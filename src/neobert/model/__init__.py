@@ -12,10 +12,9 @@ __all__ = [
 from .model import (
     NeoBERT,
     NeoBERTConfig,
-    NeoBERTForMTEB,
-    NeoBERTLMHead,
     NormNeoBERT,
 )
 from .classification import (
     NeoBERTForSequenceClassification,
 )
+from .wrappers import NeoBERTForMTEB, NeoBERTLMHead
