@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from neobert.config import ConfigLoader
+from tests.tokenizer_utils import build_wordlevel_tokenizer
 
 
 class TestContrastivePipeline:
@@ -68,8 +69,6 @@ class TestContrastivePipeline:
 
         try:
             from datasets import Dataset, DatasetDict
-            from tokenizers import Tokenizer, models, pre_tokenizers
-            from transformers import PreTrainedTokenizerFast
 
             from neobert.contrastive.trainer import trainer
         except ImportError as e:
@@ -97,16 +96,6 @@ class TestContrastivePipeline:
         def _fake_load_from_disk(path: str):
             return pretraining_dataset
 
-        def _make_tokenizer() -> PreTrainedTokenizerFast:
-            vocab = {"[PAD]": 0, "[UNK]": 1, "hello": 2, "world": 3, "test": 4, "x": 5}
-            tokenizer = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
-            tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
-            return PreTrainedTokenizerFast(
-                tokenizer_object=tokenizer,
-                pad_token="[PAD]",
-                unk_token="[UNK]",
-            )
-
         with (
             mock.patch(
                 "neobert.contrastive.trainer.load_from_disk",
@@ -118,7 +107,11 @@ class TestContrastivePipeline:
             ) as cached_loader,
             mock.patch(
                 "neobert.contrastive.trainer.get_tokenizer",
-                return_value=_make_tokenizer(),
+                return_value=build_wordlevel_tokenizer(
+                    vocab={"hello": 2, "world": 3, "test": 4, "x": 5},
+                    include_mask=False,
+                    include_sep=False,
+                ),
             ),
         ):
             trainer(config)
@@ -142,8 +135,6 @@ class TestContrastivePipeline:
 
         try:
             from datasets import Dataset, DatasetDict
-            from tokenizers import Tokenizer, models, pre_tokenizers
-            from transformers import PreTrainedTokenizerFast
 
             from neobert.contrastive.trainer import trainer
 
@@ -152,16 +143,6 @@ class TestContrastivePipeline:
 
             def _fake_load_from_disk(path: str):
                 return pretraining_dataset
-
-            def _make_tokenizer() -> PreTrainedTokenizerFast:
-                vocab = {"[PAD]": 0, "[UNK]": 1, "hello": 2}
-                tokenizer = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
-                tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
-                return PreTrainedTokenizerFast(
-                    tokenizer_object=tokenizer,
-                    pad_token="[PAD]",
-                    unk_token="[UNK]",
-                )
 
             captured = {}
 
@@ -182,7 +163,11 @@ class TestContrastivePipeline:
                 ),
                 mock.patch(
                     "neobert.contrastive.trainer.get_tokenizer",
-                    return_value=_make_tokenizer(),
+                    return_value=build_wordlevel_tokenizer(
+                        vocab={"hello": 2},
+                        include_mask=False,
+                        include_sep=False,
+                    ),
                 ),
                 mock.patch(
                     "neobert.contrastive.trainer.get_optimizer",

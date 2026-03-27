@@ -5,29 +5,14 @@ import unittest
 from unittest.mock import patch
 
 from datasets import Dataset
-from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import PreTrainedTokenizerFast
 
 from neobert.tokenizer import tokenize
 from neobert.tokenizer.tokenizer import get_tokenizer
+from tests.tokenizer_utils import build_wordlevel_tokenizer
 
 
 class TestStreamingTokenize(unittest.TestCase):
     """Validate streaming tokenization behavior."""
-
-    def _make_tokenizer(self) -> PreTrainedTokenizerFast:
-        """Build a minimal tokenizer for tests.
-
-        :return PreTrainedTokenizerFast: Tokenizer with a tiny word-level vocab.
-        """
-        vocab = {"[PAD]": 0, "[UNK]": 1, "hello": 2, "world": 3}
-        tokenizer = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
-        tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
-        return PreTrainedTokenizerFast(
-            tokenizer_object=tokenizer,
-            pad_token="[PAD]",
-            unk_token="[UNK]",
-        )
 
     def test_streaming_multicolumn_tokenize(self):
         """Ensure streaming multi-column datasets tokenize without indexing errors."""
@@ -45,7 +30,11 @@ class TestStreamingTokenize(unittest.TestCase):
             ):
                 self.skipTest(f"Shared memory unavailable for streaming dataset: {exc}")
             raise
-        tokenizer = self._make_tokenizer()
+        tokenizer = build_wordlevel_tokenizer(
+            vocab={"hello": 2, "world": 3},
+            include_mask=False,
+            include_sep=False,
+        )
 
         tokenized = tokenize(
             streaming_dataset,
@@ -69,7 +58,11 @@ class TestStreamingTokenize(unittest.TestCase):
 
     def test_get_tokenizer_pair_template_uses_single_bos(self):
         """Ensure fallback pair template does not inject BOS before sentence B."""
-        base = self._make_tokenizer()
+        base = build_wordlevel_tokenizer(
+            vocab={"hello": 2, "world": 3},
+            include_mask=False,
+            include_sep=False,
+        )
         # Trigger the fallback special-token branch.
         base.mask_token = None
 
@@ -96,7 +89,11 @@ class TestStreamingTokenize(unittest.TestCase):
 
     def test_get_tokenizer_rejects_implicit_special_token_rewrite(self):
         """Ensure tokenizer fallback rewrite requires explicit opt-in."""
-        base = self._make_tokenizer()
+        base = build_wordlevel_tokenizer(
+            vocab={"hello": 2, "world": 3},
+            include_mask=False,
+            include_sep=False,
+        )
         base.mask_token = None
 
         with patch(
@@ -108,7 +105,11 @@ class TestStreamingTokenize(unittest.TestCase):
 
     def test_get_tokenizer_allows_missing_mask_when_mlm_enforcement_disabled(self):
         """Ensure non-MLM flows can keep tokenizer special tokens unchanged."""
-        base = self._make_tokenizer()
+        base = build_wordlevel_tokenizer(
+            vocab={"hello": 2, "world": 3},
+            include_mask=False,
+            include_sep=False,
+        )
         base.mask_token = None
 
         with patch(

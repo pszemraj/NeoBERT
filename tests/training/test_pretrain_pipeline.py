@@ -11,8 +11,6 @@ import pytest
 import torch
 from accelerate.utils import DistributedType
 from datasets import Dataset, DatasetDict
-from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import PreTrainedTokenizerFast
 
 from neobert.checkpointing import MODEL_WEIGHTS_NAME, load_model_safetensors
 from neobert.config import Config, ConfigLoader
@@ -32,6 +30,7 @@ from neobert.pretraining.trainer import (
     _sync_tokenizer_derived_config,
     trainer,
 )
+from tests.tokenizer_utils import build_wordlevel_tokenizer
 
 
 class TestPretrainPipeline:
@@ -118,31 +117,6 @@ class TestPretrainPipeline:
 class TestPretrainComponents:
     """Test individual pretraining components."""
 
-    def _make_tokenizer(self) -> PreTrainedTokenizerFast:
-        """Build a minimal tokenizer for tests.
-
-        :return PreTrainedTokenizerFast: Tokenizer with a tiny word-level vocab.
-        """
-        vocab = {
-            "[PAD]": 0,
-            "[UNK]": 1,
-            "[MASK]": 2,
-            "[SEP]": 3,
-            "hello": 4,
-            "world": 5,
-            "test": 6,
-            "sentence": 7,
-        }
-        tokenizer = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
-        tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
-        return PreTrainedTokenizerFast(
-            tokenizer_object=tokenizer,
-            pad_token="[PAD]",
-            unk_token="[UNK]",
-            mask_token="[MASK]",
-            sep_token="[SEP]",
-        )
-
     def test_ensure_pinned_cpu_batch_repins_flat_and_nested_tensors(self):
         """Ensure CPU repinning covers flat and nested tensor containers."""
         cases = [
@@ -191,7 +165,9 @@ class TestPretrainComponents:
         cfg = Config()
         cfg.model.vocab_size = 17
         cfg.tokenizer.vocab_size = 17
-        tokenizer = self._make_tokenizer()
+        tokenizer = build_wordlevel_tokenizer(
+            vocab={"hello": 4, "world": 5, "test": 6, "sentence": 7},
+        )
 
         original, resolved, added = _sync_tokenizer_derived_config(cfg, tokenizer)
 

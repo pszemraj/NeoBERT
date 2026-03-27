@@ -9,8 +9,6 @@ import warnings
 from pathlib import Path
 
 import yaml
-from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import PreTrainedTokenizerFast
 
 from neobert.config import (
     Config,
@@ -24,6 +22,7 @@ from neobert.config import (
     load_config_from_args,
     round_up_to_multiple,
 )
+from tests.tokenizer_utils import build_wordlevel_tokenizer
 
 
 class TestConfigSystem(unittest.TestCase):
@@ -460,14 +459,9 @@ optimizer:
     def test_preprocess_uses_tokenizer_path(self):
         """Ensure tokenizer path is preferred when provided."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            vocab = {"[PAD]": 0, "[UNK]": 1, "[MASK]": 2, "hello": 3}
-            raw_tokenizer = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
-            raw_tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
-            tokenizer = PreTrainedTokenizerFast(
-                tokenizer_object=raw_tokenizer,
-                pad_token="[PAD]",
-                unk_token="[UNK]",
-                mask_token="[MASK]",
+            tokenizer = build_wordlevel_tokenizer(
+                vocab={"hello": 3},
+                include_sep=False,
             )
             tokenizer.save_pretrained(tmpdir)
 

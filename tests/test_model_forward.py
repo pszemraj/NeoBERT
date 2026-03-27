@@ -5,8 +5,6 @@ import unittest
 from unittest.mock import PropertyMock, patch
 
 import torch
-from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import PreTrainedTokenizerFast
 
 from neobert.model import (
     NeoBERT,
@@ -19,21 +17,11 @@ from neobert.model import (
 from neobert.kernels.attention import (
     prepare_packed_flash_metadata as _prepare_packed_flash_metadata_real,
 )
+from tests.tokenizer_utils import build_wordlevel_tokenizer
 
 
 class TestModelForward(unittest.TestCase):
     """Test NeoBERT model forward passes."""
-
-    def _make_tokenizer(self) -> PreTrainedTokenizerFast:
-        """Build a minimal tokenizer for tests."""
-        vocab = {"[PAD]": 0, "[UNK]": 1, "hello": 2, "world": 3}
-        tokenizer = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
-        tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
-        return PreTrainedTokenizerFast(
-            tokenizer_object=tokenizer,
-            pad_token="[PAD]",
-            unk_token="[UNK]",
-        )
 
     def setUp(self):
         """Set up test fixtures."""
@@ -1323,7 +1311,11 @@ class TestModelForward(unittest.TestCase):
         """Ensure SDPA MTEB encode honors model device even when CUDA is available."""
         from neobert.model import NeoBERTConfig, NeoBERTForMTEB
 
-        tokenizer = self._make_tokenizer()
+        tokenizer = build_wordlevel_tokenizer(
+            vocab={"hello": 2, "world": 3},
+            include_mask=False,
+            include_sep=False,
+        )
         config = NeoBERTConfig(
             hidden_size=32,
             num_hidden_layers=1,
@@ -1362,7 +1354,11 @@ class TestModelForward(unittest.TestCase):
                 "flash-attn not installed; flash_attn_varlen MTEB test skipped."
             )
 
-        tokenizer = self._make_tokenizer()
+        tokenizer = build_wordlevel_tokenizer(
+            vocab={"hello": 2, "world": 3},
+            include_mask=False,
+            include_sep=False,
+        )
         device = torch.device("cuda")
         config = NeoBERTConfig(
             hidden_size=32,
