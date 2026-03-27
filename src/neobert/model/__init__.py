@@ -14,8 +14,10 @@ from .model import (
     NeoBERT,
     NeoBERTConfig,
     NeoBERTForMTEB,
-    NeoBERTForSequenceClassification,
-    NeoBERTHFForSequenceClassification,
     NeoBERTLMHead,
     NormNeoBERT,
+)
+from .classification import (
+    NeoBERTForSequenceClassification,
+    NeoBERTHFForSequenceClassification,
 )
