@@ -236,7 +236,7 @@ class TestGLUETaskSpecific:
 
     def test_validate_glue_config_accepts_from_hub_and_zero_checkpoint(self):
         """Ensure GLUE validation accepts from-hub and explicit checkpoint zero."""
-        from neobert.validation.validators import validate_glue_config
+        from neobert.glue.validation import validate_glue_config
 
         cfg = Config()
         cfg.glue.task_name = "sst2"

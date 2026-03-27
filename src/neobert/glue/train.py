@@ -57,7 +57,7 @@ from neobert.training_utils import (
     validate_muon_runtime_topology,
 )
 from neobert.utils import configure_tf32, format_resolved_config, prepare_wandb_config
-from neobert.validation import ValidationError, validate_glue_config
+from neobert.glue.validation import GlueValidationError, validate_glue_config
 
 logger = get_logger(__name__)
 _bootstrap_logger = logging.getLogger(__name__)
@@ -998,7 +998,7 @@ def trainer(cfg: Config) -> None:
     # Validate configuration after resolving effective model/tokenizer settings.
     try:
         validate_glue_config(cfg)
-    except ValidationError as e:
+    except GlueValidationError as e:
         logger.error(f"Configuration validation failed: {e}")
         raise
 
