@@ -66,15 +66,11 @@ python tests/run_tests.py
 
 ## Documentation
 
-- [docs/README.md](docs/README.md)
+- [Documentation index](docs/README.md)
 - [Training Guide](docs/training.md)
 - [Configuration Reference](docs/configuration.md)
 - [Evaluation Guide](docs/evaluation.md)
-- [Export Guide](docs/export.md)
-- [Architecture](docs/architecture.md)
 - [Troubleshooting](docs/troubleshooting.md)
-- [Testing](docs/testing.md)
-- [Dev Notes](docs/dev.md)
 
 Directory READMEs under `configs/`, `scripts/`, `tests/`, and `jobs/` focus on
 entrypoints and quick usage.

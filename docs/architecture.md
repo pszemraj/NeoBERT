@@ -1,6 +1,5 @@
 # NeoBERT Architecture
 
-This document summarizes the implemented architecture and runtime behavior.
 Config defaults live in [configuration.md](configuration.md).
 
 ## Overview
@@ -16,7 +15,8 @@ NeoBERT is a transformer encoder with:
 
 ## Source Files
 
-- Core model: `src/neobert/model/model.py`
+- Core encoder and LM head: `src/neobert/model/model.py`
+- Sequence-classification heads: `src/neobert/model/classification.py`
 - Attention dispatch and packed varlen helpers: `src/neobert/kernels/attention.py`
 - Rotary embeddings: `src/neobert/model/rotary.py`
 - RMSNorm backend wrappers: `src/neobert/kernels/backend.py`, `src/neobert/model/rmsnorm.py`

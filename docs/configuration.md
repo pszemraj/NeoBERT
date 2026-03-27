@@ -6,17 +6,6 @@
 
 NeoBERT YAML config schema (`src/neobert/config.py`) and defaults.
 
-Use the sections below in this order: variables/overrides, high-impact knobs,
-field tables, task-specific sections, constraints, then presets.
-
-## How To Use This Page
-
-- Treat this as a **config-file reference**, not a CLI-first reference.
-- Start with **High-Impact Settings**, then fill in grouped sections.
-- Defaults shown here are dataclass defaults unless noted.
-- High-impact tables are summaries; field semantics are defined in section tables.
-- Unknown keys fail fast during config loading.
-
 ## Variables and Dot Overrides
 
 `ConfigLoader.load(...)` supports a small YAML variable system and post-load dot

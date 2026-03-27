@@ -1,18 +1,14 @@
 # NeoBERT Docs
 
-## Run Guides
+## Guides
 
 - [Training](training.md)
 - [Configuration](configuration.md)
 - [Evaluation](evaluation.md)
 - [Export](export.md)
-
-## Reference and Ops
-
 - [Architecture](architecture.md)
 - [Testing](testing.md)
 - [Troubleshooting](troubleshooting.md)
-- [Development Notes](dev.md)
 
 ## Directory Guides
 
@@ -25,7 +21,3 @@
 - [Tests](../tests/README.md)
 - [Test configs](../tests/configs/README.md)
 - [Manual tests](../tests/manual/README.md)
-
-## Project
-
-- [Main README](../README.md)
