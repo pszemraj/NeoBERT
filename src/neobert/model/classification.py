@@ -59,23 +59,19 @@ class _BaseSequenceClassifier(NeoBERTPreTrainedModel):
         self.num_labels = num_labels
         self.classifier_dropout = classifier_dropout
         self.classifier_init_range = classifier_init_range
-
         self.model = NormNeoBERT(config) if config.ngpt else NeoBERT(config)
         self.dense = nn.Linear(self.config.hidden_size, self.config.hidden_size)
         self.dropout = nn.Dropout(self.classifier_dropout)
         self.classifier = nn.Linear(self.config.hidden_size, self.num_labels)
-
         self.post_init()
-        nn.init.normal_(self.dense.weight, mean=0.0, std=self.classifier_init_range)
-        if self.dense.bias is not None:
-            nn.init.zeros_(self.dense.bias)
-        nn.init.normal_(
-            self.classifier.weight,
-            mean=0.0,
-            std=self.classifier_init_range,
-        )
-        if self.classifier.bias is not None:
-            nn.init.zeros_(self.classifier.bias)
+        for layer in (self.dense, self.classifier):
+            nn.init.normal_(
+                layer.weight,
+                mean=0.0,
+                std=self.classifier_init_range,
+            )
+            if layer.bias is not None:
+                nn.init.zeros_(layer.bias)
 
     def _classifier_logits(self, hidden_representation: torch.Tensor) -> torch.Tensor:
         """Pool the summary token and produce classifier logits.
@@ -156,11 +152,7 @@ class NeoBERTHFForSequenceClassification(_BaseSequenceClassifier):
             local_config,
             num_labels=getattr(local_config, "num_labels", 2),
             classifier_dropout=getattr(local_config, "classifier_dropout", 0.1),
-            classifier_init_range=getattr(
-                local_config,
-                "classifier_init_range",
-                0.02,
-            ),
+            classifier_init_range=getattr(local_config, "classifier_init_range", 0.02),
         )
 
     def forward(
@@ -188,9 +180,6 @@ class NeoBERTHFForSequenceClassification(_BaseSequenceClassifier):
         :param bool | None return_dict: Whether to return dict outputs.
         :return SequenceClassifierOutput | tuple: Model outputs.
         """
-        del token_type_ids, position_ids, inputs_embeds, output_attentions
-        del output_hidden_states
-
         if attention_mask is not None:
             if attention_mask.dtype is torch.bool:
                 additive_mask = torch.where(attention_mask, float(0.0), float("-inf"))
