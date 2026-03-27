@@ -19,6 +19,7 @@ from transformers.models.roberta.modeling_roberta import RobertaEmbeddings
 from neobert.checkpointing import (
     load_step_checkpoint_state_dict,
 )
+from neobert.huggingface.rotary import precompute_freqs_cis
 from neobert.model import NeoBERTConfig, NeoBERTLMHead
 
 
@@ -50,21 +51,6 @@ def get_data(dataset: Any) -> Any:
     final = concatenate_datasets(datasets)
 
     return final
-
-
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
-    """Precompute the frequency tensor for complex exponentials.
-
-    :param int dim: Dimension of the frequency tensor.
-    :param int end: End index for precomputing frequencies.
-    :param float theta: Scaling factor for frequency computation.
-    :return torch.Tensor: Precomputed frequency tensor.
-    """
-
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
-    t = torch.arange(end, device=freqs.device)  # type: ignore
-    freqs = torch.outer(t, freqs).float()  # type: ignore
-    return torch.polar(torch.ones_like(freqs), freqs)  # complex64
 
 
 def _load_neobert_checkpoint_weights(
