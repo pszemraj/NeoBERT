@@ -10,10 +10,10 @@ from neobert.model import (
     NeoBERT,
     NeoBERTConfig,
     NeoBERTForSequenceClassification,
-    NeoBERTHFForSequenceClassification,
     NeoBERTLMHead,
     NormNeoBERT,
 )
+from neobert.huggingface import NeoBERTHFForSequenceClassification
 from neobert.kernels.attention import (
     prepare_packed_flash_metadata as _prepare_packed_flash_metadata_real,
 )

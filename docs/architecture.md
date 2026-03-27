@@ -15,12 +15,13 @@ NeoBERT is a transformer encoder with:
 
 ## Source Files
 
-- Core encoder and LM head: `src/neobert/model/model.py`
+- Core encoder: `src/neobert/model/model.py`
 - Sequence-classification heads: `src/neobert/model/classification.py`
+- LM + embedding wrappers: `src/neobert/model/model.py`
 - Attention dispatch and packed varlen helpers: `src/neobert/kernels/attention.py`
 - Rotary embeddings: `src/neobert/model/rotary.py`
 - RMSNorm backend wrappers: `src/neobert/kernels/backend.py`, `src/neobert/model/rmsnorm.py`
-- HF export model: `src/neobert/huggingface/modeling_neobert.py`
+- HF adapters and export model: `src/neobert/huggingface/adapters.py`, `src/neobert/huggingface/modeling_neobert.py`
 
 ## Embeddings and Positions
 
