@@ -134,6 +134,9 @@ clipping path, which is auto-disabled for sharded FSDP2 Muon runs.
 Muon ships with `norm_factor=legacy_compat` and `param_policy=transformer_only`.
 Use `all_2d` explicitly when you want exact v0.1.3-style Muon scope for
 compatibility benchmarking.
+This default routing follows the original Muon guidance and PyTorch's Muon
+documentation: hidden transformer matrices use Muon, while embeddings, output
+layers, biases, and norm parameters stay on Adam-style fallback groups.
 
 ## Packed Training
 
