@@ -33,8 +33,7 @@ from transformers import (
 
 from neobert.checkpointing import (
     MODEL_WEIGHTS_NAME,
-    load_deepspeed_fp32_state_dict,
-    load_model_safetensors,
+    load_step_checkpoint_state_dict,
     prune_step_checkpoints as _prune_step_checkpoints,
     resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
     save_portable_checkpoint_weights,
@@ -634,11 +633,22 @@ def load_pretrained_weights(
     """
     checkpoint_path = Path(checkpoint_dir) / str(checkpoint_id)
     state_dict_path = checkpoint_path / MODEL_WEIGHTS_NAME
+    try:
+        state_dict = load_step_checkpoint_state_dict(
+            checkpoint_dir,
+            checkpoint_id,
+            map_location="cpu",
+        )
+    except ModuleNotFoundError:
+        raise
+    except Exception as exc:
+        raise FileNotFoundError(
+            f"Unable to load checkpoint {checkpoint_path}: expected either "
+            f"{MODEL_WEIGHTS_NAME} or a DeepSpeed ZeRO checkpoint layout."
+        ) from exc
 
-    # Portable safetensors payload is preferred when available.
     if state_dict_path.exists():
         logger.info(f"Loading state dict from {state_dict_path}")
-        state_dict = load_model_safetensors(checkpoint_path, map_location="cpu")
         logger.info(f"Loaded state dict with {len(state_dict)} keys")
         logger.info(f"✅ Successfully loaded pretrained weights from {state_dict_path}")
     else:
@@ -646,15 +656,6 @@ def load_pretrained_weights(
             f"No {MODEL_WEIGHTS_NAME} found at {state_dict_path}; "
             "attempting DeepSpeed fp32 shard conversion."
         )
-        try:
-            state_dict = load_deepspeed_fp32_state_dict(checkpoint_path)
-        except ModuleNotFoundError:
-            raise
-        except Exception as exc:
-            raise FileNotFoundError(
-                f"Unable to load checkpoint {checkpoint_path}: expected either "
-                f"{MODEL_WEIGHTS_NAME} or a DeepSpeed ZeRO checkpoint layout."
-            ) from exc
         logger.info(
             "Loaded fp32 state dict from DeepSpeed checkpoint shards at "
             f"{checkpoint_path}"
@@ -682,25 +683,6 @@ def load_pretrained_weights(
         logger.info(f"Unexpected keys: {unexpected_keys}")
 
     return model
-
-
-def _save_portable_glue_checkpoint_weights(
-    model: torch.nn.Module,
-    accelerator: Accelerator,
-    checkpoint_path: Path,
-) -> bool:
-    """Refresh the portable ``model.safetensors`` in a GLUE step checkpoint.
-
-    :param torch.nn.Module model: Prepared GLUE model.
-    :param Accelerator accelerator: Active accelerator runtime.
-    :param Path checkpoint_path: Checkpoint directory ``checkpoints/<step>/``.
-    :return bool: True when portable weights were saved.
-    """
-    return save_portable_checkpoint_weights(
-        model,
-        accelerator,
-        checkpoint_path,
-    )
 
 
 def _should_save_glue_checkpoint(
@@ -733,8 +715,7 @@ def _should_save_glue_checkpoint(
         if save_steps is None or int(save_steps) <= 0:
             return False
         return completed_steps % int(save_steps) == 0
-    # Preserve legacy fallback behavior for unknown strategies.
-    return eval_ran_this_step
+    raise ValueError(f"Unsupported save_strategy={save_strategy!r}")
 
 
 def _resolve_glue_training_schedule(
@@ -783,7 +764,7 @@ def save_training_checkpoint(
     # Save resumable Accelerate state for true optimizer/scheduler resume.
     accelerator.save_state(output_dir=str(checkpoint_path))
     accelerator.wait_for_everyone()
-    _save_portable_glue_checkpoint_weights(model, accelerator, checkpoint_path)
+    save_portable_checkpoint_weights(model, accelerator, checkpoint_path)
     accelerator.wait_for_everyone()
 
     if accelerator.is_main_process:

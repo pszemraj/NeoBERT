@@ -13,8 +13,11 @@ from neobert.checkpointing import (
     MODEL_WEIGHTS_NAME,
     load_deepspeed_fp32_state_dict,
     load_model_safetensors,
+    load_step_checkpoint_state_dict,
     model_state_dict_for_safetensors,
     resolve_deepspeed_checkpoint_root_and_tag,
+    resolve_step_checkpoint_dir,
+    resolve_step_checkpoint_selector,
     save_model_safetensors,
     save_state_dict_safetensors,
 )
@@ -211,6 +214,147 @@ def test_resolve_deepspeed_checkpoint_root_and_tag_for_nested_accelerate_layout(
 
     assert resolved_root == checkpoints_root / "1000"
     assert resolved_tag == "pytorch_model"
+
+
+def test_resolve_step_checkpoint_selector_prefers_latest_file() -> None:
+    """DeepSpeed ``latest`` metadata should stay authoritative when present."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint_root = Path(tmpdir)
+        (checkpoint_root / "latest").write_text("456\n", encoding="utf-8")
+        portable_step = checkpoint_root / "999"
+        portable_step.mkdir(parents=True, exist_ok=True)
+        (portable_step / MODEL_WEIGHTS_NAME).touch()
+
+        resolved = resolve_step_checkpoint_selector(checkpoint_root, "latest")
+
+    assert resolved == "456"
+
+
+def test_resolve_step_checkpoint_selector_picks_highest_loadable_numbered_step() -> (
+    None
+):
+    """Portable numbered steps should back ``latest`` when metadata is absent."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint_root = Path(tmpdir)
+        (checkpoint_root / "100").mkdir(parents=True, exist_ok=True)
+        step_dir = checkpoint_root / "300"
+        step_dir.mkdir(parents=True, exist_ok=True)
+        (step_dir / MODEL_WEIGHTS_NAME).touch()
+        (checkpoint_root / "500").mkdir(parents=True, exist_ok=True)
+
+        resolved = resolve_step_checkpoint_selector(checkpoint_root, "latest")
+
+    assert resolved == "300"
+
+
+def test_resolve_step_checkpoint_dir_rejects_mismatched_direct_portable_weights() -> (
+    None
+):
+    """Direct step roots must not ignore an explicit mismatched checkpoint tag."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint_dir = Path(tmpdir) / "123"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        (checkpoint_dir / MODEL_WEIGHTS_NAME).touch()
+
+        with pytest.raises(FileNotFoundError, match="Requested checkpoint '456'"):
+            resolve_step_checkpoint_dir(checkpoint_dir, "456")
+
+
+def test_load_step_checkpoint_state_dict_prefers_portable_weights(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Portable safetensors should be loaded before any legacy fallback."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint_dir = Path(tmpdir) / "123"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        (checkpoint_dir / MODEL_WEIGHTS_NAME).touch()
+        expected = {"weight": torch.ones(2, 2)}
+        calls = {"portable": 0, "legacy": 0}
+
+        def _fake_load_model_safetensors(path: Path, *, map_location: str = "cpu"):
+            del map_location
+            calls["portable"] += 1
+            assert path == checkpoint_dir
+            return expected
+
+        def _fake_load_deepspeed(*args, **kwargs):
+            del args, kwargs
+            calls["legacy"] += 1
+            raise AssertionError("DeepSpeed fallback should not run")
+
+        monkeypatch.setattr(
+            "neobert.checkpointing.load_model_safetensors",
+            _fake_load_model_safetensors,
+        )
+        monkeypatch.setattr(
+            "neobert.checkpointing.load_deepspeed_fp32_state_dict",
+            _fake_load_deepspeed,
+        )
+
+        state_dict = load_step_checkpoint_state_dict(tmpdir, "123", map_location="cpu")
+
+    assert state_dict == expected
+    assert calls == {"portable": 1, "legacy": 0}
+
+
+def test_load_step_checkpoint_state_dict_falls_back_for_direct_step_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct step directories should still use the tag-less DeepSpeed fallback."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint_dir = Path(tmpdir) / "456"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        expected = {"weight": torch.zeros(2, 2)}
+        seen: list[tuple[Path, str]] = []
+
+        def _fake_load_deepspeed(path: Path, *, tag: str | None = None):
+            normalized_path = Path(path).resolve()
+            normalized_tag = "" if tag is None else str(tag)
+            seen.append((normalized_path, normalized_tag))
+            if normalized_tag == "456":
+                raise FileNotFoundError(
+                    "explicit root/tag lookup should miss direct step dirs"
+                )
+            return expected
+
+        monkeypatch.setattr(
+            "neobert.checkpointing.load_deepspeed_fp32_state_dict",
+            _fake_load_deepspeed,
+        )
+
+        state_dict = load_step_checkpoint_state_dict(checkpoint_dir, "456")
+
+    assert state_dict == expected
+    assert seen == [(checkpoint_dir.resolve(), "456"), (checkpoint_dir.resolve(), "")]
+
+
+def test_load_step_checkpoint_state_dict_does_not_ignore_explicit_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing explicit checkpoint tags must not silently fall back to latest."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint_root = Path(tmpdir)
+        seen: list[tuple[Path, str]] = []
+
+        def _fake_load_deepspeed(path: Path, *, tag: str | None = None):
+            normalized_path = Path(path).resolve()
+            normalized_tag = "" if tag is None else str(tag)
+            seen.append((normalized_path, normalized_tag))
+            if tag is None:
+                raise AssertionError(
+                    "tag-less fallback should not run for missing tags"
+                )
+            raise FileNotFoundError("requested checkpoint missing")
+
+        monkeypatch.setattr(
+            "neobert.checkpointing.load_deepspeed_fp32_state_dict",
+            _fake_load_deepspeed,
+        )
+
+        with pytest.raises(FileNotFoundError, match="requested checkpoint missing"):
+            load_step_checkpoint_state_dict(checkpoint_root, "1000")
+
+    assert seen == [(checkpoint_root.resolve(), "1000")]
 
 
 def test_load_deepspeed_fp32_state_dict_requires_optional_dependency(

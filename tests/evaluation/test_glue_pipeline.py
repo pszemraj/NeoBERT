@@ -174,48 +174,6 @@ class TestGLUETaskSpecific:
                         assert (step_dir / MODEL_WEIGHTS_NAME).exists()
                 assert not (Path(tmpdir) / "model_checkpoints").exists()
 
-    def test_save_portable_glue_checkpoint_weights_overwrites_prefixed_file(self):
-        """GLUE checkpoint export should refresh stale wrapper-prefixed weights."""
-        from safetensors.torch import save_file
-
-        from neobert.checkpointing import MODEL_WEIGHTS_NAME, load_model_safetensors
-        from neobert.glue.train import _save_portable_glue_checkpoint_weights
-
-        class DummyAccelerator:
-            is_main_process = True
-
-            @staticmethod
-            def get_state_dict(model, unwrap=True):
-                del unwrap
-                return model.state_dict()
-
-        model = torch.nn.Linear(8, 2)
-        stale_weight = torch.zeros_like(model.weight)
-        stale_bias = torch.ones_like(model.bias)
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            checkpoint_path = Path(tmpdir)
-            save_file(
-                {
-                    "_orig_mod.weight": stale_weight,
-                    "_orig_mod.bias": stale_bias,
-                },
-                str(checkpoint_path / MODEL_WEIGHTS_NAME),
-                metadata={"format": "pt"},
-            )
-
-            saved = _save_portable_glue_checkpoint_weights(
-                model,
-                DummyAccelerator(),
-                checkpoint_path,
-            )
-            loaded = load_model_safetensors(checkpoint_path, map_location="cpu")
-
-        assert saved is True
-        assert set(loaded) == {"weight", "bias"}
-        torch.testing.assert_close(loaded["weight"], model.weight.detach().cpu())
-        torch.testing.assert_close(loaded["bias"], model.bias.detach().cpu())
-
     def test_glue_schedule_and_save_strategy_semantics(self):
         """Ensure training schedule and checkpoint-save strategy semantics are stable."""
         from neobert.glue.train import (

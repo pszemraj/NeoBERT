@@ -17,10 +17,7 @@ from transformers import (
 from transformers.models.roberta.modeling_roberta import RobertaEmbeddings
 
 from neobert.checkpointing import (
-    MODEL_WEIGHTS_NAME,
-    load_deepspeed_fp32_state_dict,
-    load_model_safetensors,
-    resolve_deepspeed_checkpoint_root_and_tag,
+    load_step_checkpoint_state_dict,
 )
 from neobert.model import NeoBERTConfig, NeoBERTLMHead
 
@@ -70,112 +67,6 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Te
     return torch.polar(torch.ones_like(freqs), freqs)  # complex64
 
 
-def _resolve_neobert_checkpoint_dir(
-    checkpoint_path: str | Path,
-    checkpoint: str,
-) -> Path:
-    """Resolve a NeoBERT checkpoint directory for portable weight loading.
-
-    ``checkpoint_path`` may point either at a checkpoint root containing
-    ``<tag>/`` subdirectories or at a single step directory already.
-
-    :param str | Path checkpoint_path: User-provided checkpoint path.
-    :param str checkpoint: Requested checkpoint tag/step.
-    :return Path: Resolved candidate checkpoint directory.
-    :raises FileNotFoundError:
-        If an explicit checkpoint tag is missing beneath a direct checkpoint path
-        that already contains portable weights.
-    """
-    checkpoint_root = Path(checkpoint_path)
-    requested_tag = str(checkpoint).strip()
-    candidate = checkpoint_root / requested_tag
-    if candidate.is_dir():
-        return candidate
-    if _checkpoint_path_matches_tag(checkpoint_root, requested_tag):
-        return checkpoint_root
-    if (checkpoint_root / MODEL_WEIGHTS_NAME).is_file():
-        raise FileNotFoundError(
-            f"Requested checkpoint '{requested_tag}' was not found under "
-            f"{checkpoint_root}. Refusing to silently load portable weights from "
-            f"the root path instead."
-        )
-    return checkpoint_root
-
-
-def _is_loadable_neobert_step(checkpoint_root: Path, step: int) -> bool:
-    """Return whether ``step`` can be loaded for pseudo-perplexity evaluation.
-
-    :param Path checkpoint_root: Root directory containing checkpoint steps.
-    :param int step: Numeric checkpoint step to validate.
-    :return bool: ``True`` when either portable or legacy weights are loadable.
-    """
-    step_dir = checkpoint_root / str(step)
-    if (step_dir / MODEL_WEIGHTS_NAME).is_file():
-        return True
-    try:
-        resolve_deepspeed_checkpoint_root_and_tag(checkpoint_root, tag=str(step))
-    except (FileNotFoundError, ValueError):
-        return False
-    return True
-
-
-def _resolve_neobert_checkpoint_selector(
-    checkpoint_root: Path,
-    checkpoint: str,
-) -> str:
-    """Resolve ``checkpoint`` to a concrete checkpoint tag for loading.
-
-    ``latest`` honors a root-level DeepSpeed ``latest`` file when present. When
-    no such file exists, scan for the highest loadable numbered step so
-    portable checkpoint roots without DeepSpeed metadata still work.
-
-    :param Path checkpoint_root: Root directory or direct checkpoint path.
-    :param str checkpoint: Requested checkpoint selector.
-    :return str: Concrete checkpoint tag to load.
-    :raises ValueError: If a legacy DeepSpeed ``latest`` file is empty.
-    """
-    requested_tag = str(checkpoint).strip()
-    if requested_tag.lower() != "latest":
-        return requested_tag
-
-    latest_path = checkpoint_root / "latest"
-    if latest_path.is_file():
-        latest_tag = latest_path.read_text(encoding="utf-8").strip()
-        if not latest_tag:
-            raise ValueError(f"DeepSpeed latest file is empty: {latest_path}")
-        return latest_tag
-
-    candidates = sorted(
-        (
-            int(path.name)
-            for path in checkpoint_root.iterdir()
-            if path.is_dir() and path.name.isdigit()
-        ),
-        reverse=True,
-    )
-    for step in candidates:
-        if _is_loadable_neobert_step(checkpoint_root, step):
-            return str(step)
-    return requested_tag
-
-
-def _checkpoint_path_matches_tag(checkpoint_path: Path, checkpoint: str) -> bool:
-    """Return whether ``checkpoint_path`` already points at ``checkpoint``.
-
-    This accepts both direct step directories (``.../<tag>``) and nested
-    Accelerate DeepSpeed layouts (``.../<tag>/pytorch_model``).
-
-    :param Path checkpoint_path: Candidate direct checkpoint path.
-    :param str checkpoint: Requested checkpoint tag/step.
-    :return bool: ``True`` when the path already targets the requested tag.
-    """
-    requested_tag = str(checkpoint).strip()
-    return bool(requested_tag) and (
-        checkpoint_path.name == requested_tag
-        or checkpoint_path.parent.name == requested_tag
-    )
-
-
 def _load_neobert_checkpoint_weights(
     model: NeoBERTLMHead,
     *,
@@ -193,28 +84,11 @@ def _load_neobert_checkpoint_weights(
     :param str checkpoint: Requested checkpoint tag/step.
     :return NeoBERTLMHead: Model with loaded weights.
     """
-    checkpoint_root = Path(checkpoint_path)
-    requested_tag = _resolve_neobert_checkpoint_selector(checkpoint_root, checkpoint)
-    checkpoint_dir = _resolve_neobert_checkpoint_dir(checkpoint_root, requested_tag)
-    weights_path = checkpoint_dir / MODEL_WEIGHTS_NAME
-
-    if weights_path.is_file():
-        state_dict = load_model_safetensors(checkpoint_dir, map_location="cpu")
-    else:
-        try:
-            state_dict = load_deepspeed_fp32_state_dict(
-                checkpoint_root,
-                tag=requested_tag,
-            )
-        except (FileNotFoundError, ValueError):
-            checkpoint_root = checkpoint_root.resolve()
-            # Only fall back to direct-path resolution when the caller already
-            # pointed at the requested step/tag directory. Otherwise re-raise so
-            # an explicit missing checkpoint cannot silently load ``latest``.
-            if _checkpoint_path_matches_tag(checkpoint_root, requested_tag):
-                state_dict = load_deepspeed_fp32_state_dict(checkpoint_root)
-            else:
-                raise
+    state_dict = load_step_checkpoint_state_dict(
+        checkpoint_path,
+        checkpoint,
+        map_location="cpu",
+    )
     model.load_state_dict(state_dict)
     return model
 

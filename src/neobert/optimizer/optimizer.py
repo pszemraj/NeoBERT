@@ -11,8 +11,6 @@ from torch.optim import Adam, AdamW
 
 from neobert.optimizer.muon_clip import MuonClipConfig, MuonClipOptimizer
 
-# from .soap.soap import SOAP  # TODO: Add SOAP optimizer implementation
-
 logger = logging.getLogger(__name__)
 _WARNED_MUONCLIP_FSDP_CLIPPING_DISABLE = False
 

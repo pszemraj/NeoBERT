@@ -27,7 +27,7 @@ from transformers import DataCollatorWithPadding
 from neobert.checkpointing import (
     MODEL_WEIGHTS_NAME,
     load_deepspeed_fp32_state_dict,
-    load_model_safetensors,
+    load_step_checkpoint_state_dict,
     prune_step_checkpoints as _prune_step_checkpoints,
     resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
     save_portable_checkpoint_weights as _save_portable_checkpoint_weights,
@@ -520,28 +520,24 @@ def trainer(cfg: Config) -> None:
             model.load_state_dict(state_dict, strict=False)
         else:
             state_dict_path = pretrained_checkpoint_dir / str(tag) / MODEL_WEIGHTS_NAME
+            try:
+                state_dict = load_step_checkpoint_state_dict(
+                    pretrained_checkpoint_dir,
+                    tag,
+                    map_location="cpu",
+                )
+            except ModuleNotFoundError:
+                raise
+            except Exception as exc:
+                raise ValueError(
+                    f"Expected {MODEL_WEIGHTS_NAME} at {state_dict_path}. "
+                    "Set pretrained_checkpoint_dir or enable legacy DeepSpeed "
+                    "checkpoint loading."
+                ) from exc
             if not state_dict_path.exists():
-                try:
-                    state_dict = load_deepspeed_fp32_state_dict(
-                        pretrained_checkpoint_dir,
-                        tag=str(tag),
-                    )
-                except ModuleNotFoundError:
-                    raise
-                except Exception as exc:
-                    raise ValueError(
-                        f"Expected {MODEL_WEIGHTS_NAME} at {state_dict_path}. "
-                        "Set pretrained_checkpoint_dir or enable legacy DeepSpeed "
-                        "checkpoint loading."
-                    ) from exc
                 logger.warning(
                     f"{MODEL_WEIGHTS_NAME} not found at {state_dict_path}; "
                     "loaded fp32 weights from DeepSpeed checkpoint shards instead."
-                )
-            else:
-                state_dict = load_model_safetensors(
-                    pretrained_checkpoint_dir / str(tag),
-                    map_location="cpu",
                 )
             # NOTE: We allow partial loads for flexibility; checkpoint/config mismatches
             # are not validated beyond this strict=False load.

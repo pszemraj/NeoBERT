@@ -8,7 +8,7 @@ import math
 import warnings
 from copy import deepcopy
 from functools import partial
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -22,9 +22,6 @@ from transformers import (
     PreTrainedTokenizerFast,
 )
 from transformers.modeling_outputs import SequenceClassifierOutput
-
-if TYPE_CHECKING:
-    pass
 
 from neobert.kernels.attention import (
     PackedFlashMetadata,

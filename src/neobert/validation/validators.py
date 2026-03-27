@@ -12,8 +12,6 @@ logger = logging.getLogger(__name__)
 class ValidationError(Exception):
     """Custom exception for validation errors."""
 
-    pass
-
 
 def validate_glue_config(cfg: Any) -> None:
     """Validate GLUE configuration before training.
@@ -149,11 +147,6 @@ def validate_glue_config(cfg: Any) -> None:
         if hasattr(cfg.optimizer, "lr"):
             if cfg.optimizer.lr <= 0:
                 errors.append(f"Learning rate must be positive, got {cfg.optimizer.lr}")
-        elif hasattr(cfg.optimizer, "hparams") and hasattr(cfg.optimizer.hparams, "lr"):
-            if cfg.optimizer.hparams.lr <= 0:
-                errors.append(
-                    f"Learning rate must be positive, got {cfg.optimizer.hparams.lr}"
-                )
 
         if hasattr(cfg.optimizer, "weight_decay"):
             if cfg.optimizer.weight_decay < 0:

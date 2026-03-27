@@ -301,6 +301,146 @@ def load_model_safetensors(
     return _canonicalize_loaded_state_dict(state_dict)
 
 
+def _checkpoint_path_matches_tag(checkpoint_path: Path, checkpoint: str | int) -> bool:
+    """Return whether ``checkpoint_path`` already points at ``checkpoint``.
+
+    This accepts both direct step directories (``.../<tag>``) and nested
+    Accelerate DeepSpeed layouts (``.../<tag>/pytorch_model``).
+
+    :param Path checkpoint_path: Candidate direct checkpoint path.
+    :param str | int checkpoint: Requested checkpoint tag/step.
+    :return bool: True when the path already targets the requested tag.
+    """
+    requested_tag = str(checkpoint).strip()
+    return bool(requested_tag) and (
+        checkpoint_path.name == requested_tag
+        or checkpoint_path.parent.name == requested_tag
+    )
+
+
+def _is_loadable_step_checkpoint(checkpoint_root: Path, step: int) -> bool:
+    """Return whether ``step`` can be loaded from ``checkpoint_root``.
+
+    :param Path checkpoint_root: Root directory containing checkpoint steps.
+    :param int step: Numeric checkpoint step to validate.
+    :return bool: True when either portable or DeepSpeed weights are loadable.
+    """
+    step_dir = checkpoint_root / str(step)
+    if (step_dir / MODEL_WEIGHTS_NAME).is_file():
+        return True
+    try:
+        resolve_deepspeed_checkpoint_root_and_tag(checkpoint_root, tag=str(step))
+    except (FileNotFoundError, ValueError):
+        return False
+    return True
+
+
+def resolve_step_checkpoint_selector(
+    checkpoint_root: str | Path,
+    checkpoint: str | int,
+) -> str:
+    """Resolve ``checkpoint`` to a concrete step/tag for loading.
+
+    ``latest`` honors a root-level DeepSpeed ``latest`` file when present. When
+    no such file exists, scan for the highest loadable numbered step so portable
+    checkpoint roots without DeepSpeed metadata still work.
+
+    :param str | Path checkpoint_root: Root directory or direct checkpoint path.
+    :param str | int checkpoint: Requested checkpoint selector.
+    :return str: Concrete checkpoint tag to load.
+    :raises ValueError: If a DeepSpeed ``latest`` file is empty.
+    """
+    checkpoint_root = Path(checkpoint_root)
+    requested_tag = str(checkpoint).strip()
+    if requested_tag.lower() != "latest":
+        return requested_tag
+
+    latest_path = checkpoint_root / "latest"
+    if latest_path.is_file():
+        latest_tag = latest_path.read_text(encoding="utf-8").strip()
+        if not latest_tag:
+            raise ValueError(f"DeepSpeed latest file is empty: {latest_path}")
+        return latest_tag
+
+    candidates = sorted(
+        (
+            int(path.name)
+            for path in checkpoint_root.iterdir()
+            if path.is_dir() and path.name.isdigit()
+        ),
+        reverse=True,
+    )
+    for step in candidates:
+        if _is_loadable_step_checkpoint(checkpoint_root, step):
+            return str(step)
+    return requested_tag
+
+
+def resolve_step_checkpoint_dir(
+    checkpoint_path: str | Path,
+    checkpoint: str | int,
+) -> Path:
+    """Resolve the checkpoint directory for portable-weight loading.
+
+    ``checkpoint_path`` may point either at a checkpoint root containing
+    ``<tag>/`` subdirectories or at a single step directory already.
+
+    :param str | Path checkpoint_path: User-provided checkpoint path.
+    :param str | int checkpoint: Requested checkpoint tag/step.
+    :return Path: Resolved candidate checkpoint directory.
+    :raises FileNotFoundError:
+        If an explicit checkpoint tag is missing beneath a direct checkpoint path
+        that already contains portable weights.
+    """
+    checkpoint_root = Path(checkpoint_path)
+    requested_tag = str(checkpoint).strip()
+    candidate = checkpoint_root / requested_tag
+    if candidate.is_dir():
+        return candidate
+    if _checkpoint_path_matches_tag(checkpoint_root, requested_tag):
+        return checkpoint_root
+    if (checkpoint_root / MODEL_WEIGHTS_NAME).is_file():
+        raise FileNotFoundError(
+            f"Requested checkpoint '{requested_tag}' was not found under "
+            f"{checkpoint_root}. Refusing to silently load portable weights from "
+            "the root path instead."
+        )
+    return checkpoint_root
+
+
+def load_step_checkpoint_state_dict(
+    checkpoint_path: str | Path,
+    checkpoint: str | int,
+    *,
+    map_location: str | torch.device = "cpu",
+) -> dict[str, torch.Tensor]:
+    """Load portable or DeepSpeed model weights for a checkpoint selector.
+
+    Portable ``model.safetensors`` payloads are preferred when present. Legacy
+    DeepSpeed ZeRO checkpoints remain supported through the optional
+    ``neobert[legacy-checkpoints]`` dependency.
+
+    :param str | Path checkpoint_path: Checkpoint root or step directory.
+    :param str | int checkpoint: Requested checkpoint tag/step.
+    :param str | torch.device map_location: Target device for safetensors loading.
+    :return dict[str, torch.Tensor]: Loaded model state dict.
+    """
+    checkpoint_root = Path(checkpoint_path)
+    requested_tag = resolve_step_checkpoint_selector(checkpoint_root, checkpoint)
+    checkpoint_dir = resolve_step_checkpoint_dir(checkpoint_root, requested_tag)
+    weights_path = checkpoint_dir / MODEL_WEIGHTS_NAME
+    if weights_path.is_file():
+        return load_model_safetensors(checkpoint_dir, map_location=map_location)
+
+    try:
+        return load_deepspeed_fp32_state_dict(checkpoint_root, tag=requested_tag)
+    except (FileNotFoundError, ValueError):
+        resolved_root = checkpoint_root.resolve()
+        if _checkpoint_path_matches_tag(resolved_root, requested_tag):
+            return load_deepspeed_fp32_state_dict(resolved_root)
+        raise
+
+
 def resolve_checkpoint_retention_limit(cfg: Any) -> int:
     """Resolve effective checkpoint retention limit from trainer config.
 
