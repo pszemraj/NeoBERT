@@ -62,6 +62,7 @@ from neobert.training_utils import (
     _compute_l2_norm_for_logging,
     _maybe_compile_model,
     _maybe_prepare_for_forward,
+    _pin_cpu_tensors,
     _resolve_resume_checkpoint,
     _update_global_norm_metric_for_logging,
     create_accelerator,
@@ -419,71 +420,8 @@ def _move_batch_to_device(batch: BatchEncoding, device: torch.device) -> BatchEn
     """
     if hasattr(batch, "to") and not torch.is_tensor(batch):
         batch = dict(batch)
-    # ``non_blocking`` overlaps copies when DataLoader uses pinned host memory.
+    # ``non_blocking`` overlaps copies when the batch uses pinned host memory.
     return send_to_device(batch, device, non_blocking=True)
-
-
-def _ensure_pinned_cpu_batch(batch: BatchEncoding) -> BatchEncoding:
-    """Pin CPU tensor values in a batch for async host->device transfer.
-
-    ``torch.cat``/``torch.split`` on pinned tensors produce non-pinned outputs.
-    Packed-batch stitching can therefore drop pinned memory guarantees unless we
-    re-pin the final CPU tensors before ``send_to_device(..., non_blocking=True)``.
-
-    :param BatchEncoding batch: Batch mapping of tensors/lists/scalars.
-    :return BatchEncoding: Batch with CPU tensors pinned when needed.
-    """
-
-    def _pin_value(value: Any) -> tuple[Any, bool]:
-        """Pin tensors in nested structures and report whether anything changed.
-
-        :param Any value: Candidate tensor/container/scalar value.
-        :return tuple[Any, bool]: Possibly pinned value and change flag.
-        """
-        if torch.is_tensor(value):
-            if value.device.type != "cpu" or value.is_pinned():
-                return value, False
-            return value.pin_memory(), True
-
-        if isinstance(value, dict):
-            updated: dict[Any, Any] = {}
-            changed = False
-            for key, inner in value.items():
-                pinned_inner, inner_changed = _pin_value(inner)
-                updated[key] = pinned_inner
-                changed = changed or inner_changed
-            if not changed:
-                return value, False
-            return updated, True
-
-        if isinstance(value, list):
-            updated_list: list[Any] = []
-            changed = False
-            for inner in value:
-                pinned_inner, inner_changed = _pin_value(inner)
-                updated_list.append(pinned_inner)
-                changed = changed or inner_changed
-            if not changed:
-                return value, False
-            return updated_list, True
-
-        if isinstance(value, tuple):
-            updated_items: list[Any] = []
-            changed = False
-            for inner in value:
-                pinned_inner, inner_changed = _pin_value(inner)
-                updated_items.append(pinned_inner)
-                changed = changed or inner_changed
-            if not changed:
-                return value, False
-            return tuple(updated_items), True
-
-        return value, False
-
-    pinned_batch, repinned = _pin_value(dict(batch))
-    if not repinned:
-        return batch
-    return pinned_batch
 
 
 def _pad_tokenizer_to_multiple(
@@ -981,7 +919,7 @@ def _resolve_loader_perf_settings(
     """Resolve effective dataloader performance settings.
 
     Applies conservative CUDA-friendly defaults when users leave knobs unset:
-    - ``pin_memory=True`` on CUDA
+    - pinned host-memory staging on CUDA
     - ``prefetch_factor=4`` when workers are enabled and no value is provided
 
     :param Config cfg: Training config.
@@ -1007,7 +945,7 @@ def _resolve_loader_perf_settings(
         if not pin_memory:
             pin_memory = True
             notes.append(
-                "dataset.pin_memory was false; enabling pin_memory=True on CUDA "
+                "dataset.pin_memory was false; enabling pinned CPU staging on CUDA "
                 "to improve host->device transfer overlap."
             )
         if num_workers > 0 and prefetch_factor is None:
@@ -2008,7 +1946,6 @@ def trainer(cfg: Config) -> None:
         tokenizer,
         batch_size=cfg.trainer.per_device_train_batch_size,
         num_workers=cfg.dataset.num_workers,
-        pin_memory=pin_memory,
         persistent_workers=persistent_workers,
         prefetch_factor=prefetch_factor,
         mlm_probability=cfg.datacollator.mlm_probability,
@@ -2026,7 +1963,6 @@ def trainer(cfg: Config) -> None:
             tokenizer,
             batch_size=cfg.trainer.per_device_eval_batch_size,
             num_workers=cfg.dataset.num_workers,
-            pin_memory=pin_memory,
             persistent_workers=persistent_workers,
             prefetch_factor=prefetch_factor,
             mlm_probability=cfg.datacollator.mlm_probability,
@@ -2393,7 +2329,7 @@ def trainer(cfg: Config) -> None:
 
             if manual_device_move:
                 if pin_memory and accelerator.device.type == "cuda":
-                    batch = _ensure_pinned_cpu_batch(batch)
+                    batch = _pin_cpu_tensors(batch)
                 batch = _move_batch_to_device(batch, accelerator.device)
 
             # Update number of batches only when we will execute a backward pass.

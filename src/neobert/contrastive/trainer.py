@@ -386,7 +386,9 @@ def trainer(cfg: Config) -> None:
     )
     dataloader_kwargs = {
         "num_workers": cfg.trainer.dataloader_num_workers,
-        "pin_memory": accelerator.device.type == "cuda",
+        # Keep DataLoader-side pinning off; current torch routes it through a
+        # deprecated per-device pinning path on CUDA.
+        "pin_memory": False,
         "shuffle": True,
     }
     dataloaders = {

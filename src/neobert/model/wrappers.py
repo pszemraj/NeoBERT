@@ -9,6 +9,8 @@ import torch
 from torch import nn
 from transformers import DataCollatorWithPadding, PreTrainedTokenizerFast
 
+from neobert.training_utils import _pin_cpu_tensors
+
 from .model import (
     NeoBERT,
     NeoBERTConfig,
@@ -259,14 +261,17 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
             batch_size=self.batch_size,
             num_workers=num_workers,
             shuffle=False,
-            pin_memory=pin_memory,
+            pin_memory=False,
         )
 
+        non_blocking = bool(pin_memory and device.type == "cuda")
         encodings = []
         for batch in tqdm(
             dataloader, desc="encoding", mininterval=10, disable=len(sentences) < 128
         ):
-            input_ids = batch["input_ids"].to(device)
+            if non_blocking:
+                batch = _pin_cpu_tensors(batch)
+            input_ids = batch["input_ids"].to(device, non_blocking=non_blocking)
             int_mask = batch["attention_mask"]
 
             if self.config.attn_backend != "sdpa":
@@ -276,9 +281,17 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
                     device="cpu", dtype=torch.int32
                 )
                 outputs = self.model(input_ids, None, packed_seqlens=packed_seqlens)
-                pool_mask = int_mask.to(device=device, dtype=mask_dtype)
+                pool_mask = int_mask.to(
+                    device=device,
+                    dtype=mask_dtype,
+                    non_blocking=non_blocking,
+                )
             else:
-                pool_mask = int_mask.to(device=device, dtype=mask_dtype)
+                pool_mask = int_mask.to(
+                    device=device,
+                    dtype=mask_dtype,
+                    non_blocking=non_blocking,
+                )
                 additive_mask = torch.where(
                     pool_mask == 1, float(0.0), float("-inf")
                 ).type(mask_dtype)

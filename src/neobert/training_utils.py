@@ -101,6 +101,63 @@ def resolve_wandb_watch_mode(
     )
 
 
+def _pin_cpu_tensors(value: Any) -> Any:
+    """Recursively pin CPU tensors for non-blocking host-to-device copies.
+
+    :param Any value: Tensor, nested container, or scalar to pin.
+    :return Any: Value with CPU tensors pinned when supported.
+    """
+
+    def _pin(inner: Any) -> tuple[Any, bool]:
+        """Pin a nested value and report whether anything changed.
+
+        :param Any inner: Candidate tensor/container/scalar.
+        :return tuple[Any, bool]: Pinned value and whether a change was made.
+        """
+        if torch.is_tensor(inner):
+            if inner.device.type != "cpu" or inner.is_pinned():
+                return inner, False
+            return inner.pin_memory(), True
+
+        if isinstance(inner, dict):
+            updated: dict[Any, Any] = {}
+            changed = False
+            for key, nested in inner.items():
+                pinned_nested, nested_changed = _pin(nested)
+                updated[key] = pinned_nested
+                changed = changed or nested_changed
+            if not changed:
+                return inner, False
+            return updated, True
+
+        if isinstance(inner, list):
+            updated_list: list[Any] = []
+            changed = False
+            for nested in inner:
+                pinned_nested, nested_changed = _pin(nested)
+                updated_list.append(pinned_nested)
+                changed = changed or nested_changed
+            if not changed:
+                return inner, False
+            return updated_list, True
+
+        if isinstance(inner, tuple):
+            updated_items: list[Any] = []
+            changed = False
+            for nested in inner:
+                pinned_nested, nested_changed = _pin(nested)
+                updated_items.append(pinned_nested)
+                changed = changed or nested_changed
+            if not changed:
+                return inner, False
+            return tuple(updated_items), True
+
+        return inner, False
+
+    pinned_value, _ = _pin(value)
+    return pinned_value
+
+
 def _unwrap_optimizer(opt: Any) -> Any:
     """Return the underlying optimizer if wrapped by Accelerate.
 

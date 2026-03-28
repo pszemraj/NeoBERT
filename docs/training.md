@@ -167,7 +167,10 @@ Primary knobs are in `dataset.*`:
 - `prefetch_factor`
 
 When running on CUDA, trainer may warn and apply throughput-friendly defaults
-if these are unset/suboptimal.
+if these are unset/suboptimal. Current PyTorch builds route
+`DataLoader(pin_memory=True)` through a deprecated CUDA-specific path, so
+NeoBERT keeps loader-side pinning off and pins final CPU batches explicitly
+before non-blocking device transfers in the paths that move batches manually.
 
 ## Streaming Eval Strategy
 

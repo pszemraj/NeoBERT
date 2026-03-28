@@ -5,7 +5,6 @@ Run: pytest tests/test_muonclip_unit.py -v
 """
 
 import copy
-import warnings
 from pathlib import Path
 
 import pytest
@@ -809,27 +808,20 @@ class TestMuonClipOptimizer:
         loaded_optim_state = {
             "optimizer": get_optimizer_state_dict(model_clone, optimizer_clone)
         }
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message=(
-                    "torch.distributed is disabled, unavailable or uninitialized, "
-                    "assuming the intent is to save in a single process."
-                ),
-            )
-            warnings.filterwarnings(
-                "ignore",
-                message=(
-                    "torch.distributed is disabled, unavailable or uninitialized, "
-                    "assuming the intent is to load in a single process."
-                ),
-            )
+        with pytest.warns(
+            UserWarning,
+            match="assuming the intent is to save in a single process",
+        ):
             dist_cp.save(
                 state_dict={
                     "optimizer": get_optimizer_state_dict(model_instance, optimizer)
                 },
                 storage_writer=dist_cp.FileSystemWriter(str(checkpoint_dir)),
             )
+        with pytest.warns(
+            UserWarning,
+            match="assuming the intent is to load in a single process",
+        ):
             dist_cp.load(
                 loaded_optim_state,
                 checkpoint_id=str(checkpoint_dir),

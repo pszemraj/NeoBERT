@@ -200,7 +200,7 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | Key                           | Type          | Default | Description                                                 |
 | ----------------------------- | ------------- | ------- | ----------------------------------------------------------- |
 | `dataset.num_workers`         | `int`         | `16`    | DataLoader worker count.                                    |
-| `dataset.pin_memory`          | `bool`        | `false` | Explicit pin-memory preference (may be overridden on CUDA). |
+| `dataset.pin_memory`          | `bool`        | `false` | Enable pinned CPU staging for non-blocking H2D copies; may be forced on for CUDA runs that move batches manually. |
 | `dataset.persistent_workers`  | `bool`        | `true`  | Keep DataLoader workers alive across epochs.                |
 | `dataset.prefetch_factor`     | `int \| None` | `null`  | Worker prefetch depth when workers > 0.                     |
 | `dataset.num_proc`            | `int`         | `4`     | Multiprocessing workers for tokenization map.               |

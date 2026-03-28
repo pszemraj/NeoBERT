@@ -3,7 +3,6 @@
 
 import os
 import tempfile
-import warnings
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,7 +16,6 @@ from neobert.config import Config, ConfigLoader
 from neobert.pretraining.masked_objective import MaskedObjectiveOut
 from neobert.pretraining.trainer import (
     _compute_weight_norm_for_logging,
-    _ensure_pinned_cpu_batch,
     _gather_decoder_weight_for_masked_objective,
     _infer_eval_split_name,
     _resolve_eval_samples,
@@ -30,6 +28,7 @@ from neobert.pretraining.trainer import (
     _sync_tokenizer_derived_config,
     trainer,
 )
+from neobert.training_utils import _pin_cpu_tensors
 from tests.tokenizer_utils import build_wordlevel_tokenizer
 
 
@@ -89,35 +88,29 @@ class TestPretrainPipeline:
         config.trainer.max_steps = 1
         config.wandb.mode = "disabled"
 
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message=r".*epoch parameter in `scheduler\\.step\\(\\)`.*",
-                category=UserWarning,
-            )
-            try:
-                trainer(config)
-            except Exception as exc:
-                expected_errors = [
-                    "hfapi",
-                    "connection",
-                    "disk",
-                    "cuda",
-                    "404",
-                    "sentencepiece",
-                    "repository not found",
-                    "input_ids",
-                    "valueerror",
-                ]
-                error_str = str(exc).lower()
-                if not any(err in error_str for err in expected_errors):
-                    raise
+        try:
+            trainer(config)
+        except Exception as exc:
+            expected_errors = [
+                "hfapi",
+                "connection",
+                "disk",
+                "cuda",
+                "404",
+                "sentencepiece",
+                "repository not found",
+                "input_ids",
+                "valueerror",
+            ]
+            error_str = str(exc).lower()
+            if not any(err in error_str for err in expected_errors):
+                raise
 
 
 class TestPretrainComponents:
     """Test individual pretraining components."""
 
-    def test_ensure_pinned_cpu_batch_repins_flat_and_nested_tensors(self):
+    def test_pin_cpu_tensors_repins_flat_and_nested_tensors(self):
         """Ensure CPU repinning covers flat and nested tensor containers."""
         cases = [
             {
@@ -149,7 +142,7 @@ class TestPretrainComponents:
         ]
         for case in cases:
             try:
-                out = _ensure_pinned_cpu_batch(case["batch"])
+                out = _pin_cpu_tensors(case["batch"])
             except RuntimeError as exc:
                 pytest.skip(f"pin_memory not supported in this environment: {exc}")
                 return
@@ -157,7 +150,7 @@ class TestPretrainComponents:
             for check in case["checks"]:
                 assert check(out)
 
-            out_again = _ensure_pinned_cpu_batch(out)
+            out_again = _pin_cpu_tensors(out)
             assert out_again is out
 
     def test_sync_tokenizer_derived_config_pads_vocab_and_pad_id(self):
