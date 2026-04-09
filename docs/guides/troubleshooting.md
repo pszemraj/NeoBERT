@@ -7,8 +7,7 @@ Common runtime and performance issues when training/evaluating NeoBERT.
 ### Unknown config keys or type errors
 
 - Config loading is strict; unknown keys raise.
-- Fix YAML field names/types against
-  [Configuration Reference](../reference/configuration.md).
+- Fix YAML field names/types against [Configuration Reference](../reference/configuration.md).
 
 ### Packed training is slow
 
@@ -21,12 +20,8 @@ Checklist:
 
 1. use `attn_backend: flash_attn_varlen` for packed runs,
 2. ensure flash-attn is installed,
-3. tune dataloader knobs (`dataset.num_workers`, `pin_memory`,
-   `persistent_workers`, `prefetch_factor`),
-   remember that `pin_memory` controls pinned CPU staging even though
-   NeoBERT keeps `DataLoader(pin_memory=True)` disabled on current PyTorch,
-4. compare `tokens/sec` (not only `steps/sec`) when
-   `enforce_full_packed_batches=true`.
+3. tune dataloader knobs (`dataset.num_workers`, `pin_memory`, `persistent_workers`, `prefetch_factor`), remember that `pin_memory` controls pinned CPU staging even though NeoBERT keeps `DataLoader(pin_memory=True)` disabled on current PyTorch,
+4. compare `tokens/sec` (not only `steps/sec`) when `enforce_full_packed_batches=true`.
 
 ### Pretraining OOM from logits memory
 
@@ -51,19 +46,15 @@ Symptoms:
 
 What happens:
 
-1. this is usually an environment/runtime issue rather than a NeoBERT config
-   issue,
+1. this is usually an environment/runtime issue rather than a NeoBERT config issue,
 2. NeoBERT does not override PyTorch BLAS library selection at startup,
-3. if bf16 is broken on the current stack, the failing PyTorch operation will
-   still fail until you change the environment or disable bf16.
+3. if bf16 is broken on the current stack, the failing PyTorch operation will still fail until you change the environment or disable bf16.
 
 Actions:
 
 1. pin a known-good PyTorch build for the affected host/GPU combination,
-2. verify CUDA/driver/PyTorch compatibility and rebuild extension wheels after
-   version changes,
-3. set `trainer.mixed_precision: no` if that environment cannot run bf16
-   reliably,
+2. verify CUDA/driver/PyTorch compatibility and rebuild extension wheels after version changes,
+3. set `trainer.mixed_precision: no` if that environment cannot run bf16 reliably,
 4. if you disable bf16, keep `attn_backend: sdpa` for supported execution.
 
 ### Accelerate launch warnings about mixed precision or dynamo
@@ -76,16 +67,13 @@ Symptoms:
 What happens:
 
 1. those warnings describe omitted launcher flags, not a NeoBERT override,
-2. NeoBERT still constructs `Accelerator(...)` from `trainer.mixed_precision`
-   and the repo's compile settings,
-3. passing matching launcher flags keeps the startup output aligned with the
-   actual runtime policy.
+2. NeoBERT still constructs `Accelerator(...)` from `trainer.mixed_precision` and the repo's compile settings,
+3. passing matching launcher flags keeps the startup output aligned with the actual runtime policy.
 
 Actions:
 
 1. pass `accelerate launch --mixed_precision bf16` when the config uses bf16,
-2. keep `--dynamo_backend no` unless you are intentionally testing launcher-side
-   dynamo,
+2. keep `--dynamo_backend no` unless you are intentionally testing launcher-side dynamo,
 3. use `--wandb.name ...` for run naming; `--wandb.run` is not a NeoBERT CLI key.
 
 ### `torch.compile` warnings/recompiles
@@ -103,18 +91,14 @@ Actions:
 
 ### Streaming resume is slow or not exact
 
-- Streaming resume is best-effort: trainer restores state and skips consumed
-  batches from stream start/current epoch position.
-- For large consumed-step counts, startup can take a while due to stream
-  advancement.
+- Streaming resume is best-effort: trainer restores state and skips consumed batches from stream start/current epoch position.
+- For large consumed-step counts, startup can take a while due to stream advancement.
 - With shuffled streams, exact sample continuity is not guaranteed.
-- If you need deterministic continuation, pre-tokenize to disk and run with
-  `dataset.streaming: false`.
+- If you need deterministic continuation, pre-tokenize to disk and run with `dataset.streaming: false`.
 
 ### Streaming eval budget error
 
-- If streaming eval has no explicit budget, trainer raises:
-  set `trainer.eval_max_batches` or `dataset.eval_samples`.
+- If streaming eval has no explicit budget, trainer raises: set `trainer.eval_max_batches` or `dataset.eval_samples`.
 - Use fixed values across sweep runs for comparable metrics.
 
 ## Evaluation Issues
@@ -122,23 +106,19 @@ Actions:
 ### GLUE backend errors
 
 - GLUE wrappers use SDPA path; packed flash varlen is training-oriented.
-- Ensure GLUE configs point to valid pretrained checkpoints unless intentionally
-  using `allow_random_weights: true`.
+- Ensure GLUE configs point to valid pretrained checkpoints unless intentionally using `allow_random_weights: true`.
 
 ### MTEB task filtering is not what you expected
 
 - Config-based selection uses `mteb_task_type`.
 - CLI override `run_mteb.py --task_types` is also supported.
-- `--task_types` accepts categories (`classification`, `clustering`,
-  `pair_classification`, `reranking`, `retrieval`, `sts`, `all`) and/or
-  explicit task names (comma-separated).
+- `--task_types` accepts categories (`classification`, `clustering`, `pair_classification`, `reranking`, `retrieval`, `sts`, `all`) and/or explicit task names (comma-separated).
 
 ## Export Issues
 
 ### Export fails with missing tokenizer files
 
-- Check checkpoint has `tokenizer/` directory with special tokens map and vocab
-  files.
+- Check checkpoint has `tokenizer/` directory with special tokens map and vocab files.
 
 ### `ngpt` checkpoint export failure
 
@@ -152,11 +132,8 @@ Actions:
 ## Checkpointing Notes
 
 - Training checkpoints are safetensors-first (`model.safetensors`).
-- Portable checkpoint loading recursively strips known runtime wrappers such as
-  `_orig_mod.` and `module.` from generic compiled/distributed saves.
-- Warning about removing shared tensors during save can be expected when tied
-  weights are de-duplicated; validate by reloading checkpoint and running a
-  forward pass.
+- Portable checkpoint loading recursively strips known runtime wrappers such as `_orig_mod.` and `module.` from generic compiled/distributed saves.
+- Warning about removing shared tensors during save can be expected when tied weights are de-duplicated; validate by reloading checkpoint and running a forward pass.
 
 ## Environment and Dependency Notes
 

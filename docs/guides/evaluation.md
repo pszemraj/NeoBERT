@@ -19,10 +19,8 @@ bash scripts/evaluation/glue/run_all_glue.sh configs/glue
 
 ### Important GLUE behavior
 
-- GLUE always runs with SDPA attention in classifier wrappers; non-SDPA
-  `model.attn_backend` requests are normalized away with a warning.
-- Pretrained local checkpoints are required unless either
-  `glue.allow_random_weights: true` or `model.from_hub: true`.
+- GLUE always runs with SDPA attention in classifier wrappers; non-SDPA `model.attn_backend` requests are normalized away with a warning.
+- Pretrained local checkpoints are required unless either `glue.allow_random_weights: true` or `model.from_hub: true`.
 - GLUE checkpoints are written to `trainer.output_dir/checkpoints/<step>/`.
 - Legacy `model_checkpoints/<step>/` paths are still accepted when loading older artifacts.
 - Results are stored under `trainer.output_dir` as JSON metrics.
@@ -55,37 +53,23 @@ python scripts/evaluation/run_mteb.py \
 
 - Runner loads checkpoints from `<model_name_or_path>/checkpoints/`.
 - Task family selection is read from config field `mteb_task_type`.
-- `--task_types` can override config selection at launch time.
-  Accepts categories (`classification`, `retrieval`, `sts`, `all`) and/or
-  explicit task names (comma-separated).
-- Output path is currently derived from run dir + checkpoint + max length:
-  `outputs/<run>/mteb/<ckpt>/<max_length>/`.
+- `--task_types` can override config selection at launch time. Accepts categories (`classification`, `retrieval`, `sts`, `all`) and/or explicit task names (comma-separated).
+- Output path is currently derived from run dir + checkpoint + max length: `outputs/<run>/mteb/<ckpt>/<max_length>/`.
 - If using a local tokenizer, point `tokenizer.name` to that path.
 
 ## Pseudo-Perplexity Utility
 
-`scripts/evaluation/pseudo_perplexity.py` can load NeoBERT checkpoints from the
-current portable step layout (`checkpoints/<step>/model.safetensors`) and falls
-back to legacy DeepSpeed ZeRO conversion only when portable weights are absent.
-That legacy fallback requires the optional `neobert[legacy-checkpoints]` extra.
-When `checkpoint_path` points at a checkpoint root, `--checkpoint latest`
-first honors a legacy DeepSpeed `latest` file when present; otherwise it
-resolves to the newest loadable numbered step. If
-`checkpoint_path` already points at a specific step directory, pass the matching
-`--checkpoint` tag; explicit missing non-`latest` tags fail fast instead of
-silently loading the direct path.
+`scripts/evaluation/pseudo_perplexity.py` can load NeoBERT checkpoints from the current portable step layout (`checkpoints/<step>/model.safetensors`) and falls back to legacy DeepSpeed ZeRO conversion only when portable weights are absent. That legacy fallback requires the optional `neobert[legacy-checkpoints]` extra. When `checkpoint_path` points at a checkpoint root, `--checkpoint latest` first honors a legacy DeepSpeed `latest` file when present; otherwise it resolves to the newest loadable numbered step. If `checkpoint_path` already points at a specific step directory, pass the matching `--checkpoint` tag; explicit missing non-`latest` tags fail fast instead of silently loading the direct path.
 
 ## Common Evaluation Pitfalls
 
 1. Wrong checkpoint path
 
-- verify `glue.pretrained_checkpoint_dir`, `glue.pretrained_checkpoint`, and
-  `glue.pretrained_model_path` in GLUE configs.
+- verify `glue.pretrained_checkpoint_dir`, `glue.pretrained_checkpoint`, and `glue.pretrained_model_path` in GLUE configs.
 
 1. Flat/random GLUE metrics
 
-- confirm pretrained weights were actually loaded (or intentionally set
-  `allow_random_weights: true`).
+- confirm pretrained weights were actually loaded (or intentionally set `allow_random_weights: true`).
 
 1. OOM during eval
 

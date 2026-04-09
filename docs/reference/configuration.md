@@ -1,16 +1,13 @@
 # Configuration Reference
 
 > [!TIP]
-> Example configs are in [configs/README.md](../../configs/README.md) (for
-> production) and [tests/configs/README.md](../../tests/configs/README.md) (for
-> tiny smoke/regression runs).
+> Example configs are in [configs/README.md](../../configs/README.md) (for production) and [tests/configs/README.md](../../tests/configs/README.md) (for tiny smoke/regression runs).
 
 NeoBERT YAML config schema (`src/neobert/config.py`) and defaults.
 
 ## Variables and Dot Overrides
 
-`ConfigLoader.load(...)` supports a small YAML variable system and post-load dot
-overrides for sweep-style runs.
+`ConfigLoader.load(...)` supports a small YAML variable system and post-load dot overrides for sweep-style runs.
 
 ### YAML variables
 
@@ -24,8 +21,7 @@ overrides for sweep-style runs.
 - Circular variable references fail fast with an explicit error.
 - Unresolved `$variables.*` tokens in strings emit warnings with field location.
 
-Example: one `seq_len` driving multiple runtime fields (without coupling model
-context length yet):
+Example: one `seq_len` driving multiple runtime fields (without coupling model context length yet):
 
 ```yaml
 variables:
@@ -45,8 +41,7 @@ wandb:
   name: "neobert-{$variables.run_tag}"
 ```
 
-Use this pattern for shared run-time sequence settings. Keep
-`model.max_position_embeddings` as an explicit architecture decision.
+Use this pattern for shared run-time sequence settings. Keep `model.max_position_embeddings` as an explicit architecture decision.
 
 ### Dot-path overrides in Python
 
@@ -72,8 +67,7 @@ Accepted list token forms:
 - `--section.key=value`
 - `--section.key value`
 
-Unknown paths and invalid value types fail fast with path-specific errors.
-Overrides are validated with the same semantic checks as base YAML configs.
+Unknown paths and invalid value types fail fast with path-specific errors. Overrides are validated with the same semantic checks as base YAML configs.
 
 ## High-Impact Settings
 
@@ -166,9 +160,7 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | `tokenizer.allow_special_token_rewrite` | `bool`        | `false`               | Explicit opt-in for fallback special-token rewrite when tokenizer lacks `mask_token`. |
 
 > [!NOTE]
-> Trainer now pads tokenizer length with inert placeholder tokens to keep `len(tokenizer) == model.vocab_size`.
-> If a tokenizer lacks `mask_token`, NeoBERT now requires explicit
-> `tokenizer.allow_special_token_rewrite: true` before mutating special tokens.
+> Trainer now pads tokenizer length with inert placeholder tokens to keep `len(tokenizer) == model.vocab_size`. If a tokenizer lacks `mask_token`, NeoBERT now requires explicit `tokenizer.allow_special_token_rewrite: true` before mutating special tokens.
 
 ---
 
@@ -190,11 +182,7 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | `dataset.validation_split` | `float \| None` | `null`         | Fraction for random eval split (non-streaming only).                                                               |
 
 > [!NOTE]
-> Streaming pretraining defaults to `dataset.eval_split: null`. When unset, trainer
-> attempts to auto-detect a validation-style split (`validation`, `eval`, `test`, `dev`).
-> If none exists and `dataset.eval_samples` is set, it builds eval from the first
-> `eval_samples` training examples and skips those from the training stream to avoid
-> leakage.
+> Streaming pretraining defaults to `dataset.eval_split: null`. When unset, trainer attempts to auto-detect a validation-style split (`validation`, `eval`, `test`, `dev`). If none exists and `dataset.eval_samples` is set, it builds eval from the first `eval_samples` training examples and skips those from the training stream to avoid leakage.
 
 ### Performance and Preprocessing
 
@@ -224,23 +212,11 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | `dataset.alpha`              | `float` | `1.0`   | Contrastive dataset sampling exponent (`1.0` = proportional by size). |
 
 > [!NOTE]
-> `dataset.pretraining_prob` is deprecated and normalized to
-> `contrastive.pretraining_prob`.
+> `dataset.pretraining_prob` is deprecated and normalized to `contrastive.pretraining_prob`.
 >
-> Streaming retry recovery resumes from the last yielded example when the
-> underlying HF iterable dataset exposes `state_dict()/load_state_dict()`.
-> When the source stream is shuffled, HF refill semantics can still perturb the
-> exact in-buffer order after a retry.
+> Streaming retry recovery resumes from the last yielded example when the underlying HF iterable dataset exposes `state_dict()/load_state_dict()`. When the source stream is shuffled, HF refill semantics can still perturb the exact in-buffer order after a retry.
 >
-> Contrastive preprocessing accepts an omitted `dataset.name`, `dataset.name:
-> ALL`, canonical registry keys such as `ALLNLI`, or common HF dataset IDs
-> from the built-in wrapper registry (for example
-> `sentence-transformers/all-nli`, `embedding-data/QQP_triplets`, or
-> `WhereIsAI/github-issue-similarity`). When
-> `dataset.load_all_from_disk=true`, cached split directories under `all/` are
-> loaded only for the requested selection and missing splits fail fast. Subset
-> preprocess refreshes preserve other cached split entries already present
-> under `all/`.
+> Contrastive preprocessing accepts an omitted `dataset.name`, `dataset.name: ALL`, canonical registry keys such as `ALLNLI`, or common HF dataset IDs from the built-in wrapper registry (for example `sentence-transformers/all-nli`, `embedding-data/QQP_triplets`, or `WhereIsAI/github-issue-similarity`). When `dataset.load_all_from_disk=true`, cached split directories under `all/` are loaded only for the requested selection and missing splits fail fast. Subset preprocess refreshes preserve other cached split entries already present under `all/`.
 
 ---
 
@@ -278,13 +254,9 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | `trainer.masked_logits_only_loss`     | `bool`          | `true`       | Pretraining MLM loss path selector: `true` = masked-logits-only path (default/recommended), `false` = original full-logits CE path (legacy ablation/debug). |
 
 > [!IMPORTANT]
-> `trainer.masked_logits_only_loss` is a run-level path selector, not a
-> multi-objective mixing interface. Choose one path for the run.
-> The project default is `true`; use `false` only when intentionally running a
-> legacy full-logits baseline.
+> `trainer.masked_logits_only_loss` is a run-level path selector, not a multi-objective mixing interface. Choose one path for the run. The project default is `true`; use `false` only when intentionally running a legacy full-logits baseline.
 >
-> Gradient-accumulation, effective-batch, and norm-logging behavior is detailed
-> in
+> Gradient-accumulation, effective-batch, and norm-logging behavior is detailed in
 > [Training Optimization](../guides/training-optimization.md#gradient-accumulation-and-logged-norms).
 
 ### Control and Legacy Compatibility
@@ -366,22 +338,14 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | `clipping_layers_mapping`      | `dict[str, str]` | `{}`              | Projection-name overrides for non-standard attention blocks. |
 
 > [!NOTE]
-> The shipped defaults are `norm_factor=neobert` and
-> `param_policy=hidden_2d`. Use `all_2d` explicitly when you want exact
-> v0.1.3-style Muon scope for compatibility benchmarking.
+> The shipped defaults are `norm_factor=neobert` and `param_policy=hidden_2d`. Use `all_2d` explicitly when you want exact v0.1.3-style Muon scope for compatibility benchmarking.
 >
 > [Training Optimization](../guides/training-optimization.md) explains the
-> shipped Muon defaults, normalization modes, fused-QKV handling, clipping, and
-> distributed tradeoffs.
+> shipped Muon defaults, normalization modes, fused-QKV handling, clipping, and distributed tradeoffs.
 >
-> `orthogonalization` changes compute precision behavior on CUDA:
-> `newton_schulz` upcasts BF16 gradients to FP32 for the iteration and casts
-> back; `polar_express` runs in BF16 work dtype (when available) for higher
-> throughput.
+> `orthogonalization` changes compute precision behavior on CUDA: `newton_schulz` upcasts BF16 gradients to FP32 for the iteration and casts back; `polar_express` runs in BF16 work dtype (when available) for higher throughput.
 >
-> Under sharded FSDP2 Muon runs, `enable_clipping=true` is auto-disabled at
-> optimizer construction time because the current owner-compute path does not
-> support the activation-hook capture flow used by QK clipping.
+> Under sharded FSDP2 Muon runs, `enable_clipping=true` is auto-disabled at optimizer construction time because the current owner-compute path does not support the activation-hook capture flow used by QK clipping.
 
 ---
 
@@ -397,31 +361,21 @@ Overrides are validated with the same semantic checks as base YAML configs.
 
 For `p = datacollator.mlm_probability`:
 
-- `mask_all: false` global token mix is `(1 - p)` untouched, `0.8p` `[MASK]`,
-  `0.1p` random-token, `0.1p` original-token.
+- `mask_all: false` global token mix is `(1 - p)` untouched, `0.8p` `[MASK]`, `0.1p` random-token, `0.1p` original-token.
 - `mask_all: true` global token mix is `(1 - p)` untouched, `p` `[MASK]`.
 
 ---
 
 ## Checkpointing and Resume
 
-Save cadence/retention knobs live under [Training Loop](#training-loop):
-`trainer.save_steps`, `trainer.save_total_limit`, and
-`trainer.resume_from_checkpoint`.
+Save cadence/retention knobs live under [Training Loop](#training-loop): `trainer.save_steps`, `trainer.save_total_limit`, and `trainer.resume_from_checkpoint`.
 
 | Key                     | Type  | Default    | Description                               |
 | ----------------------- | ----- | ---------- | ----------------------------------------- |
 | `pretrained_checkpoint` | `str` | `"latest"` | Checkpoint selector for downstream tasks. |
 
 > [!NOTE]
-> Pretraining and GLUE resumable state checkpoints are written under
-> `output_dir/checkpoints/<step>/`.
-> GLUE transfer/loading helpers still accept legacy
-> `output_dir/model_checkpoints/<step>/` layouts for older runs.
-> Resume path resolution uses numeric step directories and picks the highest
-> available step for `resume_from_checkpoint: latest`.
-> DeepSpeed `latest` indirection files are optional legacy metadata and are only
-> consulted by DeepSpeed conversion/loading helpers when present.
+> Pretraining and GLUE resumable state checkpoints are written under `output_dir/checkpoints/<step>/`. GLUE transfer/loading helpers still accept legacy `output_dir/model_checkpoints/<step>/` layouts for older runs. Resume path resolution uses numeric step directories and picks the highest available step for `resume_from_checkpoint: latest`. DeepSpeed `latest` indirection files are optional legacy metadata and are only consulted by DeepSpeed conversion/loading helpers when present.
 
 ---
 
@@ -443,13 +397,7 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 | `wandb.dir`          | `str`         | `"logs/wandb"` | Artifact/run directory.                                                                    |
 
 > [!NOTE]
-> Runtime logging prints a task-scoped resolved config before training and sends
-> the same task-scoped payload to W&B (irrelevant task sections are excluded).
-> W&B is not auto-enabled by presence of a `wandb` section; set
-> `wandb.enabled: true` explicitly.
-> For pretraining/contrastive, watch-mode precedence is:
-> `WANDB_WATCH` env var > `wandb.watch` config > default (`gradients` for
-> `wandb.mode: online`).
+> Runtime logging prints a task-scoped resolved config before training and sends the same task-scoped payload to W&B (irrelevant task sections are excluded). W&B is not auto-enabled by presence of a `wandb` section; set `wandb.enabled: true` explicitly. For pretraining/contrastive, watch-mode precedence is: `WANDB_WATCH` env var > `wandb.watch` config > default (`gradients` for `wandb.mode: online`).
 
 ### Top-Level Runtime Metadata
 
@@ -484,9 +432,7 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 | `glue.preprocessing_num_proc`    | `int`                | `4`      | Multiprocessing workers for GLUE preprocessing.          |
 
 > [!NOTE]
-> Worker-count knobs are task-scoped in the current runtime:
-> pretraining uses `dataset.num_workers`, GLUE uses `glue.num_workers`, and
-> contrastive uses `trainer.dataloader_num_workers`.
+> Worker-count knobs are task-scoped in the current runtime: pretraining uses `dataset.num_workers`, GLUE uses `glue.num_workers`, and contrastive uses `trainer.dataloader_num_workers`.
 
 ### Contrastive (`contrastive`)
 

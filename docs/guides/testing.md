@@ -39,8 +39,7 @@ conda run --name neobert python tests/run_tests.py --no-pytest
 
 ## Manual Validation Scripts
 
-`tests/manual/` contains opt-in validation/benchmark scripts and is excluded from
-default `pytest -q` discovery.
+`tests/manual/` contains opt-in validation/benchmark scripts and is excluded from default `pytest -q` discovery.
 
 Manual script commands are in [tests/manual/README.md](../../tests/manual/README.md).
 
@@ -50,8 +49,7 @@ Manual script commands are in [tests/manual/README.md](../../tests/manual/README
 - Keep tests deterministic and local (avoid network where possible).
 - Disable external logging for training tests (`wandb.mode: disabled`).
 - Guard GPU-only assertions with `torch.cuda.is_available()`.
-- For performance-sensitive paths (packing/compile), include regression tests for
-  both correctness and expected control-flow behavior.
+- For performance-sensitive paths (packing/compile), include regression tests for both correctness and expected control-flow behavior.
 
 ## Common Failures
 

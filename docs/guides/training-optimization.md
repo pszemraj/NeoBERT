@@ -1,10 +1,8 @@
 # Training Optimization
 
-This guide covers optimizer selection, MuonClip defaults, throughput tuning,
-and training metrics that matter when comparing runs.
+This guide covers optimizer selection, MuonClip defaults, throughput tuning, and training metrics that matter when comparing runs.
 
-Field names and defaults live in
-[Configuration Reference](../reference/configuration.md).
+Field names and defaults live in [Configuration Reference](../reference/configuration.md).
 
 ## MuonClip Defaults
 
@@ -22,10 +20,8 @@ These are repo defaults, not attempts to mirror reference Muon exactly.
 `hidden_2d` is the shipped default.
 
 - Muon applies to hidden transformer matrices.
-- Embeddings, output/unembedding weights, biases, and norm parameters stay on
-  Adam-style fallback groups.
-- This matches the usual Muon guidance and keeps FSDP2 owner-compute costs
-  bounded.
+- Embeddings, output/unembedding weights, biases, and norm parameters stay on Adam-style fallback groups.
+- This matches the usual Muon guidance and keeps FSDP2 owner-compute costs bounded.
 
 `all_2d` remains available for explicit compatibility or ablation runs.
 
@@ -41,8 +37,7 @@ These are repo defaults, not attempts to mirror reference Muon exactly.
 
 Why `neobert` is the default:
 
-- this encoder setup has trained better with the symmetric `neobert` scale than
-  with reference Muon scaling,
+- this encoder setup has trained better with the symmetric `neobert` scale than with reference Muon scaling,
 - the name reflects repo intent rather than compatibility baggage,
 - `muon_reference` is still available when exact reference behavior matters.
 
@@ -53,13 +48,11 @@ Why `neobert` is the default:
 
 ### Fused QKV handling
 
-NeoBERT uses fused `qkv.weight` matrices, but Muon does not treat them as one
-big matrix.
+NeoBERT uses fused `qkv.weight` matrices, but Muon does not treat them as one big matrix.
 
 - the interleaved fused matrix is split into Q, K, and V projections,
 - Muon orthogonalizes and normalizes each projection separately,
-- the result is packed back into the model's fused row layout before the update
-  is applied.
+- the result is packed back into the model's fused row layout before the update is applied.
 
 ## Clipping
 
@@ -68,20 +61,16 @@ Two clipping systems exist and they are separate:
 - `trainer.gradient_clipping`: clips final accumulated gradients
 - `optimizer.muon_config.enable_clipping`: MuonClip QK activation clipping
 
-QK clipping is auto-disabled for sharded FSDP2 Muon runs because the current
-owner-compute path does not support the activation-hook capture flow.
+QK clipping is auto-disabled for sharded FSDP2 Muon runs because the current owner-compute path does not support the activation-hook capture flow.
 
 ## Gradient Accumulation and Logged Norms
 
 - `trainer.gradient_accumulation_steps` counts microbatches per optimizer update
-- pretraining rescales gradients by the global masked-token count after
-  accumulation
-- `train/grad_norm` is logged after accumulation and masked-token rescaling, but
-  before `trainer.gradient_clipping`
+- pretraining rescales gradients by the global masked-token count after accumulation
+- `train/grad_norm` is logged after accumulation and masked-token rescaling, but before `trainer.gradient_clipping`
 - `train/weight_norm` is logged after the optimizer update
 
-For packed pretraining runs, compare `train/tokens_per_sec` and token counts,
-not only `steps/sec`.
+For packed pretraining runs, compare `train/tokens_per_sec` and token counts, not only `steps/sec`.
 
 ## Packed Training
 
@@ -99,12 +88,9 @@ Recommended for throughput:
 
 Useful control:
 
-- `trainer.enforce_full_packed_batches: true` improves token-throughput
-  stability by buffering undersized packed outputs, usually at some cost to
-  step rate
+- `trainer.enforce_full_packed_batches: true` improves token-throughput stability by buffering undersized packed outputs, usually at some cost to step rate
 
-`attn_backend: sdpa` still works for packed runs but uses the slower segmented
-fallback path.
+`attn_backend: sdpa` still works for packed runs but uses the slower segmented fallback path.
 
 ## Dataloader and Streaming Throughput
 
@@ -118,19 +104,13 @@ Primary throughput knobs:
 - `dataset.streaming_read_retry_backoff_seconds`
 - `dataset.streaming_read_retry_max_backoff_seconds`
 
-Current PyTorch builds route `DataLoader(pin_memory=True)` through a deprecated
-CUDA-specific path, so NeoBERT keeps loader-side pinning off and pins final CPU
-batches explicitly before non-blocking device transfer in the paths that move
-batches manually.
+Current PyTorch builds route `DataLoader(pin_memory=True)` through a deprecated CUDA-specific path, so NeoBERT keeps loader-side pinning off and pins final CPU batches explicitly before non-blocking device transfer in the paths that move batches manually.
 
 For hub-backed streaming datasets:
 
-- NeoBERT retries transient read failures while inspecting schemas and during
-  long-running stream iteration,
-- retry recovery resumes from the last yielded example when the underlying HF
-  iterable dataset supports `state_dict()/load_state_dict()`,
-- shuffled streams can still perturb exact in-buffer order after a retry
-  because HF refill semantics do not preserve the old shuffle buffer contents.
+- NeoBERT retries transient read failures while inspecting schemas and during long-running stream iteration,
+- retry recovery resumes from the last yielded example when the underlying HF iterable dataset supports `state_dict()/load_state_dict()`,
+- shuffled streams can still perturb exact in-buffer order after a retry because HF refill semantics do not preserve the old shuffle buffer contents.
 
 ## Distributed Muon
 
@@ -140,11 +120,9 @@ The maintained distributed Muon path is:
 - 1D row-sharded DTensor mesh
 - owner-compute update path
 
-Do not combine MuonClip with tensor parallelism, context parallelism, or other
-multi-axis DTensor layouts.
+Do not combine MuonClip with tensor parallelism, context parallelism, or other multi-axis DTensor layouts.
 
-Before long multi-rank runs, use the commands in
-[Manual Validation Scripts](../../tests/manual/README.md).
+Before long multi-rank runs, use the commands in [Manual Validation Scripts](../../tests/manual/README.md).
 
 ## Choosing a Mode
 

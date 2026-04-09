@@ -13,8 +13,7 @@ Utilities for GLUE/MTEB evaluation and result analysis.
 
 ## GLUE Helpers
 
-[GLUE helpers](glue/README.md) cover config generation, suite launchers, and
-result summaries.
+[GLUE helpers](glue/README.md) cover config generation, suite launchers, and result summaries.
 
 ## Related Docs
 

@@ -20,8 +20,7 @@ RUN_FULL=1 ./jobs/example_pretrain.sh
 ## Notes
 
 - Checkpoints and logs are written under each run's `trainer.output_dir`.
-- For long runs on clusters, copy these scripts and adapt resource flags,
-  paths, and environment setup.
+- For long runs on clusters, copy these scripts and adapt resource flags, paths, and environment setup.
 
 ## Related Docs
 

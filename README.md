@@ -5,8 +5,7 @@
 
 ## Description
 
-NeoBERT is an encoder architecture for masked-language-model pretraining,
-embedding extraction, and downstream evaluation (GLUE/MTEB).
+NeoBERT is an encoder architecture for masked-language-model pretraining, embedding extraction, and downstream evaluation (GLUE/MTEB).
 
 This fork adds:
 
@@ -15,8 +14,7 @@ This fork adds:
 - safetensors-first checkpointing,
 - end-to-end training/eval/export scripts with config-driven workflows.
 
-Pretraining loss path is selected with one explicit flag:
-`trainer.masked_logits_only_loss`.
+Pretraining loss path is selected with one explicit flag: `trainer.masked_logits_only_loss`.
 
 - `true` (default, recommended): masked-logits-only path.
 - `false` (legacy/debug): original full-logits CE path.
@@ -73,8 +71,7 @@ python tests/run_tests.py
 - [Evaluation Guide](docs/guides/evaluation.md)
 - [Troubleshooting](docs/guides/troubleshooting.md)
 
-Directory READMEs under `configs/`, `scripts/`, `tests/`, and `jobs/` focus on
-entrypoints and quick usage.
+Directory READMEs under `configs/`, `scripts/`, `tests/`, and `jobs/` focus on entrypoints and quick usage.
 
 ## Repository Layout
 
