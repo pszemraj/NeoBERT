@@ -326,7 +326,9 @@ class RetryingStreamingDataset(torch.utils.data.IterableDataset):
 
         The retry budget counts consecutive failures at a given resume point.
         Each successful yield resets the counter so isolated transient blips
-        hours apart do not accumulate toward the budget.
+        hours apart do not accumulate toward the budget. Recovery always reloads
+        a snapshot captured before the failed read so resumable dataset cursors
+        cannot skip the failure boundary.
 
         :raises RuntimeError: If transient failures persist beyond the retry budget.
         :return collections.abc.Iterator[Any]: Example iterator.
@@ -338,14 +340,21 @@ class RetryingStreamingDataset(torch.utils.data.IterableDataset):
 
         while True:
             if resume_state is not None:
-                self.dataset.load_state_dict(resume_state)
+                self.dataset.load_state_dict(deepcopy(resume_state))
                 if hasattr(self.dataset, "set_epoch"):
                     self.dataset.set_epoch(self._epoch)
             try:
+                # Snapshot before constructing/advancing the iterator so retries
+                # restart from the last known-good cursor, even if the dataset
+                # mutates its own state before surfacing a transient read error.
+                resume_state = deepcopy(self.dataset.state_dict())
                 iterator = iter(self.dataset)
-                for example in iterator:
+                while True:
+                    example = next(iterator)
+                    resume_state = deepcopy(self.dataset.state_dict())
                     retries = 0
                     yield example
+            except StopIteration:
                 return
             except Exception as exc:
                 if not is_transient_streaming_error(exc):
@@ -356,7 +365,6 @@ class RetryingStreamingDataset(torch.utils.data.IterableDataset):
                         f"{self.max_retries} retry attempt(s) after transient "
                         "read failures."
                     ) from exc
-                resume_state = self.dataset.state_dict()
                 retries += 1
                 delay = compute_retry_backoff_seconds(
                     retries,

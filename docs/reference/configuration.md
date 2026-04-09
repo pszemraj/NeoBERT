@@ -192,7 +192,7 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 | `dataset.pin_memory`          | `bool`        | `false` | Enable pinned CPU staging for non-blocking H2D copies; NeoBERT may force it on for CUDA runs and stage either in the `DataLoader` or via a final manual repin depending on the transfer path. |
 | `dataset.persistent_workers`  | `bool`        | `true`  | Keep DataLoader workers alive across epochs.                |
 | `dataset.prefetch_factor`     | `int \| None` | `null`  | Worker prefetch depth when workers > 0.                     |
-| `dataset.streaming_read_retries` | `int`      | `4`     | Outer retry count for transient streaming read failures after the underlying HF client exhausts its own per-request retries. Mid-iteration recovery requires a streaming dataset that exposes `state_dict()/load_state_dict()`. |
+| `dataset.streaming_read_retries` | `int`      | `4`     | Outer retry count for transient streaming read failures after the underlying HF client exhausts its own per-request retries. Mid-iteration recovery resumes from the last successfully yielded example and requires a streaming dataset that exposes `state_dict()/load_state_dict()`. |
 | `dataset.streaming_read_retry_backoff_seconds` | `float` | `5.0` | Initial exponential-backoff delay for transient streaming read retries. |
 | `dataset.streaming_read_retry_max_backoff_seconds` | `float` | `60.0` | Maximum capped backoff delay for transient streaming read retries. |
 | `dataset.num_proc`            | `int`         | `4`     | Multiprocessing workers for tokenization map.               |

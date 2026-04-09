@@ -401,6 +401,23 @@ class TestStreamingRetryHelpers(unittest.TestCase):
 
         self.assertEqual(list(wrapped), [0, 1, 2, 3])
 
+    def test_retrying_streaming_dataset_restores_cursor_advanced_before_failure(self):
+        """Retries must not skip examples when the dataset advances before failing."""
+        dataset = _StatefulCursorStreamingDataset(
+            [10, 11, 12],
+            fail_once_after_advance=True,
+        )
+        wrapped = RetryingStreamingDataset(
+            dataset,
+            label="unit-test",
+            max_retries=1,
+            base_backoff_seconds=0.01,
+            max_backoff_seconds=0.01,
+            sleep_fn=lambda _seconds: None,
+        )
+
+        self.assertEqual(list(wrapped), [10, 11, 12])
+
     def test_retrying_streaming_dataset_raises_after_exhausting_budget(self):
         """Ensure persistent transient failures still fail loudly after retries."""
         dataset = _RetryableFlakyDataset([0, 1, 2], fail_at=1, fail_times=3)
