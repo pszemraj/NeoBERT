@@ -20,11 +20,22 @@ from neobert.optimizer import MuonClipConfig, MuonClipOptimizer
 
 
 def _legacy_polar_express_reference(
-    grad: torch.Tensor, *, steps: int = 5, eps: float = 1e-7
+    grad: torch.Tensor,
+    *,
+    steps: int = 5,
+    beta: float = 0.95,
+    nesterov: bool = True,
+    eps: float = 1e-7,
 ) -> torch.Tensor:
-    """Reproduce the pre-refactor Polar Express update with built-in scaling."""
+    """Reproduce the original local Polar Express Muon update."""
     if grad.ndim != 2:
         return grad
+
+    momentum = grad.clone()
+    if nesterov:
+        grad = grad + beta * momentum
+    else:
+        grad = momentum
 
     steps = max(1, int(steps))
     is_transpose = grad.size(0) > grad.size(1)
@@ -83,6 +94,7 @@ class TestMuonClipConfig:
         config = MuonClipConfig()
         assert config.lr > 0
         assert 0 <= config.muon_beta < 1
+        assert config.nesterov is True
         assert config.norm_factor == "original"
         assert config.param_policy == "hidden_2d"
 
@@ -469,8 +481,8 @@ class TestMuonClipOptimizer:
             normalized = optimizer._normalize_muon_update(update, param_shape)
             assert torch.allclose(normalized, update * expected_scale)
 
-    def test_default_norm_factor_matches_pre_refactor_polar_step(self):
-        """Default normalization should match pre-refactor local Polar Express math."""
+    def test_default_muon_step_matches_original_polar_step(self):
+        """Default Muon settings should match the original local Polar step."""
         torch.manual_seed(0)
         config = NeoBERTConfig(
             hidden_size=16,
@@ -494,9 +506,10 @@ class TestMuonClipOptimizer:
             orthogonalization="polar_express",
         )
         assert muon_config.norm_factor == "original"
+        assert muon_config.nesterov is True
         optimizer = MuonClipOptimizer(model, config, muon_config)
 
-        target = model.transformer_encoder[0].qkv.weight
+        target = model.transformer_encoder[0].wo.weight
         grad = torch.randn_like(target)
         initial = target.detach().clone()
 
@@ -505,9 +518,58 @@ class TestMuonClipOptimizer:
                 param.grad = torch.zeros_like(param)
         target.grad = grad.clone()
 
-        momentum = (1 - muon_config.muon_beta) * grad
         expected_update = _legacy_polar_express_reference(
-            momentum, steps=muon_config.ns_steps
+            grad,
+            steps=muon_config.ns_steps,
+            beta=muon_config.muon_beta,
+            nesterov=muon_config.nesterov,
+        )
+        expected = initial - muon_config.lr * expected_update
+
+        optimizer.step()
+        assert torch.allclose(target, expected, atol=1e-6, rtol=1e-6)
+
+    def test_non_nesterov_muon_step_uses_plain_momentum_buffer(self):
+        """Disabling Nesterov should orthogonalize the raw momentum buffer."""
+        torch.manual_seed(0)
+        config = NeoBERTConfig(
+            hidden_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=32,
+            vocab_size=64,
+            max_length=16,
+            attn_backend="sdpa",
+            hidden_act="gelu",
+            rope=False,
+        )
+        model = NeoBERT(config)
+        muon_config = MuonClipConfig(
+            lr=1e-3,
+            muon_beta=0.95,
+            nesterov=False,
+            muon_decay=0.0,
+            adam_decay=0.0,
+            ns_steps=5,
+            enable_clipping=False,
+            orthogonalization="polar_express",
+        )
+        optimizer = MuonClipOptimizer(model, config, muon_config)
+
+        target = model.transformer_encoder[0].wo.weight
+        grad = torch.randn_like(target)
+        initial = target.detach().clone()
+
+        for param in model.parameters():
+            if param.requires_grad:
+                param.grad = torch.zeros_like(param)
+        target.grad = grad.clone()
+
+        expected_update = _legacy_polar_express_reference(
+            grad,
+            steps=muon_config.ns_steps,
+            beta=muon_config.muon_beta,
+            nesterov=muon_config.nesterov,
         )
         expected = initial - muon_config.lr * expected_update
 
@@ -883,6 +945,7 @@ class TestMuonClipOptimizer:
             group.pop("use_muon", None)
             group.pop("param_info", None)
             group.pop("beta", None)
+            group.pop("nesterov", None)
 
         model_ref = NeoBERT(config)
         model_ref.load_state_dict(model_instance.state_dict())
@@ -900,6 +963,7 @@ class TestMuonClipOptimizer:
             group for group in optimizer_clone.param_groups if group["use_muon"]
         )
         assert "beta" in muon_group
+        assert "nesterov" in muon_group
         assert len(muon_group["param_info"]) == len(muon_group["params"])
 
         input_ids = torch.randint(0, 1000, (2, 64))
@@ -1154,7 +1218,7 @@ class TestMuonClipOptimizer:
         target = model_instance.transformer_encoder[0].qkv.weight
         with pytest.raises(RuntimeError, match="device_mesh.ndim=2"):
             optimizer._orthogonalize_dtensor_update(
-                momentum_buffer=_FakeDTensor(),
+                muon_input=_FakeDTensor(),
                 param=target,
                 group_params=[target],
             )
@@ -1245,7 +1309,7 @@ class TestMuonClipOptimizer:
 
         fake_mesh = _FakeMesh()
         fake_placements = (_FakeShard(0),)
-        momentum_buffer = _FakeDTensor(
+        muon_input = _FakeDTensor(
             local_shard,
             device_mesh=fake_mesh,
             placements=fake_placements,
@@ -1312,7 +1376,7 @@ class TestMuonClipOptimizer:
         monkeypatch.setattr(muon_clip_module.dist, "scatter", _fake_scatter)
 
         update = optimizer._orthogonalize_dtensor_update(
-            momentum_buffer=momentum_buffer,
+            muon_input=muon_input,
             param=fake_param,
             group_params=[fake_param],
         )

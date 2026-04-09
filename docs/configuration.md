@@ -345,6 +345,7 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | Key                            | Type             | Default           | Description                                                  |
 | ------------------------------ | ---------------- | ----------------- | ------------------------------------------------------------ |
 | `muon_beta`                    | `float`          | `0.95`            | Muon momentum coefficient.                                   |
+| `nesterov`                     | `bool`           | `true`            | Use standard Muon Nesterov momentum (`g + beta * buffer`).   |
 | `muon_decay`                   | `float`          | `0.0`             | Muon weight decay.                                           |
 | `ns_steps`                     | `int`            | `5`               | Newton-Schulz/Polar iterations.                              |
 | `enable_clipping`              | `bool`           | `true`            | Enable MuonClip's QK clipping path (separate from `trainer.gradient_clipping`). |

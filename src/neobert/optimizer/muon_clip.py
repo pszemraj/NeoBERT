@@ -47,8 +47,9 @@ class MuonClipConfig:
     # Learning rates
     lr: float = 1e-4
 
-    # Muon parameters (for 2D weight matrices)
+    # Muon parameters (for hidden-layer 2D weight matrices)
     muon_beta: float = 0.95  # Momentum coefficient
+    nesterov: bool = True
     muon_decay: float = 0.0  # Weight decay for Muon params
     ns_steps: int = 5  # Newton-Schulz iterations (3-9 recommended)
 
@@ -863,6 +864,7 @@ class MuonClipOptimizer(Optimizer):
                     "param_info": muon_param_info,
                     "lr": self.config.lr,
                     "beta": self.config.muon_beta,
+                    "nesterov": self.config.nesterov,
                     "weight_decay": self.config.muon_decay,
                     "use_muon": True,
                     "param_policy": param_policy,
@@ -1079,11 +1081,15 @@ class MuonClipOptimizer(Optimizer):
                 continue
 
             # Apply momentum
-            state["momentum_buffer"].mul_(group["beta"]).add_(
-                grad, alpha=1 - group["beta"]
-            )
+            state["momentum_buffer"].mul_(group["beta"]).add_(grad)
 
             momentum_buffer = state["momentum_buffer"]
+            muon_input = self._muon_input(
+                grad=grad,
+                momentum_buffer=momentum_buffer,
+                beta=float(group["beta"]),
+                nesterov=bool(group.get("nesterov", True)),
+            )
             # Parameter topology is the source of truth; loaded state must match it.
             param_is_dtensor = self._is_dtensor(param)
             buffer_is_dtensor = self._is_dtensor(momentum_buffer)
@@ -1096,7 +1102,7 @@ class MuonClipOptimizer(Optimizer):
                         "a raw local-tensor load_state_dict path."
                     )
                 update = self._orthogonalize_dtensor_update(
-                    momentum_buffer=momentum_buffer,
+                    muon_input=muon_input,
                     param=param,
                     group_params=group["params"],
                     group_param_info=group.get("param_info"),
@@ -1110,7 +1116,7 @@ class MuonClipOptimizer(Optimizer):
                     )
                 # Orthogonalize 2D gradients using Newton-Schulz/Polar Express.
                 # NOTE: this local path assumes full (non-sharded) parameter tensors.
-                update = self._orthogonalize_update(momentum_buffer)
+                update = self._orthogonalize_update(muon_input)
                 update = self._normalize_muon_update(update, param.shape)
 
             # Weight decay
@@ -1432,17 +1438,37 @@ class MuonClipOptimizer(Optimizer):
             )
         return row_counts
 
+    def _muon_input(
+        self,
+        *,
+        grad: Any,
+        momentum_buffer: Any,
+        beta: float,
+        nesterov: bool,
+    ) -> Any:
+        """Build the Muon direction from the current grad and momentum state.
+
+        :param Any grad: Current gradient tensor or DTensor.
+        :param Any momentum_buffer: Momentum buffer after the current update.
+        :param float beta: Muon momentum coefficient.
+        :param bool nesterov: Whether to use standard Nesterov Muon momentum.
+        :return Any: Tensor-like value to orthogonalize.
+        """
+        if nesterov:
+            return grad.add(momentum_buffer, alpha=beta)
+        return momentum_buffer
+
     def _orthogonalize_dtensor_update(
         self,
         *,
-        momentum_buffer: Any,
+        muon_input: Any,
         param: torch.nn.Parameter,
         group_params: Sequence[torch.nn.Parameter],
         group_param_info: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> Any:
         """Orthogonalize a row-sharded DTensor via owner-compute gather/scatter.
 
-        :param Any momentum_buffer: DTensor momentum buffer (Shard(0)).
+        :param Any muon_input: DTensor Muon input (raw momentum or Nesterov direction).
         :param torch.nn.Parameter param: Parameter being updated.
         :param Sequence[torch.nn.Parameter] group_params: Muon parameter group members.
         :param Sequence[dict[str, Any]] | None group_param_info:
@@ -1458,7 +1484,7 @@ class MuonClipOptimizer(Optimizer):
                 "DTensor Muon update requires torch.distributed to be initialized."
             )
 
-        placements = momentum_buffer.placements
+        placements = muon_input.placements
         if len(placements) != 1 or not isinstance(placements[0], Shard):
             raise RuntimeError(
                 "MuonClip DTensor path currently supports only 1D row-sharded DTensors."
@@ -1469,7 +1495,7 @@ class MuonClipOptimizer(Optimizer):
                 "MuonClip DTensor path currently supports only Shard(0) placement."
             )
 
-        mesh = momentum_buffer.device_mesh
+        mesh = muon_input.device_mesh
         mesh_ndim = getattr(mesh, "ndim", None)
         if mesh_ndim is not None and int(mesh_ndim) != 1:
             raise RuntimeError(
@@ -1492,7 +1518,7 @@ class MuonClipOptimizer(Optimizer):
             process_group=process_group,
         )
 
-        local_shard = momentum_buffer.to_local()
+        local_shard = muon_input.to_local()
         if local_shard.ndim != 2:
             raise RuntimeError(
                 "MuonClip DTensor path expects rank-2 local shards, got "
@@ -1501,15 +1527,15 @@ class MuonClipOptimizer(Optimizer):
         local_rows = int(local_shard.shape[0])
         row_counts = self._get_dtensor_row_counts(
             local_shard=local_shard,
-            global_shape=momentum_buffer.shape,
+            global_shape=muon_input.shape,
             process_group=process_group,
             world_size=world_size,
             rank=rank,
         )
-        global_param_shape = torch.Size(momentum_buffer.shape)
+        global_param_shape = torch.Size(muon_input.shape)
         try:
             global_param_stride = tuple(
-                int(dim_stride) for dim_stride in momentum_buffer.stride()
+                int(dim_stride) for dim_stride in muon_input.stride()
             )
         except Exception as exc:
             raise RuntimeError(

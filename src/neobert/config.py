@@ -162,6 +162,7 @@ class MuonConfig:
     """Muon optimizer-specific configuration."""
 
     muon_beta: float = 0.95
+    nesterov: bool = True
     muon_decay: float = 0.0
     ns_steps: int = 5
     enable_clipping: bool = True
