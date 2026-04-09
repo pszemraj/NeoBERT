@@ -79,7 +79,7 @@ class MuonClipConfig:
 
     # Orthogonalization / routing control
     orthogonalization: str = "polar_express"
-    norm_factor: str = "legacy_compat"
+    norm_factor: str = "neobert"
     param_policy: str = "hidden_2d"
     algorithm: Optional[str] = None  # Alias for orthogonalization
     polar_express: Optional[bool] = None  # Legacy toggle
@@ -203,9 +203,13 @@ class MuonClipConfig:
             )
 
         norm_factor = str(self.norm_factor).strip().replace("-", "_").lower()
+        norm_factor = {
+            "legacy_compat": "neobert",
+            "original": "muon_reference",
+        }.get(norm_factor, norm_factor)
         valid_norm_factors = {
-            "legacy_compat",
-            "original",
+            "neobert",
+            "muon_reference",
             "spectral",
             "match_rms_adamw",
             "none",
@@ -1821,8 +1825,8 @@ class MuonClipOptimizer(Optimizer):
         """Normalize orthogonalized update magnitude before applying it.
 
         Named modes:
-        - ``legacy_compat``: NeoBERT compatibility scaling
-        - ``original``: reference Muon scaling
+        - ``neobert``: NeoBERT encoder default scaling
+        - ``muon_reference``: reference Muon scaling
         - ``spectral``: scale by sqrt(d_out / d_in)
         - ``match_rms_adamw``: reduced legacy-style scale
         - ``none``: no extra scaling
@@ -1836,16 +1840,20 @@ class MuonClipOptimizer(Optimizer):
 
         d_out, d_in = int(param_shape[0]), int(param_shape[1])
         norm_factor = (
-            str(getattr(self.config, "norm_factor", "legacy_compat"))
+            str(getattr(self.config, "norm_factor", "neobert"))
             .strip()
             .replace("-", "_")
             .lower()
         )
+        norm_factor = {
+            "legacy_compat": "neobert",
+            "original": "muon_reference",
+        }.get(norm_factor, norm_factor)
         if norm_factor == "none":
             scale = 1.0
-        elif norm_factor == "legacy_compat":
+        elif norm_factor == "neobert":
             scale = 0.4 * max(d_out, d_in) ** 0.5
-        elif norm_factor == "original":
+        elif norm_factor == "muon_reference":
             scale = max(1.0, d_out / max(d_in, 1)) ** 0.5
         elif norm_factor == "spectral":
             scale = (d_out / max(d_in, 1)) ** 0.5
@@ -1854,7 +1862,7 @@ class MuonClipOptimizer(Optimizer):
         else:
             raise ValueError(
                 f"Unsupported norm_factor '{norm_factor}'. "
-                "Expected one of: legacy_compat, original, spectral, "
+                "Expected one of: neobert, muon_reference, spectral, "
                 "match_rms_adamw, none."
             )
 

@@ -200,7 +200,7 @@ def main() -> None:
         }
         del init_model
 
-        for norm_factor in ("legacy_compat", "original"):
+        for norm_factor in ("neobert", "muon_reference"):
             muon_cfg = MuonClipConfig(
                 lr=1e-3,
                 muon_beta=0.95,

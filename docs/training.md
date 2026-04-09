@@ -131,16 +131,17 @@ Current logging semantics:
 `trainer.gradient_clipping` clips gradients. MuonClip's
 `optimizer.muon_config.enable_clipping` toggles its separate QK activation
 clipping path, which is auto-disabled for sharded FSDP2 Muon runs.
-Muon ships with `norm_factor=legacy_compat`, `param_policy=hidden_2d`, and
+Muon ships with `norm_factor=neobert`, `param_policy=hidden_2d`, and
 `nesterov=true`.
 Use `all_2d` explicitly when you want exact v0.1.3-style Muon scope for
 compatibility benchmarking.
 This default routing follows the original Muon guidance and PyTorch's Muon
 documentation: hidden transformer matrices use Muon, while embeddings, output
 layers, biases, and norm parameters stay on Adam-style fallback groups.
-`norm_factor=original` is the reference Muon size correction
-`sqrt(max(1, d_out / d_in))`; `legacy_compat` keeps the older NeoBERT local
-scale used by existing branch baselines.
+`norm_factor=neobert` is the shipped default because it has worked better for
+this encoder setup than reference Muon scaling. `muon_reference` keeps the
+reference size correction `sqrt(max(1, d_out / d_in))` available for parity and
+ablation runs.
 Fused `qkv.weight` parameters are handled per projection: Muon splits the
 interleaved fused matrix into Q, K, and V updates internally, applies
 orthogonalization and normalization to each projection separately, then packs

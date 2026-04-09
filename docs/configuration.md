@@ -357,14 +357,14 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | `capture_last_microbatch_only` | `bool`           | `true`            | Capture activations only for final microbatch in GA window.  |
 | `detect_anomalies`             | `bool`           | `false`           | Enable anomaly checks in optimizer step.                     |
 | `orthogonalization`            | `str`            | `"polar_express"` | Orthogonalization algorithm selector.                        |
-| `norm_factor`                  | `str`            | `"legacy_compat"` | Post-orthogonalization normalization (`legacy_compat`, `original`, `spectral`, `match_rms_adamw`, `none`). |
+| `norm_factor`                  | `str`            | `"neobert"` | Post-orthogonalization normalization (`neobert`, `muon_reference`, `spectral`, `match_rms_adamw`, `none`). |
 | `param_policy`                 | `str`            | `"hidden_2d"` | Muon routing policy (`hidden_2d` is the shipped default and applies Muon only to hidden transformer matrices; `all_2d` remains available for explicit v0.1.3-scope compatibility tests). |
 | `algorithm`                    | `str \| None`    | `null`            | Deprecated alias of `orthogonalization`.                     |
 | `polar_express`                | `bool \| None`   | `null`            | Deprecated legacy toggle.                                    |
 | `clipping_layers_mapping`      | `dict[str, str]` | `{}`              | Projection-name overrides for non-standard attention blocks. |
 
 > [!NOTE]
-> The shipped defaults are `norm_factor=legacy_compat` and
+> The shipped defaults are `norm_factor=neobert` and
 > `param_policy=hidden_2d`. Use `all_2d` explicitly when you want exact
 > v0.1.3-style Muon scope for compatibility benchmarking.
 >
@@ -373,11 +373,14 @@ Overrides are validated with the same semantic checks as base YAML configs.
 > layer matrices, while embeddings, output/unembedding layers, biases, and norm
 > parameters stay on a standard Adam-style optimizer.
 >
-> `original` matches the reference Muon size correction used by PyTorch and
+> `neobert` is the shipped default because this encoder family trained better
+> with the symmetric `0.4 * sqrt(max(d_out, d_in))` scale than with reference
+> Muon scaling. It keeps the branch's current pretraining behavior while
+> avoiding compatibility-driven naming.
+>
+> `muon_reference` matches the reference Muon size correction used by PyTorch and
 > OpenAI's recent parameter-golf implementation: scale by
-> `sqrt(max(1, d_out / d_in))`. `legacy_compat` keeps NeoBERT's older local
-> scaling for compatibility with existing ablations and checkpoints on this
-> branch.
+> `sqrt(max(1, d_out / d_in))`.
 >
 > NeoBERT's fused `qkv.weight` parameters are still treated as three hidden
 > matrices for Muon. Q, K, and V are orthogonalized and normalized separately,

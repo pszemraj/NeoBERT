@@ -149,7 +149,7 @@ def _build_prepared_run(project_dir: Path):
         muon_config={
             "enable_clipping": False,
             "orthogonalization": "polar_express",
-            "norm_factor": "legacy_compat",
+            "norm_factor": "neobert",
             "param_policy": "hidden_2d",
         },
     )
