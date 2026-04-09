@@ -1045,25 +1045,22 @@ def _resolve_loader_perf_settings(
 def _should_use_loader_pin_memory(
     *,
     pin_memory: bool,
-    disable_dispatch: bool,
     accelerator: Accelerator,
 ) -> bool:
     """Return whether pinned CPU staging should happen inside the dataloader.
 
-    Automatic Accelerate device placement can consume pinned batches directly.
-    Packed/manual transfer paths instead re-pin the final CPU batch immediately
-    before the non-blocking H2D copy.
+    Loader-side pinning is enabled whenever the runtime supports it so that
+    every consumer (training loop, eval loop) gets page-locked batches for
+    ``non_blocking`` H2D copies.  The training path additionally re-pins
+    after gradient-accumulation concatenation (``torch.cat`` produces
+    unpinned tensors); the ``_pin_cpu_tensors`` helper is a no-op when
+    tensors are already pinned.
 
     :param bool pin_memory: Whether pinned CPU staging is enabled overall.
-    :param bool disable_dispatch: Whether batches stay on CPU until manually moved.
     :param Accelerator accelerator: Runtime accelerator instance.
     :return bool: ``True`` when loader-side pinning should be enabled.
     """
-    return bool(
-        pin_memory
-        and not disable_dispatch
-        and hasattr(accelerator, "prepare_data_loader")
-    )
+    return bool(pin_memory and hasattr(accelerator, "prepare_data_loader"))
 
 
 def _scale_gradients(model: torch.nn.Module, scale: torch.Tensor) -> None:
@@ -2092,7 +2089,6 @@ def trainer(cfg: Config) -> None:
         logger.info(note)
     loader_pin_memory = _should_use_loader_pin_memory(
         pin_memory=pin_memory,
-        disable_dispatch=disable_dispatch,
         accelerator=accelerator,
     )
 

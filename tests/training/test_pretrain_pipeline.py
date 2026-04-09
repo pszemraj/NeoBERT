@@ -551,8 +551,8 @@ class TestPretrainComponents:
         assert prefetch_factor == 2
         assert notes == []
 
-    def test_should_use_loader_pin_memory_only_for_auto_dispatch(self):
-        """Loader-side pinning should stay on only for auto-dispatched batches."""
+    def test_should_use_loader_pin_memory(self):
+        """Loader-side pinning requires pin_memory and prepare_data_loader support."""
 
         class _AcceleratorWithPrepare:
             @staticmethod
@@ -564,22 +564,14 @@ class TestPretrainComponents:
 
         assert _should_use_loader_pin_memory(
             pin_memory=True,
-            disable_dispatch=False,
             accelerator=_AcceleratorWithPrepare(),
         )
         assert not _should_use_loader_pin_memory(
             pin_memory=True,
-            disable_dispatch=True,
-            accelerator=_AcceleratorWithPrepare(),
-        )
-        assert not _should_use_loader_pin_memory(
-            pin_memory=True,
-            disable_dispatch=False,
             accelerator=_AcceleratorWithoutPrepare(),
         )
         assert not _should_use_loader_pin_memory(
             pin_memory=False,
-            disable_dispatch=False,
             accelerator=_AcceleratorWithPrepare(),
         )
 
