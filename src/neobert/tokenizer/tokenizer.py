@@ -9,6 +9,8 @@ from datasets import Dataset, Features, Sequence, Value
 from tokenizers.processors import TemplateProcessing
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 
+from neobert.streaming import is_streaming_dataset, peek_streaming_example
+
 logger = logging.getLogger("neobert.tokenizer")
 
 
@@ -191,17 +193,32 @@ def get_tokenizer(
 
 
 def resolve_text_column(
-    dataset: Dataset, is_streaming: bool, preferred: Optional[str] = None
+    dataset: Dataset,
+    is_streaming: bool,
+    preferred: Optional[str] = None,
+    *,
+    streaming_read_retries: int = 0,
+    streaming_read_retry_backoff_seconds: float = 1.0,
+    streaming_read_retry_max_backoff_seconds: float = 8.0,
 ) -> str:
     """Resolve the text column for tokenization.
 
     :param Dataset dataset: Dataset to inspect.
     :param bool is_streaming: Whether the dataset is streaming.
     :param str | None preferred: Optional preferred column name to validate.
+    :param int streaming_read_retries: Retry count for transient streaming reads.
+    :param float streaming_read_retry_backoff_seconds: Initial backoff for retries.
+    :param float streaming_read_retry_max_backoff_seconds: Maximum retry backoff.
     :return str: Name of the text column.
     """
     if is_streaming:
-        first_example = next(iter(dataset))
+        first_example = peek_streaming_example(
+            dataset,
+            context="resolve_text_column",
+            max_retries=streaming_read_retries,
+            base_backoff_seconds=streaming_read_retry_backoff_seconds,
+            max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+        )
         columns = list(first_example.keys())
     else:
         columns = dataset.column_names
@@ -342,7 +359,7 @@ def tokenize(
     :return Dataset: Tokenized dataset.
     """
     # Check if this is a streaming dataset (IterableDataset)
-    is_streaming = hasattr(dataset, "_iter") or "IterableDataset" in str(type(dataset))
+    is_streaming = is_streaming_dataset(dataset)
 
     # Get the number of cpu cores available to the process
     # Override with kwargs if provided (e.g., from trainer)

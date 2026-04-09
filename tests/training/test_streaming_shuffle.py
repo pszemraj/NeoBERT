@@ -2,11 +2,31 @@
 """Tests for streaming dataset shuffle helpers."""
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import requests
+import torch
 
 from neobert.pretraining.trainer import (
     _maybe_shuffle_streaming_dataset,
+    _load_streaming_split,
     _prepare_resume_dataloader,
 )
+from neobert.streaming import RetryingStreamingDataset, peek_streaming_example
+
+
+def _http_error(status_code: int) -> requests.exceptions.HTTPError:
+    """Construct an HTTPError with a response-like object.
+
+    :param int status_code: HTTP status code to attach.
+    :return requests.exceptions.HTTPError: HTTP error instance.
+    """
+    response = SimpleNamespace(status_code=status_code)
+    return requests.exceptions.HTTPError(
+        f"{status_code} transient failure",
+        response=response,
+    )
 
 
 class DummyStreamingDataset:
@@ -156,3 +176,159 @@ class TestStreamingPercentSlice(unittest.TestCase):
                 _load_streaming_split("dummy_dataset", "train[:1%]", {})
 
             self.assertIn("percent slicing", str(ctx.exception))
+
+    def test_load_streaming_split_retries_transient_load_errors(self):
+        """Ensure transient hub failures retry before the split loader gives up."""
+        mock_dataset = MagicMock()
+        calls = {"count": 0}
+
+        def _flaky_load(*args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise _http_error(503)
+            return mock_dataset
+
+        with patch("neobert.pretraining.trainer.load_dataset", side_effect=_flaky_load):
+            loaded = _load_streaming_split(
+                "dummy_dataset",
+                "train",
+                {},
+                streaming_read_retries=1,
+                streaming_read_retry_backoff_seconds=0.01,
+                streaming_read_retry_max_backoff_seconds=0.01,
+            )
+
+        self.assertIs(loaded, mock_dataset)
+        self.assertEqual(calls["count"], 2)
+
+
+class _PeekFlakyDataset(torch.utils.data.IterableDataset):
+    """Yield once after a single transient failure."""
+
+    def __init__(self) -> None:
+        """Initialize the flaky dataset."""
+        super().__init__()
+        self.failed = False
+
+    def __iter__(self):
+        """Yield the first example after a transient failure.
+
+        :return collections.abc.Iterator[dict[str, str]]: Example iterator.
+        """
+        if not self.failed:
+            self.failed = True
+            raise _http_error(503)
+        yield {"text": "ok"}
+
+
+class _RetryableFlakyDataset(torch.utils.data.IterableDataset):
+    """Streaming stub that can resume from state after transient failures."""
+
+    def __init__(
+        self,
+        values: list[int],
+        *,
+        fail_at: int,
+        fail_times: int,
+    ) -> None:
+        """Initialize the retryable stub.
+
+        :param list[int] values: Sequence of values to yield.
+        :param int fail_at: Cursor position where failures should trigger.
+        :param int fail_times: Number of transient failures before success.
+        """
+        super().__init__()
+        self.values = values
+        self.fail_at = fail_at
+        self.failures_remaining = fail_times
+        self.epoch = 0
+        self._starting_state = {"cursor": 0, "epoch": 0}
+        self._state = {"cursor": 0, "epoch": 0}
+
+    def set_epoch(self, epoch: int) -> None:
+        """Set the current epoch.
+
+        :param int epoch: Epoch index.
+        """
+        self.epoch = int(epoch)
+
+    def state_dict(self) -> dict[str, int]:
+        """Return the current iterator state.
+
+        :return dict[str, int]: Cursor and epoch state.
+        """
+        return dict(self._state)
+
+    def load_state_dict(self, state_dict: dict[str, int]) -> None:
+        """Load the next iterator start state.
+
+        :param dict[str, int] state_dict: Cursor and epoch state.
+        """
+        self._starting_state = dict(state_dict)
+
+    def __iter__(self):
+        """Iterate values and inject configured transient failures.
+
+        :return collections.abc.Iterator[int]: Value iterator.
+        """
+        cursor = 0
+        if self._starting_state.get("epoch", 0) == self.epoch:
+            cursor = int(self._starting_state.get("cursor", 0))
+        while cursor < len(self.values):
+            if cursor == self.fail_at and self.failures_remaining > 0:
+                self.failures_remaining -= 1
+                raise _http_error(503)
+            value = self.values[cursor]
+            cursor += 1
+            self._state = {"cursor": cursor, "epoch": self.epoch}
+            yield value
+
+
+class TestStreamingRetryHelpers(unittest.TestCase):
+    """Validate retry helpers for transient streaming read failures."""
+
+    def test_peek_streaming_example_retries_transient_http_error(self):
+        """Ensure peeking the first streaming example retries transient errors."""
+        dataset = _PeekFlakyDataset()
+
+        first = peek_streaming_example(
+            dataset,
+            context="unit-test peek",
+            max_retries=1,
+            base_backoff_seconds=0.01,
+            max_backoff_seconds=0.01,
+            sleep_fn=lambda _seconds: None,
+        )
+
+        self.assertEqual(first, {"text": "ok"})
+
+    def test_retrying_streaming_dataset_resumes_after_transient_failure(self):
+        """Ensure transient failures resume from the last yielded example."""
+        dataset = _RetryableFlakyDataset([0, 1, 2, 3], fail_at=2, fail_times=1)
+        wrapped = RetryingStreamingDataset(
+            dataset,
+            label="unit-test",
+            max_retries=1,
+            base_backoff_seconds=0.01,
+            max_backoff_seconds=0.01,
+            sleep_fn=lambda _seconds: None,
+        )
+
+        self.assertEqual(list(wrapped), [0, 1, 2, 3])
+
+    def test_retrying_streaming_dataset_raises_after_exhausting_budget(self):
+        """Ensure persistent transient failures still fail loudly after retries."""
+        dataset = _RetryableFlakyDataset([0, 1, 2], fail_at=1, fail_times=3)
+        wrapped = RetryingStreamingDataset(
+            dataset,
+            label="unit-test",
+            max_retries=1,
+            base_backoff_seconds=0.01,
+            max_backoff_seconds=0.01,
+            sleep_fn=lambda _seconds: None,
+        )
+
+        with self.assertRaises(RuntimeError) as ctx:
+            list(wrapped)
+
+        self.assertIn("exhausted 1 retry attempt", str(ctx.exception))

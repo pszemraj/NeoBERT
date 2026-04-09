@@ -127,6 +127,9 @@ class DatasetConfig:
     train_split: Optional[str] = None
     eval_split: Optional[str] = None
     eval_samples: Optional[int] = None
+    streaming_read_retries: int = 4
+    streaming_read_retry_backoff_seconds: float = 5.0
+    streaming_read_retry_max_backoff_seconds: float = 60.0
     num_proc: int = 4  # Number of processes for tokenization
     shuffle_buffer_size: int = 10000  # Buffer size for streaming dataset shuffling
     pre_tokenize: bool = False  # Whether to pre-tokenize non-streaming datasets
@@ -1443,6 +1446,31 @@ class ConfigLoader:
                 "dataset.eval_samples must be > 0 when set, got "
                 f"{config.dataset.eval_samples}."
             )
+        if config.dataset.streaming_read_retries < 0:
+            errors.append(
+                "dataset.streaming_read_retries must be >= 0, got "
+                f"{config.dataset.streaming_read_retries}."
+            )
+        if config.dataset.streaming_read_retry_backoff_seconds <= 0:
+            errors.append(
+                "dataset.streaming_read_retry_backoff_seconds must be > 0, got "
+                f"{config.dataset.streaming_read_retry_backoff_seconds}."
+            )
+        if config.dataset.streaming_read_retry_max_backoff_seconds <= 0:
+            errors.append(
+                "dataset.streaming_read_retry_max_backoff_seconds must be > 0, got "
+                f"{config.dataset.streaming_read_retry_max_backoff_seconds}."
+            )
+        if (
+            config.dataset.streaming_read_retry_max_backoff_seconds
+            < config.dataset.streaming_read_retry_backoff_seconds
+        ):
+            errors.append(
+                "dataset.streaming_read_retry_max_backoff_seconds must be >= "
+                "dataset.streaming_read_retry_backoff_seconds, got "
+                f"{config.dataset.streaming_read_retry_max_backoff_seconds} < "
+                f"{config.dataset.streaming_read_retry_backoff_seconds}."
+            )
 
         if task in {"pretraining", "contrastive"}:
             if config.tokenizer.max_length < config.dataset.max_seq_length:
@@ -2054,6 +2082,21 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         "--dataset.streaming",
         type=_parse_cli_bool,
         help="Stream dataset from hub",
+    )
+    parser.add_argument(
+        "--dataset.streaming_read_retries",
+        type=int,
+        help="Outer retry count for transient streaming read failures",
+    )
+    parser.add_argument(
+        "--dataset.streaming_read_retry_backoff_seconds",
+        type=float,
+        help="Initial backoff for transient streaming read retries",
+    )
+    parser.add_argument(
+        "--dataset.streaming_read_retry_max_backoff_seconds",
+        type=float,
+        help="Maximum backoff for transient streaming read retries",
     )
     parser.add_argument(
         "--dataset.max_seq_length", type=int, help="Maximum sequence length"

@@ -165,12 +165,21 @@ Primary knobs are in `dataset.*`:
 - `pin_memory`
 - `persistent_workers`
 - `prefetch_factor`
+- `streaming_read_retries`
+- `streaming_read_retry_backoff_seconds`
+- `streaming_read_retry_max_backoff_seconds`
 
 When running on CUDA, trainer may warn and apply throughput-friendly defaults
 if these are unset/suboptimal. Current PyTorch builds route
 `DataLoader(pin_memory=True)` through a deprecated CUDA-specific path, so
 NeoBERT keeps loader-side pinning off and pins final CPU batches explicitly
 before non-blocking device transfers in the paths that move batches manually.
+For hub-backed streaming datasets, NeoBERT also retries transient read failures
+when inspecting stream schemas and while iterating long-running train/eval
+dataloaders. Recovery resumes from the last yielded example when the underlying
+HF iterable dataset supports `state_dict()/load_state_dict()`. Shuffled streams
+can still perturb in-buffer order after a retry because HF refill semantics do
+not preserve the exact old shuffle buffer contents.
 
 ## Streaming Eval Strategy
 

@@ -57,6 +57,12 @@ from neobert.pretraining.masked_objective import (
     MaskedPositionsOnlyMLMObjective,
 )
 from neobert.scheduler import get_scheduler, resolve_scheduler_steps
+from neobert.streaming import (
+    RetryingStreamingDataset,
+    is_streaming_dataset,
+    peek_streaming_example,
+    retry_streaming_operation,
+)
 from neobert.tokenizer import get_tokenizer, resolve_text_column
 from neobert.training_utils import (
     _compute_l2_norm_for_logging,
@@ -139,6 +145,48 @@ def _format_percent(value: float) -> str:
     :return str: Human-readable percentage string.
     """
     return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def _streaming_retry_settings(cfg: Config) -> tuple[int, float, float]:
+    """Resolve transient streaming read retry settings from config.
+
+    :param Config cfg: Active runtime config.
+    :return tuple[int, float, float]: ``(retries, base_backoff, max_backoff)``.
+    """
+    return (
+        int(cfg.dataset.streaming_read_retries),
+        float(cfg.dataset.streaming_read_retry_backoff_seconds),
+        float(cfg.dataset.streaming_read_retry_max_backoff_seconds),
+    )
+
+
+def _maybe_wrap_streaming_dataset_for_retries(
+    dataset: Dataset,
+    *,
+    label: str,
+    cfg: Config,
+) -> Dataset:
+    """Wrap a streaming dataset so transient hub read failures restart iteration.
+
+    :param Dataset dataset: Dataset to wrap.
+    :param str label: Human-readable dataset label for logs/errors.
+    :param Config cfg: Active runtime config.
+    :return Dataset: Wrapped dataset when retries are enabled, otherwise the original.
+    """
+    if isinstance(dataset, RetryingStreamingDataset):
+        return dataset
+    if not is_streaming_dataset(dataset):
+        return dataset
+    retries, base_backoff, max_backoff = _streaming_retry_settings(cfg)
+    if retries <= 0:
+        return dataset
+    return RetryingStreamingDataset(
+        dataset,
+        label=label,
+        max_retries=retries,
+        base_backoff_seconds=base_backoff,
+        max_backoff_seconds=max_backoff,
+    )
 
 
 def _log_masking_strategy(cfg: Config) -> None:
@@ -532,6 +580,10 @@ def _load_streaming_split(
     dataset_name: str,
     split: str,
     dataset_kwargs: dict[str, object],
+    *,
+    streaming_read_retries: int = 0,
+    streaming_read_retry_backoff_seconds: float = 1.0,
+    streaming_read_retry_max_backoff_seconds: float = 8.0,
 ) -> Dataset:
     """Load a streaming dataset split with optional slice notation.
 
@@ -541,14 +593,23 @@ def _load_streaming_split(
     :param str dataset_name: Dataset identifier.
     :param str split: Split string (e.g., "train[:1%]").
     :param dict[str, object] dataset_kwargs: Additional kwargs for HF datasets.
+    :param int streaming_read_retries: Retry count for transient streaming reads.
+    :param float streaming_read_retry_backoff_seconds: Initial retry backoff.
+    :param float streaming_read_retry_max_backoff_seconds: Maximum retry backoff.
     :return Dataset: Streaming dataset (IterableDataset).
     """
     base, start_token, end_token = _parse_split_slice(split)
-    dataset = load_dataset(
-        dataset_name,
-        split=base,
-        streaming=True,
-        **dataset_kwargs,
+    dataset = retry_streaming_operation(
+        lambda: load_dataset(
+            dataset_name,
+            split=base,
+            streaming=True,
+            **dataset_kwargs,
+        ),
+        context=f"load streaming split {dataset_name}:{base}",
+        max_retries=streaming_read_retries,
+        base_backoff_seconds=streaming_read_retry_backoff_seconds,
+        max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
     )
 
     if start_token is None and end_token is None:
@@ -560,7 +621,13 @@ def _load_streaming_split(
     total_examples: Optional[int] = None
     if needs_total:
         try:
-            builder = load_dataset_builder(dataset_name, **dataset_kwargs)
+            builder = retry_streaming_operation(
+                lambda: load_dataset_builder(dataset_name, **dataset_kwargs),
+                context=f"load dataset builder {dataset_name}",
+                max_retries=streaming_read_retries,
+                base_backoff_seconds=streaming_read_retry_backoff_seconds,
+                max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+            )
             if base in builder.info.splits:
                 total_examples = builder.info.splits[base].num_examples
         except Exception as exc:
@@ -597,17 +664,29 @@ def _infer_eval_split_name(
     dataset_kwargs: dict[str, object],
     *,
     train_split: Optional[str],
+    streaming_read_retries: int = 0,
+    streaming_read_retry_backoff_seconds: float = 1.0,
+    streaming_read_retry_max_backoff_seconds: float = 8.0,
 ) -> Optional[str]:
     """Infer a reasonable eval split name from dataset metadata.
 
     :param str dataset_name: Dataset identifier.
     :param dict[str, object] dataset_kwargs: Additional kwargs for HF datasets.
     :param str | None train_split: Train split selector (possibly sliced).
+    :param int streaming_read_retries: Retry count for transient streaming reads.
+    :param float streaming_read_retry_backoff_seconds: Initial retry backoff.
+    :param float streaming_read_retry_max_backoff_seconds: Maximum retry backoff.
     :return str | None: Preferred eval split name or ``None``.
     """
     train_base = _parse_split_slice(train_split or "train")[0].lower()
     try:
-        builder = load_dataset_builder(dataset_name, **dataset_kwargs)
+        builder = retry_streaming_operation(
+            lambda: load_dataset_builder(dataset_name, **dataset_kwargs),
+            context=f"infer eval split for {dataset_name}",
+            max_retries=streaming_read_retries,
+            base_backoff_seconds=streaming_read_retry_backoff_seconds,
+            max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+        )
         split_names = list(getattr(builder.info, "splits", {}).keys())
     except Exception as exc:
         logger.warning(
@@ -1580,6 +1659,11 @@ def trainer(cfg: Config) -> None:
     metrics["train/batches_in_epoch"] = int(metrics.get("train/batches_in_epoch", 0))
 
     is_streaming = cfg.dataset.streaming
+    (
+        streaming_read_retries,
+        streaming_read_retry_backoff_seconds,
+        streaming_read_retry_max_backoff_seconds,
+    ) = _streaming_retry_settings(cfg)
 
     if cfg.datacollator.pack_sequences:
         logger.info(
@@ -1675,6 +1759,9 @@ def trainer(cfg: Config) -> None:
                     cfg.dataset.name,
                     cfg.dataset.train_split,
                     dataset_kwargs,
+                    streaming_read_retries=streaming_read_retries,
+                    streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+                    streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
                 )
             else:
                 train_dataset = load_dataset(
@@ -1698,7 +1785,13 @@ def trainer(cfg: Config) -> None:
     if train_dataset is not None:
         if is_streaming:
             # For streaming datasets, peek at the first example
-            first_example = next(iter(train_dataset))
+            first_example = peek_streaming_example(
+                train_dataset,
+                context="inspect training stream schema",
+                max_retries=streaming_read_retries,
+                base_backoff_seconds=streaming_read_retry_backoff_seconds,
+                max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+            )
             needs_tokenization = "input_ids" not in first_example
         else:
             needs_tokenization = "input_ids" not in train_dataset.column_names
@@ -1766,6 +1859,9 @@ def trainer(cfg: Config) -> None:
                 train_dataset,
                 is_streaming,
                 preferred=cfg.dataset.text_column,
+                streaming_read_retries=streaming_read_retries,
+                streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+                streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
             )
             tokenize_num_proc = (
                 None
@@ -1809,6 +1905,9 @@ def trainer(cfg: Config) -> None:
             cfg.dataset.name,
             dataset_kwargs,
             train_split=cfg.dataset.train_split,
+            streaming_read_retries=streaming_read_retries,
+            streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+            streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
         )
         if inferred_eval_split is not None:
             eval_split = inferred_eval_split
@@ -1834,6 +1933,9 @@ def trainer(cfg: Config) -> None:
                     cfg.dataset.name,
                     eval_split,
                     dataset_kwargs,
+                    streaming_read_retries=streaming_read_retries,
+                    streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+                    streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
                 )
             else:
                 eval_dataset = load_dataset(
@@ -1887,7 +1989,13 @@ def trainer(cfg: Config) -> None:
         )
         eval_needs_tokenization = False
         if eval_is_streaming:
-            first_example = next(iter(eval_dataset))
+            first_example = peek_streaming_example(
+                eval_dataset,
+                context="inspect eval stream schema",
+                max_retries=streaming_read_retries,
+                base_backoff_seconds=streaming_read_retry_backoff_seconds,
+                max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+            )
             eval_needs_tokenization = "input_ids" not in first_example
         else:
             eval_needs_tokenization = "input_ids" not in eval_dataset.column_names
@@ -1899,6 +2007,9 @@ def trainer(cfg: Config) -> None:
                 eval_dataset,
                 eval_is_streaming,
                 preferred=cfg.dataset.text_column,
+                streaming_read_retries=streaming_read_retries,
+                streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+                streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
             )
             eval_num_proc = (
                 None
@@ -1932,6 +2043,17 @@ def trainer(cfg: Config) -> None:
             cfg.seed,
             print_fn=accelerator.print,
         )
+        train_dataset = _maybe_wrap_streaming_dataset_for_retries(
+            train_dataset,
+            label=f"{cfg.dataset.name}:{cfg.dataset.train_split or 'train'}",
+            cfg=cfg,
+        )
+        if eval_dataset is not None and eval_is_streaming:
+            eval_dataset = _maybe_wrap_streaming_dataset_for_retries(
+                eval_dataset,
+                label=f"{cfg.dataset.name}:{eval_split or 'eval'}",
+                cfg=cfg,
+            )
 
     pin_memory, persistent_workers, prefetch_factor, loader_perf_notes = (
         _resolve_loader_perf_settings(cfg, device=accelerator.device)

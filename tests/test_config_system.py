@@ -92,6 +92,12 @@ class TestConfigSystem(unittest.TestCase):
             "false",
             "--dataset.streaming",
             "false",
+            "--dataset.streaming_read_retries",
+            "7",
+            "--dataset.streaming_read_retry_backoff_seconds",
+            "2.5",
+            "--dataset.streaming_read_retry_max_backoff_seconds",
+            "15.0",
             "--datacollator.pack_sequences",
             "true",
             "--trainer.torch_compile",
@@ -122,6 +128,11 @@ class TestConfigSystem(unittest.TestCase):
             self.assertEqual(config.trainer.save_total_limit, 1)
             self.assertFalse(config.trainer.use_cpu)
             self.assertFalse(config.dataset.streaming)
+            self.assertEqual(config.dataset.streaming_read_retries, 7)
+            self.assertEqual(config.dataset.streaming_read_retry_backoff_seconds, 2.5)
+            self.assertEqual(
+                config.dataset.streaming_read_retry_max_backoff_seconds, 15.0
+            )
             self.assertTrue(config.datacollator.pack_sequences)
             self.assertEqual(config.trainer.logging_steps, 17)
             self.assertTrue(config.trainer.torch_compile)
@@ -398,6 +409,11 @@ optimizer:
             ConfigLoader.load(
                 str(config_path),
                 overrides=["dataset.streaming=truthy-but-invalid"],
+            )
+        with self.assertRaises(ValueError):
+            ConfigLoader.load(
+                str(config_path),
+                overrides=["dataset.streaming_read_retry_max_backoff_seconds=0.5"],
             )
 
     def test_all_test_configs_load(self):

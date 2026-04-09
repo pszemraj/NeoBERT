@@ -203,6 +203,9 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | `dataset.pin_memory`          | `bool`        | `false` | Enable pinned CPU staging for non-blocking H2D copies; may be forced on for CUDA runs that move batches manually. |
 | `dataset.persistent_workers`  | `bool`        | `true`  | Keep DataLoader workers alive across epochs.                |
 | `dataset.prefetch_factor`     | `int \| None` | `null`  | Worker prefetch depth when workers > 0.                     |
+| `dataset.streaming_read_retries` | `int`      | `4`     | Outer retry count for transient streaming read failures after the underlying HF client exhausts its own per-request retries. |
+| `dataset.streaming_read_retry_backoff_seconds` | `float` | `5.0` | Initial exponential-backoff delay for transient streaming read retries. |
+| `dataset.streaming_read_retry_max_backoff_seconds` | `float` | `60.0` | Maximum capped backoff delay for transient streaming read retries. |
 | `dataset.num_proc`            | `int`         | `4`     | Multiprocessing workers for tokenization map.               |
 | `dataset.shuffle_buffer_size` | `int`         | `10000` | Streaming shuffle buffer.                                   |
 | `dataset.pre_tokenize`        | `bool`        | `false` | Pre-tokenize non-streaming datasets and persist results.    |
@@ -222,6 +225,11 @@ Overrides are validated with the same semantic checks as base YAML configs.
 > [!NOTE]
 > `dataset.pretraining_prob` is deprecated and normalized to
 > `contrastive.pretraining_prob`.
+>
+> Streaming retry recovery resumes from the last yielded example when the
+> underlying HF iterable dataset exposes `state_dict()/load_state_dict()`.
+> When the source stream is shuffled, HF refill semantics can still perturb the
+> exact in-buffer order after a retry.
 >
 > Contrastive preprocessing accepts an omitted `dataset.name`, `dataset.name:
 > ALL`, canonical registry keys such as `ALLNLI`, or common HF dataset IDs
