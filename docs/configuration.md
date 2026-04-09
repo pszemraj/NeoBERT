@@ -373,6 +373,10 @@ Overrides are validated with the same semantic checks as base YAML configs.
 > layer matrices, while embeddings, output/unembedding layers, biases, and norm
 > parameters stay on a standard Adam-style optimizer.
 >
+> NeoBERT's fused `qkv.weight` parameters are still treated as three hidden
+> matrices for Muon. Q, K, and V are orthogonalized and normalized separately,
+> then packed back into the model's interleaved fused layout.
+>
 > `orthogonalization` changes compute precision behavior on CUDA:
 > `newton_schulz` upcasts BF16 gradients to FP32 for the iteration and casts
 > back; `polar_express` runs in BF16 work dtype (when available) for higher

@@ -138,6 +138,10 @@ compatibility benchmarking.
 This default routing follows the original Muon guidance and PyTorch's Muon
 documentation: hidden transformer matrices use Muon, while embeddings, output
 layers, biases, and norm parameters stay on Adam-style fallback groups.
+Fused `qkv.weight` parameters are handled per projection: Muon splits the
+interleaved fused matrix into Q, K, and V updates internally, applies
+orthogonalization and normalization to each projection separately, then packs
+the result back into the fused layout before the optimizer step.
 
 ## Packed Training
 
