@@ -247,6 +247,18 @@ def test_resolve_step_checkpoint_selector_picks_highest_loadable_numbered_step()
     assert resolved == "300"
 
 
+def test_resolve_step_checkpoint_selector_accepts_direct_step_dir_for_latest() -> None:
+    """Direct step paths should resolve ``latest`` to their own step tag."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint_dir = Path(tmpdir) / "123"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        (checkpoint_dir / MODEL_WEIGHTS_NAME).touch()
+
+        resolved = resolve_step_checkpoint_selector(checkpoint_dir, "latest")
+
+    assert resolved == "123"
+
+
 def test_resolve_step_checkpoint_dir_rejects_mismatched_direct_portable_weights() -> (
     None
 ):
@@ -326,6 +338,35 @@ def test_load_step_checkpoint_state_dict_falls_back_for_direct_step_dir(
 
     assert state_dict == expected
     assert seen == [(checkpoint_dir.resolve(), "456"), (checkpoint_dir.resolve(), "")]
+
+
+def test_load_step_checkpoint_state_dict_accepts_latest_for_direct_step_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct step paths should load cleanly when callers request ``latest``."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint_dir = Path(tmpdir) / "789"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        (checkpoint_dir / MODEL_WEIGHTS_NAME).touch()
+        expected = {"weight": torch.full((2, 2), 7.0)}
+
+        def _fake_load_model_safetensors(path: Path, *, map_location: str = "cpu"):
+            del map_location
+            assert path == checkpoint_dir
+            return expected
+
+        monkeypatch.setattr(
+            "neobert.checkpointing.load_model_safetensors",
+            _fake_load_model_safetensors,
+        )
+
+        state_dict = load_step_checkpoint_state_dict(
+            checkpoint_dir,
+            "latest",
+            map_location="cpu",
+        )
+
+    assert state_dict == expected
 
 
 def test_load_step_checkpoint_state_dict_does_not_ignore_explicit_checkpoint(

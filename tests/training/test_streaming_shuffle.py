@@ -286,6 +286,51 @@ class _RetryableFlakyDataset(torch.utils.data.IterableDataset):
             yield value
 
 
+class _StatefulCursorStreamingDataset(torch.utils.data.IterableDataset):
+    """Streaming stub whose dataset object owns the active cursor state."""
+
+    def __init__(self, values: list[int], *, fail_once_after_advance: bool) -> None:
+        """Store values and optional one-time transient failure behavior.
+
+        :param list[int] values: Sequence of values to yield.
+        :param bool fail_once_after_advance:
+            Whether to advance the cursor once, raise a transient error, then
+            succeed on the next attempt.
+        """
+        super().__init__()
+        self.values = values
+        self.cursor = 0
+        self.fail_once_after_advance = fail_once_after_advance
+
+    def state_dict(self) -> dict[str, int]:
+        """Return the active dataset cursor.
+
+        :return dict[str, int]: Current cursor position.
+        """
+        return {"cursor": self.cursor}
+
+    def load_state_dict(self, state_dict: dict[str, int]) -> None:
+        """Restore the active dataset cursor.
+
+        :param dict[str, int] state_dict: Cursor state to restore.
+        """
+        self.cursor = int(state_dict["cursor"])
+
+    def __iter__(self):
+        """Yield values while mutating the dataset-owned cursor in place.
+
+        :return collections.abc.Iterator[int]: Value iterator.
+        """
+        if self.fail_once_after_advance:
+            self.fail_once_after_advance = False
+            self.cursor += 1
+            raise _http_error(503)
+        while self.cursor < len(self.values):
+            value = self.values[self.cursor]
+            self.cursor += 1
+            yield value
+
+
 class _StatelessStreamingDataset(torch.utils.data.IterableDataset):
     """Iterable dataset stub without resumable iteration state."""
 
@@ -322,6 +367,25 @@ class TestStreamingRetryHelpers(unittest.TestCase):
         )
 
         self.assertEqual(first, {"text": "ok"})
+
+    def test_peek_streaming_example_restores_stateful_cursor_after_retry(self):
+        """Peeking resumable streams must not consume examples or skew retries."""
+        dataset = _StatefulCursorStreamingDataset(
+            [10, 11, 12],
+            fail_once_after_advance=True,
+        )
+
+        first = peek_streaming_example(
+            dataset,
+            context="stateful cursor peek",
+            max_retries=1,
+            base_backoff_seconds=0.01,
+            max_backoff_seconds=0.01,
+            sleep_fn=lambda _seconds: None,
+        )
+
+        self.assertEqual(first, 10)
+        self.assertEqual(list(dataset), [10, 11, 12])
 
     def test_retrying_streaming_dataset_resumes_after_transient_failure(self):
         """Ensure transient failures resume from the last yielded example."""

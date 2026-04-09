@@ -4,6 +4,7 @@ import errno
 import logging
 import time
 from collections.abc import Callable, Iterator, Mapping
+from copy import deepcopy
 from typing import Any, TypeVar
 
 import requests
@@ -191,6 +192,10 @@ def peek_streaming_example(
 ) -> Any:
     """Fetch the next example from a streaming dataset with retry handling.
 
+    Resumable streaming datasets are peeked non-destructively: the iterator state
+    is snapshotted before inspection, each retry restarts from that snapshot, and
+    the original cursor is restored before returning or raising.
+
     :param object dataset: Streaming dataset to read from.
     :param str context: Human-readable context for logs/errors.
     :param int max_retries: Maximum retry count after the initial failure.
@@ -199,14 +204,37 @@ def peek_streaming_example(
     :param Callable[[float], None] sleep_fn: Sleep function for backoff delays.
     :return Any: First yielded example.
     """
-    return retry_streaming_operation(
-        lambda: next(iter(dataset)),
-        context=context,
-        max_retries=max_retries,
-        base_backoff_seconds=base_backoff_seconds,
-        max_backoff_seconds=max_backoff_seconds,
-        sleep_fn=sleep_fn,
-    )
+    if not supports_streaming_iteration_resume(dataset):
+        return retry_streaming_operation(
+            lambda: next(iter(dataset)),
+            context=context,
+            max_retries=max_retries,
+            base_backoff_seconds=base_backoff_seconds,
+            max_backoff_seconds=max_backoff_seconds,
+            sleep_fn=sleep_fn,
+        )
+
+    resume_state = deepcopy(dataset.state_dict())
+
+    def _peek_once() -> Any:
+        """Read the next example from the saved resume position.
+
+        :return Any: Next example at the snapshotted cursor.
+        """
+        dataset.load_state_dict(deepcopy(resume_state))
+        return next(iter(dataset))
+
+    try:
+        return retry_streaming_operation(
+            _peek_once,
+            context=context,
+            max_retries=max_retries,
+            base_backoff_seconds=base_backoff_seconds,
+            max_backoff_seconds=max_backoff_seconds,
+            sleep_fn=sleep_fn,
+        )
+    finally:
+        dataset.load_state_dict(deepcopy(resume_state))
 
 
 class RetryingStreamingDataset(torch.utils.data.IterableDataset):

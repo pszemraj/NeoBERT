@@ -318,6 +318,30 @@ def _checkpoint_path_matches_tag(checkpoint_path: Path, checkpoint: str | int) -
     )
 
 
+def _resolve_direct_checkpoint_tag(checkpoint_path: Path) -> str | None:
+    """Return the step tag when ``checkpoint_path`` already targets one step.
+
+    This accepts direct portable step directories, direct DeepSpeed ZeRO tag
+    directories, and nested Accelerate layouts such as ``<step>/pytorch_model``.
+
+    :param Path checkpoint_path: Candidate direct checkpoint path.
+    :return str | None: Concrete step/tag when the path is already resolved.
+    """
+    if (checkpoint_path / MODEL_WEIGHTS_NAME).is_file():
+        return checkpoint_path.name
+
+    if _is_deepspeed_tag_dir(checkpoint_path):
+        if checkpoint_path.name in _DEEPSPEED_NESTED_TAG_CANDIDATES:
+            return checkpoint_path.parent.name
+        return checkpoint_path.name
+
+    for nested_tag in _DEEPSPEED_NESTED_TAG_CANDIDATES:
+        if _is_deepspeed_tag_dir(checkpoint_path / nested_tag):
+            return checkpoint_path.name
+
+    return None
+
+
 def _is_loadable_step_checkpoint(checkpoint_root: Path, step: int) -> bool:
     """Return whether ``step`` can be loaded from ``checkpoint_root``.
 
@@ -341,9 +365,10 @@ def resolve_step_checkpoint_selector(
 ) -> str:
     """Resolve ``checkpoint`` to a concrete step/tag for loading.
 
-    ``latest`` honors a root-level DeepSpeed ``latest`` file when present. When
-    no such file exists, scan for the highest loadable numbered step so portable
-    checkpoint roots without DeepSpeed metadata still work.
+    ``latest`` honors an already-selected direct checkpoint path first, then a
+    root-level DeepSpeed ``latest`` file when present. When neither exists, scan
+    for the highest loadable numbered step so portable checkpoint roots without
+    DeepSpeed metadata still work.
 
     :param str | Path checkpoint_root: Root directory or direct checkpoint path.
     :param str | int checkpoint: Requested checkpoint selector.
@@ -354,6 +379,10 @@ def resolve_step_checkpoint_selector(
     requested_tag = str(checkpoint).strip()
     if requested_tag.lower() != "latest":
         return requested_tag
+
+    direct_tag = _resolve_direct_checkpoint_tag(checkpoint_root)
+    if direct_tag is not None:
+        return direct_tag
 
     latest_path = checkpoint_root / "latest"
     if latest_path.is_file():
