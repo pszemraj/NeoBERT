@@ -13,5 +13,5 @@ take an exported HF model directory.
 
 ## Related Docs
 
-- [Export](../../docs/export.md)
-- [Troubleshooting](../../docs/troubleshooting.md)
+- [Export](../../docs/guides/export.md)
+- [Troubleshooting](../../docs/guides/troubleshooting.md)

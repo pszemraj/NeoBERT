@@ -97,6 +97,7 @@ silently loading the direct path.
 
 ## Related Docs
 
-- [Configuration](configuration.md)
+- [Configuration](../reference/configuration.md)
 - [Training](training.md)
+- [Training optimization](training-optimization.md)
 - [Troubleshooting](troubleshooting.md)

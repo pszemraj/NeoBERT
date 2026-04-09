@@ -41,7 +41,7 @@ pip install -e .[flash] --no-build-isolation
 pip install -e .[legacy-checkpoints]
 ```
 
-See [docs/troubleshooting.md](docs/troubleshooting.md) for environment issues.
+See [docs/guides/troubleshooting.md](docs/guides/troubleshooting.md) for environment issues.
 
 ## Verify Setup
 
@@ -67,10 +67,11 @@ python tests/run_tests.py
 ## Documentation
 
 - [Documentation index](docs/README.md)
-- [Training Guide](docs/training.md)
-- [Configuration Reference](docs/configuration.md)
-- [Evaluation Guide](docs/evaluation.md)
-- [Troubleshooting](docs/troubleshooting.md)
+- [Training Guide](docs/guides/training.md)
+- [Training Optimization](docs/guides/training-optimization.md)
+- [Configuration Reference](docs/reference/configuration.md)
+- [Evaluation Guide](docs/guides/evaluation.md)
+- [Troubleshooting](docs/guides/troubleshooting.md)
 
 Directory READMEs under `configs/`, `scripts/`, `tests/`, and `jobs/` focus on
 entrypoints and quick usage.

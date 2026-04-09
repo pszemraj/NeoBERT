@@ -1,8 +1,9 @@
 # Configuration Reference
 
 > [!TIP]
-> Example configs are in [configs/](../configs/) (for production) and
-> [tests/configs/](../tests/configs/) (for tiny smoke/regression runs).
+> Example configs are in [configs/README.md](../../configs/README.md) (for
+> production) and [tests/configs/README.md](../../tests/configs/README.md) (for
+> tiny smoke/regression runs).
 
 NeoBERT YAML config schema (`src/neobert/config.py`) and defaults.
 
@@ -283,7 +284,8 @@ Overrides are validated with the same semantic checks as base YAML configs.
 > legacy full-logits baseline.
 >
 > Gradient-accumulation, effective-batch, and norm-logging behavior is detailed
-> in [training.md](training.md#gradient-accumulation-and-norm-logging).
+> in
+> [Training Optimization](../guides/training-optimization.md#gradient-accumulation-and-logged-norms).
 
 ### Control and Legacy Compatibility
 
@@ -368,23 +370,9 @@ Overrides are validated with the same semantic checks as base YAML configs.
 > `param_policy=hidden_2d`. Use `all_2d` explicitly when you want exact
 > v0.1.3-style Muon scope for compatibility benchmarking.
 >
-> `hidden_2d` is the shipped default because it matches the original
-> Muon guidance and PyTorch's documented Muon usage: apply Muon to 2D hidden
-> layer matrices, while embeddings, output/unembedding layers, biases, and norm
-> parameters stay on a standard Adam-style optimizer.
->
-> `neobert` is the shipped default because this encoder family trained better
-> with the symmetric `0.4 * sqrt(max(d_out, d_in))` scale than with reference
-> Muon scaling. It keeps the branch's current pretraining behavior while
-> avoiding compatibility-driven naming.
->
-> `muon_reference` matches the reference Muon size correction used by PyTorch and
-> OpenAI's recent parameter-golf implementation: scale by
-> `sqrt(max(1, d_out / d_in))`.
->
-> NeoBERT's fused `qkv.weight` parameters are still treated as three hidden
-> matrices for Muon. Q, K, and V are orthogonalized and normalized separately,
-> then packed back into the model's interleaved fused layout.
+> [Training Optimization](../guides/training-optimization.md) explains the
+> shipped Muon defaults, normalization modes, fused-QKV handling, clipping, and
+> distributed tradeoffs.
 >
 > `orthogonalization` changes compute precision behavior on CUDA:
 > `newton_schulz` upcasts BF16 gradients to FP32 for the iteration and casts
@@ -696,6 +684,7 @@ scheduler:
 
 ## Related Docs
 
-- [Training](training.md)
-- [Testing](testing.md)
-- [Troubleshooting](troubleshooting.md)
+- [Training](../guides/training.md)
+- [Training optimization](../guides/training-optimization.md)
+- [Testing](../guides/testing.md)
+- [Troubleshooting](../guides/troubleshooting.md)

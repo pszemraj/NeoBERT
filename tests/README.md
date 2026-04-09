@@ -1,7 +1,7 @@
 # NeoBERT Test Suite
 
 Automated regression tests for model, training, config, and evaluation code.
-Commands and authoring guidance are in [docs/testing.md](../docs/testing.md).
+Commands and authoring guidance are in [docs/guides/testing.md](../docs/guides/testing.md).
 
 ## Layout
 
@@ -14,6 +14,6 @@ Commands and authoring guidance are in [docs/testing.md](../docs/testing.md).
 
 ## Related References
 
-- [Testing guide](../docs/testing.md)
+- [Testing guide](../docs/guides/testing.md)
 - [Test configs](configs/README.md)
 - [Manual validation scripts](manual/README.md)

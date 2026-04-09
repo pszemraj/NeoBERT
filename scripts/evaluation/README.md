@@ -18,5 +18,5 @@ result summaries.
 
 ## Related Docs
 
-- [Evaluation](../../docs/evaluation.md)
-- [Troubleshooting](../../docs/troubleshooting.md)
+- [Evaluation](../../docs/guides/evaluation.md)
+- [Troubleshooting](../../docs/guides/troubleshooting.md)

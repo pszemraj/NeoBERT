@@ -2,13 +2,17 @@
 
 ## Guides
 
-- [Training](training.md)
-- [Configuration](configuration.md)
-- [Evaluation](evaluation.md)
-- [Export](export.md)
-- [Architecture](architecture.md)
-- [Testing](testing.md)
-- [Troubleshooting](troubleshooting.md)
+- [Training](guides/training.md)
+- [Training Optimization](guides/training-optimization.md)
+- [Evaluation](guides/evaluation.md)
+- [Export](guides/export.md)
+- [Testing](guides/testing.md)
+- [Troubleshooting](guides/troubleshooting.md)
+
+## Reference
+
+- [Configuration](reference/configuration.md)
+- [Architecture](reference/architecture.md)
 
 ## Directory Guides
 

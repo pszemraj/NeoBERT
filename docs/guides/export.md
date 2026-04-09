@@ -1,7 +1,8 @@
 # Hugging Face Export Guide
 
 Export NeoBERT training checkpoints to a Hugging Face-compatible folder.
-Helper scripts live under [Hugging Face Export Scripts](../scripts/export-hf/README.md).
+Helper scripts live under
+[Hugging Face Export Scripts](../../scripts/export-hf/README.md).
 
 ## Supported Inputs
 
@@ -94,6 +95,6 @@ int/bool/additive equivalence) to catch exported-model mask regressions.
 
 ## Related Docs
 
-- [scripts/export-hf/README.md](../scripts/export-hf/README.md)
+- [scripts/export-hf/README.md](../../scripts/export-hf/README.md)
 - [Troubleshooting](troubleshooting.md)
 - [Evaluation](evaluation.md)

@@ -1,6 +1,6 @@
 # NeoBERT Architecture
 
-Config defaults live in [configuration.md](configuration.md).
+Config defaults live in [Configuration Reference](configuration.md).
 
 ## Overview
 
@@ -86,10 +86,11 @@ Architecture-relevant fields live under:
 - `model.rms_norm`, `model.ngpt`
 - `model.attn_backend`, `model.kernel_backend`
 
-See [configuration.md](configuration.md) for defaults and constraints.
+See [Configuration Reference](configuration.md) for defaults and constraints.
 
 ## Related Docs
 
-- [Training](training.md)
+- [Training](../guides/training.md)
+- [Training Optimization](../guides/training-optimization.md)
 - [Configuration](configuration.md)
-- [Evaluation](evaluation.md)
+- [Evaluation](../guides/evaluation.md)

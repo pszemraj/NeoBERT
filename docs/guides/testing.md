@@ -42,7 +42,7 @@ conda run --name neobert python tests/run_tests.py --no-pytest
 `tests/manual/` contains opt-in validation/benchmark scripts and is excluded from
 default `pytest -q` discovery.
 
-Manual script commands are in [tests/manual/README.md](../tests/manual/README.md).
+Manual script commands are in [tests/manual/README.md](../../tests/manual/README.md).
 
 ## Test Authoring Guidelines
 
@@ -69,6 +69,6 @@ Manual script commands are in [tests/manual/README.md](../tests/manual/README.md
 
 ## Related Docs
 
-- [tests/README.md](../tests/README.md)
-- [tests/configs/README.md](../tests/configs/README.md)
-- [Configuration](configuration.md)
+- [tests/README.md](../../tests/README.md)
+- [tests/configs/README.md](../../tests/configs/README.md)
+- [Configuration](../reference/configuration.md)

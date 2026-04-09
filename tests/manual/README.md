@@ -15,8 +15,9 @@ conda run -s --name neobert torchrun --standalone --nproc_per_node=2 tests/manua
 ## Notes
 
 - Distributed launch policy, topology, and gradient/norm logging behavior are in
-  [docs/training.md](../../docs/training.md#distributed-topology) and
-  [docs/training.md](../../docs/training.md#gradient-accumulation-and-norm-logging).
+  [docs/guides/training.md](../../docs/guides/training.md#distributed-topology)
+  and
+  [docs/guides/training-optimization.md](../../docs/guides/training-optimization.md#gradient-accumulation-and-logged-norms).
 - `test_muonclip_fsdp2_golden.py` requires CUDA and 2 ranks; it validates the
   raw FSDP2 owner-compute update path and sharded DCP optimizer-state round-trip.
 - `test_muonclip_accelerate_fsdp2_resume.py` validates the shipped Accelerate

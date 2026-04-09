@@ -1,7 +1,10 @@
 # Training Guide
 
 This guide covers pretraining and contrastive workflows.
-Full field-level schema/defaults are in [configuration.md](configuration.md).
+Full field-level schema/defaults are in
+[Configuration Reference](../reference/configuration.md).
+Optimizer policy, Muon defaults, throughput tuning, and gradient/logging
+semantics are in [Training Optimization](training-optimization.md).
 
 ## Entry Points
 
@@ -54,7 +57,7 @@ parallelism, context parallelism, or other multi-axis DTensor layouts.
 
 ### Distributed validation
 
-Use the commands in [`tests/manual/README.md`](../tests/manual/README.md)
+Use the commands in [`tests/manual/README.md`](../../tests/manual/README.md)
 before long multi-rank MuonClip runs. The two distributed smokes cover the raw
 FSDP2 owner-compute path and the shipped Accelerate `save_state/load_state`
 resume path.
@@ -103,92 +106,15 @@ Distributed launch policy for this repo:
 - Use `--wandb.name <run-name>` for the W&B run name override; `--wandb.run`
   is not a NeoBERT config key.
 
-## Gradient Accumulation and Norm Logging
+## Optimization
 
-- `trainer.gradient_accumulation_steps` counts microbatches per optimizer update.
-- For GLUE and contrastive training, the effective sample batch per optimizer
-  step is:
-  `per_device_train_batch_size * world_size * gradient_accumulation_steps`.
-- Pretraining uses the same sample-count formula when microbatches are full, but
-  packed batches can vary token counts per update. For packed runs, compare
-  `train/tokens_per_sec` and token counts rather than only `steps/sec`.
+Use [Training Optimization](training-optimization.md) for:
 
-Pretraining applies one extra scaling step after accumulation: gradients are
-rescaled by the global masked-token count for the just-finished update. That
-keeps the effective loss normalization aligned with a full masked-token mean
-even when masking density or packing makes per-rank token counts uneven.
-
-Current logging semantics:
-
-- `train/grad_norm` is the global L2 gradient norm after accumulation and, in
-  pretraining, after masked-token rescaling.
-- `train/grad_norm` is measured before `trainer.gradient_clipping`.
-- `trainer.gradient_clipping` clips the final accumulated gradient; in
-  pretraining that means after token-based rescaling.
-- `train/weight_norm` is the global L2 parameter norm on logging steps after
-  the optimizer update.
-
-`trainer.gradient_clipping` clips gradients. MuonClip's
-`optimizer.muon_config.enable_clipping` toggles its separate QK activation
-clipping path, which is auto-disabled for sharded FSDP2 Muon runs.
-Muon ships with `norm_factor=neobert`, `param_policy=hidden_2d`, and
-`nesterov=true`.
-Use `all_2d` explicitly when you want exact v0.1.3-style Muon scope for
-compatibility benchmarking.
-This default routing follows the original Muon guidance and PyTorch's Muon
-documentation: hidden transformer matrices use Muon, while embeddings, output
-layers, biases, and norm parameters stay on Adam-style fallback groups.
-`norm_factor=neobert` is the shipped default because it has worked better for
-this encoder setup than reference Muon scaling. `muon_reference` keeps the
-reference size correction `sqrt(max(1, d_out / d_in))` available for parity and
-ablation runs.
-Fused `qkv.weight` parameters are handled per projection: Muon splits the
-interleaved fused matrix into Q, K, and V updates internally, applies
-orthogonalization and normalization to each projection separately, then packs
-the result back into the fused layout before the optimizer step.
-
-## Packed Training
-
-Enable packing via `datacollator.pack_sequences: true`.
-
-Recommended for throughput:
-
-- `model.attn_backend: flash_attn_varlen`
-- install flash-attn (`pip install -e .[flash]`)
-
-Supported but slower:
-
-- `pack_sequences: true` with `attn_backend: sdpa` uses segmented fallback.
-
-Useful control:
-
-- `trainer.enforce_full_packed_batches: true` keeps full microbatches by
-  buffering undersized packed outputs (better token throughput stability,
-  typically lower step/s).
-
-## Dataloader Throughput Knobs
-
-Primary knobs are in `dataset.*`:
-
-- `num_workers`
-- `pin_memory`
-- `persistent_workers`
-- `prefetch_factor`
-- `streaming_read_retries`
-- `streaming_read_retry_backoff_seconds`
-- `streaming_read_retry_max_backoff_seconds`
-
-When running on CUDA, trainer may warn and apply throughput-friendly defaults
-if these are unset/suboptimal. Current PyTorch builds route
-`DataLoader(pin_memory=True)` through a deprecated CUDA-specific path, so
-NeoBERT keeps loader-side pinning off and pins final CPU batches explicitly
-before non-blocking device transfers in the paths that move batches manually.
-For hub-backed streaming datasets, NeoBERT also retries transient read failures
-when inspecting stream schemas and while iterating long-running train/eval
-dataloaders. Recovery resumes from the last yielded example when the underlying
-HF iterable dataset supports `state_dict()/load_state_dict()`. Shuffled streams
-can still perturb in-buffer order after a retry because HF refill semantics do
-not preserve the exact old shuffle buffer contents.
+- MuonClip defaults and recommended modes,
+- gradient accumulation and norm logging semantics,
+- packed-training and dataloader throughput knobs,
+- QK clipping vs standard gradient clipping,
+- distributed Muon validation and performance tradeoffs.
 
 ## Streaming Eval Strategy
 
@@ -359,6 +285,7 @@ Ensure `dataset.path` points to output from `scripts/contrastive/preprocess.py`.
 
 ## Related Docs
 
-- [Configuration](configuration.md)
+- [Configuration](../reference/configuration.md)
+- [Training optimization](training-optimization.md)
 - [Evaluation](evaluation.md)
 - [Troubleshooting](troubleshooting.md)
