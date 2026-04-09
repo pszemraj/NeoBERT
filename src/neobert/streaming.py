@@ -253,6 +253,10 @@ class RetryingStreamingDataset(torch.utils.data.IterableDataset):
     def __iter__(self) -> Iterator[Any]:
         """Iterate over the wrapped dataset with transient read recovery.
 
+        The retry budget counts consecutive failures at a given resume point.
+        Each successful yield resets the counter so isolated transient blips
+        hours apart do not accumulate toward the budget.
+
         :raises RuntimeError: If transient failures persist beyond the retry budget.
         :return collections.abc.Iterator[Any]: Example iterator.
         """
@@ -269,6 +273,7 @@ class RetryingStreamingDataset(torch.utils.data.IterableDataset):
             try:
                 iterator = iter(self.dataset)
                 for example in iterator:
+                    retries = 0
                     yield example
                 return
             except Exception as exc:
@@ -297,10 +302,3 @@ class RetryingStreamingDataset(torch.utils.data.IterableDataset):
                     exc,
                 )
                 self.sleep_fn(delay)
-
-    def __len__(self) -> int:
-        """Return dataset length when the wrapped dataset provides one.
-
-        :return int: Wrapped dataset length.
-        """
-        return len(self.dataset)

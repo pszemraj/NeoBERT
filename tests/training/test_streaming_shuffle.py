@@ -354,6 +354,55 @@ class TestStreamingRetryHelpers(unittest.TestCase):
 
         self.assertIn("exhausted 1 retry attempt", str(ctx.exception))
 
+    def test_retrying_streaming_dataset_resets_budget_after_successful_yields(self):
+        """Isolated transient failures at different positions each get the full retry budget."""
+
+        class _MultiFlakyDataset(torch.utils.data.IterableDataset):
+            """Streaming stub that fails once at each of several cursor positions."""
+
+            def __init__(self, values, fail_at_positions):
+                super().__init__()
+                self.values = values
+                self.fail_at_positions = set(fail_at_positions)
+                self.epoch = 0
+                self._starting_state = {"cursor": 0, "epoch": 0}
+                self._state = {"cursor": 0, "epoch": 0}
+
+            def set_epoch(self, epoch):
+                self.epoch = int(epoch)
+
+            def state_dict(self):
+                return dict(self._state)
+
+            def load_state_dict(self, state_dict):
+                self._starting_state = dict(state_dict)
+
+            def __iter__(self):
+                cursor = 0
+                if self._starting_state.get("epoch", 0) == self.epoch:
+                    cursor = int(self._starting_state.get("cursor", 0))
+                while cursor < len(self.values):
+                    if cursor in self.fail_at_positions:
+                        self.fail_at_positions.discard(cursor)
+                        raise _http_error(503)
+                    cursor += 1
+                    self._state = {"cursor": cursor, "epoch": self.epoch}
+                    yield self.values[cursor - 1]
+
+        # Two isolated failures with max_retries=1.  Without retry-budget
+        # reset this would exhaust the budget on the second failure.
+        dataset = _MultiFlakyDataset([0, 1, 2, 3, 4, 5], fail_at_positions={1, 4})
+        wrapped = RetryingStreamingDataset(
+            dataset,
+            label="unit-test",
+            max_retries=1,
+            base_backoff_seconds=0.01,
+            max_backoff_seconds=0.01,
+            sleep_fn=lambda _seconds: None,
+        )
+
+        self.assertEqual(list(wrapped), [0, 1, 2, 3, 4, 5])
+
     def test_retrying_streaming_dataset_requires_resumable_state(self):
         """Ensure the low-level retry wrapper remains strict about resume hooks."""
         dataset = _StatelessStreamingDataset([0, 1, 2])

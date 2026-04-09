@@ -751,15 +751,8 @@ class MuonClipOptimizer(Optimizer):
         adam_no_decay_params: List[torch.nn.Parameter] = []
         adam_no_decay_param_info: List[Dict[str, Any]] = []
 
-        param_policy = str(getattr(self.config, "param_policy", "hidden_2d")).strip()
-        param_policy = param_policy.replace("-", "_").lower()
-        param_policy = {"transformer_only": "hidden_2d"}.get(param_policy, param_policy)
-        valid_param_policies = {"all_2d", "hidden_2d"}
-        if param_policy not in valid_param_policies:
-            raise ValueError(
-                f"Unsupported param_policy '{param_policy}'. "
-                f"Valid options: {', '.join(sorted(valid_param_policies))}"
-            )
+        # param_policy is validated and normalized by MuonClipConfig.__post_init__
+        param_policy = self.config.param_policy
 
         transformer_param_ids: set[int] = set()
         layer_idx_by_param_id: Dict[int, int] = {}
