@@ -9,6 +9,8 @@ import pytest
 import torch
 
 from neobert.config import Config, ConfigLoader
+from neobert.model import NeoBERT, NeoBERTConfig
+from neobert.model.wrappers import NeoBERTLMHead
 from tests.tokenizer_utils import build_wordlevel_tokenizer
 
 
@@ -213,6 +215,94 @@ class TestContrastivePipeline:
         assert dataloader_kwargs["pin_memory"] is False
         assert dataloader_kwargs["shuffle"] is True
         assert notes == []
+
+    def test_contrastive_pretrained_backbone_loader_strips_lm_head_prefix(self):
+        """LM-head checkpoints should load the exact encoder backbone for contrastive."""
+        from neobert.contrastive.trainer import (
+            _load_contrastive_pretrained_backbone_weights,
+        )
+
+        cfg = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            intermediate_size=64,
+            vocab_size=128,
+            max_length=16,
+        )
+        source = NeoBERTLMHead(cfg)
+        target = NeoBERT(cfg)
+
+        for param in target.parameters():
+            torch.nn.init.zeros_(param)
+
+        _load_contrastive_pretrained_backbone_weights(target, source.state_dict())
+
+        source_state = source.state_dict()
+        for key, value in target.state_dict().items():
+            assert torch.equal(value, source_state[f"model.{key}"])
+
+    def test_contrastive_pretrained_backbone_loader_rejects_mismatch(self):
+        """Partial or shape-mismatched encoder checkpoints must fail loudly."""
+        from neobert.contrastive.trainer import (
+            _load_contrastive_pretrained_backbone_weights,
+        )
+
+        cfg = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            intermediate_size=64,
+            vocab_size=128,
+            max_length=16,
+        )
+        source = NeoBERTLMHead(cfg)
+        target = NeoBERT(cfg)
+        broken_state = dict(source.state_dict())
+        broken_state.pop("model.layer_norm.weight")
+
+        with pytest.raises(ValueError, match="does not match the NeoBERT encoder"):
+            _load_contrastive_pretrained_backbone_weights(target, broken_state)
+
+    def test_contrastive_runtime_sync_uses_checkpoint_metadata(self, tmp_path: Path):
+        """Checkpoint metadata should drive encoder/tokenizer compatibility for init."""
+        from neobert.contrastive.trainer import (
+            _sync_contrastive_runtime_from_pretraining,
+        )
+
+        cfg = Config()
+        cfg.model.hidden_size = 128
+        cfg.model.num_hidden_layers = 3
+        cfg.model.dropout_prob = 0.2
+        cfg.tokenizer.path = None
+        cfg.tokenizer.name = "runtime-tokenizer"
+        cfg.tokenizer.revision = "runtime-rev"
+
+        pretraining_cfg = Config()
+        pretraining_cfg.model.hidden_size = 256
+        pretraining_cfg.model.num_hidden_layers = 6
+        pretraining_cfg.model.vocab_size = 512
+        pretraining_cfg.model.dropout_prob = 0.0
+        pretraining_cfg.tokenizer.name = "checkpoint-tokenizer"
+        pretraining_cfg.tokenizer.revision = "checkpoint-rev"
+
+        checkpoint_step_dir = tmp_path / "123"
+        checkpoint_tokenizer_dir = checkpoint_step_dir / "tokenizer"
+        checkpoint_tokenizer_dir.mkdir(parents=True, exist_ok=True)
+
+        _sync_contrastive_runtime_from_pretraining(
+            cfg,
+            pretraining_cfg,
+            checkpoint_step_dir=checkpoint_step_dir,
+        )
+
+        assert cfg.model.hidden_size == 256
+        assert cfg.model.num_hidden_layers == 6
+        assert cfg.model.vocab_size == 512
+        assert cfg.model.dropout_prob == 0.2
+        assert cfg.tokenizer.path == str(checkpoint_tokenizer_dir)
+        assert cfg.tokenizer.name == "runtime-tokenizer"
+        assert cfg.tokenizer.revision == "runtime-rev"
 
 
 class TestContrastiveLoss:
