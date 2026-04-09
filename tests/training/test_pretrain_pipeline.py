@@ -10,6 +10,7 @@ import pytest
 import torch
 from accelerate.utils import DistributedType
 from datasets import Dataset, DatasetDict
+from transformers import BatchEncoding
 
 from neobert.checkpointing import MODEL_WEIGHTS_NAME, load_model_safetensors
 from neobert.config import Config, ConfigLoader
@@ -137,6 +138,19 @@ class TestPretrainComponents:
                     lambda out: out["input_ids"].is_pinned(),
                     lambda out: out["nested"]["labels"].is_pinned(),
                     lambda out: out["nested"]["meta"][1].is_pinned(),
+                ],
+            },
+            {
+                "batch": BatchEncoding(
+                    {
+                        "input_ids": torch.randint(0, 10, (2, 4), dtype=torch.long),
+                        "attention_mask": torch.ones((2, 4), dtype=torch.long),
+                    }
+                ),
+                "checks": [
+                    lambda out: isinstance(out, BatchEncoding),
+                    lambda out: out["input_ids"].is_pinned(),
+                    lambda out: out["attention_mask"].is_pinned(),
                 ],
             },
         ]

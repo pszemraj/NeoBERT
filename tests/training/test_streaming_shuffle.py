@@ -8,7 +8,9 @@ from unittest.mock import MagicMock, patch
 import requests
 import torch
 
+from neobert.config import Config
 from neobert.pretraining.trainer import (
+    _maybe_wrap_streaming_dataset_for_retries,
     _maybe_shuffle_streaming_dataset,
     _load_streaming_split,
     _prepare_resume_dataloader,
@@ -284,6 +286,25 @@ class _RetryableFlakyDataset(torch.utils.data.IterableDataset):
             yield value
 
 
+class _StatelessStreamingDataset(torch.utils.data.IterableDataset):
+    """Iterable dataset stub without resumable iteration state."""
+
+    def __init__(self, values: list[int]) -> None:
+        """Store values to yield.
+
+        :param list[int] values: Sequence of values to iterate.
+        """
+        super().__init__()
+        self.values = values
+
+    def __iter__(self):
+        """Yield configured values in order.
+
+        :return collections.abc.Iterator[int]: Value iterator.
+        """
+        yield from self.values
+
+
 class TestStreamingRetryHelpers(unittest.TestCase):
     """Validate retry helpers for transient streaming read failures."""
 
@@ -332,3 +353,40 @@ class TestStreamingRetryHelpers(unittest.TestCase):
             list(wrapped)
 
         self.assertIn("exhausted 1 retry attempt", str(ctx.exception))
+
+    def test_retrying_streaming_dataset_requires_resumable_state(self):
+        """Ensure the low-level retry wrapper remains strict about resume hooks."""
+        dataset = _StatelessStreamingDataset([0, 1, 2])
+
+        with self.assertRaises(TypeError) as ctx:
+            RetryingStreamingDataset(
+                dataset,
+                label="unit-test",
+                max_retries=1,
+                base_backoff_seconds=0.01,
+                max_backoff_seconds=0.01,
+                sleep_fn=lambda _seconds: None,
+            )
+
+        self.assertIn("state_dict/load_state_dict", str(ctx.exception))
+
+    def test_retry_wrapper_falls_back_for_stateless_streams(self):
+        """Ensure trainer setup does not force retry wrapping onto stateless streams."""
+        dataset = _StatelessStreamingDataset([0, 1, 2])
+        cfg = Config()
+        cfg.dataset.streaming_read_retries = 2
+        cfg.dataset.streaming_read_retry_backoff_seconds = 0.01
+        cfg.dataset.streaming_read_retry_max_backoff_seconds = 0.01
+
+        with self.assertLogs("neobert.pretraining.trainer", level="WARNING") as logs:
+            wrapped = _maybe_wrap_streaming_dataset_for_retries(
+                dataset,
+                label="unit-test",
+                cfg=cfg,
+            )
+
+        self.assertIs(wrapped, dataset)
+        self.assertIn(
+            "does not expose resumable iteration state",
+            "\n".join(logs.output),
+        )

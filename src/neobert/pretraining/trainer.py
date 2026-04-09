@@ -62,6 +62,7 @@ from neobert.streaming import (
     is_streaming_dataset,
     peek_streaming_example,
     retry_streaming_operation,
+    supports_streaming_iteration_resume,
 )
 from neobert.tokenizer import get_tokenizer, resolve_text_column
 from neobert.training_utils import (
@@ -179,6 +180,14 @@ def _maybe_wrap_streaming_dataset_for_retries(
         return dataset
     retries, base_backoff, max_backoff = _streaming_retry_settings(cfg)
     if retries <= 0:
+        return dataset
+    if not supports_streaming_iteration_resume(dataset):
+        logger.warning(
+            "Streaming read retries are enabled for %s, but the dataset does not "
+            "expose resumable iteration state; leaving it unwrapped to avoid "
+            "duplicating or skipping examples after a transient failure.",
+            label,
+        )
         return dataset
     return RetryingStreamingDataset(
         dataset,

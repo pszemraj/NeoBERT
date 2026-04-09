@@ -1,5 +1,6 @@
 """Shared helpers for training loops (pretraining, GLUE, contrastive)."""
 
+from collections.abc import Mapping
 import logging
 import os
 import re
@@ -10,6 +11,11 @@ import torch
 from accelerate import Accelerator
 from accelerate.state import AcceleratorState, GradientState
 from accelerate.utils import DistributedType
+
+try:
+    from transformers import BatchEncoding
+except Exception:  # pragma: no cover - transformers import should succeed in repo env
+    BatchEncoding = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +125,25 @@ def _pin_cpu_tensors(value: Any) -> Any:
                 return inner, False
             return inner.pin_memory(), True
 
-        if isinstance(inner, dict):
+        if BatchEncoding is not None and isinstance(inner, BatchEncoding):
+            updated_data: dict[Any, Any] = {}
+            changed = False
+            for key, nested in inner.items():
+                pinned_nested, nested_changed = _pin(nested)
+                updated_data[key] = pinned_nested
+                changed = changed or nested_changed
+            if not changed:
+                return inner, False
+            return (
+                BatchEncoding(
+                    data=updated_data,
+                    encoding=inner.encodings,
+                    n_sequences=inner.n_sequences,
+                ),
+                True,
+            )
+
+        if isinstance(inner, Mapping):
             updated: dict[Any, Any] = {}
             changed = False
             for key, nested in inner.items():
@@ -128,7 +152,12 @@ def _pin_cpu_tensors(value: Any) -> Any:
                 changed = changed or nested_changed
             if not changed:
                 return inner, False
-            return updated, True
+            if isinstance(inner, dict):
+                return updated, True
+            try:
+                return type(inner)(updated), True
+            except TypeError:
+                return updated, True
 
         if isinstance(inner, list):
             updated_list: list[Any] = []

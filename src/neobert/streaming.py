@@ -54,6 +54,18 @@ def is_streaming_dataset(dataset: object) -> bool:
     )
 
 
+def supports_streaming_iteration_resume(dataset: object) -> bool:
+    """Return whether a dataset exposes resumable iterator state hooks.
+
+    :param object dataset: Dataset-like object to inspect.
+    :return bool: ``True`` when ``state_dict`` and ``load_state_dict`` are callable.
+    """
+    return bool(
+        callable(getattr(dataset, "state_dict", None))
+        and callable(getattr(dataset, "load_state_dict", None))
+    )
+
+
 def _iter_exception_chain(exc: BaseException) -> Iterator[BaseException]:
     """Yield an exception plus its causal chain.
 
@@ -216,9 +228,7 @@ class RetryingStreamingDataset(torch.utils.data.IterableDataset):
         """
         if not is_streaming_dataset(dataset):
             raise TypeError("RetryingStreamingDataset requires an iterable dataset.")
-        if not hasattr(dataset, "state_dict") or not hasattr(
-            dataset, "load_state_dict"
-        ):
+        if not supports_streaming_iteration_resume(dataset):
             raise TypeError(
                 "RetryingStreamingDataset requires dataset.state_dict/load_state_dict."
             )
