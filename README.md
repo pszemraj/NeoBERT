@@ -1,13 +1,13 @@
 # NeoBERT
 
 > [!IMPORTANT]
-> This repository is a fork of [chandar-lab/NeoBERT](https://github.com/chandar-lab/NeoBERT) focused on active experimentation and training-system iteration.
+> This repository builds on the original [chandar-lab/NeoBERT](https://github.com/chandar-lab/NeoBERT) codebase and is focused on active experimentation and training-system iteration.
 
 ## Description
 
 NeoBERT is an encoder architecture for masked-language-model pretraining, embedding extraction, and downstream evaluation (GLUE/MTEB).
 
-This fork adds:
+This repo adds:
 
 - configurable attention backends (`sdpa`, `flash_attn_varlen` for packed training),
 - optional Liger kernel dispatch (`kernel_backend: auto|liger|torch`),
@@ -19,7 +19,7 @@ Pretraining loss path is selected with one explicit flag: `trainer.masked_logits
 - `true` (default, recommended): masked-logits-only path.
 - `false` (legacy/debug): original full-logits CE path.
 
-Paper (original): <https://arxiv.org/abs/2502.19587>
+Original paper: <https://arxiv.org/abs/2502.19587>
 
 ## Install
 
