@@ -1,6 +1,8 @@
 """Training-time LM and embedding wrappers built on the NeoBERT backbone."""
 
 import logging
+import warnings
+from contextlib import nullcontext
 from functools import partial
 from typing import Any, Dict, List, Optional
 
@@ -231,6 +233,7 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
         pin_memory = kwargs.pop("pin_memory", None)
         if pin_memory is None:
             pin_memory = device.type == "cuda"
+        pin_memory = bool(pin_memory)
 
         def _transform_func(
             tokenizer: PreTrainedTokenizerFast, x: Dict[str, List]
@@ -261,50 +264,69 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
             batch_size=self.batch_size,
             num_workers=num_workers,
             shuffle=False,
-            pin_memory=False,
+            pin_memory=pin_memory,
         )
 
         non_blocking = bool(pin_memory and device.type == "cuda")
         encodings = []
-        for batch in tqdm(
-            dataloader, desc="encoding", mininterval=10, disable=len(sentences) < 128
-        ):
+        warning_context = nullcontext()
+        if non_blocking:
+            # Torch's current DataLoader pin-memory path still calls the
+            # deprecated ``Tensor.pin_memory(device=...)`` signature internally.
+            # Keep loader-side pinning for overlap, but silence that transient
+            # upstream warning until PyTorch removes the deprecated call.
+            warning_context = warnings.catch_warnings()
+
+        with warning_context:
             if non_blocking:
-                batch = _pin_cpu_tensors(batch)
-            input_ids = batch["input_ids"].to(device, non_blocking=non_blocking)
-            int_mask = batch["attention_mask"]
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r"The argument 'device' of Tensor\..* is deprecated\.",
+                    category=DeprecationWarning,
+                )
 
-            if self.config.attn_backend != "sdpa":
-                # Packed path: compute packed_seqlens on CPU to avoid CUDA sync,
-                # then pass pad_mask=None so the model uses packed attention.
-                packed_seqlens = int_mask.sum(dim=1, keepdim=True).to(
-                    device="cpu", dtype=torch.int32
-                )
-                outputs = self.model(input_ids, None, packed_seqlens=packed_seqlens)
-                pool_mask = int_mask.to(
-                    device=device,
-                    dtype=mask_dtype,
-                    non_blocking=non_blocking,
-                )
-            else:
-                pool_mask = int_mask.to(
-                    device=device,
-                    dtype=mask_dtype,
-                    non_blocking=non_blocking,
-                )
-                additive_mask = torch.where(
-                    pool_mask == 1, float(0.0), float("-inf")
-                ).type(mask_dtype)
-                outputs = self.model(input_ids, additive_mask)
+            for batch in tqdm(
+                dataloader,
+                desc="encoding",
+                mininterval=10,
+                disable=len(sentences) < 128,
+            ):
+                if non_blocking:
+                    batch = _pin_cpu_tensors(batch)
+                input_ids = batch["input_ids"].to(device, non_blocking=non_blocking)
+                int_mask = batch["attention_mask"]
 
-            if self.pooling == "avg":
-                outputs = outputs * pool_mask.unsqueeze(-1).expand(
-                    -1, -1, outputs.shape[-1]
-                )
-                outputs = outputs.sum(dim=1) / pool_mask.sum(dim=1).unsqueeze(-1)
-            else:
-                outputs = outputs[:, 0, :]
+                if self.config.attn_backend != "sdpa":
+                    # Packed path: compute packed_seqlens on CPU to avoid CUDA sync,
+                    # then pass pad_mask=None so the model uses packed attention.
+                    packed_seqlens = int_mask.sum(dim=1, keepdim=True).to(
+                        device="cpu", dtype=torch.int32
+                    )
+                    outputs = self.model(input_ids, None, packed_seqlens=packed_seqlens)
+                    pool_mask = int_mask.to(
+                        device=device,
+                        dtype=mask_dtype,
+                        non_blocking=non_blocking,
+                    )
+                else:
+                    pool_mask = int_mask.to(
+                        device=device,
+                        dtype=mask_dtype,
+                        non_blocking=non_blocking,
+                    )
+                    additive_mask = torch.where(
+                        pool_mask == 1, float(0.0), float("-inf")
+                    ).type(mask_dtype)
+                    outputs = self.model(input_ids, additive_mask)
 
-            encodings.append(outputs.cpu().numpy())
+                if self.pooling == "avg":
+                    outputs = outputs * pool_mask.unsqueeze(-1).expand(
+                        -1, -1, outputs.shape[-1]
+                    )
+                    outputs = outputs.sum(dim=1) / pool_mask.sum(dim=1).unsqueeze(-1)
+                else:
+                    outputs = outputs[:, 0, :]
+
+                encodings.append(outputs.cpu().numpy())
 
         return np.concatenate(encodings, axis=0)

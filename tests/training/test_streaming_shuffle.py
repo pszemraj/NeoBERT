@@ -403,6 +403,57 @@ class TestStreamingRetryHelpers(unittest.TestCase):
 
         self.assertEqual(list(wrapped), [0, 1, 2, 3, 4, 5])
 
+    def test_retrying_streaming_dataset_state_dict_round_trips_resume_state(self):
+        """Checkpointed wrapper state should resume from the wrapped cursor."""
+        wrapped = RetryingStreamingDataset(
+            _RetryableFlakyDataset([0, 1, 2, 3], fail_at=99, fail_times=0),
+            label="unit-test",
+            max_retries=1,
+            base_backoff_seconds=0.01,
+            max_backoff_seconds=0.01,
+            sleep_fn=lambda _seconds: None,
+        )
+        wrapped.set_epoch(7)
+
+        iterator = iter(wrapped)
+        self.assertEqual(next(iterator), 0)
+        self.assertEqual(next(iterator), 1)
+        saved_state = wrapped.state_dict()
+
+        resumed_dataset = _RetryableFlakyDataset([0, 1, 2, 3], fail_at=99, fail_times=0)
+        resumed = RetryingStreamingDataset(
+            resumed_dataset,
+            label="unit-test",
+            max_retries=1,
+            base_backoff_seconds=0.01,
+            max_backoff_seconds=0.01,
+            sleep_fn=lambda _seconds: None,
+        )
+
+        resumed.load_state_dict(saved_state)
+
+        self.assertEqual(resumed_dataset.epoch, 7)
+        self.assertEqual(list(resumed), [2, 3])
+
+    def test_retrying_streaming_dataset_loads_raw_dataset_state(self):
+        """Raw dataset resume payloads should remain loadable through the wrapper."""
+        raw_state = {"cursor": 2, "epoch": 5}
+
+        resumed_dataset = _RetryableFlakyDataset([0, 1, 2, 3], fail_at=99, fail_times=0)
+        resumed = RetryingStreamingDataset(
+            resumed_dataset,
+            label="unit-test",
+            max_retries=1,
+            base_backoff_seconds=0.01,
+            max_backoff_seconds=0.01,
+            sleep_fn=lambda _seconds: None,
+        )
+
+        resumed.load_state_dict(raw_state)
+
+        self.assertEqual(resumed_dataset.epoch, 5)
+        self.assertEqual(list(resumed), [2, 3])
+
     def test_retrying_streaming_dataset_requires_resumable_state(self):
         """Ensure the low-level retry wrapper remains strict about resume hooks."""
         dataset = _StatelessStreamingDataset([0, 1, 2])

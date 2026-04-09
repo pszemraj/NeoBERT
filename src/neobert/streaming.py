@@ -3,7 +3,8 @@
 import errno
 import logging
 import time
-from typing import Any, Callable, Iterator, TypeVar
+from collections.abc import Callable, Iterator, Mapping
+from typing import Any, TypeVar
 
 import requests
 import torch
@@ -40,6 +41,11 @@ _TRANSIENT_MESSAGE_FRAGMENTS = (
 )
 
 T = TypeVar("T")
+
+_WRAPPER_STATE_VERSION_KEY = "_retrying_streaming_wrapper_version"
+_WRAPPER_STATE_EPOCH_KEY = "_retrying_streaming_wrapper_epoch"
+_WRAPPER_DATASET_STATE_KEY = "_retrying_streaming_wrapper_dataset_state"
+_WRAPPER_STATE_VERSION = 1
 
 
 def is_streaming_dataset(dataset: object) -> bool:
@@ -250,6 +256,43 @@ class RetryingStreamingDataset(torch.utils.data.IterableDataset):
         if hasattr(self.dataset, "set_epoch"):
             self.dataset.set_epoch(self._epoch)
 
+    def state_dict(self) -> dict[str, Any]:
+        """Return checkpointable wrapper and dataset iteration state.
+
+        :return dict[str, Any]: Serialized wrapper epoch and wrapped dataset state.
+        """
+        return {
+            _WRAPPER_STATE_VERSION_KEY: _WRAPPER_STATE_VERSION,
+            _WRAPPER_STATE_EPOCH_KEY: self._epoch,
+            _WRAPPER_DATASET_STATE_KEY: self.dataset.state_dict(),
+        }
+
+    def load_state_dict(self, state_dict: Any) -> None:
+        """Restore wrapper and dataset iteration state.
+
+        Wrapper-produced payloads restore both the wrapped dataset cursor and the
+        wrapper epoch. Raw underlying dataset payloads are also accepted so runs
+        can resume cleanly when retry wrapping is toggled on after earlier
+        checkpoints were written without the wrapper.
+
+        :param Any state_dict: Wrapper or wrapped-dataset resume payload.
+        """
+        dataset_state = state_dict
+        epoch = self._epoch
+        if isinstance(state_dict, Mapping):
+            if _WRAPPER_DATASET_STATE_KEY in state_dict:
+                dataset_state = state_dict[_WRAPPER_DATASET_STATE_KEY]
+                epoch = int(state_dict.get(_WRAPPER_STATE_EPOCH_KEY, epoch))
+            elif "epoch" in state_dict:
+                raw_epoch = state_dict.get("epoch")
+                if raw_epoch is not None:
+                    epoch = int(raw_epoch)
+
+        self._epoch = epoch
+        self.dataset.load_state_dict(dataset_state)
+        if hasattr(self.dataset, "set_epoch"):
+            self.dataset.set_epoch(self._epoch)
+
     def __iter__(self) -> Iterator[Any]:
         """Iterate over the wrapped dataset with transient read recovery.
 
@@ -261,7 +304,7 @@ class RetryingStreamingDataset(torch.utils.data.IterableDataset):
         :return collections.abc.Iterator[Any]: Example iterator.
         """
         retries = 0
-        resume_state: dict[str, Any] | None = None
+        resume_state: Any | None = None
         if hasattr(self.dataset, "set_epoch"):
             self.dataset.set_epoch(self._epoch)
 

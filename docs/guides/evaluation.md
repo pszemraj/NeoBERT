@@ -56,6 +56,7 @@ python scripts/evaluation/run_mteb.py \
 - `--task_types` can override config selection at launch time. Accepts categories (`classification`, `retrieval`, `sts`, `all`) and/or explicit task names (comma-separated).
 - Output path is currently derived from run dir + checkpoint + max length: `outputs/<run>/mteb/<ckpt>/<max_length>/`.
 - If using a local tokenizer, point `tokenizer.name` to that path.
+- `NeoBERTForMTEB.encode()` honors `num_workers` and `pin_memory` overrides; on CUDA it keeps loader-side pinned staging enabled for overlapped host-to-device copies.
 
 ## Pseudo-Perplexity Utility
 

@@ -109,7 +109,7 @@ NeoBERT keeps pinned CPU staging enabled on CUDA. When Accelerate owns device pl
 For hub-backed streaming datasets:
 
 - NeoBERT retries transient read failures while inspecting schemas and during long-running stream iteration,
-- retry recovery resumes from the last yielded example when the underlying HF iterable dataset supports `state_dict()/load_state_dict()`,
+- retry recovery resumes from the last yielded example when the underlying HF iterable dataset supports `state_dict()/load_state_dict()`, and the retry wrapper keeps those hooks visible to checkpoint/save-state resume paths,
 - shuffled streams can still perturb exact in-buffer order after a retry because HF refill semantics do not preserve the old shuffle buffer contents.
 
 ## Distributed Muon

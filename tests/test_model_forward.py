@@ -1341,6 +1341,61 @@ class TestModelForward(unittest.TestCase):
         self.assertEqual(embeddings.shape[0], 2)
         self.assertEqual(embeddings.shape[1], config.hidden_size)
 
+    def test_mteb_encode_propagates_pin_memory_to_dataloader(self):
+        """Ensure MTEB encode forwards the requested pin_memory setting."""
+        from neobert.model import NeoBERTConfig, NeoBERTForMTEB
+
+        tokenizer = build_wordlevel_tokenizer(
+            vocab={"hello": 2, "world": 3},
+            include_mask=False,
+            include_sep=False,
+        )
+        config = NeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=10,
+            max_length=8,
+            attn_backend="sdpa",
+            ngpt=False,
+            hidden_act="gelu",
+        )
+        model = NeoBERTForMTEB(
+            config=config,
+            tokenizer=tokenizer,
+            max_length=8,
+            batch_size=2,
+            pooling="avg",
+        )
+        model.to("cpu")
+        model.eval()
+
+        captured: dict[str, object] = {}
+
+        class _FakeDataLoader(list):
+            def __init__(self, *args, **kwargs):
+                captured["kwargs"] = kwargs
+                super().__init__(
+                    [
+                        {
+                            "input_ids": torch.tensor([[2, 3], [2, 0]]),
+                            "attention_mask": torch.tensor([[1, 1], [1, 0]]),
+                        }
+                    ]
+                )
+
+        with patch("torch.utils.data.DataLoader", _FakeDataLoader):
+            embeddings = model.encode(
+                ["hello world", "hello"],
+                num_workers=2,
+                pin_memory=True,
+            )
+
+        self.assertTrue(captured["kwargs"]["pin_memory"])
+        self.assertEqual(embeddings.shape[0], 2)
+        self.assertEqual(embeddings.shape[1], config.hidden_size)
+
     @unittest.skipUnless(
         torch.cuda.is_available(), "CUDA required for flash_attn_varlen MTEB test"
     )
