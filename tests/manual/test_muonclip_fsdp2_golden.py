@@ -200,7 +200,7 @@ def main() -> None:
         }
         del init_model
 
-        for norm_factor in ("legacy_compat", "spectral"):
+        for norm_factor in ("original", "spectral"):
             muon_cfg = MuonClipConfig(
                 lr=1e-3,
                 muon_beta=0.95,
@@ -209,7 +209,7 @@ def main() -> None:
                 enable_clipping=False,
                 orthogonalization="polar_express",
                 norm_factor=norm_factor,
-                param_policy="transformer_only",
+                param_policy="hidden_2d",
             )
 
             # Rank-0 local baseline (full tensor update).

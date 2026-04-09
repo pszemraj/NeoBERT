@@ -78,8 +78,8 @@ class MuonClipConfig:
 
     # Orthogonalization / routing control
     orthogonalization: str = "polar_express"
-    norm_factor: str = "legacy_compat"
-    param_policy: str = "transformer_only"
+    norm_factor: str = "original"
+    param_policy: str = "hidden_2d"
     algorithm: Optional[str] = None  # Alias for orthogonalization
     polar_express: Optional[bool] = None  # Legacy toggle
 
@@ -202,8 +202,9 @@ class MuonClipConfig:
             )
 
         norm_factor = str(self.norm_factor).strip().replace("-", "_").lower()
+        norm_factor = {"legacy_compat": "original"}.get(norm_factor, norm_factor)
         valid_norm_factors = {
-            "legacy_compat",
+            "original",
             "spectral",
             "match_rms_adamw",
             "none",
@@ -215,7 +216,8 @@ class MuonClipConfig:
             )
 
         param_policy = str(self.param_policy).strip().replace("-", "_").lower()
-        valid_param_policies = {"all_2d", "transformer_only"}
+        param_policy = {"transformer_only": "hidden_2d"}.get(param_policy, param_policy)
+        valid_param_policies = {"all_2d", "hidden_2d"}
         if param_policy not in valid_param_policies:
             raise ValueError(
                 f"Unsupported param_policy '{self.param_policy}'. "
@@ -730,9 +732,9 @@ class MuonClipOptimizer(Optimizer):
         - ``all_2d``: route every trainable rank-2 parameter to Muon. This
           restores the v0.1.3 scope and remains available as an explicit
           compatibility mode.
-        - ``transformer_only``: route only transformer-layer rank-2 weights to
+        - ``hidden_2d``: route only hidden transformer-layer rank-2 weights to
           Muon. Embeddings / output matrices fall back to AdamW-style grouping.
-          This is the runtime default after the short regression ablation.
+          This is the runtime default and matches the original Muon guidance.
 
         :param torch.nn.Module model: Model to inspect.
         :return list[dict]: Parameter groups for the optimizer.
@@ -744,11 +746,10 @@ class MuonClipOptimizer(Optimizer):
         adam_no_decay_params: List[torch.nn.Parameter] = []
         adam_no_decay_param_info: List[Dict[str, Any]] = []
 
-        param_policy = str(
-            getattr(self.config, "param_policy", "transformer_only")
-        ).strip()
+        param_policy = str(getattr(self.config, "param_policy", "hidden_2d")).strip()
         param_policy = param_policy.replace("-", "_").lower()
-        valid_param_policies = {"all_2d", "transformer_only"}
+        param_policy = {"transformer_only": "hidden_2d"}.get(param_policy, param_policy)
+        valid_param_policies = {"all_2d", "hidden_2d"}
         if param_policy not in valid_param_policies:
             raise ValueError(
                 f"Unsupported param_policy '{param_policy}'. "
@@ -1638,7 +1639,7 @@ class MuonClipOptimizer(Optimizer):
         """Normalize orthogonalized update magnitude before applying it.
 
         Named modes:
-        - ``legacy_compat``: pre-0.1.4 Muon scaling
+        - ``original``: original Muon scaling
         - ``spectral``: scale by sqrt(d_out / d_in)
         - ``match_rms_adamw``: reduced legacy-style scale
         - ``none``: no extra scaling
@@ -1652,23 +1653,24 @@ class MuonClipOptimizer(Optimizer):
 
         d_out, d_in = int(param_shape[0]), int(param_shape[1])
         norm_factor = (
-            str(getattr(self.config, "norm_factor", "legacy_compat"))
+            str(getattr(self.config, "norm_factor", "original"))
             .strip()
             .replace("-", "_")
             .lower()
         )
+        norm_factor = {"legacy_compat": "original"}.get(norm_factor, norm_factor)
         if norm_factor == "none":
             scale = 1.0
         elif norm_factor == "spectral":
             scale = (d_out / max(d_in, 1)) ** 0.5
         elif norm_factor == "match_rms_adamw":
             scale = 0.2 * max(d_out, d_in) ** 0.5
-        elif norm_factor == "legacy_compat":
+        elif norm_factor == "original":
             scale = 0.4 * max(d_out, d_in) ** 0.5
         else:
             raise ValueError(
                 f"Unsupported norm_factor '{norm_factor}'. "
-                "Expected one of: legacy_compat, spectral, match_rms_adamw, none."
+                "Expected one of: original, spectral, match_rms_adamw, none."
             )
 
         return update * scale

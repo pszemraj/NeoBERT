@@ -131,7 +131,7 @@ Current logging semantics:
 `trainer.gradient_clipping` clips gradients. MuonClip's
 `optimizer.muon_config.enable_clipping` toggles its separate QK activation
 clipping path, which is auto-disabled for sharded FSDP2 Muon runs.
-Muon ships with `norm_factor=legacy_compat` and `param_policy=transformer_only`.
+Muon ships with `norm_factor=original` and `param_policy=hidden_2d`.
 Use `all_2d` explicitly when you want exact v0.1.3-style Muon scope for
 compatibility benchmarking.
 This default routing follows the original Muon guidance and PyTorch's Muon

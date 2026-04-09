@@ -173,8 +173,8 @@ class MuonConfig:
     capture_last_microbatch_only: bool = True
     detect_anomalies: bool = False
     orthogonalization: str = "polar_express"
-    norm_factor: str = "legacy_compat"
-    param_policy: str = "transformer_only"
+    norm_factor: str = "original"
+    param_policy: str = "hidden_2d"
     algorithm: Optional[str] = None  # Alias for orthogonalization
     polar_express: Optional[bool] = None  # Legacy toggle
     clipping_layers_mapping: Dict[str, str] = field(default_factory=dict)
@@ -189,8 +189,9 @@ class MuonConfig:
             )
 
         norm_factor = str(self.norm_factor).strip().replace("-", "_").lower()
+        norm_factor = {"legacy_compat": "original"}.get(norm_factor, norm_factor)
         valid_norm_factors = {
-            "legacy_compat",
+            "original",
             "spectral",
             "match_rms_adamw",
             "none",
@@ -203,7 +204,8 @@ class MuonConfig:
         self.norm_factor = norm_factor
 
         param_policy = str(self.param_policy).strip().replace("-", "_").lower()
-        valid_param_policies = {"all_2d", "transformer_only"}
+        param_policy = {"transformer_only": "hidden_2d"}.get(param_policy, param_policy)
+        valid_param_policies = {"all_2d", "hidden_2d"}
         if param_policy not in valid_param_policies:
             raise ValueError(
                 f"Unsupported param_policy '{self.param_policy}'. "

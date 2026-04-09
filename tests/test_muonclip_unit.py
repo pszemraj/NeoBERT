@@ -83,8 +83,8 @@ class TestMuonClipConfig:
         config = MuonClipConfig()
         assert config.lr > 0
         assert 0 <= config.muon_beta < 1
-        assert config.norm_factor == "legacy_compat"
-        assert config.param_policy == "transformer_only"
+        assert config.norm_factor == "original"
+        assert config.param_policy == "hidden_2d"
 
     def test_invalid_numeric_fields_raise(self):
         """Test invalid numeric config values fail fast."""
@@ -305,7 +305,7 @@ class TestMuonClipOptimizer:
         for p in muon_group["params"]:
             assert p.ndim == 2
 
-        assert muon_group["param_policy"] == "transformer_only"
+        assert muon_group["param_policy"] == "hidden_2d"
         assert model_instance.encoder.weight not in muon_params
         if hasattr(model_instance, "positional_embedding"):
             assert model_instance.positional_embedding.weight not in muon_params
@@ -349,8 +349,8 @@ class TestMuonClipOptimizer:
         assert model.decoder.weight not in adam_params
         assert model.model.transformer_encoder[0].qkv.weight in muon_params
 
-    def test_grouping_transformer_only_excludes_embeddings_and_lm_head(self):
-        """transformer_only should keep embeddings/output projection in Adam."""
+    def test_grouping_hidden_2d_excludes_embeddings_and_lm_head(self):
+        """hidden_2d should keep embeddings/output projection in Adam."""
         config = NeoBERTConfig(
             hidden_size=64,
             num_hidden_layers=2,
@@ -367,7 +367,7 @@ class TestMuonClipOptimizer:
         optimizer = MuonClipOptimizer(
             model,
             config,
-            MuonClipConfig(enable_clipping=False, param_policy="transformer_only"),
+            MuonClipConfig(enable_clipping=False, param_policy="hidden_2d"),
         )
 
         muon_group = next(g for g in optimizer.param_groups if g["use_muon"])
@@ -375,7 +375,7 @@ class TestMuonClipOptimizer:
         adam_groups = [g for g in optimizer.param_groups if not g["use_muon"]]
         adam_params = {param for group in adam_groups for param in group["params"]}
 
-        assert muon_group["param_policy"] == "transformer_only"
+        assert muon_group["param_policy"] == "hidden_2d"
         assert model.model.encoder.weight not in muon_params
         assert model.model.encoder.weight in adam_params
         assert model.decoder.weight not in muon_params
@@ -403,7 +403,7 @@ class TestMuonClipOptimizer:
             MuonClipConfig(
                 enable_clipping=False,
                 adam_decay=0.1,
-                param_policy="transformer_only",
+                param_policy="hidden_2d",
             ),
         )
 
@@ -457,7 +457,7 @@ class TestMuonClipOptimizer:
             "none": 1.0,
             "spectral": (6 / 3) ** 0.5,
             "match_rms_adamw": 0.2 * (6**0.5),
-            "legacy_compat": 0.4 * (6**0.5),
+            "original": 0.4 * (6**0.5),
         }
 
         for mode, expected_scale in expected_scales.items():
@@ -493,7 +493,7 @@ class TestMuonClipOptimizer:
             enable_clipping=False,
             orthogonalization="polar_express",
         )
-        assert muon_config.norm_factor == "legacy_compat"
+        assert muon_config.norm_factor == "original"
         optimizer = MuonClipOptimizer(model, config, muon_config)
 
         target = model.transformer_encoder[0].qkv.weight
@@ -726,7 +726,7 @@ class TestMuonClipOptimizer:
         model_instance, config = model
         muon_config = MuonClipConfig(
             enable_clipping=False,
-            param_policy="transformer_only",
+            param_policy="hidden_2d",
         )
         optimizer = MuonClipOptimizer(model_instance, config, muon_config)
 
@@ -788,7 +788,7 @@ class TestMuonClipOptimizer:
         model_instance, config = model
         muon_config = MuonClipConfig(
             enable_clipping=False,
-            param_policy="transformer_only",
+            param_policy="hidden_2d",
         )
         optimizer = MuonClipOptimizer(model_instance, config, muon_config)
 

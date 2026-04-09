@@ -164,7 +164,7 @@ def get_optimizer(
                     "MuonClip param_policy=all_2d preserves the v0.1.3 optimizer "
                     "scope. Under FSDP2 it will also owner-compute embeddings/"
                     "output matrices, so expect materially higher communication "
-                    "cost than transformer_only."
+                    "cost than hidden_2d."
                 )
 
             logger.info(
