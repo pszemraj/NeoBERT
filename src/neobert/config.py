@@ -174,7 +174,7 @@ class MuonConfig:
     capture_last_microbatch_only: bool = True
     detect_anomalies: bool = False
     orthogonalization: str = "polar_express"
-    norm_factor: str = "original"
+    norm_factor: str = "legacy_compat"
     param_policy: str = "hidden_2d"
     algorithm: Optional[str] = None  # Alias for orthogonalization
     polar_express: Optional[bool] = None  # Legacy toggle
@@ -190,8 +190,8 @@ class MuonConfig:
             )
 
         norm_factor = str(self.norm_factor).strip().replace("-", "_").lower()
-        norm_factor = {"legacy_compat": "original"}.get(norm_factor, norm_factor)
         valid_norm_factors = {
+            "legacy_compat",
             "original",
             "spectral",
             "match_rms_adamw",

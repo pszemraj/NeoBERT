@@ -129,7 +129,7 @@ class TestMuonClipConfig:
         assert config.lr > 0
         assert 0 <= config.muon_beta < 1
         assert config.nesterov is True
-        assert config.norm_factor == "original"
+        assert config.norm_factor == "legacy_compat"
         assert config.param_policy == "hidden_2d"
 
     def test_invalid_numeric_fields_raise(self):
@@ -501,9 +501,10 @@ class TestMuonClipOptimizer:
         param_shape = torch.Size([6, 3])
         expected_scales = {
             "none": 1.0,
+            "legacy_compat": 0.4 * (6**0.5),
+            "original": max(1.0, 6 / 3) ** 0.5,
             "spectral": (6 / 3) ** 0.5,
             "match_rms_adamw": 0.2 * (6**0.5),
-            "original": 0.4 * (6**0.5),
         }
 
         for mode, expected_scale in expected_scales.items():
@@ -515,8 +516,8 @@ class TestMuonClipOptimizer:
             normalized = optimizer._normalize_muon_update(update, param_shape)
             assert torch.allclose(normalized, update * expected_scale)
 
-    def test_default_muon_step_matches_original_polar_step(self):
-        """Default Muon settings should match the original local Polar step."""
+    def test_default_muon_step_matches_legacy_compat_polar_step(self):
+        """Default Muon settings should match the NeoBERT compatibility step."""
         torch.manual_seed(0)
         config = NeoBERTConfig(
             hidden_size=16,
@@ -539,7 +540,7 @@ class TestMuonClipOptimizer:
             enable_clipping=False,
             orthogonalization="polar_express",
         )
-        assert muon_config.norm_factor == "original"
+        assert muon_config.norm_factor == "legacy_compat"
         assert muon_config.nesterov is True
         optimizer = MuonClipOptimizer(model, config, muon_config)
 
@@ -609,6 +610,30 @@ class TestMuonClipOptimizer:
 
         optimizer.step()
         assert torch.allclose(target, expected, atol=1e-6, rtol=1e-6)
+
+    def test_original_norm_factor_matches_reference_scale(self):
+        """Reference Muon scaling should match the OpenAI/PyTorch shape rule."""
+        config = NeoBERTConfig(
+            hidden_size=8,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=16,
+            vocab_size=64,
+            max_length=16,
+            attn_backend="sdpa",
+            hidden_act="gelu",
+            rope=False,
+        )
+        model = NeoBERT(config)
+        optimizer = MuonClipOptimizer(
+            model,
+            config,
+            MuonClipConfig(enable_clipping=False, norm_factor="original"),
+        )
+        update = torch.ones(12, 3)
+        normalized = optimizer._normalize_muon_update(update, update.shape)
+        expected_scale = max(1.0, 12 / 3) ** 0.5
+        torch.testing.assert_close(normalized, update * expected_scale)
 
     def test_interleaved_qkv_scaling(self):
         """Ensure fused QKV scaling matches per-head interleaved layout."""
