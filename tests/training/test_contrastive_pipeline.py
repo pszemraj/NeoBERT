@@ -8,7 +8,7 @@ from unittest import mock
 import pytest
 import torch
 
-from neobert.config import ConfigLoader
+from neobert.config import Config, ConfigLoader
 from tests.tokenizer_utils import build_wordlevel_tokenizer
 
 
@@ -180,6 +180,39 @@ class TestContrastivePipeline:
 
         except ImportError as e:
             pytest.skip(f"Contrastive trainer dependencies unavailable: {e}")
+
+    def test_contrastive_loader_kwargs_keep_cuda_pin_memory(self):
+        """Contrastive dataloaders should preserve pinned staging on CUDA."""
+        try:
+            from neobert.contrastive.trainer import (
+                _resolve_contrastive_dataloader_kwargs,
+            )
+        except ImportError as e:
+            pytest.skip(f"Contrastive trainer module not available: {e}")
+
+        cuda_cfg = Config()
+        cuda_cfg.dataset.pin_memory = False
+        cuda_cfg.trainer.dataloader_num_workers = 4
+        dataloader_kwargs, notes = _resolve_contrastive_dataloader_kwargs(
+            cuda_cfg,
+            device=torch.device("cuda"),
+        )
+        assert dataloader_kwargs["num_workers"] == 4
+        assert dataloader_kwargs["pin_memory"] is True
+        assert dataloader_kwargs["shuffle"] is True
+        assert len(notes) > 0
+
+        cpu_cfg = Config()
+        cpu_cfg.dataset.pin_memory = False
+        cpu_cfg.trainer.dataloader_num_workers = 2
+        dataloader_kwargs, notes = _resolve_contrastive_dataloader_kwargs(
+            cpu_cfg,
+            device=torch.device("cpu"),
+        )
+        assert dataloader_kwargs["num_workers"] == 2
+        assert dataloader_kwargs["pin_memory"] is False
+        assert dataloader_kwargs["shuffle"] is True
+        assert notes == []
 
 
 class TestContrastiveLoss:

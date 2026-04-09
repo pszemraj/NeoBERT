@@ -70,6 +70,7 @@ from neobert.training_utils import (
     _maybe_compile_model,
     _maybe_prepare_for_forward,
     _pin_cpu_tensors,
+    _resolve_cuda_pin_memory,
     _resolve_resume_checkpoint,
     _update_global_norm_metric_for_logging,
     create_accelerator,
@@ -1016,7 +1017,10 @@ def _resolve_loader_perf_settings(
         ``(pin_memory, persistent_workers, prefetch_factor, notes)``.
     """
     num_workers = max(0, int(cfg.dataset.num_workers))
-    pin_memory = bool(cfg.dataset.pin_memory)
+    pin_memory, notes = _resolve_cuda_pin_memory(
+        cfg.dataset.pin_memory,
+        device=device,
+    )
     persistent_workers = bool(cfg.dataset.persistent_workers and num_workers > 0)
     prefetch_factor = cfg.dataset.prefetch_factor
     if num_workers <= 0:
@@ -1028,14 +1032,7 @@ def _resolve_loader_perf_settings(
                 f"dataset.prefetch_factor must be > 0 when set, got {prefetch_factor}."
             )
 
-    notes: list[str] = []
     if device.type == "cuda":
-        if not pin_memory:
-            pin_memory = True
-            notes.append(
-                "dataset.pin_memory was false; enabling pinned CPU staging on CUDA "
-                "to improve host->device transfer overlap."
-            )
         if num_workers > 0 and prefetch_factor is None:
             prefetch_factor = 4
             notes.append(
@@ -1043,6 +1040,30 @@ def _resolve_loader_perf_settings(
             )
 
     return pin_memory, persistent_workers, prefetch_factor, notes
+
+
+def _should_use_loader_pin_memory(
+    *,
+    pin_memory: bool,
+    disable_dispatch: bool,
+    accelerator: Accelerator,
+) -> bool:
+    """Return whether pinned CPU staging should happen inside the dataloader.
+
+    Automatic Accelerate device placement can consume pinned batches directly.
+    Packed/manual transfer paths instead re-pin the final CPU batch immediately
+    before the non-blocking H2D copy.
+
+    :param bool pin_memory: Whether pinned CPU staging is enabled overall.
+    :param bool disable_dispatch: Whether batches stay on CPU until manually moved.
+    :param Accelerator accelerator: Runtime accelerator instance.
+    :return bool: ``True`` when loader-side pinning should be enabled.
+    """
+    return bool(
+        pin_memory
+        and not disable_dispatch
+        and hasattr(accelerator, "prepare_data_loader")
+    )
 
 
 def _scale_gradients(model: torch.nn.Module, scale: torch.Tensor) -> None:
@@ -2069,6 +2090,11 @@ def trainer(cfg: Config) -> None:
     )
     for note in loader_perf_notes:
         logger.info(note)
+    loader_pin_memory = _should_use_loader_pin_memory(
+        pin_memory=pin_memory,
+        disable_dispatch=disable_dispatch,
+        accelerator=accelerator,
+    )
 
     # Dataloader
     collator_max_length = cfg.datacollator.max_length or cfg.dataset.max_seq_length
@@ -2077,6 +2103,7 @@ def trainer(cfg: Config) -> None:
         tokenizer,
         batch_size=cfg.trainer.per_device_train_batch_size,
         num_workers=cfg.dataset.num_workers,
+        pin_memory=loader_pin_memory,
         persistent_workers=persistent_workers,
         prefetch_factor=prefetch_factor,
         mlm_probability=cfg.datacollator.mlm_probability,
@@ -2094,6 +2121,7 @@ def trainer(cfg: Config) -> None:
             tokenizer,
             batch_size=cfg.trainer.per_device_eval_batch_size,
             num_workers=cfg.dataset.num_workers,
+            pin_memory=loader_pin_memory,
             persistent_workers=persistent_workers,
             prefetch_factor=prefetch_factor,
             mlm_probability=cfg.datacollator.mlm_probability,

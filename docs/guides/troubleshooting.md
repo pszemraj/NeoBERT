@@ -20,7 +20,7 @@ Checklist:
 
 1. use `attn_backend: flash_attn_varlen` for packed runs,
 2. ensure flash-attn is installed,
-3. tune dataloader knobs (`dataset.num_workers`, `pin_memory`, `persistent_workers`, `prefetch_factor`), remember that `pin_memory` controls pinned CPU staging even though NeoBERT keeps `DataLoader(pin_memory=True)` disabled on current PyTorch,
+3. tune dataloader knobs (`dataset.num_workers`, `pin_memory`, `persistent_workers`, `prefetch_factor`); on CUDA, `pin_memory` keeps host buffers pinned, with loader-side pinning on the default Accelerate-managed path and final-batch repinning on packed/manual-transfer paths,
 4. compare `tokens/sec` (not only `steps/sec`) when `enforce_full_packed_batches=true`.
 
 ### Pretraining OOM from logits memory

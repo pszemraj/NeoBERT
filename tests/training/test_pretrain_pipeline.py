@@ -14,6 +14,7 @@ from transformers import BatchEncoding
 
 from neobert.checkpointing import MODEL_WEIGHTS_NAME, load_model_safetensors
 from neobert.config import Config, ConfigLoader
+from neobert.dataloader import get_dataloader
 from neobert.pretraining.masked_objective import MaskedObjectiveOut
 from neobert.pretraining.trainer import (
     _compute_weight_norm_for_logging,
@@ -23,6 +24,7 @@ from neobert.pretraining.trainer import (
     _resolve_loader_perf_settings,
     _resolve_streaming_eval_budget,
     _save_portable_checkpoint_weights,
+    _should_use_loader_pin_memory,
     _run_masked_objective_step,
     _split_train_dataset_for_eval_samples,
     _should_backward_inside_gathered_decoder_weight,
@@ -548,6 +550,66 @@ class TestPretrainComponents:
         assert persistent_workers
         assert prefetch_factor == 2
         assert notes == []
+
+    def test_should_use_loader_pin_memory_only_for_auto_dispatch(self):
+        """Loader-side pinning should stay on only for auto-dispatched batches."""
+
+        class _AcceleratorWithPrepare:
+            @staticmethod
+            def prepare_data_loader(*args, **kwargs):
+                return args[0]
+
+        class _AcceleratorWithoutPrepare:
+            pass
+
+        assert _should_use_loader_pin_memory(
+            pin_memory=True,
+            disable_dispatch=False,
+            accelerator=_AcceleratorWithPrepare(),
+        )
+        assert not _should_use_loader_pin_memory(
+            pin_memory=True,
+            disable_dispatch=True,
+            accelerator=_AcceleratorWithPrepare(),
+        )
+        assert not _should_use_loader_pin_memory(
+            pin_memory=True,
+            disable_dispatch=False,
+            accelerator=_AcceleratorWithoutPrepare(),
+        )
+        assert not _should_use_loader_pin_memory(
+            pin_memory=False,
+            disable_dispatch=False,
+            accelerator=_AcceleratorWithPrepare(),
+        )
+
+    def test_get_dataloader_propagates_requested_pin_memory(self):
+        """Requested loader pinning should be forwarded to ``torch.DataLoader``."""
+        tokenizer = build_wordlevel_tokenizer(
+            vocab={"hello": 4, "world": 5},
+        )
+        dataset = Dataset.from_dict(
+            {
+                "input_ids": [[4, 5, 0]],
+                "attention_mask": [[1, 1, 0]],
+                "special_tokens_mask": [[0, 0, 1]],
+            }
+        )
+        with patch("neobert.dataloader.dataloader.DataLoader") as dataloader_cls:
+            sentinel = object()
+            dataloader_cls.return_value = sentinel
+
+            dataloader = get_dataloader(
+                dataset,
+                tokenizer,
+                batch_size=1,
+                num_workers=0,
+                pin_memory=True,
+                persistent_workers=False,
+            )
+
+        assert dataloader is sentinel
+        assert dataloader_cls.call_args.kwargs["pin_memory"] is True
 
     def test_resolve_tokenize_num_proc_falls_back_to_cpu_count(self):
         """Ensure tokenization num_proc falls back when affinity is unavailable."""

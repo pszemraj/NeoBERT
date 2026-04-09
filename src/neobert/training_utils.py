@@ -107,6 +107,33 @@ def resolve_wandb_watch_mode(
     )
 
 
+def _resolve_cuda_pin_memory(
+    requested_pin_memory: bool,
+    *,
+    device: torch.device,
+) -> tuple[bool, list[str]]:
+    """Resolve effective pinned CPU staging for training/eval dataloaders.
+
+    NeoBERT keeps pinned host buffers enabled on CUDA so both automatic
+    device-placement paths and manual non-blocking H2D copies can overlap
+    transfers with compute. Call sites can choose whether that staging happens
+    inside the ``DataLoader`` or via a final batch repin just before transfer.
+
+    :param bool requested_pin_memory: User-configured pinned staging toggle.
+    :param torch.device device: Active accelerator device.
+    :return tuple[bool, list[str]]: Effective setting plus informational notes.
+    """
+    pin_memory = bool(requested_pin_memory)
+    notes: list[str] = []
+    if device.type == "cuda" and not pin_memory:
+        pin_memory = True
+        notes.append(
+            "dataset.pin_memory was false; enabling pinned CPU staging on CUDA "
+            "to improve host->device transfer overlap."
+        )
+    return pin_memory, notes
+
+
 def _pin_cpu_tensors(value: Any) -> Any:
     """Recursively pin CPU tensors for non-blocking host-to-device copies.
 

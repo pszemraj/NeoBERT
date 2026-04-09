@@ -45,6 +45,7 @@ from neobert.tokenizer import get_tokenizer
 from neobert.training_utils import (
     _maybe_compile_model,
     _maybe_prepare_for_forward,
+    _resolve_cuda_pin_memory,
     _resolve_resume_checkpoint,
     _update_global_norm_metric_for_logging,
     create_accelerator,
@@ -116,6 +117,32 @@ def _build_packed_seqlens(attention_mask: torch.Tensor, *, name: str) -> torch.T
             "model.attn_backend='sdpa'."
         )
     return attention_mask_to_packed_seqlens(mask_cpu)
+
+
+def _resolve_contrastive_dataloader_kwargs(
+    cfg: Config,
+    *,
+    device: torch.device,
+) -> tuple[dict[str, Any], list[str]]:
+    """Resolve contrastive dataloader kwargs while preserving CUDA pinning.
+
+    Contrastive training relies on Accelerate device placement, so pinned CPU
+    staging needs to remain on when running on CUDA.
+
+    :param Config cfg: Training configuration.
+    :param torch.device device: Active accelerator device.
+    :return tuple[dict[str, Any], list[str]]: Dataloader kwargs plus notes.
+    """
+    pin_memory, notes = _resolve_cuda_pin_memory(
+        cfg.dataset.pin_memory,
+        device=device,
+    )
+    dataloader_kwargs: dict[str, Any] = {
+        "num_workers": max(0, int(cfg.trainer.dataloader_num_workers)),
+        "pin_memory": pin_memory,
+        "shuffle": True,
+    }
+    return dataloader_kwargs, notes
 
 
 class CustomDataCollatorWithPadding(DataCollatorWithPadding):
@@ -384,13 +411,12 @@ def trainer(cfg: Config) -> None:
     target_bsz = (
         cfg.trainer.per_device_train_batch_size or cfg.trainer.train_batch_size or 16
     )
-    dataloader_kwargs = {
-        "num_workers": cfg.trainer.dataloader_num_workers,
-        # Keep DataLoader-side pinning off; current torch routes it through a
-        # deprecated per-device pinning path on CUDA.
-        "pin_memory": False,
-        "shuffle": True,
-    }
+    dataloader_kwargs, loader_perf_notes = _resolve_contrastive_dataloader_kwargs(
+        cfg,
+        device=accelerator.device,
+    )
+    for note in loader_perf_notes:
+        logger.info(note)
     dataloaders = {
         key: DataLoader(
             dataset[key],

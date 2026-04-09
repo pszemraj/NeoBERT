@@ -21,6 +21,7 @@ def get_dataloader(
     num_workers: int = 4,
     batch_size: int = 64,
     shuffle: bool = True,
+    pin_memory: bool = False,
     persistent_workers: bool = True,
     prefetch_factor: int | None = None,
     pack_sequences: bool = False,
@@ -37,6 +38,7 @@ def get_dataloader(
     :param int num_workers: Number of dataloader workers.
     :param int batch_size: Batch size per device.
     :param bool shuffle: Whether to shuffle the dataset each epoch.
+    :param bool pin_memory: Whether the dataloader should pin CPU batches.
     :param bool persistent_workers: Keep workers alive across epochs.
     :param int | None prefetch_factor: Number of prefetched batches per worker.
     :param bool pack_sequences: Whether to pack sequences before collation.
@@ -65,9 +67,7 @@ def get_dataloader(
         "collate_fn": collate_fn,
         "num_workers": num_workers,
         "batch_size": batch_size,
-        # Keep DataLoader-side pinning off. CUDA call sites that move batches
-        # manually re-pin the final CPU batch before non-blocking H2D copies.
-        "pin_memory": False,
+        "pin_memory": bool(pin_memory),
         "persistent_workers": persistent_workers if num_workers > 0 else False,
         # Keep tail batches (important for unbiased eval); training logic tolerates
         # smaller final batches when packing is enabled.

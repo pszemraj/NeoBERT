@@ -104,7 +104,7 @@ Primary throughput knobs:
 - `dataset.streaming_read_retry_backoff_seconds`
 - `dataset.streaming_read_retry_max_backoff_seconds`
 
-Current PyTorch builds route `DataLoader(pin_memory=True)` through a deprecated CUDA-specific path, so NeoBERT keeps loader-side pinning off and pins final CPU batches explicitly before non-blocking device transfer in the paths that move batches manually.
+NeoBERT keeps pinned CPU staging enabled on CUDA. When Accelerate owns device placement, loaders preserve `pin_memory=True` so unpacked batches stay pinned end to end; packed/manual-transfer paths instead re-pin the final CPU batch immediately before the non-blocking device copy.
 
 For hub-backed streaming datasets:
 
