@@ -78,6 +78,53 @@ def is_streaming_dataset(dataset: object) -> bool:
     )
 
 
+class TorchIterableDatasetAdapter(torch.utils.data.IterableDataset):
+    """Expose a streaming iterable through PyTorch's ``IterableDataset`` API."""
+
+    def __init__(self, dataset: object) -> None:
+        """Initialize the adapter.
+
+        :param object dataset: Streaming iterable dataset to adapt.
+        :raises TypeError: If ``dataset`` is not recognized as streaming.
+        """
+        if not is_streaming_dataset(dataset):
+            raise TypeError("TorchIterableDatasetAdapter requires a streaming dataset.")
+        super().__init__()
+        self.dataset = dataset
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate dataset-specific methods such as ``state_dict`` and ``set_epoch``.
+
+        :param str name: Missing attribute name.
+        :return Any: Attribute from the wrapped dataset.
+        """
+        try:
+            dataset = self.__dict__["dataset"]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+        return getattr(dataset, name)
+
+    def __iter__(self) -> Iterator[Any]:
+        """Iterate over the wrapped streaming dataset.
+
+        :return collections.abc.Iterator[Any]: Wrapped dataset iterator.
+        """
+        return iter(self.dataset)
+
+
+def ensure_torch_iterable_dataset(dataset: object) -> object:
+    """Return a PyTorch-compatible iterable dataset for streaming inputs.
+
+    :param object dataset: Dataset-like object to inspect.
+    :return object: Original dataset or a PyTorch iterable adapter.
+    """
+    if not is_streaming_dataset(dataset) or isinstance(
+        dataset, torch.utils.data.IterableDataset
+    ):
+        return dataset
+    return TorchIterableDatasetAdapter(dataset)
+
+
 def supports_streaming_iteration_resume(dataset: object) -> bool:
     """Return whether a dataset exposes resumable iterator state hooks.
 

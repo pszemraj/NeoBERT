@@ -9,7 +9,11 @@ from datasets import Dataset, Features, Sequence, Value
 from tokenizers.processors import TemplateProcessing
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 
-from neobert.streaming import is_streaming_dataset, peek_streaming_example
+from neobert.streaming import (
+    is_streaming_dataset,
+    is_transient_streaming_error,
+    peek_streaming_example,
+)
 
 logger = logging.getLogger("neobert.tokenizer")
 
@@ -343,6 +347,9 @@ def tokenize(
     truncation: bool = True,
     add_special_tokens: bool = True,
     return_special_tokens_mask: bool = False,
+    streaming_read_retries: int = 0,
+    streaming_read_retry_backoff_seconds: float = 1.0,
+    streaming_read_retry_max_backoff_seconds: float = 8.0,
     **kwargs: Any,
 ) -> Dataset:
     """Tokenize a dataset with a single- or multi-column schema.
@@ -355,6 +362,9 @@ def tokenize(
     :param bool truncation: Whether to truncate sequences.
     :param bool add_special_tokens: Whether to add tokenizer special tokens.
     :param bool return_special_tokens_mask: Whether to return special token masks.
+    :param int streaming_read_retries: Retry count for transient streaming reads.
+    :param float streaming_read_retry_backoff_seconds: Initial backoff for retries.
+    :param float streaming_read_retry_max_backoff_seconds: Maximum retry backoff.
     :param Any kwargs: Extra arguments passed to ``Dataset.map``.
     :return Dataset: Tokenized dataset.
     """
@@ -373,7 +383,13 @@ def tokenize(
         if is_streaming:
             # For streaming datasets, we need to get column names from first example
             try:
-                first_example = next(iter(dataset))
+                first_example = peek_streaming_example(
+                    dataset,
+                    context="tokenize streaming schema",
+                    max_retries=streaming_read_retries,
+                    base_backoff_seconds=streaming_read_retry_backoff_seconds,
+                    max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+                )
                 all_columns = list(first_example.keys())
                 # Remove all columns except the ones we're creating
                 columns_to_remove = [
@@ -381,7 +397,9 @@ def tokenize(
                     for col in all_columns
                     if col not in ["input_ids", "attention_mask", "token_type_ids"]
                 ]
-            except Exception:
+            except Exception as exc:
+                if is_transient_streaming_error(exc):
+                    raise
                 # Fallback to just removing the text column(s) we're tokenizing
                 if isinstance(column_name, str):
                     columns_to_remove = [column_name]

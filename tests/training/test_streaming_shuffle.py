@@ -38,9 +38,18 @@ def _http_error(status_code: int) -> requests.exceptions.HTTPError:
 class DummyStreamingDataset:
     """Streaming dataset stub that records shuffle calls."""
 
+    _ex_iterable = object()
+
     def __init__(self) -> None:
         """Initialize the dummy dataset."""
         self.shuffle_calls: list[tuple[int, int]] = []
+
+    def __iter__(self):
+        """Yield no examples.
+
+        :return collections.abc.Iterator[object]: Empty iterator.
+        """
+        return iter(())
 
     def shuffle(self, buffer_size: int, seed: int):
         """Record shuffle calls and return self.
@@ -71,6 +80,24 @@ class TestStreamingShuffle(unittest.TestCase):
 
         self.assertIs(out, dataset)
         self.assertEqual(dataset.shuffle_calls, [])
+
+    def test_shuffle_skipped_for_map_style_dataset(self):
+        """Ensure streaming shuffle helper does not call map-style shuffle APIs."""
+
+        class _MapStyleDataset:
+            def __init__(self) -> None:
+                self.shuffle_called = False
+
+            def shuffle(self, *args, **kwargs):
+                self.shuffle_called = True
+                return self
+
+        dataset = _MapStyleDataset()
+
+        out = _maybe_shuffle_streaming_dataset(dataset, buffer_size=32, seed=123)
+
+        self.assertIs(out, dataset)
+        self.assertFalse(dataset.shuffle_called)
 
     def test_prepare_resume_dataloader_streaming_skip_cases(self):
         """Ensure streaming resume skips using the expected counter per case."""

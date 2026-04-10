@@ -20,6 +20,7 @@ from neobert.pretraining.trainer import (
     _compute_weight_norm_for_logging,
     _gather_decoder_weight_for_masked_objective,
     _infer_eval_split_name,
+    _requires_streaming_eval_budget,
     _resolve_eval_samples,
     _resolve_loader_perf_settings,
     _resolve_streaming_eval_budget,
@@ -31,6 +32,7 @@ from neobert.pretraining.trainer import (
     _sync_tokenizer_derived_config,
     trainer,
 )
+from neobert.streaming import RetryingStreamingDataset
 from neobert.training_utils import _pin_cpu_tensors
 from tests.tokenizer_utils import build_wordlevel_tokenizer
 
@@ -40,12 +42,34 @@ class _HuggingFaceMarkerStreamingDataset:
 
     _ex_iterable = object()
 
-    def __iter__(self):
-        """Yield no examples.
+    def __init__(self) -> None:
+        """Initialize a tokenized streaming dataset stub."""
+        self._state = {}
 
-        :return collections.abc.Iterator[dict[str, list[int]]]: Empty iterator.
+    def state_dict(self) -> dict[str, object]:
+        """Return a resumable cursor payload.
+
+        :return dict[str, object]: Cursor payload.
         """
-        return iter(())
+        return dict(self._state)
+
+    def load_state_dict(self, state_dict: dict[str, object]) -> None:
+        """Load a resumable cursor payload.
+
+        :param dict[str, object] state_dict: Cursor payload.
+        """
+        self._state = dict(state_dict)
+
+    def __iter__(self):
+        """Yield tokenized examples.
+
+        :return collections.abc.Iterator[dict[str, list[int]]]: Example iterator.
+        """
+        yield {
+            "input_ids": [4, 5],
+            "attention_mask": [1, 1],
+            "special_tokens_mask": [0, 0],
+        }
 
 
 class TestPretrainPipeline:
@@ -637,6 +661,41 @@ class TestPretrainComponents:
 
         assert dataloader is sentinel
         assert "shuffle" not in dataloader_cls.call_args.kwargs
+
+    def test_get_dataloader_adapts_huggingface_marker_stream_for_torch(self):
+        """Detected streams should work with PyTorch even without torch subclassing."""
+        tokenizer = build_wordlevel_tokenizer(
+            vocab={"hello": 4, "world": 5},
+        )
+        dataset = _HuggingFaceMarkerStreamingDataset()
+
+        dataloader = get_dataloader(
+            dataset,
+            tokenizer,
+            batch_size=1,
+            num_workers=0,
+            shuffle=True,
+            persistent_workers=False,
+            mlm_probability=0.0,
+        )
+        batch = next(iter(dataloader))
+
+        assert "input_ids" in batch
+        assert "labels" in batch
+
+    def test_streaming_eval_budget_required_for_retry_wrapped_eval_dataset(self):
+        """Retry wrappers must not hide streaming eval datasets from budget guards."""
+        dataset = _HuggingFaceMarkerStreamingDataset()
+        wrapped = RetryingStreamingDataset(
+            dataset,
+            label="unit-test",
+            max_retries=1,
+            base_backoff_seconds=0.01,
+            max_backoff_seconds=0.01,
+            sleep_fn=lambda _seconds: None,
+        )
+
+        assert _requires_streaming_eval_budget(wrapped)
 
     def test_resolve_tokenize_num_proc_falls_back_to_cpu_count(self):
         """Ensure tokenization num_proc falls back when affinity is unavailable."""

@@ -853,6 +853,15 @@ def _resolve_streaming_eval_budget(
     return max(1, math.ceil(eval_samples / eval_batch_size)), "dataset.eval_samples"
 
 
+def _requires_streaming_eval_budget(eval_dataset: object | None) -> bool:
+    """Return whether an eval dataset needs an explicit streaming budget.
+
+    :param object | None eval_dataset: Evaluation dataset to inspect.
+    :return bool: ``True`` when the dataset is streaming-style.
+    """
+    return eval_dataset is not None and is_streaming_dataset(eval_dataset)
+
+
 def _run_eval(
     model: torch.nn.Module,
     eval_dataloader: torch.utils.data.DataLoader,
@@ -1429,7 +1438,11 @@ def _maybe_shuffle_streaming_dataset(
     :param callable | None print_fn: Optional logging callback.
     :return Dataset: Shuffled dataset (or the original dataset if no shuffle is applied).
     """
-    if buffer_size <= 0 or not hasattr(dataset, "shuffle"):
+    if (
+        buffer_size <= 0
+        or not is_streaming_dataset(dataset)
+        or not hasattr(dataset, "shuffle")
+    ):
         return dataset
 
     shuffled = dataset.shuffle(buffer_size=buffer_size, seed=seed)
@@ -1798,12 +1811,28 @@ def trainer(cfg: Config) -> None:
                     **dataset_kwargs,
                 )
         else:
-            dataset = load_dataset(
-                cfg.dataset.name,
-                streaming=cfg.dataset.streaming,
-                **dataset_kwargs,
+            dataset = (
+                retry_streaming_operation(
+                    lambda: load_dataset(
+                        cfg.dataset.name,
+                        streaming=True,
+                        **dataset_kwargs,
+                    ),
+                    context=f"load streaming dataset {cfg.dataset.name}",
+                    max_retries=streaming_read_retries,
+                    base_backoff_seconds=streaming_read_retry_backoff_seconds,
+                    max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+                )
+                if cfg.dataset.streaming
+                else load_dataset(
+                    cfg.dataset.name,
+                    streaming=False,
+                    **dataset_kwargs,
+                )
             )
             train_dataset = dataset["train"]
+
+    is_streaming = is_streaming_dataset(train_dataset)
 
     # Check if dataset needs tokenization
     # For streaming datasets, we need to check differently
@@ -1860,6 +1889,9 @@ def trainer(cfg: Config) -> None:
                         num_proc=cfg.dataset.num_proc,
                         add_special_tokens=add_special_tokens,
                         return_special_tokens_mask=return_special_tokens_mask,
+                        streaming_read_retries=streaming_read_retries,
+                        streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+                        streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
                     )
                     tokenized_dataset.save_to_disk(output_dir)
                 except Exception as exc:
@@ -1912,8 +1944,11 @@ def trainer(cfg: Config) -> None:
                     num_proc=tokenize_num_proc,
                     add_special_tokens=add_special_tokens,
                     return_special_tokens_mask=return_special_tokens_mask,
+                    streaming_read_retries=streaming_read_retries,
+                    streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+                    streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
                 )
-        if cfg.dataset.streaming:
+        if is_streaming:
             accelerator.print("Tokenization setup complete for streaming dataset.")
         else:
             accelerator.print(
@@ -2058,12 +2093,15 @@ def trainer(cfg: Config) -> None:
                     num_proc=eval_num_proc,
                     add_special_tokens=add_special_tokens,
                     return_special_tokens_mask=return_special_tokens_mask,
+                    streaming_read_retries=streaming_read_retries,
+                    streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+                    streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
                 )
 
         if not eval_is_streaming:
             accelerator.print(f"Eval dataset size: {len(eval_dataset)}")
 
-    if cfg.dataset.streaming and hasattr(cfg.dataset, "shuffle_buffer_size"):
+    if is_streaming and hasattr(cfg.dataset, "shuffle_buffer_size"):
         train_dataset = _maybe_shuffle_streaming_dataset(
             train_dataset,
             cfg.dataset.shuffle_buffer_size,
@@ -2358,12 +2396,7 @@ def trainer(cfg: Config) -> None:
             "ablation/debug and has higher memory use."
         )
     eval_max_batches = getattr(cfg.trainer, "eval_max_batches", None)
-    eval_dataset_is_streaming = (
-        eval_dataset is not None
-        and cfg.dataset.streaming
-        and hasattr(eval_dataset, "take")
-        and hasattr(eval_dataset, "skip")
-    )
+    eval_dataset_is_streaming = _requires_streaming_eval_budget(eval_dataset)
     if eval_dataset_is_streaming:
         eval_max_batches, eval_budget_source = _resolve_streaming_eval_budget(
             eval_max_batches=eval_max_batches,
@@ -2829,7 +2862,7 @@ def trainer(cfg: Config) -> None:
         skipped_train_dataloader = None
 
         # For streaming datasets, update the epoch to ensure different shuffling
-        if cfg.dataset.streaming and hasattr(train_dataset, "set_epoch"):
+        if is_streaming and hasattr(train_dataset, "set_epoch"):
             # Called after epoch increment so the next epoch uses the new seed.
             train_dataset.set_epoch(metrics["train/epochs"])
             accelerator.print(

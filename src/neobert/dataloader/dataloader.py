@@ -9,7 +9,7 @@ from transformers import PreTrainedTokenizer
 
 # Ours
 from neobert.collator import get_collator
-from neobert.streaming import is_streaming_dataset
+from neobert.streaming import ensure_torch_iterable_dataset, is_streaming_dataset
 
 
 def get_dataloader(
@@ -60,6 +60,8 @@ def get_dataloader(
 
     # Check if this is a streaming dataset
     is_streaming = is_streaming_dataset(dataset)
+    if is_streaming:
+        dataset = ensure_torch_iterable_dataset(dataset)
 
     # Streaming datasets can't use shuffle in DataLoader
     dataloader_kwargs = {
