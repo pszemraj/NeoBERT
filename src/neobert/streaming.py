@@ -9,6 +9,7 @@ from typing import Any, TypeVar
 
 import requests
 import torch
+from datasets import IterableDataset as HuggingFaceIterableDataset
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,19 @@ _WRAPPER_STATE_VERSION_KEY = "_retrying_streaming_wrapper_version"
 _WRAPPER_STATE_EPOCH_KEY = "_retrying_streaming_wrapper_epoch"
 _WRAPPER_DATASET_STATE_KEY = "_retrying_streaming_wrapper_dataset_state"
 _WRAPPER_STATE_VERSION = 1
+_STREAMING_ITERATOR_MARKERS = ("_iter", "_ex_iterable")
+
+
+def _has_streaming_iterator_marker(dataset: object) -> bool:
+    """Return whether a dataset exposes known streaming iterator internals.
+
+    :param object dataset: Dataset-like object to inspect.
+    :return bool: ``True`` when the object has a streaming iterator marker.
+    """
+    return bool(
+        callable(getattr(dataset, "__iter__", None))
+        and any(hasattr(dataset, marker) for marker in _STREAMING_ITERATOR_MARKERS)
+    )
 
 
 def is_streaming_dataset(dataset: object) -> bool:
@@ -56,8 +70,11 @@ def is_streaming_dataset(dataset: object) -> bool:
     :return bool: ``True`` when the object should be treated as streaming.
     """
     return bool(
-        isinstance(dataset, torch.utils.data.IterableDataset)
-        or hasattr(dataset, "_iter")
+        isinstance(
+            dataset,
+            (torch.utils.data.IterableDataset, HuggingFaceIterableDataset),
+        )
+        or _has_streaming_iterator_marker(dataset)
     )
 
 

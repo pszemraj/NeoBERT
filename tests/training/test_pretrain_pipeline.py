@@ -35,6 +35,19 @@ from neobert.training_utils import _pin_cpu_tensors
 from tests.tokenizer_utils import build_wordlevel_tokenizer
 
 
+class _HuggingFaceMarkerStreamingDataset:
+    """Minimal Hugging Face-style stream marker for DataLoader kwarg tests."""
+
+    _ex_iterable = object()
+
+    def __iter__(self):
+        """Yield no examples.
+
+        :return collections.abc.Iterator[dict[str, list[int]]]: Empty iterator.
+        """
+        return iter(())
+
+
 class TestPretrainPipeline:
     """Test pretraining pipeline functionality."""
 
@@ -602,6 +615,28 @@ class TestPretrainComponents:
 
         assert dataloader is sentinel
         assert dataloader_cls.call_args.kwargs["pin_memory"] is True
+
+    def test_get_dataloader_omits_shuffle_for_huggingface_stream_marker(self):
+        """Hugging Face-style streaming datasets should avoid map-style shuffle."""
+        tokenizer = build_wordlevel_tokenizer(
+            vocab={"hello": 4, "world": 5},
+        )
+        dataset = _HuggingFaceMarkerStreamingDataset()
+        with patch("neobert.dataloader.dataloader.DataLoader") as dataloader_cls:
+            sentinel = object()
+            dataloader_cls.return_value = sentinel
+
+            dataloader = get_dataloader(
+                dataset,
+                tokenizer,
+                batch_size=1,
+                num_workers=0,
+                shuffle=True,
+                persistent_workers=False,
+            )
+
+        assert dataloader is sentinel
+        assert "shuffle" not in dataloader_cls.call_args.kwargs
 
     def test_resolve_tokenize_num_proc_falls_back_to_cpu_count(self):
         """Ensure tokenization num_proc falls back when affinity is unavailable."""

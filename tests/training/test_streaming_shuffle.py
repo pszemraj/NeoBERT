@@ -15,7 +15,11 @@ from neobert.pretraining.trainer import (
     _load_streaming_split,
     _prepare_resume_dataloader,
 )
-from neobert.streaming import RetryingStreamingDataset, peek_streaming_example
+from neobert.streaming import (
+    RetryingStreamingDataset,
+    is_streaming_dataset,
+    peek_streaming_example,
+)
 
 
 def _http_error(status_code: int) -> requests.exceptions.HTTPError:
@@ -350,8 +354,71 @@ class _StatelessStreamingDataset(torch.utils.data.IterableDataset):
         yield from self.values
 
 
+class _HuggingFaceStyleStreamingDataset:
+    """Legacy Hugging Face-style iterable that is not a torch subclass."""
+
+    def __init__(self, values: list[int]) -> None:
+        """Store values and expose the Hugging Face streaming marker.
+
+        :param list[int] values: Sequence of values to iterate.
+        """
+        self.values = values
+        self._ex_iterable = object()
+        self._starting_state = {"cursor": 0}
+        self._state = {"cursor": 0}
+
+    def state_dict(self) -> dict[str, int]:
+        """Return the active dataset cursor.
+
+        :return dict[str, int]: Current cursor position.
+        """
+        return dict(self._state)
+
+    def load_state_dict(self, state_dict: dict[str, int]) -> None:
+        """Load the next iterator start state.
+
+        :param dict[str, int] state_dict: Cursor state.
+        """
+        self._starting_state = dict(state_dict)
+
+    def __iter__(self):
+        """Yield configured values while updating cursor state.
+
+        :return collections.abc.Iterator[int]: Value iterator.
+        """
+        cursor = int(self._starting_state.get("cursor", 0))
+        while cursor < len(self.values):
+            value = self.values[cursor]
+            cursor += 1
+            self._state = {"cursor": cursor}
+            yield value
+
+
 class TestStreamingRetryHelpers(unittest.TestCase):
     """Validate retry helpers for transient streaming read failures."""
+
+    def test_is_streaming_dataset_recognizes_huggingface_marker(self):
+        """Ensure legacy Hugging Face stream markers are treated as streaming."""
+        dataset = _HuggingFaceStyleStreamingDataset([0, 1, 2])
+
+        self.assertTrue(is_streaming_dataset(dataset))
+
+    def test_retry_wrapper_accepts_huggingface_marker_streams(self):
+        """Ensure retry setup still wraps Hugging Face-style resumable streams."""
+        dataset = _HuggingFaceStyleStreamingDataset([0, 1, 2])
+        cfg = Config()
+        cfg.dataset.streaming_read_retries = 1
+        cfg.dataset.streaming_read_retry_backoff_seconds = 0.01
+        cfg.dataset.streaming_read_retry_max_backoff_seconds = 0.01
+
+        wrapped = _maybe_wrap_streaming_dataset_for_retries(
+            dataset,
+            label="unit-test",
+            cfg=cfg,
+        )
+
+        self.assertIsInstance(wrapped, RetryingStreamingDataset)
+        self.assertEqual(list(wrapped), [0, 1, 2])
 
     def test_peek_streaming_example_retries_transient_http_error(self):
         """Ensure peeking the first streaming example retries transient errors."""
