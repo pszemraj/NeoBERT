@@ -340,6 +340,38 @@ def test_load_step_checkpoint_state_dict_falls_back_for_direct_step_dir(
     assert seen == [(checkpoint_dir.resolve(), "456"), (checkpoint_dir.resolve(), "")]
 
 
+def test_load_step_checkpoint_state_dict_falls_back_for_nested_direct_step_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nested DeepSpeed step dirs should still allow the tag-less fallback."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint_dir = Path(tmpdir) / "456" / "pytorch_model"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        (checkpoint_dir / "mp_rank_00_model_states.pt").touch()
+        expected = {"weight": torch.zeros(2, 2)}
+        seen: list[tuple[Path, str]] = []
+
+        def _fake_load_deepspeed(path: Path, *, tag: str | None = None):
+            normalized_path = Path(path).resolve()
+            normalized_tag = "" if tag is None else str(tag)
+            seen.append((normalized_path, normalized_tag))
+            if normalized_tag == "456":
+                raise FileNotFoundError(
+                    "explicit root/tag lookup should miss nested direct step dirs"
+                )
+            return expected
+
+        monkeypatch.setattr(
+            "neobert.checkpointing.load_deepspeed_fp32_state_dict",
+            _fake_load_deepspeed,
+        )
+
+        state_dict = load_step_checkpoint_state_dict(checkpoint_dir, "456")
+
+    assert state_dict == expected
+    assert seen == [(checkpoint_dir.resolve(), "456"), (checkpoint_dir.resolve(), "")]
+
+
 def test_load_step_checkpoint_state_dict_accepts_latest_for_direct_step_dir(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -396,6 +428,36 @@ def test_load_step_checkpoint_state_dict_does_not_ignore_explicit_checkpoint(
             load_step_checkpoint_state_dict(checkpoint_root, "1000")
 
     assert seen == [(checkpoint_root.resolve(), "1000")]
+
+
+def test_load_step_checkpoint_state_dict_does_not_misread_numeric_parent_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Numeric parent dirs must not trigger tag-less fallback for explicit tags."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint_root = Path(tmpdir) / "123" / "checkpoints"
+        checkpoint_root.mkdir(parents=True, exist_ok=True)
+        seen: list[tuple[Path, str]] = []
+
+        def _fake_load_deepspeed(path: Path, *, tag: str | None = None):
+            normalized_path = Path(path).resolve()
+            normalized_tag = "" if tag is None else str(tag)
+            seen.append((normalized_path, normalized_tag))
+            if tag is None:
+                raise AssertionError(
+                    "tag-less fallback should not run for numeric-parent checkpoint roots"
+                )
+            raise FileNotFoundError("requested checkpoint missing")
+
+        monkeypatch.setattr(
+            "neobert.checkpointing.load_deepspeed_fp32_state_dict",
+            _fake_load_deepspeed,
+        )
+
+        with pytest.raises(FileNotFoundError, match="requested checkpoint missing"):
+            load_step_checkpoint_state_dict(checkpoint_root, "123")
+
+    assert seen == [(checkpoint_root.resolve(), "123")]
 
 
 def test_load_deepspeed_fp32_state_dict_requires_optional_dependency(

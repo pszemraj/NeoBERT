@@ -305,7 +305,10 @@ def _checkpoint_path_matches_tag(checkpoint_path: Path, checkpoint: str | int) -
     """Return whether ``checkpoint_path`` already points at ``checkpoint``.
 
     This accepts both direct step directories (``.../<tag>``) and nested
-    Accelerate DeepSpeed layouts (``.../<tag>/pytorch_model``).
+    Accelerate DeepSpeed layouts (``.../<tag>/pytorch_model``). Parent-name
+    matching is intentionally restricted to known nested DeepSpeed tag dirs so
+    numerically named parents such as ``.../<run_id>/checkpoints`` do not
+    masquerade as a resolved explicit checkpoint tag.
 
     :param Path checkpoint_path: Candidate direct checkpoint path.
     :param str | int checkpoint: Requested checkpoint tag/step.
@@ -314,7 +317,11 @@ def _checkpoint_path_matches_tag(checkpoint_path: Path, checkpoint: str | int) -
     requested_tag = str(checkpoint).strip()
     return bool(requested_tag) and (
         checkpoint_path.name == requested_tag
-        or checkpoint_path.parent.name == requested_tag
+        or (
+            checkpoint_path.name in _DEEPSPEED_NESTED_TAG_CANDIDATES
+            and checkpoint_path.parent.name == requested_tag
+            and _is_deepspeed_tag_dir(checkpoint_path)
+        )
     )
 
 
