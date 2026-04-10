@@ -49,6 +49,70 @@ def _make_accelerator() -> SimpleNamespace:
     return SimpleNamespace(distributed_type=DistributedType.NO)
 
 
+class _RuntimeTopologyShard:
+    def __init__(self, dim: int) -> None:
+        self.dim = dim
+
+
+class _RuntimeTopologyMesh:
+    def __init__(self, ndim: int = 1) -> None:
+        self.ndim = ndim
+
+
+class _RuntimeTopologyDTensorParam:
+    def __init__(
+        self,
+        *,
+        mesh_ndim: int = 1,
+        shard_dim: int = 0,
+        local: torch.Tensor | None = None,
+    ) -> None:
+        self.device_mesh = _RuntimeTopologyMesh(mesh_ndim)
+        self.placements = (_RuntimeTopologyShard(shard_dim),)
+        self._local = torch.zeros(1, 1) if local is None else local
+
+    def to_local(self) -> torch.Tensor:
+        return self._local
+
+
+def _runtime_topology_optimizer(
+    *, mesh_ndim: int = 1, shard_dim: int = 0
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        param_groups=[
+            {
+                "use_muon": True,
+                "params": [
+                    _RuntimeTopologyDTensorParam(
+                        mesh_ndim=mesh_ndim,
+                        shard_dim=shard_dim,
+                    )
+                ],
+            }
+        ]
+    )
+
+
+class _RuntimeReplicate:
+    pass
+
+
+class _RuntimeLoggingDTensor:
+    def __init__(self, local_value: torch.Tensor, placements: tuple[object, ...]):
+        self.device_mesh = _RuntimeTopologyMesh()
+        self._local_value = local_value
+        self.placements = placements
+
+    def to_local(self) -> torch.Tensor:
+        return self._local_value
+
+
+class _RuntimeShardedGradParam(_RuntimeTopologyDTensorParam):
+    def __init__(self, grad: torch.Tensor) -> None:
+        super().__init__(local=torch.zeros(0))
+        self.grad = grad
+
+
 def test_maybe_compile_model_allows_muonclip_clipping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -665,28 +729,11 @@ def test_validate_distributed_runtime_policy_rejects_deepspeed(
 
 def test_validate_muon_runtime_topology_rejects_multidim_mesh() -> None:
     """Prepared MuonClip DTensor params must reject unsupported mesh rank."""
-
-    class _FakeShard:
-        def __init__(self, dim: int):
-            self.dim = dim
-
-    class _FakeMesh:
-        ndim = 2
-
-    class _FakeDTensorParam:
-        device_mesh = _FakeMesh()
-        placements = (_FakeShard(0),)
-
-        def to_local(self) -> torch.Tensor:
-            return torch.zeros(1, 1)
-
     accelerator = SimpleNamespace(
         distributed_type=DistributedType.FSDP,
         num_processes=2,
     )
-    optimizer = SimpleNamespace(
-        param_groups=[{"use_muon": True, "params": [_FakeDTensorParam()]}]
-    )
+    optimizer = _runtime_topology_optimizer(mesh_ndim=2)
 
     with pytest.raises(RuntimeError, match="device_mesh.ndim=2"):
         validate_muon_runtime_topology(
@@ -700,28 +747,11 @@ def test_validate_muon_runtime_topology_rejects_multidim_mesh() -> None:
 
 def test_validate_muon_runtime_topology_accepts_row_shard_layout() -> None:
     """Prepared MuonClip DTensor params should allow 1D Shard(0) layouts."""
-
-    class _FakeShard:
-        def __init__(self, dim: int):
-            self.dim = dim
-
-    class _FakeMesh:
-        ndim = 1
-
-    class _FakeDTensorParam:
-        device_mesh = _FakeMesh()
-        placements = (_FakeShard(0),)
-
-        def to_local(self) -> torch.Tensor:
-            return torch.zeros(1, 1)
-
     accelerator = SimpleNamespace(
         distributed_type=DistributedType.FSDP,
         num_processes=2,
     )
-    optimizer = SimpleNamespace(
-        param_groups=[{"use_muon": True, "params": [_FakeDTensorParam()]}]
-    )
+    optimizer = _runtime_topology_optimizer()
 
     validate_muon_runtime_topology(
         accelerator=accelerator,
@@ -756,24 +786,6 @@ def test_validate_muon_runtime_topology_rejects_missing_dtensor_params() -> None
 
 def test_compute_l2_norm_for_logging_reduces_only_sharded_dtensors() -> None:
     """Global logged norms must reduce shard contributions without double-counting replicas."""
-
-    class _FakeShard:
-        def __init__(self, dim: int):
-            self.dim = dim
-
-    class _FakeReplicate:
-        pass
-
-    class _FakeDTensor:
-        device_mesh = SimpleNamespace(ndim=1)
-
-        def __init__(self, local_value: torch.Tensor, placements: tuple[object, ...]):
-            self._local_value = local_value
-            self.placements = placements
-
-        def to_local(self) -> torch.Tensor:
-            return self._local_value
-
     reduce_calls: list[tuple[float, str]] = []
 
     accelerator = SimpleNamespace(
@@ -784,8 +796,8 @@ def test_compute_l2_norm_for_logging_reduces_only_sharded_dtensors() -> None:
         ),
     )
     parameters = [
-        _FakeDTensor(torch.tensor([3.0, 4.0]), (_FakeShard(0),)),
-        _FakeDTensor(torch.tensor([1.0, 2.0]), (_FakeReplicate(),)),
+        _RuntimeLoggingDTensor(torch.tensor([3.0, 4.0]), (_RuntimeTopologyShard(0),)),
+        _RuntimeLoggingDTensor(torch.tensor([1.0, 2.0]), (_RuntimeReplicate(),)),
     ]
 
     norm = _compute_l2_norm_for_logging(parameters, accelerator)
@@ -797,21 +809,6 @@ def test_compute_l2_norm_for_logging_reduces_only_sharded_dtensors() -> None:
 
 def test_compute_l2_norm_for_logging_uses_dtensor_owner_for_gradients() -> None:
     """Gradient logging must reduce local grads when the owning param is sharded."""
-
-    class _FakeShard:
-        def __init__(self, dim: int):
-            self.dim = dim
-
-    class _FakeShardedParam:
-        device_mesh = SimpleNamespace(ndim=1)
-        placements = (_FakeShard(0),)
-
-        def __init__(self, grad: torch.Tensor):
-            self.grad = grad
-
-        def to_local(self) -> torch.Tensor:
-            return torch.zeros(0)
-
     reduce_calls: list[tuple[float, str]] = []
     accelerator = SimpleNamespace(
         distributed_type=DistributedType.FSDP,
@@ -822,7 +819,7 @@ def test_compute_l2_norm_for_logging_uses_dtensor_owner_for_gradients() -> None:
     )
 
     norm = _compute_l2_norm_for_logging(
-        [_FakeShardedParam(torch.tensor([6.0, 8.0]))],
+        [_RuntimeShardedGradParam(torch.tensor([6.0, 8.0]))],
         accelerator,
         grad=True,
     )

@@ -120,6 +120,223 @@ def _merge_interleaved_qkv_reference(
     return fused
 
 
+class _OwnerComputeShard:
+    """Minimal row-shard placement stub for owner-compute DTensor tests."""
+
+    def __init__(self, dim: int) -> None:
+        """Store the sharded dimension."""
+        self.dim = dim
+
+
+class _OwnerComputeMesh:
+    """Single-axis device mesh stub that returns a supplied process group."""
+
+    ndim = 1
+
+    def __init__(self, process_group: object) -> None:
+        """Initialize the mesh with a fake process group."""
+        self._process_group = process_group
+
+    def get_group(self) -> object:
+        """Return the fake process group."""
+        return self._process_group
+
+
+class _OwnerComputeDTensor:
+    """DTensor stub used by owner-compute Muon update tests."""
+
+    expected_shape: torch.Size | None = None
+    expected_stride: tuple[int, ...] | None = None
+
+    def __init__(
+        self,
+        local: torch.Tensor,
+        *,
+        device_mesh: _OwnerComputeMesh,
+        placements: tuple[_OwnerComputeShard, ...],
+        shape: torch.Size,
+        stride: tuple[int, ...],
+    ) -> None:
+        """Initialize the fake DTensor payload and metadata."""
+        self._local = local
+        self.device_mesh = device_mesh
+        self.placements = placements
+        self.shape = torch.Size(shape)
+        self._stride = tuple(stride)
+
+    def to_local(self) -> torch.Tensor:
+        """Return the local shard tensor."""
+        return self._local
+
+    def stride(self) -> tuple[int, ...]:
+        """Return the logical global stride."""
+        return self._stride
+
+    @classmethod
+    def from_local(
+        cls,
+        local: torch.Tensor,
+        *,
+        device_mesh: _OwnerComputeMesh,
+        placements: tuple[_OwnerComputeShard, ...],
+        run_check: bool = False,
+        shape: torch.Size,
+        stride: tuple[int, ...],
+    ) -> "_OwnerComputeDTensor":
+        """Rebuild a fake DTensor from a local shard."""
+        assert not run_check
+        if cls.expected_shape is not None:
+            assert tuple(shape) == tuple(cls.expected_shape)
+        if cls.expected_stride is not None:
+            assert tuple(stride) == tuple(cls.expected_stride)
+        return cls(
+            local,
+            device_mesh=device_mesh,
+            placements=placements,
+            shape=shape,
+            stride=stride,
+        )
+
+
+class _FakeShapeParam:
+    """Parameter-like object with independent local shape and global numel."""
+
+    def __init__(self, shape: tuple[int, ...], numel: int) -> None:
+        """Initialize fake shape metadata."""
+        self.shape = torch.Size(shape)
+        self._numel = int(numel)
+
+    def numel(self) -> int:
+        """Return the global parameter element count."""
+        return self._numel
+
+
+class _TopologyMesh:
+    """Mesh metadata stub for loaded-state topology validation tests."""
+
+    def __init__(self, ranks: tuple[int, ...] = (0, 1)) -> None:
+        """Initialize rank metadata."""
+        self.ndim = 1
+        self.mesh = torch.tensor(ranks)
+
+
+class _TopologyShard:
+    """Shard placement stub for loaded-state topology validation tests."""
+
+    def __init__(self, dim: int) -> None:
+        """Store the sharded dimension."""
+        self.dim = dim
+
+
+class _TopologyDTensor:
+    """DTensor metadata stub for loaded-state topology validation tests."""
+
+    def __init__(
+        self,
+        ranks: tuple[int, ...] = (0, 1),
+        dim: int = 0,
+        shape: tuple[int, ...] | None = None,
+    ) -> None:
+        """Initialize fake mesh, placement, and optional shape metadata."""
+        self.device_mesh = _TopologyMesh(ranks)
+        self.placements = (_TopologyShard(dim),)
+        if shape is not None:
+            self.shape = torch.Size(shape)
+
+
+def _set_single_muon_param_state(
+    optimizer: MuonClipOptimizer,
+    fake_param: object,
+    state: dict[str, object],
+) -> None:
+    """Install a single Muon param group and optimizer state for topology tests."""
+    optimizer.param_groups = [
+        {
+            "use_muon": True,
+            "params": [fake_param],
+            "param_info": [
+                {
+                    "name": "transformer_encoder.0.qkv.weight",
+                    "layer_idx": 0,
+                    "is_qkv": True,
+                    "proj_type": "qkv",
+                }
+            ],
+        }
+    ]
+    optimizer.state = {fake_param: state}
+
+
+def _install_owner_compute_dtensor_fakes(
+    monkeypatch: pytest.MonkeyPatch,
+    muon_clip_module: object,
+    *,
+    process_group: object,
+    remote_padded: torch.Tensor,
+    expected_shape: torch.Size,
+    expected_stride: tuple[int, ...],
+) -> tuple[_OwnerComputeMesh, tuple[_OwnerComputeShard, ...]]:
+    """Patch DTensor and distributed collectives for owner-compute tests."""
+    mesh = _OwnerComputeMesh(process_group)
+    placements = (_OwnerComputeShard(0),)
+    _OwnerComputeDTensor.expected_shape = torch.Size(expected_shape)
+    _OwnerComputeDTensor.expected_stride = tuple(expected_stride)
+
+    monkeypatch.setattr(muon_clip_module, "DTensor", _OwnerComputeDTensor)
+    monkeypatch.setattr(muon_clip_module, "Shard", _OwnerComputeShard)
+    monkeypatch.setattr(muon_clip_module.dist, "is_available", lambda: True)
+    monkeypatch.setattr(muon_clip_module.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(
+        muon_clip_module.dist,
+        "get_process_group_ranks",
+        lambda _group: [0, 1],
+    )
+    monkeypatch.setattr(
+        muon_clip_module.dist,
+        "get_world_size",
+        lambda _group=None: 2,
+    )
+    monkeypatch.setattr(
+        muon_clip_module.dist,
+        "get_rank",
+        lambda _group=None: 0,
+    )
+
+    def _unexpected_all_gather(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("row-count all_gather should not run in normal mode")
+
+    def _fake_gather(
+        tensor: torch.Tensor,
+        gather_list: list[torch.Tensor] | None,
+        *,
+        group: object,
+        group_dst: int,
+    ) -> None:
+        assert group is process_group
+        assert group_dst == 0
+        assert gather_list is not None
+        gather_list[0].copy_(tensor)
+        gather_list[1].copy_(remote_padded)
+
+    def _fake_scatter(
+        tensor: torch.Tensor,
+        scatter_list: list[torch.Tensor] | None,
+        *,
+        group: object,
+        group_src: int,
+    ) -> None:
+        assert group is process_group
+        assert group_src == 0
+        assert scatter_list is not None
+        tensor.copy_(scatter_list[0])
+
+    monkeypatch.setattr(muon_clip_module.dist, "all_gather", _unexpected_all_gather)
+    monkeypatch.setattr(muon_clip_module.dist, "gather", _fake_gather)
+    monkeypatch.setattr(muon_clip_module.dist, "scatter", _fake_scatter)
+    return mesh, placements
+
+
 class TestMuonClipConfig:
     """Test configuration validation."""
 
@@ -1137,39 +1354,16 @@ class TestMuonClipOptimizer:
             MuonClipConfig(enable_clipping=False),
         )
 
-        class _FakeMesh:
-            ndim = 1
-            mesh = torch.tensor([0, 1])
-
-        class _FakeShard:
-            def __init__(self, dim: int):
-                self.dim = dim
-
-        class _FakeDTensor:
-            def __init__(self):
-                self.device_mesh = _FakeMesh()
-                self.placements = (_FakeShard(0),)
-
-        fake_param = _FakeDTensor()
-        optimizer.param_groups = [
-            {
-                "use_muon": True,
-                "params": [fake_param],
-                "param_info": [
-                    {
-                        "name": "transformer_encoder.0.qkv.weight",
-                        "layer_idx": 0,
-                        "is_qkv": True,
-                        "proj_type": "qkv",
-                    }
-                ],
-            }
-        ]
-        optimizer.state = {fake_param: {"momentum_buffer": torch.zeros(2, 2)}}
+        fake_param = _TopologyDTensor()
+        _set_single_muon_param_state(
+            optimizer,
+            fake_param,
+            {"momentum_buffer": torch.zeros(2, 2)},
+        )
         monkeypatch.setattr(
             optimizer,
             "_is_dtensor",
-            lambda tensor: isinstance(tensor, _FakeDTensor),
+            lambda tensor: isinstance(tensor, _TopologyDTensor),
         )
 
         with pytest.raises(RuntimeError, match="local Tensor momentum buffer"):
@@ -1186,41 +1380,17 @@ class TestMuonClipOptimizer:
             MuonClipConfig(enable_clipping=False),
         )
 
-        class _FakeMesh:
-            def __init__(self, ranks: list[int]):
-                self.ndim = 1
-                self.mesh = torch.tensor(ranks)
-
-        class _FakeShard:
-            def __init__(self, dim: int):
-                self.dim = dim
-
-        class _FakeDTensor:
-            def __init__(self, ranks: list[int], dim: int):
-                self.device_mesh = _FakeMesh(ranks)
-                self.placements = (_FakeShard(dim),)
-
-        fake_param = _FakeDTensor([0, 1], 0)
-        fake_buffer = _FakeDTensor([0, 1], 1)
-        optimizer.param_groups = [
-            {
-                "use_muon": True,
-                "params": [fake_param],
-                "param_info": [
-                    {
-                        "name": "transformer_encoder.0.qkv.weight",
-                        "layer_idx": 0,
-                        "is_qkv": True,
-                        "proj_type": "qkv",
-                    }
-                ],
-            }
-        ]
-        optimizer.state = {fake_param: {"momentum_buffer": fake_buffer}}
+        fake_param = _TopologyDTensor((0, 1), 0)
+        fake_buffer = _TopologyDTensor((0, 1), 1)
+        _set_single_muon_param_state(
+            optimizer,
+            fake_param,
+            {"momentum_buffer": fake_buffer},
+        )
         monkeypatch.setattr(
             optimizer,
             "_is_dtensor",
-            lambda tensor: isinstance(tensor, _FakeDTensor),
+            lambda tensor: isinstance(tensor, _TopologyDTensor),
         )
 
         with pytest.raises(RuntimeError, match="mesh/placement metadata"):
@@ -1237,42 +1407,17 @@ class TestMuonClipOptimizer:
             MuonClipConfig(enable_clipping=False),
         )
 
-        class _FakeMesh:
-            def __init__(self, ranks: list[int]):
-                self.ndim = 1
-                self.mesh = torch.tensor(ranks)
-
-        class _FakeShard:
-            def __init__(self, dim: int):
-                self.dim = dim
-
-        class _FakeDTensor:
-            def __init__(self, ranks: list[int], dim: int, shape: tuple[int, int]):
-                self.device_mesh = _FakeMesh(ranks)
-                self.placements = (_FakeShard(dim),)
-                self.shape = torch.Size(shape)
-
-        fake_param = _FakeDTensor([0, 1], 0, (8, 4))
-        fake_buffer = _FakeDTensor([0, 1], 0, (7, 4))
-        optimizer.param_groups = [
-            {
-                "use_muon": True,
-                "params": [fake_param],
-                "param_info": [
-                    {
-                        "name": "transformer_encoder.0.qkv.weight",
-                        "layer_idx": 0,
-                        "is_qkv": True,
-                        "proj_type": "qkv",
-                    }
-                ],
-            }
-        ]
-        optimizer.state = {fake_param: {"momentum_buffer": fake_buffer}}
+        fake_param = _TopologyDTensor((0, 1), 0, (8, 4))
+        fake_buffer = _TopologyDTensor((0, 1), 0, (7, 4))
+        _set_single_muon_param_state(
+            optimizer,
+            fake_param,
+            {"momentum_buffer": fake_buffer},
+        )
         monkeypatch.setattr(
             optimizer,
             "_is_dtensor",
-            lambda tensor: isinstance(tensor, _FakeDTensor),
+            lambda tensor: isinstance(tensor, _TopologyDTensor),
         )
 
         with pytest.raises(RuntimeError, match="momentum state with shape"):
@@ -1375,134 +1520,26 @@ class TestMuonClipOptimizer:
         local_shard = full_matrix[:2].clone()
         remote_shard = full_matrix[2:].clone()
         process_group = object()
-
-        class _FakeShard:
-            def __init__(self, dim: int):
-                self.dim = dim
-
-        class _FakeMesh:
-            ndim = 1
-
-            def get_group(self):
-                return process_group
-
-        class _FakeDTensor:
-            def __init__(
-                self,
-                local: torch.Tensor,
-                *,
-                device_mesh: _FakeMesh,
-                placements: tuple[_FakeShard, ...],
-                shape: torch.Size,
-                stride: tuple[int, ...],
-            ):
-                self._local = local
-                self.device_mesh = device_mesh
-                self.placements = placements
-                self.shape = torch.Size(shape)
-                self._stride = tuple(stride)
-
-            def to_local(self) -> torch.Tensor:
-                return self._local
-
-            def stride(self) -> tuple[int, ...]:
-                return self._stride
-
-            @staticmethod
-            def from_local(
-                local: torch.Tensor,
-                *,
-                device_mesh: _FakeMesh,
-                placements: tuple[_FakeShard, ...],
-                run_check: bool = False,
-                shape: torch.Size,
-                stride: tuple[int, ...],
-            ) -> "_FakeDTensor":
-                assert not run_check
-                assert tuple(shape) == tuple(full_matrix.shape)
-                assert tuple(stride) == tuple(full_matrix.stride())
-                return _FakeDTensor(
-                    local,
-                    device_mesh=device_mesh,
-                    placements=placements,
-                    shape=shape,
-                    stride=stride,
-                )
-
-        class _FakeParam:
-            shape = torch.Size([2, 2])
-
-            @staticmethod
-            def numel() -> int:
-                return int(full_matrix.numel())
-
-        fake_mesh = _FakeMesh()
-        fake_placements = (_FakeShard(0),)
-        muon_input = _FakeDTensor(
+        remote_padded = torch.cat(
+            (remote_shard, torch.zeros_like(local_shard[:1])),
+            dim=0,
+        )
+        fake_mesh, fake_placements = _install_owner_compute_dtensor_fakes(
+            monkeypatch,
+            muon_clip_module,
+            process_group=process_group,
+            remote_padded=remote_padded,
+            expected_shape=full_matrix.shape,
+            expected_stride=full_matrix.stride(),
+        )
+        muon_input = _OwnerComputeDTensor(
             local_shard,
             device_mesh=fake_mesh,
             placements=fake_placements,
             shape=full_matrix.shape,
             stride=full_matrix.stride(),
         )
-        fake_param = _FakeParam()
-        remote_padded = torch.cat(
-            (remote_shard, torch.zeros_like(local_shard[:1])),
-            dim=0,
-        )
-
-        monkeypatch.setattr(muon_clip_module, "DTensor", _FakeDTensor)
-        monkeypatch.setattr(muon_clip_module, "Shard", _FakeShard)
-        monkeypatch.setattr(muon_clip_module.dist, "is_available", lambda: True)
-        monkeypatch.setattr(muon_clip_module.dist, "is_initialized", lambda: True)
-        monkeypatch.setattr(
-            muon_clip_module.dist,
-            "get_process_group_ranks",
-            lambda _group: [0, 1],
-        )
-        monkeypatch.setattr(
-            muon_clip_module.dist,
-            "get_world_size",
-            lambda _group=None: 2,
-        )
-        monkeypatch.setattr(
-            muon_clip_module.dist,
-            "get_rank",
-            lambda _group=None: 0,
-        )
-
-        def _unexpected_all_gather(*args, **kwargs):
-            del args, kwargs
-            raise AssertionError("row-count all_gather should not run in normal mode")
-
-        def _fake_gather(
-            tensor: torch.Tensor,
-            gather_list: list[torch.Tensor] | None,
-            *,
-            group: object,
-            group_dst: int,
-        ) -> None:
-            assert group is process_group
-            assert group_dst == 0
-            assert gather_list is not None
-            gather_list[0].copy_(tensor)
-            gather_list[1].copy_(remote_padded)
-
-        def _fake_scatter(
-            tensor: torch.Tensor,
-            scatter_list: list[torch.Tensor] | None,
-            *,
-            group: object,
-            group_src: int,
-        ) -> None:
-            assert group is process_group
-            assert group_src == 0
-            assert scatter_list is not None
-            tensor.copy_(scatter_list[0])
-
-        monkeypatch.setattr(muon_clip_module.dist, "all_gather", _unexpected_all_gather)
-        monkeypatch.setattr(muon_clip_module.dist, "gather", _fake_gather)
-        monkeypatch.setattr(muon_clip_module.dist, "scatter", _fake_scatter)
+        fake_param = _FakeShapeParam((2, 2), full_matrix.numel())
 
         update = optimizer._orthogonalize_dtensor_update(
             muon_input=muon_input,
@@ -1548,75 +1585,6 @@ class TestMuonClipOptimizer:
         local_shard = full_matrix[:5].clone()
         remote_shard = full_matrix[5:].clone()
         process_group = object()
-
-        class _FakeShard:
-            def __init__(self, dim: int):
-                self.dim = dim
-
-        class _FakeMesh:
-            ndim = 1
-
-            def get_group(self):
-                return process_group
-
-        class _FakeDTensor:
-            def __init__(
-                self,
-                local: torch.Tensor,
-                *,
-                device_mesh: _FakeMesh,
-                placements: tuple[_FakeShard, ...],
-                shape: torch.Size,
-                stride: tuple[int, ...],
-            ):
-                self._local = local
-                self.device_mesh = device_mesh
-                self.placements = placements
-                self.shape = torch.Size(shape)
-                self._stride = tuple(stride)
-
-            def to_local(self) -> torch.Tensor:
-                return self._local
-
-            def stride(self) -> tuple[int, ...]:
-                return self._stride
-
-            @staticmethod
-            def from_local(
-                local: torch.Tensor,
-                *,
-                device_mesh: _FakeMesh,
-                placements: tuple[_FakeShard, ...],
-                run_check: bool = False,
-                shape: torch.Size,
-                stride: tuple[int, ...],
-            ) -> "_FakeDTensor":
-                assert not run_check
-                return _FakeDTensor(
-                    local,
-                    device_mesh=device_mesh,
-                    placements=placements,
-                    shape=shape,
-                    stride=stride,
-                )
-
-        class _FakeParam:
-            shape = torch.Size([9, 3])
-
-            @staticmethod
-            def numel() -> int:
-                return int(full_matrix.numel())
-
-        fake_mesh = _FakeMesh()
-        fake_placements = (_FakeShard(0),)
-        muon_input = _FakeDTensor(
-            local_shard,
-            device_mesh=fake_mesh,
-            placements=fake_placements,
-            shape=full_matrix.shape,
-            stride=full_matrix.stride(),
-        )
-        fake_param = _FakeParam()
         remote_padded = torch.cat(
             (
                 remote_shard,
@@ -1624,59 +1592,22 @@ class TestMuonClipOptimizer:
             ),
             dim=0,
         )
-
-        monkeypatch.setattr(muon_clip_module, "DTensor", _FakeDTensor)
-        monkeypatch.setattr(muon_clip_module, "Shard", _FakeShard)
-        monkeypatch.setattr(muon_clip_module.dist, "is_available", lambda: True)
-        monkeypatch.setattr(muon_clip_module.dist, "is_initialized", lambda: True)
-        monkeypatch.setattr(
-            muon_clip_module.dist,
-            "get_process_group_ranks",
-            lambda _group: [0, 1],
+        fake_mesh, fake_placements = _install_owner_compute_dtensor_fakes(
+            monkeypatch,
+            muon_clip_module,
+            process_group=process_group,
+            remote_padded=remote_padded,
+            expected_shape=full_matrix.shape,
+            expected_stride=full_matrix.stride(),
         )
-        monkeypatch.setattr(
-            muon_clip_module.dist,
-            "get_world_size",
-            lambda _group=None: 2,
+        muon_input = _OwnerComputeDTensor(
+            local_shard,
+            device_mesh=fake_mesh,
+            placements=fake_placements,
+            shape=full_matrix.shape,
+            stride=full_matrix.stride(),
         )
-        monkeypatch.setattr(
-            muon_clip_module.dist,
-            "get_rank",
-            lambda _group=None: 0,
-        )
-
-        def _unexpected_all_gather(*args, **kwargs):
-            del args, kwargs
-            raise AssertionError("row-count all_gather should not run in normal mode")
-
-        def _fake_gather(
-            tensor: torch.Tensor,
-            gather_list: list[torch.Tensor] | None,
-            *,
-            group: object,
-            group_dst: int,
-        ) -> None:
-            assert group is process_group
-            assert group_dst == 0
-            assert gather_list is not None
-            gather_list[0].copy_(tensor)
-            gather_list[1].copy_(remote_padded)
-
-        def _fake_scatter(
-            tensor: torch.Tensor,
-            scatter_list: list[torch.Tensor] | None,
-            *,
-            group: object,
-            group_src: int,
-        ) -> None:
-            assert group is process_group
-            assert group_src == 0
-            assert scatter_list is not None
-            tensor.copy_(scatter_list[0])
-
-        monkeypatch.setattr(muon_clip_module.dist, "all_gather", _unexpected_all_gather)
-        monkeypatch.setattr(muon_clip_module.dist, "gather", _fake_gather)
-        monkeypatch.setattr(muon_clip_module.dist, "scatter", _fake_scatter)
+        fake_param = _FakeShapeParam(tuple(full_matrix.shape), full_matrix.numel())
 
         update = optimizer._orthogonalize_dtensor_update(
             muon_input=muon_input,
