@@ -9,8 +9,6 @@ import warnings
 from pathlib import Path
 
 import yaml
-from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import PreTrainedTokenizerFast
 
 from neobert.config import (
     Config,
@@ -24,6 +22,7 @@ from neobert.config import (
     load_config_from_args,
     round_up_to_multiple,
 )
+from tests.tokenizer_utils import build_wordlevel_tokenizer
 
 
 class TestConfigSystem(unittest.TestCase):
@@ -71,6 +70,23 @@ class TestConfigSystem(unittest.TestCase):
         self.assertEqual(config.trainer.per_device_train_batch_size, 2)
         self.assertEqual(config.dataset.max_seq_length, 128)
 
+    def test_saved_default_config_loads_without_legacy_none_conflicts(self):
+        """Saved configs should roundtrip even with null deprecated aliases."""
+        config = Config()
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            path = f.name
+
+        try:
+            ConfigLoader.save(config, path)
+            loaded = ConfigLoader.load(path)
+        finally:
+            os.unlink(path)
+
+        self.assertEqual(loaded.trainer.per_device_train_batch_size, 16)
+        self.assertEqual(loaded.trainer.per_device_eval_batch_size, 32)
+        self.assertEqual(loaded.trainer.save_total_limit, 3)
+
     def test_cli_override_system(self):
         """Test CLI override functionality."""
         config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"
@@ -93,6 +109,12 @@ class TestConfigSystem(unittest.TestCase):
             "false",
             "--dataset.streaming",
             "false",
+            "--dataset.streaming_read_retries",
+            "7",
+            "--dataset.streaming_read_retry_backoff_seconds",
+            "2.5",
+            "--dataset.streaming_read_retry_max_backoff_seconds",
+            "15.0",
             "--datacollator.pack_sequences",
             "true",
             "--trainer.torch_compile",
@@ -123,6 +145,11 @@ class TestConfigSystem(unittest.TestCase):
             self.assertEqual(config.trainer.save_total_limit, 1)
             self.assertFalse(config.trainer.use_cpu)
             self.assertFalse(config.dataset.streaming)
+            self.assertEqual(config.dataset.streaming_read_retries, 7)
+            self.assertEqual(config.dataset.streaming_read_retry_backoff_seconds, 2.5)
+            self.assertEqual(
+                config.dataset.streaming_read_retry_max_backoff_seconds, 15.0
+            )
             self.assertTrue(config.datacollator.pack_sequences)
             self.assertEqual(config.trainer.logging_steps, 17)
             self.assertTrue(config.trainer.torch_compile)
@@ -400,6 +427,11 @@ optimizer:
                 str(config_path),
                 overrides=["dataset.streaming=truthy-but-invalid"],
             )
+        with self.assertRaises(ValueError):
+            ConfigLoader.load(
+                str(config_path),
+                overrides=["dataset.streaming_read_retry_max_backoff_seconds=0.5"],
+            )
 
     def test_all_test_configs_load(self):
         """Test that all tiny task configs load with expected task/dataset metadata."""
@@ -460,14 +492,9 @@ optimizer:
     def test_preprocess_uses_tokenizer_path(self):
         """Ensure tokenizer path is preferred when provided."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            vocab = {"[PAD]": 0, "[UNK]": 1, "[MASK]": 2, "hello": 3}
-            raw_tokenizer = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
-            raw_tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
-            tokenizer = PreTrainedTokenizerFast(
-                tokenizer_object=raw_tokenizer,
-                pad_token="[PAD]",
-                unk_token="[UNK]",
-                mask_token="[MASK]",
+            tokenizer = build_wordlevel_tokenizer(
+                vocab={"hello": 3},
+                include_sep=False,
             )
             tokenizer.save_pretrained(tmpdir)
 

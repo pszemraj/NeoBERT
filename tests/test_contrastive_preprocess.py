@@ -13,6 +13,11 @@ from neobert.contrastive.datasets import (
     CONTRASTIVE_DATASETS,
     resolve_contrastive_dataset_name,
 )
+from neobert.tokenization_cache import (
+    build_tokenization_manifest,
+    write_tokenized_cache_manifest,
+)
+from tests.tokenizer_utils import build_wordlevel_tokenizer
 
 
 def _load_contrastive_preprocess_module():
@@ -159,19 +164,63 @@ def test_pipeline_subset_refresh_preserves_other_cached_manifest_entries(
     all_dir = tmp_path / "all"
     all_dir.mkdir(parents=True, exist_ok=True)
 
-    Dataset.from_dict({"query": ["a"], "corpus": ["b"]}).save_to_disk(
-        all_dir / "ALLNLI"
-    )
-    Dataset.from_dict({"query": ["c"], "corpus": ["d"]}).save_to_disk(all_dir / "QQP")
+    cached_payload = {
+        "input_ids_query": [[4]],
+        "attention_mask_query": [[1]],
+        "input_ids_corpus": [[5]],
+        "attention_mask_corpus": [[1]],
+    }
+    Dataset.from_dict(cached_payload).save_to_disk(all_dir / "ALLNLI")
+    Dataset.from_dict(cached_payload).save_to_disk(all_dir / "QQP")
     (all_dir / "dataset_dict.json").write_text(
         '{"splits": ["ALLNLI", "QQP"]}\n',
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(module, "get_tokenizer", lambda **_: object())
+    tokenizer = build_wordlevel_tokenizer(vocab={"a": 4, "b": 5})
+    for name in ("ALLNLI", "QQP"):
+        manifest = build_tokenization_manifest(
+            tokenizer,
+            dataset_name=name,
+            dataset_config=None,
+            dataset_path=cfg.dataset.path,
+            column_name=("query", "corpus"),
+            max_length=cfg.tokenizer.max_length,
+            truncation=cfg.tokenizer.truncation,
+            add_special_tokens=True,
+            return_special_tokens_mask=False,
+        )
+        write_tokenized_cache_manifest(all_dir / name, manifest)
+
+    monkeypatch.setattr(module, "get_tokenizer", lambda **_: tokenizer)
 
     dataset = module.pipeline(cfg)
 
     assert list(dataset.keys()) == ["ALLNLI"]
     reloaded = load_from_disk(all_dir)
     assert list(reloaded.keys()) == ["ALLNLI", "QQP"]
+
+
+def test_pipeline_rejects_cached_split_without_tokenization_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Existing contrastive caches need a manifest before reuse."""
+    module = _load_contrastive_preprocess_module()
+    cfg = _make_cfg("ALLNLI", dataset_path=str(tmp_path), load_all_from_disk=False)
+    all_dir = tmp_path / "all"
+    all_dir.mkdir(parents=True, exist_ok=True)
+    Dataset.from_dict(
+        {
+            "input_ids_query": [[4]],
+            "attention_mask_query": [[1]],
+            "input_ids_corpus": [[5]],
+            "attention_mask_corpus": [[1]],
+        }
+    ).save_to_disk(all_dir / "ALLNLI")
+
+    tokenizer = build_wordlevel_tokenizer(vocab={"a": 4, "b": 5})
+    monkeypatch.setattr(module, "get_tokenizer", lambda **_: tokenizer)
+
+    with pytest.raises(RuntimeError, match="tokenization_manifest.json"):
+        module.pipeline(cfg)

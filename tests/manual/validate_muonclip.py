@@ -111,18 +111,18 @@ def validate_config():
 
     # Invalid lr
     try:
-        config = MuonClipConfig(lr=0)
+        _ = MuonClipConfig(lr=0)
         print("❌ Should have rejected lr=0")
         return False
-    except AssertionError:
+    except ValueError:
         print("✓ Correctly rejected lr=0")
 
     # Invalid threshold
     try:
-        config = MuonClipConfig(clipping_threshold=0)
+        _ = MuonClipConfig(clipping_threshold=0)
         print("❌ Should have rejected clipping_threshold=0")
         return False
-    except AssertionError:
+    except ValueError:
         print("✓ Correctly rejected clipping_threshold=0")
 
     print("\n✅ Configuration validation passed!")

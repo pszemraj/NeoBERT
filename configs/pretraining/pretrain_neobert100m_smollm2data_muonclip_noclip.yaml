@@ -71,7 +71,8 @@ optimizer:
   muon_config:
     # Muon-specific parameters
     orthogonalization: polar_express # Options: polar_express (default), newton_schulz
-    norm_factor: spectral # spectral, match_rms_adamw, none, or legacy_compat
+    norm_factor: neobert # neobert, muon_reference, spectral, match_rms_adamw, or none
+    param_policy: hidden_2d # shipped default; aligns with original/PyTorch Muon guidance to keep embeddings/output weights off Muon
     muon_beta: 0.95 # Momentum coefficient for Muon
     muon_decay: 0.01 # Weight decay for 2D params
     ns_steps: 5 # Newton-Schulz iterations (3-9 recommended)

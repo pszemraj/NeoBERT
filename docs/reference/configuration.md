@@ -1,26 +1,13 @@
 # Configuration Reference
 
 > [!TIP]
-> Example configs are in [configs/](../configs/) (for production) and
-> [tests/configs/](../tests/configs/) (for tiny smoke/regression runs).
+> Example configs are in [configs/README.md](../../configs/README.md) (for production) and [tests/configs/README.md](../../tests/configs/README.md) (for tiny smoke/regression runs).
 
 NeoBERT YAML config schema (`src/neobert/config.py`) and defaults.
 
-Use the sections below in this order: variables/overrides, high-impact knobs,
-field tables, task-specific sections, constraints, then presets.
-
-## How To Use This Page
-
-- Treat this as a **config-file reference**, not a CLI-first reference.
-- Start with **High-Impact Settings**, then fill in grouped sections.
-- Defaults shown here are dataclass defaults unless noted.
-- High-impact tables are summaries; field semantics are defined in section tables.
-- Unknown keys fail fast during config loading.
-
 ## Variables and Dot Overrides
 
-`ConfigLoader.load(...)` supports a small YAML variable system and post-load dot
-overrides for sweep-style runs.
+`ConfigLoader.load(...)` supports a small YAML variable system and post-load dot overrides for sweep-style runs.
 
 ### YAML variables
 
@@ -34,8 +21,7 @@ overrides for sweep-style runs.
 - Circular variable references fail fast with an explicit error.
 - Unresolved `$variables.*` tokens in strings emit warnings with field location.
 
-Example: one `seq_len` driving multiple runtime fields (without coupling model
-context length yet):
+Example: one `seq_len` driving multiple runtime fields (without coupling model context length yet):
 
 ```yaml
 variables:
@@ -55,8 +41,7 @@ wandb:
   name: "neobert-{$variables.run_tag}"
 ```
 
-Use this pattern for shared run-time sequence settings. Keep
-`model.max_position_embeddings` as an explicit architecture decision.
+Use this pattern for shared run-time sequence settings. Keep `model.max_position_embeddings` as an explicit architecture decision.
 
 ### Dot-path overrides in Python
 
@@ -82,8 +67,7 @@ Accepted list token forms:
 - `--section.key=value`
 - `--section.key value`
 
-Unknown paths and invalid value types fail fast with path-specific errors.
-Overrides are validated with the same semantic checks as base YAML configs.
+Unknown paths and invalid value types fail fast with path-specific errors. Overrides are validated with the same semantic checks as base YAML configs.
 
 ## High-Impact Settings
 
@@ -176,9 +160,7 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | `tokenizer.allow_special_token_rewrite` | `bool`        | `false`               | Explicit opt-in for fallback special-token rewrite when tokenizer lacks `mask_token`. |
 
 > [!NOTE]
-> Trainer now pads tokenizer length with inert placeholder tokens to keep `len(tokenizer) == model.vocab_size`.
-> If a tokenizer lacks `mask_token`, NeoBERT now requires explicit
-> `tokenizer.allow_special_token_rewrite: true` before mutating special tokens.
+> Trainer now pads tokenizer length with inert placeholder tokens to keep `len(tokenizer) == model.vocab_size`. If a tokenizer lacks `mask_token`, NeoBERT now requires explicit `tokenizer.allow_special_token_rewrite: true` before mutating special tokens.
 
 ---
 
@@ -200,24 +182,23 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | `dataset.validation_split` | `float \| None` | `null`         | Fraction for random eval split (non-streaming only).                                                               |
 
 > [!NOTE]
-> Streaming pretraining defaults to `dataset.eval_split: null`. When unset, trainer
-> attempts to auto-detect a validation-style split (`validation`, `eval`, `test`, `dev`).
-> If none exists and `dataset.eval_samples` is set, it builds eval from the first
-> `eval_samples` training examples and skips those from the training stream to avoid
-> leakage.
+> Streaming pretraining defaults to `dataset.eval_split: null`. When unset, trainer attempts to auto-detect a validation-style split (`validation`, `eval`, `test`, `dev`). If none exists and `dataset.eval_samples` is set, it builds eval from the first `eval_samples` training examples and skips those from the training stream to avoid leakage.
 
 ### Performance and Preprocessing
 
 | Key                           | Type          | Default | Description                                                 |
 | ----------------------------- | ------------- | ------- | ----------------------------------------------------------- |
 | `dataset.num_workers`         | `int`         | `16`    | DataLoader worker count.                                    |
-| `dataset.pin_memory`          | `bool`        | `false` | Explicit pin-memory preference (may be overridden on CUDA). |
+| `dataset.pin_memory`          | `bool`        | `false` | Enable pinned CPU staging for non-blocking H2D copies; NeoBERT may force it on for CUDA runs and stage either in the `DataLoader` or via a final manual repin depending on the transfer path. |
 | `dataset.persistent_workers`  | `bool`        | `true`  | Keep DataLoader workers alive across epochs.                |
 | `dataset.prefetch_factor`     | `int \| None` | `null`  | Worker prefetch depth when workers > 0.                     |
+| `dataset.streaming_read_retries` | `int`      | `4`     | Outer retry count for transient streaming read failures after the underlying HF client exhausts its own per-request retries. Mid-iteration recovery resumes from the last successfully yielded example and requires a streaming dataset that exposes `state_dict()/load_state_dict()`. |
+| `dataset.streaming_read_retry_backoff_seconds` | `float` | `5.0` | Initial exponential-backoff delay for transient streaming read retries. |
+| `dataset.streaming_read_retry_max_backoff_seconds` | `float` | `60.0` | Maximum capped backoff delay for transient streaming read retries. |
 | `dataset.num_proc`            | `int`         | `4`     | Multiprocessing workers for tokenization map.               |
 | `dataset.shuffle_buffer_size` | `int`         | `10000` | Streaming shuffle buffer.                                   |
 | `dataset.pre_tokenize`        | `bool`        | `false` | Pre-tokenize non-streaming datasets and persist results.    |
-| `dataset.pre_tokenize_output` | `str \| None` | `null`  | Output path for pre-tokenized datasets.                     |
+| `dataset.pre_tokenize_output` | `str \| None` | `null`  | Output path for pre-tokenized datasets; cache reuse requires a matching `tokenization_manifest.json`. |
 | `dataset.cache_dir`           | `str \| None` | `null`  | HF datasets cache directory.                                |
 | `dataset.trust_remote_code`   | `bool`        | `false` | Allow remote dataset code execution.                        |
 
@@ -231,18 +212,11 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | `dataset.alpha`              | `float` | `1.0`   | Contrastive dataset sampling exponent (`1.0` = proportional by size). |
 
 > [!NOTE]
-> `dataset.pretraining_prob` is deprecated and normalized to
-> `contrastive.pretraining_prob`.
+> `dataset.pretraining_prob` is deprecated and normalized to `contrastive.pretraining_prob`.
 >
-> Contrastive preprocessing accepts an omitted `dataset.name`, `dataset.name:
-> ALL`, canonical registry keys such as `ALLNLI`, or common HF dataset IDs
-> from the built-in wrapper registry (for example
-> `sentence-transformers/all-nli`, `embedding-data/QQP_triplets`, or
-> `WhereIsAI/github-issue-similarity`). When
-> `dataset.load_all_from_disk=true`, cached split directories under `all/` are
-> loaded only for the requested selection and missing splits fail fast. Subset
-> preprocess refreshes preserve other cached split entries already present
-> under `all/`.
+> Streaming retry recovery resumes from the last yielded example when the underlying HF iterable dataset exposes `state_dict()/load_state_dict()`. When the source stream is shuffled, HF refill semantics can still perturb the exact in-buffer order after a retry.
+>
+> Contrastive preprocessing accepts an omitted `dataset.name`, `dataset.name: ALL`, canonical registry keys such as `ALLNLI`, or common HF dataset IDs from the built-in wrapper registry (for example `sentence-transformers/all-nli`, `embedding-data/QQP_triplets`, or `WhereIsAI/github-issue-similarity`). When `dataset.load_all_from_disk=true`, cached split directories under `all/` are loaded only for the requested selection and missing splits fail fast. Subset preprocess refreshes preserve other cached split entries already present under `all/`.
 
 ---
 
@@ -280,13 +254,10 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | `trainer.masked_logits_only_loss`     | `bool`          | `true`       | Pretraining MLM loss path selector: `true` = masked-logits-only path (default/recommended), `false` = original full-logits CE path (legacy ablation/debug). |
 
 > [!IMPORTANT]
-> `trainer.masked_logits_only_loss` is a run-level path selector, not a
-> multi-objective mixing interface. Choose one path for the run.
-> The project default is `true`; use `false` only when intentionally running a
-> legacy full-logits baseline.
+> `trainer.masked_logits_only_loss` is a run-level path selector, not a multi-objective mixing interface. Choose one path for the run. The project default is `true`; use `false` only when intentionally running a legacy full-logits baseline.
 >
-> Gradient-accumulation, effective-batch, and norm-logging behavior is detailed
-> in [training.md](training.md#gradient-accumulation-and-norm-logging).
+> Gradient-accumulation, effective-batch, and norm-logging behavior is detailed in
+> [Training Optimization](../guides/training-optimization.md#gradient-accumulation-and-logged-norms).
 
 ### Control and Legacy Compatibility
 
@@ -348,6 +319,7 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | Key                            | Type             | Default           | Description                                                  |
 | ------------------------------ | ---------------- | ----------------- | ------------------------------------------------------------ |
 | `muon_beta`                    | `float`          | `0.95`            | Muon momentum coefficient.                                   |
+| `nesterov`                     | `bool`           | `true`            | Use standard Muon Nesterov momentum (`g + beta * buffer`).   |
 | `muon_decay`                   | `float`          | `0.0`             | Muon weight decay.                                           |
 | `ns_steps`                     | `int`            | `5`               | Newton-Schulz/Polar iterations.                              |
 | `enable_clipping`              | `bool`           | `true`            | Enable MuonClip's QK clipping path (separate from `trainer.gradient_clipping`). |
@@ -359,20 +331,21 @@ Overrides are validated with the same semantic checks as base YAML configs.
 | `capture_last_microbatch_only` | `bool`           | `true`            | Capture activations only for final microbatch in GA window.  |
 | `detect_anomalies`             | `bool`           | `false`           | Enable anomaly checks in optimizer step.                     |
 | `orthogonalization`            | `str`            | `"polar_express"` | Orthogonalization algorithm selector.                        |
-| `norm_factor`                  | `str`            | `"spectral"`      | Post-orthogonalization normalization (`spectral`, `match_rms_adamw`, `none`, `legacy_compat`). |
+| `norm_factor`                  | `str`            | `"neobert"` | Post-orthogonalization normalization (`neobert`, `muon_reference`, `spectral`, `match_rms_adamw`, `none`). |
+| `param_policy`                 | `str`            | `"hidden_2d"` | Muon routing policy (`hidden_2d` is the shipped default and applies Muon only to hidden transformer matrices; `all_2d` remains available for explicit v0.1.3-scope compatibility tests). |
 | `algorithm`                    | `str \| None`    | `null`            | Deprecated alias of `orthogonalization`.                     |
 | `polar_express`                | `bool \| None`   | `null`            | Deprecated legacy toggle.                                    |
 | `clipping_layers_mapping`      | `dict[str, str]` | `{}`              | Projection-name overrides for non-standard attention blocks. |
 
 > [!NOTE]
-> `orthogonalization` changes compute precision behavior on CUDA:
-> `newton_schulz` upcasts BF16 gradients to FP32 for the iteration and casts
-> back; `polar_express` runs in BF16 work dtype (when available) for higher
-> throughput.
+> The shipped defaults are `norm_factor=neobert` and `param_policy=hidden_2d`. Use `all_2d` explicitly when you want exact v0.1.3-style Muon scope for compatibility benchmarking.
 >
-> Under sharded FSDP2 Muon runs, `enable_clipping=true` is auto-disabled at
-> optimizer construction time because the current owner-compute path does not
-> support the activation-hook capture flow used by QK clipping.
+> [Training Optimization](../guides/training-optimization.md) explains the
+> shipped Muon defaults, normalization modes, fused-QKV handling, clipping, and distributed tradeoffs.
+>
+> `orthogonalization` changes compute precision behavior on CUDA: `newton_schulz` upcasts BF16 gradients to FP32 for the iteration and casts back; `polar_express` runs in BF16 work dtype (when available) for higher throughput.
+>
+> Under sharded FSDP2 Muon runs, `enable_clipping=true` is auto-disabled at optimizer construction time because the current owner-compute path does not support the activation-hook capture flow used by QK clipping.
 
 ---
 
@@ -388,31 +361,21 @@ Overrides are validated with the same semantic checks as base YAML configs.
 
 For `p = datacollator.mlm_probability`:
 
-- `mask_all: false` global token mix is `(1 - p)` untouched, `0.8p` `[MASK]`,
-  `0.1p` random-token, `0.1p` original-token.
+- `mask_all: false` global token mix is `(1 - p)` untouched, `0.8p` `[MASK]`, `0.1p` random-token, `0.1p` original-token.
 - `mask_all: true` global token mix is `(1 - p)` untouched, `p` `[MASK]`.
 
 ---
 
 ## Checkpointing and Resume
 
-Save cadence/retention knobs live under [Training Loop](#training-loop):
-`trainer.save_steps`, `trainer.save_total_limit`, and
-`trainer.resume_from_checkpoint`.
+Save cadence/retention knobs live under [Training Loop](#training-loop): `trainer.save_steps`, `trainer.save_total_limit`, and `trainer.resume_from_checkpoint`.
 
 | Key                     | Type  | Default    | Description                               |
 | ----------------------- | ----- | ---------- | ----------------------------------------- |
 | `pretrained_checkpoint` | `str` | `"latest"` | Checkpoint selector for downstream tasks. |
 
 > [!NOTE]
-> Pretraining and GLUE resumable state checkpoints are written under
-> `output_dir/checkpoints/<step>/`.
-> GLUE transfer/loading helpers still accept legacy
-> `output_dir/model_checkpoints/<step>/` layouts for older runs.
-> Resume path resolution uses numeric step directories and picks the highest
-> available step for `resume_from_checkpoint: latest`.
-> DeepSpeed `latest` indirection files are optional legacy metadata and are only
-> consulted by DeepSpeed conversion/loading helpers when present.
+> Pretraining, contrastive, and GLUE resumable state checkpoints are written under `output_dir/checkpoints/<step>/`. Pretraining and contrastive step directories include config/tokenizer metadata plus optimizer parameter-name manifests for faithful resume. GLUE transfer/loading helpers still accept legacy `output_dir/model_checkpoints/<step>/` layouts for older runs. Resume path resolution uses numeric step directories and picks the highest available step for `resume_from_checkpoint: latest`. DeepSpeed `latest` indirection files are optional legacy metadata and are only consulted by DeepSpeed conversion/loading helpers when present.
 
 ---
 
@@ -434,13 +397,7 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 | `wandb.dir`          | `str`         | `"logs/wandb"` | Artifact/run directory.                                                                    |
 
 > [!NOTE]
-> Runtime logging prints a task-scoped resolved config before training and sends
-> the same task-scoped payload to W&B (irrelevant task sections are excluded).
-> W&B is not auto-enabled by presence of a `wandb` section; set
-> `wandb.enabled: true` explicitly.
-> For pretraining/contrastive, watch-mode precedence is:
-> `WANDB_WATCH` env var > `wandb.watch` config > default (`gradients` for
-> `wandb.mode: online`).
+> Runtime logging prints a task-scoped resolved config before training and sends the same task-scoped payload to W&B (irrelevant task sections are excluded). W&B is not auto-enabled by presence of a `wandb` section; set `wandb.enabled: true` explicitly. For pretraining/contrastive, watch-mode precedence is: `WANDB_WATCH` env var > `wandb.watch` config > default (`gradients` for `wandb.mode: online`).
 
 ### Top-Level Runtime Metadata
 
@@ -475,16 +432,14 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 | `glue.preprocessing_num_proc`    | `int`                | `4`      | Multiprocessing workers for GLUE preprocessing.          |
 
 > [!NOTE]
-> Worker-count knobs are task-scoped in the current runtime:
-> pretraining uses `dataset.num_workers`, GLUE uses `glue.num_workers`, and
-> contrastive uses `trainer.dataloader_num_workers`.
+> Worker-count knobs are task-scoped in the current runtime: pretraining uses `dataset.num_workers`, GLUE uses `glue.num_workers`, and contrastive uses `trainer.dataloader_num_workers`.
 
 ### Contrastive (`contrastive`)
 
 | Key                                     | Type                 | Default    | Description                                                                 |
 | --------------------------------------- | -------------------- | ---------- | --------------------------------------------------------------------------- |
 | `contrastive.temperature`               | `float`              | `0.05`     | Contrastive temperature.                                                    |
-| `contrastive.pooling`                   | `str`                | `"avg"`    | Pooling mode: `avg`, `cls`, `max`.                                          |
+| `contrastive.pooling`                   | `str`                | `"avg"`    | Pooling mode used by contrastive training: `avg`, `cls`, `max`.             |
 | `contrastive.loss_type`                 | `str`                | `"simcse"` | Loss variant: `simcse`, `supcon`.                                           |
 | `contrastive.hard_negative_weight`      | `float`              | `0.0`      | Additional hard-negative weighting.                                         |
 | `contrastive.pretraining_prob`          | `float`              | `0.3`      | Fraction of steps that draw the pretraining branch in contrastive training. |
@@ -508,6 +463,9 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 | Rule                                                                              | Type               | Details                                                                                                             |
 | --------------------------------------------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------- |
 | `trainer.resume_from_checkpoint` with `dataset.streaming=true`                    | **BEST-EFFORT**    | Streaming resume restores state and advances stream by consumed batches; exact sample continuity is not guaranteed. |
+| `trainer.resume_from_checkpoint` with checkpoint `config.yaml` drift              | **CHECKPOINT WINS** | Resume loads checkpoint model/tokenizer/data objective fields before constructing runtime objects; missing checkpoint config fails fast. |
+| `trainer.resume_from_checkpoint` with optimizer parameter-order drift             | **ERROR**          | Resume validates `optimizer_param_names.json` before loading optimizer state to avoid positional momentum/buffer corruption. |
+| Reusing pre-tokenized caches                                                     | **MANIFEST CHECK** | Caches without a matching `tokenization_manifest.json` are rejected; delete/regenerate the cache or choose a new output path. |
 | Streaming eval with neither `trainer.eval_max_batches` nor `dataset.eval_samples` | **ERROR**          | Set an explicit eval budget for reproducible streaming metrics.                                                     |
 | `dataset.validation_split` with `dataset.streaming=true`                          | **WARNING / SKIP** | Validation split creation is skipped for streaming datasets.                                                        |
 | `scheduler.warmup_percent` and `scheduler.warmup_steps`                           | **PRECEDENCE**     | `warmup_percent` overrides absolute warmup steps.                                                                   |
@@ -518,6 +476,7 @@ Save cadence/retention knobs live under [Training Loop](#training-loop):
 | `optimizer.name=muonclip` with FSDP v1                                             | **ERROR**          | MuonClip distributed mode requires FSDP2 (`fsdp_version=2`).                                                       |
 | Any DeepSpeed runtime                                                              | **ERROR**          | DeepSpeed execution is unsupported in this repo; use Accelerate FSDP v2 for distributed runs. Legacy DeepSpeed checkpoint conversion remains available separately. |
 | `trainer.mixed_precision='no'` with `model.attn_backend=flash_attn_varlen`         | **AUTO-ADJUST**    | Runtime switches attention backend to `sdpa` with a warning.                                                       |
+| `contrastive.pretraining_prob > 0` with `model.dropout_prob <= 0`                 | **ERROR**          | SimCSE-style anti-forgetting steps require dropout-created views.                                                   |
 | `datacollator.pack_sequences=true` with `model.attn_backend=sdpa`                 | **WARNING**        | Works, but slower than `flash_attn_varlen`; SDPA uses fallback path.                                                |
 | `dataset.path` and `dataset.name` both set                                        | **PRECEDENCE**     | Existing local `dataset.path` is used first; hub dataset acts as fallback.                                          |
 | Tokenizer/model vocab sizes                                                       | **IMPORTANT**      | Runtime now pads tokenizer with inert tokens so tokenizer length matches model vocab size.                          |
@@ -675,6 +634,7 @@ scheduler:
 
 ## Related Docs
 
-- [Training](training.md)
-- [Testing](testing.md)
-- [Troubleshooting](troubleshooting.md)
+- [Training](../guides/training.md)
+- [Training optimization](../guides/training-optimization.md)
+- [Testing](../guides/testing.md)
+- [Troubleshooting](../guides/troubleshooting.md)

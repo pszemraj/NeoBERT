@@ -5,7 +5,6 @@ Run: pytest tests/test_muonclip_unit.py -v
 """
 
 import copy
-import warnings
 from pathlib import Path
 
 import pytest
@@ -20,12 +19,23 @@ from neobert.model import NeoBERT, NeoBERTConfig, NeoBERTLMHead
 from neobert.optimizer import MuonClipConfig, MuonClipOptimizer
 
 
-def _legacy_polar_express_reference(
-    grad: torch.Tensor, *, steps: int = 5, eps: float = 1e-7
+def _neobert_polar_express_reference(
+    grad: torch.Tensor,
+    *,
+    steps: int = 5,
+    beta: float = 0.95,
+    nesterov: bool = True,
+    eps: float = 1e-7,
 ) -> torch.Tensor:
-    """Reproduce the pre-refactor Polar Express update with built-in scaling."""
+    """Reproduce NeoBERT's default local Polar Express Muon update."""
     if grad.ndim != 2:
         return grad
+
+    momentum = grad.clone()
+    if nesterov:
+        grad = grad + beta * momentum
+    else:
+        grad = momentum
 
     steps = max(1, int(steps))
     is_transpose = grad.size(0) > grad.size(1)
@@ -76,6 +86,40 @@ def _legacy_polar_express_reference(
     return working.T if is_transpose else working
 
 
+def _split_interleaved_qkv_reference(
+    matrix: torch.Tensor, *, num_heads: int, head_dim: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Split a NeoBERT interleaved fused QKV matrix into Q/K/V references."""
+    hidden_size = num_heads * head_dim
+    view = matrix.view(num_heads, 3 * head_dim, hidden_size)
+    q_matrix = view[:, :head_dim].reshape(hidden_size, hidden_size).contiguous()
+    k_matrix = view[:, head_dim : 2 * head_dim].reshape(hidden_size, hidden_size)
+    k_matrix = k_matrix.contiguous()
+    v_matrix = view[:, 2 * head_dim : 3 * head_dim].reshape(hidden_size, hidden_size)
+    v_matrix = v_matrix.contiguous()
+    return q_matrix, k_matrix, v_matrix
+
+
+def _merge_interleaved_qkv_reference(
+    q_matrix: torch.Tensor,
+    k_matrix: torch.Tensor,
+    v_matrix: torch.Tensor,
+    *,
+    num_heads: int,
+    head_dim: int,
+) -> torch.Tensor:
+    """Merge Q/K/V references into NeoBERT's interleaved fused QKV layout."""
+    hidden_size = num_heads * head_dim
+    fused = q_matrix.new_empty((3 * hidden_size, q_matrix.shape[1]))
+    fused_view = fused.view(num_heads, 3 * head_dim, q_matrix.shape[1])
+    fused_view[:, :head_dim].copy_(q_matrix.view(num_heads, head_dim, -1))
+    fused_view[:, head_dim : 2 * head_dim].copy_(k_matrix.view(num_heads, head_dim, -1))
+    fused_view[:, 2 * head_dim : 3 * head_dim].copy_(
+        v_matrix.view(num_heads, head_dim, -1)
+    )
+    return fused
+
+
 class TestMuonClipConfig:
     """Test configuration validation."""
 
@@ -84,6 +128,9 @@ class TestMuonClipConfig:
         config = MuonClipConfig()
         assert config.lr > 0
         assert 0 <= config.muon_beta < 1
+        assert config.nesterov is True
+        assert config.norm_factor == "neobert"
+        assert config.param_policy == "hidden_2d"
 
     def test_invalid_numeric_fields_raise(self):
         """Test invalid numeric config values fail fast."""
@@ -96,6 +143,7 @@ class TestMuonClipConfig:
             {"clipping_interval": -3},
             {"clipping_qk_chunk_size": 0},
             {"norm_factor": "unsupported"},
+            {"param_policy": "unsupported"},
         ]
         for kwargs in cases:
             with pytest.raises(ValueError):
@@ -270,6 +318,7 @@ class TestMuonClipOptimizer:
             max_length=128,
             attn_backend="sdpa",
             hidden_act="gelu",
+            dropout=0.0,
             rope=False,
         )
         return NeoBERT(config), config
@@ -291,32 +340,31 @@ class TestMuonClipOptimizer:
         assert optimizer.config.orthogonalization == "polar_express"
 
     def test_parameter_grouping(self, model):
-        """Test parameters are correctly grouped."""
+        """Default grouping should keep embeddings/output weights on Adam."""
         model_instance, config = model
 
         muon_config = MuonClipConfig(enable_clipping=False)
         optimizer = MuonClipOptimizer(model_instance, config, muon_config)
 
-        # Muon should only see transformer 2D weights.
         muon_group = next(g for g in optimizer.param_groups if g["use_muon"])
         muon_params = set(muon_group["params"])
         for p in muon_group["params"]:
             assert p.ndim == 2
 
+        assert muon_group["param_policy"] == "hidden_2d"
         assert model_instance.encoder.weight not in muon_params
         if hasattr(model_instance, "positional_embedding"):
             assert model_instance.positional_embedding.weight not in muon_params
         assert model_instance.transformer_encoder[0].qkv.weight in muon_params
 
-        # Adam groups include 1D params and non-transformer 2D weights.
         adam_groups = [g for g in optimizer.param_groups if not g["use_muon"]]
         adam_params = {param for group in adam_groups for param in group["params"]}
         assert model_instance.encoder.weight in adam_params
         if hasattr(model_instance, "positional_embedding"):
             assert model_instance.positional_embedding.weight in adam_params
 
-    def test_grouping_excludes_embeddings_and_lm_head(self):
-        """Embeddings/output projection must stay in Adam, never Muon."""
+    def test_grouping_all_2d_routes_embeddings_and_lm_head_to_muon(self):
+        """all_2d should restore v0.1.3-style Muon scope."""
         config = NeoBERTConfig(
             hidden_size=64,
             num_hidden_layers=2,
@@ -333,7 +381,7 @@ class TestMuonClipOptimizer:
         optimizer = MuonClipOptimizer(
             model,
             config,
-            MuonClipConfig(enable_clipping=False),
+            MuonClipConfig(enable_clipping=False, param_policy="all_2d"),
         )
 
         muon_group = next(g for g in optimizer.param_groups if g["use_muon"])
@@ -341,6 +389,39 @@ class TestMuonClipOptimizer:
         adam_groups = [g for g in optimizer.param_groups if not g["use_muon"]]
         adam_params = {param for group in adam_groups for param in group["params"]}
 
+        assert model.model.encoder.weight in muon_params
+        assert model.decoder.weight in muon_params
+        assert model.model.encoder.weight not in adam_params
+        assert model.decoder.weight not in adam_params
+        assert model.model.transformer_encoder[0].qkv.weight in muon_params
+
+    def test_grouping_hidden_2d_excludes_embeddings_and_lm_head(self):
+        """hidden_2d should keep embeddings/output projection in Adam."""
+        config = NeoBERTConfig(
+            hidden_size=64,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            intermediate_size=128,
+            vocab_size=257,
+            max_length=64,
+            attn_backend="sdpa",
+            hidden_act="gelu",
+            rope=False,
+            tie_word_embeddings=False,
+        )
+        model = NeoBERTLMHead(config)
+        optimizer = MuonClipOptimizer(
+            model,
+            config,
+            MuonClipConfig(enable_clipping=False, param_policy="hidden_2d"),
+        )
+
+        muon_group = next(g for g in optimizer.param_groups if g["use_muon"])
+        muon_params = set(muon_group["params"])
+        adam_groups = [g for g in optimizer.param_groups if not g["use_muon"]]
+        adam_params = {param for group in adam_groups for param in group["params"]}
+
+        assert muon_group["param_policy"] == "hidden_2d"
         assert model.model.encoder.weight not in muon_params
         assert model.model.encoder.weight in adam_params
         assert model.decoder.weight not in muon_params
@@ -365,7 +446,11 @@ class TestMuonClipOptimizer:
         optimizer = MuonClipOptimizer(
             model,
             config,
-            MuonClipConfig(enable_clipping=False, adam_decay=0.1),
+            MuonClipConfig(
+                enable_clipping=False,
+                adam_decay=0.1,
+                param_policy="hidden_2d",
+            ),
         )
 
         adam_groups = [
@@ -416,9 +501,10 @@ class TestMuonClipOptimizer:
         param_shape = torch.Size([6, 3])
         expected_scales = {
             "none": 1.0,
+            "neobert": 0.4 * (6**0.5),
+            "muon_reference": max(1.0, 6 / 3) ** 0.5,
             "spectral": (6 / 3) ** 0.5,
             "match_rms_adamw": 0.2 * (6**0.5),
-            "legacy_compat": 0.4 * (6**0.5),
         }
 
         for mode, expected_scale in expected_scales.items():
@@ -430,8 +516,8 @@ class TestMuonClipOptimizer:
             normalized = optimizer._normalize_muon_update(update, param_shape)
             assert torch.allclose(normalized, update * expected_scale)
 
-    def test_legacy_compat_matches_pre_refactor_polar_step(self):
-        """Legacy normalization should match pre-refactor local Polar Express math."""
+    def test_default_muon_step_matches_neobert_polar_step(self):
+        """Default Muon settings should match the NeoBERT default step."""
         torch.manual_seed(0)
         config = NeoBERTConfig(
             hidden_size=16,
@@ -453,11 +539,12 @@ class TestMuonClipOptimizer:
             ns_steps=5,
             enable_clipping=False,
             orthogonalization="polar_express",
-            norm_factor="legacy_compat",
         )
+        assert muon_config.norm_factor == "neobert"
+        assert muon_config.nesterov is True
         optimizer = MuonClipOptimizer(model, config, muon_config)
 
-        target = model.transformer_encoder[0].qkv.weight
+        target = model.transformer_encoder[0].wo.weight
         grad = torch.randn_like(target)
         initial = target.detach().clone()
 
@@ -466,14 +553,92 @@ class TestMuonClipOptimizer:
                 param.grad = torch.zeros_like(param)
         target.grad = grad.clone()
 
-        momentum = (1 - muon_config.muon_beta) * grad
-        expected_update = _legacy_polar_express_reference(
-            momentum, steps=muon_config.ns_steps
+        expected_update = _neobert_polar_express_reference(
+            grad,
+            steps=muon_config.ns_steps,
+            beta=muon_config.muon_beta,
+            nesterov=muon_config.nesterov,
         )
         expected = initial - muon_config.lr * expected_update
 
         optimizer.step()
         assert torch.allclose(target, expected, atol=1e-6, rtol=1e-6)
+
+    def test_non_nesterov_muon_step_uses_plain_momentum_buffer(self):
+        """Disabling Nesterov should orthogonalize the raw momentum buffer."""
+        torch.manual_seed(0)
+        config = NeoBERTConfig(
+            hidden_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=32,
+            vocab_size=64,
+            max_length=16,
+            attn_backend="sdpa",
+            hidden_act="gelu",
+            rope=False,
+        )
+        model = NeoBERT(config)
+        muon_config = MuonClipConfig(
+            lr=1e-3,
+            muon_beta=0.95,
+            nesterov=False,
+            muon_decay=0.0,
+            adam_decay=0.0,
+            ns_steps=5,
+            enable_clipping=False,
+            orthogonalization="polar_express",
+        )
+        optimizer = MuonClipOptimizer(model, config, muon_config)
+
+        target = model.transformer_encoder[0].wo.weight
+        grad = torch.randn_like(target)
+        initial = target.detach().clone()
+
+        for param in model.parameters():
+            if param.requires_grad:
+                param.grad = torch.zeros_like(param)
+        target.grad = grad.clone()
+
+        expected_update = _neobert_polar_express_reference(
+            grad,
+            steps=muon_config.ns_steps,
+            beta=muon_config.muon_beta,
+            nesterov=muon_config.nesterov,
+        )
+        expected = initial - muon_config.lr * expected_update
+
+        optimizer.step()
+        assert torch.allclose(target, expected, atol=1e-6, rtol=1e-6)
+
+    def test_muon_reference_norm_factor_matches_reference_scale(self):
+        """Reference Muon scaling should match the OpenAI/PyTorch shape rule."""
+        config = NeoBERTConfig(
+            hidden_size=8,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=16,
+            vocab_size=64,
+            max_length=16,
+            attn_backend="sdpa",
+            hidden_act="gelu",
+            rope=False,
+        )
+        model = NeoBERT(config)
+        optimizer = MuonClipOptimizer(
+            model,
+            config,
+            MuonClipConfig(enable_clipping=False, norm_factor="muon_reference"),
+        )
+        update = torch.ones(12, 3)
+        normalized = optimizer._normalize_muon_update(update, update.shape)
+        expected_scale = max(1.0, 12 / 3) ** 0.5
+        torch.testing.assert_close(normalized, update * expected_scale)
+
+    def test_norm_factor_aliases_normalize_to_canonical_names(self):
+        """Legacy strings should normalize to the current canonical names."""
+        assert MuonClipConfig(norm_factor="legacy_compat").norm_factor == "neobert"
+        assert MuonClipConfig(norm_factor="original").norm_factor == "muon_reference"
 
     def test_interleaved_qkv_scaling(self):
         """Ensure fused QKV scaling matches per-head interleaved layout."""
@@ -507,6 +672,71 @@ class TestMuonClipOptimizer:
         view = expected.view(config.num_attention_heads, config.dim_head * 3, -1)
         view[:, : config.dim_head].mul_(eta.view(-1, 1, 1))
         assert torch.allclose(qkv_param, expected)
+
+    def test_fused_qkv_muon_splits_projections_before_orthogonalization(self):
+        """Fused QKV updates should apply Muon separately to Q, K, and V."""
+        torch.manual_seed(0)
+        config = NeoBERTConfig(
+            hidden_size=8,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=16,
+            vocab_size=32,
+            max_length=8,
+            attn_backend="sdpa",
+            hidden_act="gelu",
+            rope=False,
+        )
+        model = NeoBERT(config)
+        optimizer = MuonClipOptimizer(
+            model,
+            config,
+            MuonClipConfig(
+                lr=1e-3,
+                muon_beta=0.95,
+                nesterov=True,
+                enable_clipping=False,
+                orthogonalization="polar_express",
+            ),
+        )
+        qkv_weight = model.transformer_encoder[0].qkv.weight
+        grad = torch.randn_like(qkv_weight)
+
+        q_grad, k_grad, v_grad = _split_interleaved_qkv_reference(
+            grad,
+            num_heads=config.num_attention_heads,
+            head_dim=config.dim_head,
+        )
+        expected = _merge_interleaved_qkv_reference(
+            _neobert_polar_express_reference(
+                q_grad,
+                steps=optimizer.config.ns_steps,
+                beta=optimizer.config.muon_beta,
+                nesterov=optimizer.config.nesterov,
+            ),
+            _neobert_polar_express_reference(
+                k_grad,
+                steps=optimizer.config.ns_steps,
+                beta=optimizer.config.muon_beta,
+                nesterov=optimizer.config.nesterov,
+            ),
+            _neobert_polar_express_reference(
+                v_grad,
+                steps=optimizer.config.ns_steps,
+                beta=optimizer.config.muon_beta,
+                nesterov=optimizer.config.nesterov,
+            ),
+            num_heads=config.num_attention_heads,
+            head_dim=config.dim_head,
+        )
+
+        actual = optimizer._orthogonalize_muon_input(
+            muon_input=grad,
+            param_shape=qkv_weight.shape,
+            param_info={"proj_type": "qkv"},
+        )
+
+        torch.testing.assert_close(actual, expected)
 
     def test_qkv_scaling_rejects_non_interleaved_layout(self):
         """Ensure fused QKV scaling fails fast on incompatible weight layouts."""
@@ -685,7 +915,10 @@ class TestMuonClipOptimizer:
     def test_distributed_checkpoint_api_restores_step_and_next_update(self, model):
         """Distributed checkpoint APIs should preserve Muon step semantics."""
         model_instance, config = model
-        muon_config = MuonClipConfig(enable_clipping=False)
+        muon_config = MuonClipConfig(
+            enable_clipping=False,
+            param_policy="hidden_2d",
+        )
         optimizer = MuonClipOptimizer(model_instance, config, muon_config)
 
         for _ in range(3):
@@ -744,7 +977,10 @@ class TestMuonClipOptimizer:
     ):
         """Filesystem DCP round-trips should use the FQN optimizer schema."""
         model_instance, config = model
-        muon_config = MuonClipConfig(enable_clipping=False)
+        muon_config = MuonClipConfig(
+            enable_clipping=False,
+            param_policy="hidden_2d",
+        )
         optimizer = MuonClipOptimizer(model_instance, config, muon_config)
 
         for _ in range(3):
@@ -763,27 +999,20 @@ class TestMuonClipOptimizer:
         loaded_optim_state = {
             "optimizer": get_optimizer_state_dict(model_clone, optimizer_clone)
         }
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message=(
-                    "torch.distributed is disabled, unavailable or uninitialized, "
-                    "assuming the intent is to save in a single process."
-                ),
-            )
-            warnings.filterwarnings(
-                "ignore",
-                message=(
-                    "torch.distributed is disabled, unavailable or uninitialized, "
-                    "assuming the intent is to load in a single process."
-                ),
-            )
+        with pytest.warns(
+            UserWarning,
+            match="assuming the intent is to save in a single process",
+        ):
             dist_cp.save(
                 state_dict={
                     "optimizer": get_optimizer_state_dict(model_instance, optimizer)
                 },
                 storage_writer=dist_cp.FileSystemWriter(str(checkpoint_dir)),
             )
+        with pytest.warns(
+            UserWarning,
+            match="assuming the intent is to load in a single process",
+        ):
             dist_cp.load(
                 loaded_optim_state,
                 checkpoint_id=str(checkpoint_dir),
@@ -845,6 +1074,7 @@ class TestMuonClipOptimizer:
             group.pop("use_muon", None)
             group.pop("param_info", None)
             group.pop("beta", None)
+            group.pop("nesterov", None)
 
         model_ref = NeoBERT(config)
         model_ref.load_state_dict(model_instance.state_dict())
@@ -862,6 +1092,7 @@ class TestMuonClipOptimizer:
             group for group in optimizer_clone.param_groups if group["use_muon"]
         )
         assert "beta" in muon_group
+        assert "nesterov" in muon_group
         assert len(muon_group["param_info"]) == len(muon_group["params"])
 
         input_ids = torch.randint(0, 1000, (2, 64))
@@ -1116,7 +1347,7 @@ class TestMuonClipOptimizer:
         target = model_instance.transformer_encoder[0].qkv.weight
         with pytest.raises(RuntimeError, match="device_mesh.ndim=2"):
             optimizer._orthogonalize_dtensor_update(
-                momentum_buffer=_FakeDTensor(),
+                muon_input=_FakeDTensor(),
                 param=target,
                 group_params=[target],
             )
@@ -1207,7 +1438,7 @@ class TestMuonClipOptimizer:
 
         fake_mesh = _FakeMesh()
         fake_placements = (_FakeShard(0),)
-        momentum_buffer = _FakeDTensor(
+        muon_input = _FakeDTensor(
             local_shard,
             device_mesh=fake_mesh,
             placements=fake_placements,
@@ -1274,7 +1505,7 @@ class TestMuonClipOptimizer:
         monkeypatch.setattr(muon_clip_module.dist, "scatter", _fake_scatter)
 
         update = optimizer._orthogonalize_dtensor_update(
-            momentum_buffer=momentum_buffer,
+            muon_input=muon_input,
             param=fake_param,
             group_params=[fake_param],
         )
@@ -1286,6 +1517,197 @@ class TestMuonClipOptimizer:
         torch.testing.assert_close(update.to_local(), expected_full[:2])
         assert tuple(update.shape) == tuple(full_matrix.shape)
         assert tuple(update.stride()) == tuple(full_matrix.stride())
+
+    def test_dtensor_owner_compute_splits_fused_qkv_projections(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Owner-compute DTensor Muon should split fused QKV by projection."""
+        import neobert.optimizer.muon_clip as muon_clip_module
+
+        config = NeoBERTConfig(
+            hidden_size=3,
+            num_hidden_layers=1,
+            num_attention_heads=1,
+            intermediate_size=16,
+            vocab_size=32,
+            max_length=8,
+            attn_backend="sdpa",
+            hidden_act="gelu",
+            rope=False,
+        )
+        model = NeoBERT(config)
+        optimizer = MuonClipOptimizer(
+            model,
+            config,
+            MuonClipConfig(
+                enable_clipping=False,
+                orthogonalization="polar_express",
+            ),
+        )
+        full_matrix = torch.arange(27, dtype=torch.float32).view(9, 3) / 10.0
+        local_shard = full_matrix[:5].clone()
+        remote_shard = full_matrix[5:].clone()
+        process_group = object()
+
+        class _FakeShard:
+            def __init__(self, dim: int):
+                self.dim = dim
+
+        class _FakeMesh:
+            ndim = 1
+
+            def get_group(self):
+                return process_group
+
+        class _FakeDTensor:
+            def __init__(
+                self,
+                local: torch.Tensor,
+                *,
+                device_mesh: _FakeMesh,
+                placements: tuple[_FakeShard, ...],
+                shape: torch.Size,
+                stride: tuple[int, ...],
+            ):
+                self._local = local
+                self.device_mesh = device_mesh
+                self.placements = placements
+                self.shape = torch.Size(shape)
+                self._stride = tuple(stride)
+
+            def to_local(self) -> torch.Tensor:
+                return self._local
+
+            def stride(self) -> tuple[int, ...]:
+                return self._stride
+
+            @staticmethod
+            def from_local(
+                local: torch.Tensor,
+                *,
+                device_mesh: _FakeMesh,
+                placements: tuple[_FakeShard, ...],
+                run_check: bool = False,
+                shape: torch.Size,
+                stride: tuple[int, ...],
+            ) -> "_FakeDTensor":
+                assert not run_check
+                return _FakeDTensor(
+                    local,
+                    device_mesh=device_mesh,
+                    placements=placements,
+                    shape=shape,
+                    stride=stride,
+                )
+
+        class _FakeParam:
+            shape = torch.Size([9, 3])
+
+            @staticmethod
+            def numel() -> int:
+                return int(full_matrix.numel())
+
+        fake_mesh = _FakeMesh()
+        fake_placements = (_FakeShard(0),)
+        muon_input = _FakeDTensor(
+            local_shard,
+            device_mesh=fake_mesh,
+            placements=fake_placements,
+            shape=full_matrix.shape,
+            stride=full_matrix.stride(),
+        )
+        fake_param = _FakeParam()
+        remote_padded = torch.cat(
+            (
+                remote_shard,
+                torch.zeros((1, remote_shard.shape[1]), dtype=remote_shard.dtype),
+            ),
+            dim=0,
+        )
+
+        monkeypatch.setattr(muon_clip_module, "DTensor", _FakeDTensor)
+        monkeypatch.setattr(muon_clip_module, "Shard", _FakeShard)
+        monkeypatch.setattr(muon_clip_module.dist, "is_available", lambda: True)
+        monkeypatch.setattr(muon_clip_module.dist, "is_initialized", lambda: True)
+        monkeypatch.setattr(
+            muon_clip_module.dist,
+            "get_process_group_ranks",
+            lambda _group: [0, 1],
+        )
+        monkeypatch.setattr(
+            muon_clip_module.dist,
+            "get_world_size",
+            lambda _group=None: 2,
+        )
+        monkeypatch.setattr(
+            muon_clip_module.dist,
+            "get_rank",
+            lambda _group=None: 0,
+        )
+
+        def _unexpected_all_gather(*args, **kwargs):
+            del args, kwargs
+            raise AssertionError("row-count all_gather should not run in normal mode")
+
+        def _fake_gather(
+            tensor: torch.Tensor,
+            gather_list: list[torch.Tensor] | None,
+            *,
+            group: object,
+            group_dst: int,
+        ) -> None:
+            assert group is process_group
+            assert group_dst == 0
+            assert gather_list is not None
+            gather_list[0].copy_(tensor)
+            gather_list[1].copy_(remote_padded)
+
+        def _fake_scatter(
+            tensor: torch.Tensor,
+            scatter_list: list[torch.Tensor] | None,
+            *,
+            group: object,
+            group_src: int,
+        ) -> None:
+            assert group is process_group
+            assert group_src == 0
+            assert scatter_list is not None
+            tensor.copy_(scatter_list[0])
+
+        monkeypatch.setattr(muon_clip_module.dist, "all_gather", _unexpected_all_gather)
+        monkeypatch.setattr(muon_clip_module.dist, "gather", _fake_gather)
+        monkeypatch.setattr(muon_clip_module.dist, "scatter", _fake_scatter)
+
+        update = optimizer._orthogonalize_dtensor_update(
+            muon_input=muon_input,
+            param=fake_param,
+            group_params=[fake_param],
+            param_info={"proj_type": "qkv"},
+        )
+
+        q_full, k_full, v_full = _split_interleaved_qkv_reference(
+            full_matrix,
+            num_heads=config.num_attention_heads,
+            head_dim=config.dim_head,
+        )
+        expected_full = _merge_interleaved_qkv_reference(
+            optimizer._normalize_muon_update(
+                optimizer._orthogonalize_update(q_full),
+                q_full.shape,
+            ),
+            optimizer._normalize_muon_update(
+                optimizer._orthogonalize_update(k_full),
+                k_full.shape,
+            ),
+            optimizer._normalize_muon_update(
+                optimizer._orthogonalize_update(v_full),
+                v_full.shape,
+            ),
+            num_heads=config.num_attention_heads,
+            head_dim=config.dim_head,
+        )
+
+        torch.testing.assert_close(update.to_local(), expected_full[:5])
 
     def test_owner_rank_tie_breaks_on_param_name(
         self, model, monkeypatch: pytest.MonkeyPatch

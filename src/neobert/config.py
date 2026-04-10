@@ -127,6 +127,9 @@ class DatasetConfig:
     train_split: Optional[str] = None
     eval_split: Optional[str] = None
     eval_samples: Optional[int] = None
+    streaming_read_retries: int = 4
+    streaming_read_retry_backoff_seconds: float = 5.0
+    streaming_read_retry_max_backoff_seconds: float = 60.0
     num_proc: int = 4  # Number of processes for tokenization
     shuffle_buffer_size: int = 10000  # Buffer size for streaming dataset shuffling
     pre_tokenize: bool = False  # Whether to pre-tokenize non-streaming datasets
@@ -159,6 +162,7 @@ class MuonConfig:
     """Muon optimizer-specific configuration."""
 
     muon_beta: float = 0.95
+    nesterov: bool = True
     muon_decay: float = 0.0
     ns_steps: int = 5
     enable_clipping: bool = True
@@ -170,19 +174,49 @@ class MuonConfig:
     capture_last_microbatch_only: bool = True
     detect_anomalies: bool = False
     orthogonalization: str = "polar_express"
-    norm_factor: str = "spectral"
+    norm_factor: str = "neobert"
+    param_policy: str = "hidden_2d"
     algorithm: Optional[str] = None  # Alias for orthogonalization
     polar_express: Optional[bool] = None  # Legacy toggle
     clipping_layers_mapping: Dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Warn on legacy alias usage."""
+        """Warn on legacy alias usage and normalize enum-like fields."""
         if self.algorithm is not None:
             warnings.warn(
                 "MuonConfig.algorithm is deprecated; use orthogonalization instead.",
                 UserWarning,
                 stacklevel=2,
             )
+
+        norm_factor = str(self.norm_factor).strip().replace("-", "_").lower()
+        norm_factor = {
+            "legacy_compat": "neobert",
+            "original": "muon_reference",
+        }.get(norm_factor, norm_factor)
+        valid_norm_factors = {
+            "neobert",
+            "muon_reference",
+            "spectral",
+            "match_rms_adamw",
+            "none",
+        }
+        if norm_factor not in valid_norm_factors:
+            raise ValueError(
+                f"Unsupported norm_factor '{self.norm_factor}'. "
+                f"Valid options: {', '.join(sorted(valid_norm_factors))}"
+            )
+        self.norm_factor = norm_factor
+
+        param_policy = str(self.param_policy).strip().replace("-", "_").lower()
+        param_policy = {"transformer_only": "hidden_2d"}.get(param_policy, param_policy)
+        valid_param_policies = {"all_2d", "hidden_2d"}
+        if param_policy not in valid_param_policies:
+            raise ValueError(
+                f"Unsupported param_policy '{self.param_policy}'. "
+                f"Valid options: {', '.join(sorted(valid_param_policies))}"
+            )
+        self.param_policy = param_policy
         if self.polar_express is not None:
             warnings.warn(
                 "MuonConfig.polar_express is deprecated; use orthogonalization instead.",
@@ -1037,53 +1071,56 @@ class ConfigLoader:
             # trainer.train_batch_size -> trainer.per_device_train_batch_size
             if "train_batch_size" in trainer:
                 train_batch_size = trainer.pop("train_batch_size")
-                if "per_device_train_batch_size" in trainer and trainer[
-                    "per_device_train_batch_size"
-                ] not in (None, train_batch_size):
-                    raise ValueError(
-                        "Both 'trainer.train_batch_size' and "
-                        "'trainer.per_device_train_batch_size' are set with different values."
+                if train_batch_size is not None:
+                    if "per_device_train_batch_size" in trainer and trainer[
+                        "per_device_train_batch_size"
+                    ] not in (None, train_batch_size):
+                        raise ValueError(
+                            "Both 'trainer.train_batch_size' and "
+                            "'trainer.per_device_train_batch_size' are set with different values."
+                        )
+                    if trainer.get("per_device_train_batch_size") is None:
+                        trainer["per_device_train_batch_size"] = train_batch_size
+                    ConfigLoader._warn_legacy(
+                        "Config key 'trainer.train_batch_size' is deprecated; use "
+                        "'trainer.per_device_train_batch_size'."
                     )
-                if trainer.get("per_device_train_batch_size") is None:
-                    trainer["per_device_train_batch_size"] = train_batch_size
-                ConfigLoader._warn_legacy(
-                    "Config key 'trainer.train_batch_size' is deprecated; use "
-                    "'trainer.per_device_train_batch_size'."
-                )
 
             # trainer.eval_batch_size -> trainer.per_device_eval_batch_size
             if "eval_batch_size" in trainer:
                 eval_batch_size = trainer.pop("eval_batch_size")
-                if "per_device_eval_batch_size" in trainer and trainer[
-                    "per_device_eval_batch_size"
-                ] not in (None, eval_batch_size):
-                    raise ValueError(
-                        "Both 'trainer.eval_batch_size' and "
-                        "'trainer.per_device_eval_batch_size' are set with different values."
+                if eval_batch_size is not None:
+                    if "per_device_eval_batch_size" in trainer and trainer[
+                        "per_device_eval_batch_size"
+                    ] not in (None, eval_batch_size):
+                        raise ValueError(
+                            "Both 'trainer.eval_batch_size' and "
+                            "'trainer.per_device_eval_batch_size' are set with different values."
+                        )
+                    if trainer.get("per_device_eval_batch_size") is None:
+                        trainer["per_device_eval_batch_size"] = eval_batch_size
+                    ConfigLoader._warn_legacy(
+                        "Config key 'trainer.eval_batch_size' is deprecated; use "
+                        "'trainer.per_device_eval_batch_size'."
                     )
-                if trainer.get("per_device_eval_batch_size") is None:
-                    trainer["per_device_eval_batch_size"] = eval_batch_size
-                ConfigLoader._warn_legacy(
-                    "Config key 'trainer.eval_batch_size' is deprecated; use "
-                    "'trainer.per_device_eval_batch_size'."
-                )
 
             # trainer.max_ckpt -> trainer.save_total_limit
             if "max_ckpt" in trainer:
                 max_ckpt = trainer.pop("max_ckpt")
-                if "save_total_limit" in trainer and trainer[
-                    "save_total_limit"
-                ] not in (None, max_ckpt):
-                    raise ValueError(
-                        "Both 'trainer.max_ckpt' and 'trainer.save_total_limit' are set "
-                        "with different values."
+                if max_ckpt is not None:
+                    if "save_total_limit" in trainer and trainer[
+                        "save_total_limit"
+                    ] not in (None, max_ckpt):
+                        raise ValueError(
+                            "Both 'trainer.max_ckpt' and 'trainer.save_total_limit' are set "
+                            "with different values."
+                        )
+                    if trainer.get("save_total_limit") is None:
+                        trainer["save_total_limit"] = max_ckpt
+                    ConfigLoader._warn_legacy(
+                        "Config key 'trainer.max_ckpt' is deprecated; use "
+                        "'trainer.save_total_limit'."
                     )
-                if trainer.get("save_total_limit") is None:
-                    trainer["save_total_limit"] = max_ckpt
-                ConfigLoader._warn_legacy(
-                    "Config key 'trainer.max_ckpt' is deprecated; use "
-                    "'trainer.save_total_limit'."
-                )
 
         # dataset.tokenizer_name -> tokenizer.name
         dataset = normalized.get("dataset", {})
@@ -1176,18 +1213,28 @@ class ConfigLoader:
         # wandb.log_interval -> trainer.logging_steps
         wandb = normalized.get("wandb", {})
         if isinstance(wandb, dict) and "log_interval" in wandb:
-            log_interval = wandb["log_interval"]
+            log_interval = wandb.pop("log_interval")
             trainer = _section("trainer")
-            if "logging_steps" in trainer and trainer["logging_steps"] != log_interval:
-                raise ValueError(
-                    "Both 'wandb.log_interval' and 'trainer.logging_steps' are set with "
-                    "different values."
+            if log_interval is not None:
+                if (
+                    "logging_steps" in trainer
+                    and trainer["logging_steps"] != log_interval
+                ):
+                    raise ValueError(
+                        "Both 'wandb.log_interval' and 'trainer.logging_steps' are set with "
+                        "different values."
+                    )
+                if "logging_steps" not in trainer:
+                    trainer["logging_steps"] = log_interval
+                    ConfigLoader._warn_legacy(
+                        "Config key 'wandb.log_interval' is deprecated for trainer logging; "
+                        "use 'trainer.logging_steps'."
+                    )
+            else:
+                ConfigLoader._warn_legacy(
+                    "Config key 'wandb.log_interval' is deprecated for trainer logging; "
+                    "use 'trainer.logging_steps'."
                 )
-            trainer.setdefault("logging_steps", log_interval)
-            ConfigLoader._warn_legacy(
-                "Config key 'wandb.log_interval' is deprecated for trainer logging; "
-                "use 'trainer.logging_steps'."
-            )
 
         # scheduler.num_cycles is unsupported by the current scheduler implementation.
         scheduler = normalized.get("scheduler", {})
@@ -1262,14 +1309,15 @@ class ConfigLoader:
                 for legacy_key, contrastive_key in contrastive_key_map.items():
                     if legacy_key in model:
                         value = model.pop(legacy_key)
-                        if contrastive_key in contrastive and contrastive[
-                            contrastive_key
-                        ] not in (None, value):
-                            raise ValueError(
-                                "Both 'model."
-                                f"{legacy_key}' and 'contrastive.{contrastive_key}' "
-                                "are set with different values."
-                            )
+                        if contrastive_key in contrastive:
+                            if contrastive[contrastive_key] not in (None, value):
+                                raise ValueError(
+                                    "Both 'model."
+                                    f"{legacy_key}' and 'contrastive.{contrastive_key}' "
+                                    "are set with different values."
+                                )
+                            if contrastive[contrastive_key] == value:
+                                continue
                         contrastive.setdefault(contrastive_key, value)
                         ConfigLoader._warn_legacy(
                             "Config key 'model."
@@ -1295,11 +1343,14 @@ class ConfigLoader:
                 for legacy_key, glue_key in glue_key_map.items():
                     if legacy_key in model:
                         value = model.pop(legacy_key)
-                        if glue_key in glue and glue[glue_key] not in (None, value):
-                            raise ValueError(
-                                f"Both 'model.{legacy_key}' and 'glue.{glue_key}' are set with "
-                                "different values."
-                            )
+                        if glue_key in glue:
+                            if glue[glue_key] not in (None, value):
+                                raise ValueError(
+                                    f"Both 'model.{legacy_key}' and 'glue.{glue_key}' are set with "
+                                    "different values."
+                                )
+                            if glue[glue_key] == value:
+                                continue
                         glue.setdefault(glue_key, value)
                         ConfigLoader._warn_legacy(
                             f"Config key 'model.{legacy_key}' is deprecated; use 'glue.{glue_key}'."
@@ -1418,6 +1469,31 @@ class ConfigLoader:
             errors.append(
                 "dataset.eval_samples must be > 0 when set, got "
                 f"{config.dataset.eval_samples}."
+            )
+        if config.dataset.streaming_read_retries < 0:
+            errors.append(
+                "dataset.streaming_read_retries must be >= 0, got "
+                f"{config.dataset.streaming_read_retries}."
+            )
+        if config.dataset.streaming_read_retry_backoff_seconds <= 0:
+            errors.append(
+                "dataset.streaming_read_retry_backoff_seconds must be > 0, got "
+                f"{config.dataset.streaming_read_retry_backoff_seconds}."
+            )
+        if config.dataset.streaming_read_retry_max_backoff_seconds <= 0:
+            errors.append(
+                "dataset.streaming_read_retry_max_backoff_seconds must be > 0, got "
+                f"{config.dataset.streaming_read_retry_max_backoff_seconds}."
+            )
+        if (
+            config.dataset.streaming_read_retry_max_backoff_seconds
+            < config.dataset.streaming_read_retry_backoff_seconds
+        ):
+            errors.append(
+                "dataset.streaming_read_retry_max_backoff_seconds must be >= "
+                "dataset.streaming_read_retry_backoff_seconds, got "
+                f"{config.dataset.streaming_read_retry_max_backoff_seconds} < "
+                f"{config.dataset.streaming_read_retry_backoff_seconds}."
             )
 
         if task in {"pretraining", "contrastive"}:
@@ -2030,6 +2106,21 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         "--dataset.streaming",
         type=_parse_cli_bool,
         help="Stream dataset from hub",
+    )
+    parser.add_argument(
+        "--dataset.streaming_read_retries",
+        type=int,
+        help="Outer retry count for transient streaming read failures",
+    )
+    parser.add_argument(
+        "--dataset.streaming_read_retry_backoff_seconds",
+        type=float,
+        help="Initial backoff for transient streaming read retries",
+    )
+    parser.add_argument(
+        "--dataset.streaming_read_retry_max_backoff_seconds",
+        type=float,
+        help="Maximum backoff for transient streaming read retries",
     )
     parser.add_argument(
         "--dataset.max_seq_length", type=int, help="Maximum sequence length"

@@ -16,6 +16,11 @@ from neobert.contrastive.datasets import (
     resolve_contrastive_dataset_name,
     resolve_contrastive_dataset_names,
 )
+from neobert.tokenization_cache import (
+    build_tokenization_manifest,
+    validate_tokenized_cache_manifest,
+    write_tokenized_cache_manifest,
+)
 from neobert.tokenizer import get_tokenizer, tokenize
 
 
@@ -122,6 +127,23 @@ def pipeline(cfg: Any) -> DatasetDict:
             if dataset_dir.is_dir() and not force_redownload:
                 print(f"Loading tokenized {name} from disk...")
                 subdataset = dataset_cls.from_disk(dataset_dir).dataset
+                token_columns = tuple(
+                    col.removeprefix("input_ids_")
+                    for col in subdataset.column_names
+                    if col.startswith("input_ids_")
+                )
+                manifest = build_tokenization_manifest(
+                    tokenizer,
+                    dataset_name=name,
+                    dataset_config=None,
+                    dataset_path=dataset_path,
+                    column_name=token_columns,
+                    max_length=getattr(cfg.tokenizer, "max_length", 512),
+                    truncation=getattr(cfg.tokenizer, "truncation", True),
+                    add_special_tokens=True,
+                    return_special_tokens_mask=False,
+                )
+                validate_tokenized_cache_manifest(dataset_dir, manifest)
             else:
                 if dataset_dir.is_dir():
                     shutil.rmtree(dataset_dir)
@@ -138,6 +160,17 @@ def pipeline(cfg: Any) -> DatasetDict:
                         f"{name} has no tokenizable columns in "
                         f"{subdataset.column_names!r}."
                     )
+                manifest = build_tokenization_manifest(
+                    tokenizer,
+                    dataset_name=name,
+                    dataset_config=None,
+                    dataset_path=dataset_path,
+                    column_name=token_columns,
+                    max_length=getattr(cfg.tokenizer, "max_length", 512),
+                    truncation=getattr(cfg.tokenizer, "truncation", True),
+                    add_special_tokens=True,
+                    return_special_tokens_mask=False,
+                )
                 subdataset = tokenize(
                     subdataset,
                     tokenizer,
@@ -149,6 +182,7 @@ def pipeline(cfg: Any) -> DatasetDict:
                     remove_columns=True,
                 )
                 subdataset.save_to_disk(dataset_dir)
+                write_tokenized_cache_manifest(dataset_dir, manifest)
 
             dataset_dict[name] = subdataset
 

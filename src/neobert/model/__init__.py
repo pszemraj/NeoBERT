@@ -3,7 +3,6 @@
 __all__ = [
     "NeoBERTForMTEB",
     "NeoBERTForSequenceClassification",
-    "NeoBERTHFForSequenceClassification",
     "NeoBERTLMHead",
     "NeoBERT",
     "NormNeoBERT",
@@ -13,9 +12,9 @@ __all__ = [
 from .model import (
     NeoBERT,
     NeoBERTConfig,
-    NeoBERTForMTEB,
-    NeoBERTForSequenceClassification,
-    NeoBERTHFForSequenceClassification,
-    NeoBERTLMHead,
     NormNeoBERT,
 )
+from .classification import (
+    NeoBERTForSequenceClassification,
+)
+from .wrappers import NeoBERTForMTEB, NeoBERTLMHead

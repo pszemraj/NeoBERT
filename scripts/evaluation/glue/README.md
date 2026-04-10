@@ -14,6 +14,5 @@ Automation helpers for generating, running, and summarizing GLUE configs.
 ## Usage Notes
 
 - Invoke from repository root.
-- Generated configs default to `configs/glue/generated/` unless
-  `build_configs.sh` overrides `--config-output-dir`.
-- GLUE workflow details are in [docs/evaluation.md](../../../docs/evaluation.md).
+- Generated configs default to `configs/glue/generated/` unless `build_configs.sh` overrides `--config-output-dir`.
+- GLUE workflow details are in [docs/guides/evaluation.md](../../../docs/guides/evaluation.md).

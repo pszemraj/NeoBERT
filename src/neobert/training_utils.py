@@ -1,5 +1,8 @@
 """Shared helpers for training loops (pretraining, GLUE, contrastive)."""
 
+from collections.abc import Mapping
+from copy import deepcopy
+import json
 import logging
 import os
 import re
@@ -11,7 +14,14 @@ from accelerate import Accelerator
 from accelerate.state import AcceleratorState, GradientState
 from accelerate.utils import DistributedType
 
+try:
+    from transformers import BatchEncoding
+except Exception:  # pragma: no cover - transformers import should succeed in repo env
+    BatchEncoding = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
+
+OPTIMIZER_PARAM_NAMES_MANIFEST = "optimizer_param_names.json"
 
 try:
     from torch.distributed.tensor import DTensor
@@ -99,6 +109,113 @@ def resolve_wandb_watch_mode(
         None,
         f"Unrecognized wandb watch mode '{raw_mode}'; skipping wandb.watch().",
     )
+
+
+def _resolve_cuda_pin_memory(
+    requested_pin_memory: bool,
+    *,
+    device: torch.device,
+) -> tuple[bool, list[str]]:
+    """Resolve effective pinned CPU staging for training/eval dataloaders.
+
+    NeoBERT keeps pinned host buffers enabled on CUDA so both automatic
+    device-placement paths and manual non-blocking H2D copies can overlap
+    transfers with compute. Call sites can choose whether that staging happens
+    inside the ``DataLoader`` or via a final batch repin just before transfer.
+
+    :param bool requested_pin_memory: User-configured pinned staging toggle.
+    :param torch.device device: Active accelerator device.
+    :return tuple[bool, list[str]]: Effective setting plus informational notes.
+    """
+    pin_memory = bool(requested_pin_memory)
+    notes: list[str] = []
+    if device.type == "cuda" and not pin_memory:
+        pin_memory = True
+        notes.append(
+            "dataset.pin_memory was false; enabling pinned CPU staging on CUDA "
+            "to improve host->device transfer overlap."
+        )
+    return pin_memory, notes
+
+
+def _pin_cpu_tensors(value: Any) -> Any:
+    """Recursively pin CPU tensors for non-blocking host-to-device copies.
+
+    :param Any value: Tensor, nested container, or scalar to pin.
+    :return Any: Value with CPU tensors pinned when supported.
+    """
+
+    def _pin(inner: Any) -> tuple[Any, bool]:
+        """Pin a nested value and report whether anything changed.
+
+        :param Any inner: Candidate tensor/container/scalar.
+        :return tuple[Any, bool]: Pinned value and whether a change was made.
+        """
+        if torch.is_tensor(inner):
+            if inner.device.type != "cpu" or inner.is_pinned():
+                return inner, False
+            return inner.pin_memory(), True
+
+        if BatchEncoding is not None and isinstance(inner, BatchEncoding):
+            updated_data: dict[Any, Any] = {}
+            changed = False
+            for key, nested in inner.items():
+                pinned_nested, nested_changed = _pin(nested)
+                updated_data[key] = pinned_nested
+                changed = changed or nested_changed
+            if not changed:
+                return inner, False
+            return (
+                BatchEncoding(
+                    data=updated_data,
+                    encoding=inner.encodings,
+                    n_sequences=inner.n_sequences,
+                ),
+                True,
+            )
+
+        if isinstance(inner, Mapping):
+            updated: dict[Any, Any] = {}
+            changed = False
+            for key, nested in inner.items():
+                pinned_nested, nested_changed = _pin(nested)
+                updated[key] = pinned_nested
+                changed = changed or nested_changed
+            if not changed:
+                return inner, False
+            if isinstance(inner, dict):
+                return updated, True
+            try:
+                return type(inner)(updated), True
+            except TypeError:
+                return updated, True
+
+        if isinstance(inner, list):
+            updated_list: list[Any] = []
+            changed = False
+            for nested in inner:
+                pinned_nested, nested_changed = _pin(nested)
+                updated_list.append(pinned_nested)
+                changed = changed or nested_changed
+            if not changed:
+                return inner, False
+            return updated_list, True
+
+        if isinstance(inner, tuple):
+            updated_items: list[Any] = []
+            changed = False
+            for nested in inner:
+                pinned_nested, nested_changed = _pin(nested)
+                updated_items.append(pinned_nested)
+                changed = changed or nested_changed
+            if not changed:
+                return inner, False
+            return tuple(updated_items), True
+
+        return inner, False
+
+    pinned_value, _ = _pin(value)
+    return pinned_value
 
 
 def _unwrap_optimizer(opt: Any) -> Any:
@@ -375,7 +492,7 @@ def create_accelerator(
         accelerator_kwargs["cpu"] = True
     _maybe_set_local_cuda_device(use_cpu=use_cpu, log=log)
     try:
-        return accelerator_factory(**accelerator_kwargs)
+        accelerator = accelerator_factory(**accelerator_kwargs)
     except ValueError as exc:
         if _is_accelerator_state_reinit_error(exc):
             log.warning(
@@ -386,8 +503,27 @@ def create_accelerator(
                 accelerator_kwargs.get("mixed_precision"),
             )
             _reset_accelerate_runtime_state()
-            return accelerator_factory(**accelerator_kwargs)
-        raise
+            accelerator = accelerator_factory(**accelerator_kwargs)
+        else:
+            raise
+
+    device = getattr(accelerator, "device", None)
+    if use_cpu and getattr(device, "type", None) == "cuda":
+        log.warning(
+            "Accelerator returned CUDA device despite trainer.use_cpu=true, likely "
+            "because stale Accelerate singleton state was reused. Resetting state "
+            "and recreating the accelerator."
+        )
+        _reset_accelerate_runtime_state()
+        accelerator = accelerator_factory(**accelerator_kwargs)
+        device = getattr(accelerator, "device", None)
+        if getattr(device, "type", None) == "cuda":
+            raise RuntimeError(
+                "Accelerator still resolved to CUDA after resetting state while "
+                "trainer.use_cpu=true."
+            )
+
+    return accelerator
 
 
 def validate_muon_distributed_compatibility(
@@ -636,6 +772,308 @@ def _maybe_compile_model(
         f"dynamic={use_dynamic})."
     )
     return torch.compile(model, backend=compile_backend, dynamic=use_dynamic)
+
+
+def _copy_checkpoint_config_fields(
+    dst_obj: Any,
+    src_obj: Any,
+    fields: tuple[str, ...],
+    *,
+    section: str,
+) -> list[str]:
+    """Copy selected config fields and report changed fully qualified names.
+
+    :param Any dst_obj: Mutable runtime config section.
+    :param Any src_obj: Checkpoint config section.
+    :param tuple[str, ...] fields: Field names to copy.
+    :param str section: Human-readable section prefix.
+    :return list[str]: Changed ``section.field`` names.
+    """
+    changed: list[str] = []
+    for field_name in fields:
+        if not hasattr(dst_obj, field_name) or not hasattr(src_obj, field_name):
+            continue
+        checkpoint_value = deepcopy(getattr(src_obj, field_name))
+        if getattr(dst_obj, field_name) != checkpoint_value:
+            changed.append(f"{section}.{field_name}")
+        setattr(dst_obj, field_name, checkpoint_value)
+    return changed
+
+
+def sync_resume_source_of_truth(
+    cfg: Any,
+    resume_checkpoint_path: str | Path | None,
+    *,
+    task: str,
+    log: logging.Logger,
+) -> None:
+    """Make checkpoint metadata authoritative for resume-sensitive config fields.
+
+    A resumable checkpoint contains optimizer and scheduler state, so silently
+    combining it with a different tokenizer, model shape, masking contract, or
+    contrastive objective is not a faithful continuation. Runtime-only knobs such
+    as ``trainer.max_steps`` and logging cadence intentionally remain controlled
+    by the current launch config.
+
+    :param Any cfg: Mutable runtime config.
+    :param str | Path | None resume_checkpoint_path: Resolved checkpoint step path.
+    :param str task: Training task name.
+    :param logging.Logger log: Logger for drift warnings.
+    :raises RuntimeError: If checkpoint ``config.yaml`` is missing.
+    """
+    if resume_checkpoint_path is None:
+        return
+
+    from neobert.config import ConfigLoader
+
+    checkpoint_path = Path(resume_checkpoint_path)
+    checkpoint_config_path = checkpoint_path / "config.yaml"
+    if not checkpoint_config_path.is_file():
+        raise RuntimeError(
+            f"{checkpoint_config_path} is missing; refusing to resume with current "
+            "tokenizer/model/objective settings."
+        )
+
+    checkpoint_cfg = ConfigLoader.load(str(checkpoint_config_path))
+    changed: list[str] = []
+
+    changed.extend(
+        _copy_checkpoint_config_fields(
+            cfg.model,
+            checkpoint_cfg.model,
+            (
+                "hidden_size",
+                "num_hidden_layers",
+                "num_attention_heads",
+                "intermediate_size",
+                "max_position_embeddings",
+                "vocab_size",
+                "rope",
+                "rms_norm",
+                "hidden_act",
+                "dropout_prob",
+                "norm_eps",
+                "embedding_init_range",
+                "decoder_init_range",
+                "classifier_init_range",
+                "attn_backend",
+                "kernel_backend",
+                "ngpt",
+                "base_scale",
+                "pad_token_id",
+            ),
+            section="model",
+        )
+    )
+    changed.extend(
+        _copy_checkpoint_config_fields(
+            cfg.tokenizer,
+            checkpoint_cfg.tokenizer,
+            (
+                "name",
+                "path",
+                "max_length",
+                "padding",
+                "truncation",
+                "trust_remote_code",
+                "revision",
+                "allow_special_token_rewrite",
+            ),
+            section="tokenizer",
+        )
+    )
+    changed.extend(
+        _copy_checkpoint_config_fields(
+            cfg.dataset,
+            checkpoint_cfg.dataset,
+            (
+                "name",
+                "config",
+                "path",
+                "cache_dir",
+                "trust_remote_code",
+                "streaming",
+                "max_seq_length",
+                "text_column",
+                "validation_split",
+                "train_split",
+                "eval_split",
+                "eval_samples",
+                "shuffle_buffer_size",
+                "pre_tokenize",
+                "pre_tokenize_output",
+                "load_all_from_disk",
+                "min_length",
+                "alpha",
+            ),
+            section="dataset",
+        )
+    )
+    changed.extend(
+        _copy_checkpoint_config_fields(
+            cfg.datacollator,
+            checkpoint_cfg.datacollator,
+            (
+                "mlm_probability",
+                "pad_to_multiple_of",
+                "mask_all",
+                "pack_sequences",
+                "max_length",
+            ),
+            section="datacollator",
+        )
+    )
+    changed.extend(
+        _copy_checkpoint_config_fields(
+            cfg.trainer,
+            checkpoint_cfg.trainer,
+            (
+                "per_device_train_batch_size",
+                "gradient_accumulation_steps",
+                "gradient_clipping",
+                "mixed_precision",
+                "masked_logits_only_loss",
+                "gradient_checkpointing",
+                "torch_compile",
+                "torch_compile_dynamic",
+                "torch_compile_backend",
+            ),
+            section="trainer",
+        )
+    )
+
+    if task == "contrastive":
+        changed.extend(
+            _copy_checkpoint_config_fields(
+                cfg.contrastive,
+                checkpoint_cfg.contrastive,
+                (
+                    "temperature",
+                    "pooling",
+                    "loss_type",
+                    "hard_negative_weight",
+                    "pretraining_prob",
+                ),
+                section="contrastive",
+            )
+        )
+
+    checkpoint_tokenizer_dir = checkpoint_path / "tokenizer"
+    if checkpoint_tokenizer_dir.is_dir():
+        tokenizer_path = str(checkpoint_tokenizer_dir)
+        if getattr(cfg.tokenizer, "path", None) != tokenizer_path:
+            changed.append("tokenizer.path")
+        cfg.tokenizer.path = tokenizer_path
+
+    if changed:
+        log.warning(
+            "Resume config drift detected in %s; checkpoint values are the source "
+            "of truth.",
+            ", ".join(sorted(set(changed))),
+        )
+
+
+def _optimizer_param_groups(optimizer: Any) -> list[dict[str, Any]]:
+    """Return optimizer parameter groups from plain or Accelerate-wrapped objects.
+
+    :param Any optimizer: Optimizer-like object.
+    :return list[dict[str, Any]]: Optimizer parameter groups.
+    :raises TypeError: If no parameter groups can be found.
+    """
+    if hasattr(optimizer, "param_groups"):
+        return list(optimizer.param_groups)
+    inner = getattr(optimizer, "optimizer", None)
+    if inner is not None and hasattr(inner, "param_groups"):
+        return list(inner.param_groups)
+    raise TypeError(f"Optimizer object {type(optimizer).__name__} has no param_groups.")
+
+
+def attach_optimizer_param_names(
+    model: torch.nn.Module,
+    optimizer: Any,
+) -> None:
+    """Attach ordered parameter names to optimizer groups for resume validation.
+
+    :param torch.nn.Module model: Model whose named parameters define the order.
+    :param Any optimizer: Optimizer or Accelerate optimizer wrapper.
+    :raises RuntimeError: If an optimizer parameter cannot be mapped to a model name.
+    """
+    name_by_id = {id(param): name for name, param in model.named_parameters()}
+    for group in _optimizer_param_groups(optimizer):
+        names: list[str] = []
+        for param in group["params"]:
+            try:
+                names.append(name_by_id[id(param)])
+            except KeyError as exc:
+                raise RuntimeError(
+                    "Optimizer contains a parameter that is not present in "
+                    "model.named_parameters(); cannot build resume manifest."
+                ) from exc
+        group["param_names"] = names
+
+
+def optimizer_param_name_groups(optimizer: Any) -> list[list[str]]:
+    """Return the ordered parameter-name manifest for optimizer groups.
+
+    :param Any optimizer: Optimizer or Accelerate optimizer wrapper.
+    :return list[list[str]]: Parameter names per group.
+    :raises RuntimeError: If names were not attached first.
+    """
+    payload: list[list[str]] = []
+    for group_idx, group in enumerate(_optimizer_param_groups(optimizer)):
+        names = group.get("param_names")
+        if names is None:
+            raise RuntimeError(
+                "Optimizer parameter names are missing for group "
+                f"{group_idx}; call attach_optimizer_param_names() before checkpointing."
+            )
+        payload.append([str(name) for name in names])
+    return payload
+
+
+def save_optimizer_param_name_manifest(
+    optimizer: Any,
+    checkpoint_path: str | Path,
+) -> Path:
+    """Persist optimizer parameter ordering beside a training checkpoint.
+
+    :param Any optimizer: Optimizer or Accelerate optimizer wrapper.
+    :param str | Path checkpoint_path: Checkpoint step directory.
+    :return Path: Written manifest path.
+    """
+    path = Path(checkpoint_path) / OPTIMIZER_PARAM_NAMES_MANIFEST
+    payload = optimizer_param_name_groups(optimizer)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return path
+
+
+def validate_optimizer_param_name_manifest(
+    optimizer: Any,
+    checkpoint_path: str | Path,
+) -> None:
+    """Fail fast if optimizer parameter ordering differs from a checkpoint.
+
+    PyTorch optimizer state is positional inside parameter groups. This guard
+    prevents same-shaped parameters from inheriting the wrong optimizer buffers
+    after a model refactor or construction-order change.
+
+    :param Any optimizer: Optimizer or Accelerate optimizer wrapper.
+    :param str | Path checkpoint_path: Checkpoint step directory.
+    :raises RuntimeError: If the manifest is missing or does not match.
+    """
+    path = Path(checkpoint_path) / OPTIMIZER_PARAM_NAMES_MANIFEST
+    if not path.is_file():
+        raise RuntimeError(
+            f"{path} is missing; refusing a silent positional optimizer resume."
+        )
+
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    current = optimizer_param_name_groups(optimizer)
+    if saved != current:
+        raise RuntimeError(
+            "Optimizer parameter order changed since the checkpoint was written. "
+            "Refusing to load optimizer state positionally."
+        )
 
 
 def _resolve_resume_checkpoint(

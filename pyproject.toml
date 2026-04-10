@@ -52,6 +52,7 @@ local_scheme = "dirty-tag"
 [tool.pytest.ini_options]
 # Keep default `pytest -q` runs focused on the curated test suite.
 testpaths = ["tests"]
+filterwarnings = ["error"]
 # Prevent accidental collection of scratch data/scripts and large artifacts.
 norecursedirs = [
     "local-scratch",

@@ -1,4 +1,4 @@
-"""Comprehensive validation for GLUE configurations."""
+"""Validation helpers for GLUE fine-tuning."""
 
 import logging
 from pathlib import Path
@@ -9,17 +9,15 @@ from neobert.config import resolve_mixed_precision
 logger = logging.getLogger(__name__)
 
 
-class ValidationError(Exception):
-    """Custom exception for validation errors."""
-
-    pass
+class GlueValidationError(Exception):
+    """Raised when a GLUE configuration is invalid."""
 
 
 def validate_glue_config(cfg: Any) -> None:
     """Validate GLUE configuration before training.
 
     :param Any cfg: Configuration object.
-    :raises ValidationError: If configuration is invalid.
+    :raises GlueValidationError: If configuration is invalid.
     """
     errors = []
 
@@ -44,10 +42,10 @@ def validate_glue_config(cfg: Any) -> None:
         errors.append(f"Invalid task: {task}. Must be one of {valid_tasks}")
 
     def _is_missing(value: Any) -> bool:
-        """Return True when a config value should be treated as unset.
+        """Return whether a config value should be treated as unset.
 
         :param Any value: Candidate config value.
-        :return bool: ``True`` when the value is effectively unset.
+        :return bool: True when the value is effectively unset.
         """
         if value is None:
             return True
@@ -61,8 +59,6 @@ def validate_glue_config(cfg: Any) -> None:
         checkpoint_dir = getattr(glue_cfg, "pretrained_checkpoint_dir", None)
         checkpoint = getattr(glue_cfg, "pretrained_checkpoint", None)
         if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
-            # Legacy fallback only: canonical GLUE schema now stores these under
-            # cfg.glue.* and should be used as the source of truth.
             raw_model = cfg._raw_model_dict
             if checkpoint_dir is None and "pretrained_checkpoint_dir" in raw_model:
                 checkpoint_dir = raw_model.get("pretrained_checkpoint_dir")
@@ -114,11 +110,10 @@ def validate_glue_config(cfg: Any) -> None:
                     f"num_attention_heads ({cfg.model.num_attention_heads})"
                 )
 
-        if hasattr(cfg.model, "dropout_prob"):
-            if not 0 <= cfg.model.dropout_prob <= 1:
-                errors.append(
-                    f"dropout_prob must be between 0 and 1, got {cfg.model.dropout_prob}"
-                )
+        if hasattr(cfg.model, "dropout_prob") and not 0 <= cfg.model.dropout_prob <= 1:
+            errors.append(
+                f"dropout_prob must be between 0 and 1, got {cfg.model.dropout_prob}"
+            )
 
     if hasattr(cfg, "trainer"):
         if hasattr(cfg.trainer, "per_device_train_batch_size"):
@@ -133,8 +128,8 @@ def validate_glue_config(cfg: Any) -> None:
             output_dir = Path(cfg.trainer.output_dir)
             try:
                 output_dir.mkdir(parents=True, exist_ok=True)
-            except Exception as e:
-                errors.append(f"Cannot create output directory {output_dir}: {e}")
+            except Exception as exc:
+                errors.append(f"Cannot create output directory {output_dir}: {exc}")
 
         if hasattr(cfg.trainer, "mixed_precision"):
             try:
@@ -146,20 +141,13 @@ def validate_glue_config(cfg: Any) -> None:
                 errors.append(str(exc))
 
     if hasattr(cfg, "optimizer"):
-        if hasattr(cfg.optimizer, "lr"):
-            if cfg.optimizer.lr <= 0:
-                errors.append(f"Learning rate must be positive, got {cfg.optimizer.lr}")
-        elif hasattr(cfg.optimizer, "hparams") and hasattr(cfg.optimizer.hparams, "lr"):
-            if cfg.optimizer.hparams.lr <= 0:
-                errors.append(
-                    f"Learning rate must be positive, got {cfg.optimizer.hparams.lr}"
-                )
+        if hasattr(cfg.optimizer, "lr") and cfg.optimizer.lr <= 0:
+            errors.append(f"Learning rate must be positive, got {cfg.optimizer.lr}")
 
-        if hasattr(cfg.optimizer, "weight_decay"):
-            if cfg.optimizer.weight_decay < 0:
-                errors.append(
-                    f"Weight decay must be non-negative, got {cfg.optimizer.weight_decay}"
-                )
+        if hasattr(cfg.optimizer, "weight_decay") and cfg.optimizer.weight_decay < 0:
+            errors.append(
+                f"Weight decay must be non-negative, got {cfg.optimizer.weight_decay}"
+            )
 
     if hasattr(cfg, "scheduler"):
         if hasattr(cfg.scheduler, "warmup_percent") and hasattr(
@@ -170,7 +158,8 @@ def validate_glue_config(cfg: Any) -> None:
                 and cfg.scheduler.warmup_steps is not None
             ):
                 logger.warning(
-                    "Both warmup_percent and warmup_steps specified. warmup_percent will take precedence."
+                    "Both warmup_percent and warmup_steps specified. "
+                    "warmup_percent will take precedence."
                 )
 
     if hasattr(cfg, "glue"):
@@ -181,7 +170,8 @@ def validate_glue_config(cfg: Any) -> None:
                 )
             elif cfg.glue.max_seq_length > 512:
                 logger.warning(
-                    f"max_seq_length={cfg.glue.max_seq_length} > 512 may cause issues with some models"
+                    f"max_seq_length={cfg.glue.max_seq_length} > 512 may cause issues "
+                    "with some models"
                 )
 
         expected_labels = {
@@ -203,8 +193,8 @@ def validate_glue_config(cfg: Any) -> None:
             if hasattr(cfg.glue, "num_labels"):
                 if cfg.glue.num_labels != expected:
                     logger.warning(
-                        f"Task {task} expects {expected} labels but got {cfg.glue.num_labels}. "
-                        f"Auto-correcting to {expected}."
+                        f"Task {task} expects {expected} labels but got "
+                        f"{cfg.glue.num_labels}. Auto-correcting to {expected}."
                     )
                     cfg.glue.num_labels = expected
             else:
@@ -212,8 +202,8 @@ def validate_glue_config(cfg: Any) -> None:
 
     if errors:
         error_msg = "Configuration validation failed:\n" + "\n".join(
-            f"  - {e}" for e in errors
+            f"  - {error}" for error in errors
         )
-        raise ValidationError(error_msg)
+        raise GlueValidationError(error_msg)
 
     logger.info("✓ Configuration validation passed")

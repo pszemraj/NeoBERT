@@ -47,8 +47,9 @@ class MuonClipConfig:
     # Learning rates
     lr: float = 1e-4
 
-    # Muon parameters (for 2D weight matrices)
+    # Muon parameters (for hidden-layer 2D weight matrices)
     muon_beta: float = 0.95  # Momentum coefficient
+    nesterov: bool = True
     muon_decay: float = 0.0  # Weight decay for Muon params
     ns_steps: int = 5  # Newton-Schulz iterations (3-9 recommended)
 
@@ -76,9 +77,10 @@ class MuonClipConfig:
     # Monitoring and debugging
     detect_anomalies: bool = False  # Enable gradient anomaly detection
 
-    # Orthogonalization control
+    # Orthogonalization / routing control
     orthogonalization: str = "polar_express"
-    norm_factor: str = "spectral"
+    norm_factor: str = "neobert"
+    param_policy: str = "hidden_2d"
     algorithm: Optional[str] = None  # Alias for orthogonalization
     polar_express: Optional[bool] = None  # Legacy toggle
 
@@ -201,11 +203,16 @@ class MuonClipConfig:
             )
 
         norm_factor = str(self.norm_factor).strip().replace("-", "_").lower()
+        norm_factor = {
+            "legacy_compat": "neobert",
+            "original": "muon_reference",
+        }.get(norm_factor, norm_factor)
         valid_norm_factors = {
+            "neobert",
+            "muon_reference",
             "spectral",
             "match_rms_adamw",
             "none",
-            "legacy_compat",
         }
         if norm_factor not in valid_norm_factors:
             raise ValueError(
@@ -213,8 +220,18 @@ class MuonClipConfig:
                 f"Valid options: {', '.join(sorted(valid_norm_factors))}"
             )
 
+        param_policy = str(self.param_policy).strip().replace("-", "_").lower()
+        param_policy = {"transformer_only": "hidden_2d"}.get(param_policy, param_policy)
+        valid_param_policies = {"all_2d", "hidden_2d"}
+        if param_policy not in valid_param_policies:
+            raise ValueError(
+                f"Unsupported param_policy '{self.param_policy}'. "
+                f"Valid options: {', '.join(sorted(valid_param_policies))}"
+            )
+
         self.orthogonalization = algo
         self.norm_factor = norm_factor
+        self.param_policy = param_policy
         self.algorithm = algo
         # Reset explicit toggle to prevent downstream confusion
         self.polar_express = None
@@ -716,6 +733,14 @@ class MuonClipOptimizer(Optimizer):
     def _build_param_groups(self, model: torch.nn.Module) -> List[Dict]:
         """Build parameter groups for hybrid Muon+Adam optimization.
 
+        Policies:
+        - ``all_2d``: route every trainable rank-2 parameter to Muon. This
+          restores the v0.1.3 scope and remains available as an explicit
+          compatibility mode.
+        - ``hidden_2d``: route only hidden transformer-layer rank-2 weights to
+          Muon. Embeddings / output matrices fall back to AdamW-style grouping.
+          This is the runtime default and matches the original Muon guidance.
+
         :param torch.nn.Module model: Model to inspect.
         :return list[dict]: Parameter groups for the optimizer.
         """
@@ -725,6 +750,9 @@ class MuonClipOptimizer(Optimizer):
         adam_decay_param_info: List[Dict[str, Any]] = []
         adam_no_decay_params: List[torch.nn.Parameter] = []
         adam_no_decay_param_info: List[Dict[str, Any]] = []
+
+        # param_policy is validated and normalized by MuonClipConfig.__post_init__
+        param_policy = self.config.param_policy
 
         transformer_param_ids: set[int] = set()
         layer_idx_by_param_id: Dict[int, int] = {}
@@ -801,11 +829,14 @@ class MuonClipOptimizer(Optimizer):
                 "proj_type": proj_type,
             }
 
-            use_muon = (
-                param.ndim == 2
-                and param_id in transformer_param_ids
-                and param_id not in embedding_param_ids
-            )
+            if param_policy == "all_2d":
+                use_muon = param.ndim == 2
+            else:
+                use_muon = (
+                    param.ndim == 2
+                    and param_id in transformer_param_ids
+                    and param_id not in embedding_param_ids
+                )
             if use_muon:
                 muon_params.append(param)
                 muon_param_info.append(param_info)
@@ -830,11 +861,17 @@ class MuonClipOptimizer(Optimizer):
                     "param_info": muon_param_info,
                     "lr": self.config.lr,
                     "beta": self.config.muon_beta,
+                    "nesterov": self.config.nesterov,
                     "weight_decay": self.config.muon_decay,
                     "use_muon": True,
+                    "param_policy": param_policy,
                 }
             )
-            logger.info(f"Muon group: {len(muon_params)} parameters")
+            logger.info(
+                "Muon group: %s parameters (policy=%s)",
+                len(muon_params),
+                param_policy,
+            )
 
         if adam_decay_params:
             groups.append(
@@ -1019,9 +1056,13 @@ class MuonClipOptimizer(Optimizer):
         ):
             self._disable_clipping_for_sharded_runtime()
 
-        for param in group["params"]:
+        group_param_info = group.get("param_info")
+        for param_idx, param in enumerate(group["params"]):
             if param.grad is None:
                 continue
+            param_info = None
+            if group_param_info is not None and param_idx < len(group_param_info):
+                param_info = group_param_info[param_idx]
 
             # Check for NaN/Inf in gradients
             if self.config.detect_anomalies:
@@ -1041,11 +1082,15 @@ class MuonClipOptimizer(Optimizer):
                 continue
 
             # Apply momentum
-            state["momentum_buffer"].mul_(group["beta"]).add_(
-                grad, alpha=1 - group["beta"]
-            )
+            state["momentum_buffer"].mul_(group["beta"]).add_(grad)
 
             momentum_buffer = state["momentum_buffer"]
+            muon_input = self._muon_input(
+                grad=grad,
+                momentum_buffer=momentum_buffer,
+                beta=float(group["beta"]),
+                nesterov=bool(group.get("nesterov", True)),
+            )
             # Parameter topology is the source of truth; loaded state must match it.
             param_is_dtensor = self._is_dtensor(param)
             buffer_is_dtensor = self._is_dtensor(momentum_buffer)
@@ -1058,10 +1103,11 @@ class MuonClipOptimizer(Optimizer):
                         "a raw local-tensor load_state_dict path."
                     )
                 update = self._orthogonalize_dtensor_update(
-                    momentum_buffer=momentum_buffer,
+                    muon_input=muon_input,
                     param=param,
                     group_params=group["params"],
                     group_param_info=group.get("param_info"),
+                    param_info=param_info,
                 )
             else:
                 if buffer_is_dtensor:
@@ -1070,10 +1116,11 @@ class MuonClipOptimizer(Optimizer):
                         "non-DTensor parameter. Optimizer state topology does not "
                         "match the current model parameters."
                     )
-                # Orthogonalize 2D gradients using Newton-Schulz/Polar Express.
-                # NOTE: this local path assumes full (non-sharded) parameter tensors.
-                update = self._orthogonalize_update(momentum_buffer)
-                update = self._normalize_muon_update(update, param.shape)
+                update = self._orthogonalize_muon_input(
+                    muon_input=muon_input,
+                    param_shape=param.shape,
+                    param_info=param_info,
+                )
 
             # Weight decay
             if group["weight_decay"] > 0:
@@ -1394,21 +1441,43 @@ class MuonClipOptimizer(Optimizer):
             )
         return row_counts
 
+    def _muon_input(
+        self,
+        *,
+        grad: Any,
+        momentum_buffer: Any,
+        beta: float,
+        nesterov: bool,
+    ) -> Any:
+        """Build the Muon direction from the current grad and momentum state.
+
+        :param Any grad: Current gradient tensor or DTensor.
+        :param Any momentum_buffer: Momentum buffer after the current update.
+        :param float beta: Muon momentum coefficient.
+        :param bool nesterov: Whether to use standard Nesterov Muon momentum.
+        :return Any: Tensor-like value to orthogonalize.
+        """
+        if nesterov:
+            return grad.add(momentum_buffer, alpha=beta)
+        return momentum_buffer
+
     def _orthogonalize_dtensor_update(
         self,
         *,
-        momentum_buffer: Any,
+        muon_input: Any,
         param: torch.nn.Parameter,
         group_params: Sequence[torch.nn.Parameter],
         group_param_info: Optional[Sequence[Dict[str, Any]]] = None,
+        param_info: Optional[Dict[str, Any]] = None,
     ) -> Any:
         """Orthogonalize a row-sharded DTensor via owner-compute gather/scatter.
 
-        :param Any momentum_buffer: DTensor momentum buffer (Shard(0)).
+        :param Any muon_input: DTensor Muon input (raw momentum or Nesterov direction).
         :param torch.nn.Parameter param: Parameter being updated.
         :param Sequence[torch.nn.Parameter] group_params: Muon parameter group members.
         :param Sequence[dict[str, Any]] | None group_param_info:
             Static metadata aligned with ``group_params``.
+        :param dict[str, Any] | None param_info: Metadata for the current parameter.
         :return Any: DTensor update with the original placement metadata.
         """
         if DTensor is None or Shard is None:
@@ -1420,7 +1489,7 @@ class MuonClipOptimizer(Optimizer):
                 "DTensor Muon update requires torch.distributed to be initialized."
             )
 
-        placements = momentum_buffer.placements
+        placements = muon_input.placements
         if len(placements) != 1 or not isinstance(placements[0], Shard):
             raise RuntimeError(
                 "MuonClip DTensor path currently supports only 1D row-sharded DTensors."
@@ -1431,7 +1500,7 @@ class MuonClipOptimizer(Optimizer):
                 "MuonClip DTensor path currently supports only Shard(0) placement."
             )
 
-        mesh = momentum_buffer.device_mesh
+        mesh = muon_input.device_mesh
         mesh_ndim = getattr(mesh, "ndim", None)
         if mesh_ndim is not None and int(mesh_ndim) != 1:
             raise RuntimeError(
@@ -1454,7 +1523,7 @@ class MuonClipOptimizer(Optimizer):
             process_group=process_group,
         )
 
-        local_shard = momentum_buffer.to_local()
+        local_shard = muon_input.to_local()
         if local_shard.ndim != 2:
             raise RuntimeError(
                 "MuonClip DTensor path expects rank-2 local shards, got "
@@ -1463,15 +1532,15 @@ class MuonClipOptimizer(Optimizer):
         local_rows = int(local_shard.shape[0])
         row_counts = self._get_dtensor_row_counts(
             local_shard=local_shard,
-            global_shape=momentum_buffer.shape,
+            global_shape=muon_input.shape,
             process_group=process_group,
             world_size=world_size,
             rank=rank,
         )
-        global_param_shape = torch.Size(momentum_buffer.shape)
+        global_param_shape = torch.Size(muon_input.shape)
         try:
             global_param_stride = tuple(
-                int(dim_stride) for dim_stride in momentum_buffer.stride()
+                int(dim_stride) for dim_stride in muon_input.stride()
             )
         except Exception as exc:
             raise RuntimeError(
@@ -1517,10 +1586,11 @@ class MuonClipOptimizer(Optimizer):
             else:
                 full_matrix = local_padded.new_zeros((0, local_padded.shape[1]))
 
-            update_full = self._orthogonalize_update(full_matrix)
-            # Muon normalization is defined on the full matrix shape, not the
-            # current rank's local shard shape.
-            update_full = self._normalize_muon_update(update_full, global_param_shape)
+            update_full = self._orthogonalize_muon_input(
+                muon_input=full_matrix,
+                param_shape=global_param_shape,
+                param_info=param_info,
+            )
 
             scatter_list = []
             row_start = 0
@@ -1553,6 +1623,153 @@ class MuonClipOptimizer(Optimizer):
             shape=global_param_shape,
             stride=global_param_stride,
         )
+
+    def _orthogonalize_muon_input(
+        self,
+        *,
+        muon_input: torch.Tensor,
+        param_shape: torch.Size,
+        param_info: Optional[Dict[str, Any]] = None,
+    ) -> torch.Tensor:
+        """Orthogonalize and normalize a local Muon input tensor.
+
+        :param torch.Tensor muon_input: Tensor to orthogonalize.
+        :param torch.Size param_shape: Shape of the owning parameter.
+        :param dict[str, Any] | None param_info: Static metadata for the parameter.
+        :return torch.Tensor: Orthogonalized and normalized update tensor.
+        """
+        if self._uses_fused_qkv_muon_split(
+            param_shape=param_shape, param_info=param_info
+        ):
+            return self._orthogonalize_fused_qkv_update(muon_input)
+        update = self._orthogonalize_update(muon_input)
+        return self._normalize_muon_update(update, param_shape)
+
+    def _uses_fused_qkv_muon_split(
+        self,
+        *,
+        param_shape: torch.Size,
+        param_info: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Return whether a parameter should split fused QKV for Muon.
+
+        :param torch.Size param_shape: Shape of the owning parameter.
+        :param dict[str, Any] | None param_info: Static metadata for the parameter.
+        :return bool: ``True`` when the update should be split into Q/K/V matrices.
+        """
+        if len(param_shape) != 2:
+            return False
+        if (param_info or {}).get("proj_type") != "qkv":
+            return False
+        return True
+
+    def _orthogonalize_fused_qkv_update(self, muon_input: torch.Tensor) -> torch.Tensor:
+        """Orthogonalize fused QKV matrices as separate Q, K, and V projections.
+
+        :param torch.Tensor muon_input: Interleaved fused-QKV update tensor.
+        :return torch.Tensor: Fused update tensor rebuilt from per-projection Muon.
+        """
+        q_update, k_update, v_update = self._split_interleaved_qkv_matrix(muon_input)
+        q_update = self._normalize_muon_update(
+            self._orthogonalize_update(q_update),
+            q_update.shape,
+        )
+        k_update = self._normalize_muon_update(
+            self._orthogonalize_update(k_update),
+            k_update.shape,
+        )
+        v_update = self._normalize_muon_update(
+            self._orthogonalize_update(v_update),
+            v_update.shape,
+        )
+        return self._merge_interleaved_qkv_matrix(q_update, k_update, v_update)
+
+    def _split_interleaved_qkv_matrix(
+        self, matrix: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Split an interleaved fused QKV matrix into per-projection matrices.
+
+        :param torch.Tensor matrix: Fused QKV tensor shaped like ``qkv.weight``.
+        :return tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            Separate Q, K, and V matrices.
+        """
+        matrix_view, head_dim, hidden_size = self._view_interleaved_qkv_matrix(matrix)
+        q_slice = slice(0, head_dim)
+        k_slice = slice(head_dim, 2 * head_dim)
+        v_slice = slice(2 * head_dim, 3 * head_dim)
+        q_matrix = (
+            matrix_view[:, q_slice].reshape(hidden_size, hidden_size).contiguous()
+        )
+        k_matrix = (
+            matrix_view[:, k_slice].reshape(hidden_size, hidden_size).contiguous()
+        )
+        v_matrix = (
+            matrix_view[:, v_slice].reshape(hidden_size, hidden_size).contiguous()
+        )
+        return q_matrix, k_matrix, v_matrix
+
+    def _merge_interleaved_qkv_matrix(
+        self,
+        q_matrix: torch.Tensor,
+        k_matrix: torch.Tensor,
+        v_matrix: torch.Tensor,
+    ) -> torch.Tensor:
+        """Merge per-projection Q, K, and V matrices into interleaved fused rows.
+
+        :param torch.Tensor q_matrix: Query projection update.
+        :param torch.Tensor k_matrix: Key projection update.
+        :param torch.Tensor v_matrix: Value projection update.
+        :return torch.Tensor: Interleaved fused-QKV update tensor.
+        """
+        hidden_size = int(self.model_config.hidden_size)
+        num_heads = int(self.model_config.num_attention_heads)
+        head_dim = int(self.model_config.dim_head)
+        cols = int(q_matrix.shape[1])
+
+        expected_projection_shape = (hidden_size, cols)
+        for name, matrix in (
+            ("q", q_matrix),
+            ("k", k_matrix),
+            ("v", v_matrix),
+        ):
+            if tuple(matrix.shape) != expected_projection_shape:
+                raise RuntimeError(
+                    f"Unexpected {name}-projection shape {tuple(matrix.shape)}; "
+                    f"expected {expected_projection_shape}."
+                )
+
+        fused = q_matrix.new_empty((3 * hidden_size, cols))
+        fused_view = fused.view(num_heads, 3 * head_dim, cols)
+        fused_view[:, :head_dim].copy_(q_matrix.view(num_heads, head_dim, cols))
+        fused_view[:, head_dim : 2 * head_dim].copy_(
+            k_matrix.view(num_heads, head_dim, cols)
+        )
+        fused_view[:, 2 * head_dim : 3 * head_dim].copy_(
+            v_matrix.view(num_heads, head_dim, cols)
+        )
+        return fused
+
+    def _view_interleaved_qkv_matrix(
+        self, matrix: torch.Tensor
+    ) -> tuple[torch.Tensor, int, int]:
+        """Return the per-head fused-QKV view used by NeoBERT attention blocks.
+
+        :param torch.Tensor matrix: Fused QKV tensor shaped like ``qkv.weight``.
+        :return tuple[torch.Tensor, int, int]:
+            View shaped ``[heads, 3 * head_dim, hidden_size]``, ``head_dim``,
+            and ``hidden_size``.
+        """
+        hidden_size = int(self.model_config.hidden_size)
+        num_heads = int(self.model_config.num_attention_heads)
+        head_dim = int(self.model_config.dim_head)
+        expected_shape = (3 * hidden_size, hidden_size)
+        if tuple(matrix.shape) != expected_shape:
+            raise RuntimeError(
+                "Unexpected fused QKV parameter layout "
+                f"{tuple(matrix.shape)}; expected {expected_shape} for per-head interleaved "
+                "rows [Q_h, K_h, V_h]."
+            )
+        return matrix.view(num_heads, 3 * head_dim, hidden_size), head_dim, hidden_size
 
     def _newton_schulz_update(self, grad: torch.Tensor, steps: int = 5) -> torch.Tensor:
         """Apply Newton-Schulz orthogonalization to a gradient.
@@ -1600,6 +1817,13 @@ class MuonClipOptimizer(Optimizer):
     ) -> torch.Tensor:
         """Normalize orthogonalized update magnitude before applying it.
 
+        Named modes:
+        - ``neobert``: NeoBERT encoder default scaling
+        - ``muon_reference``: reference Muon scaling
+        - ``spectral``: scale by sqrt(d_out / d_in)
+        - ``match_rms_adamw``: reduced legacy-style scale
+        - ``none``: no extra scaling
+
         :param torch.Tensor update: Orthogonalized update tensor.
         :param torch.Size param_shape: Shape of the owning parameter.
         :return torch.Tensor: Normalized update tensor.
@@ -1608,19 +1832,31 @@ class MuonClipOptimizer(Optimizer):
             return update
 
         d_out, d_in = int(param_shape[0]), int(param_shape[1])
-        norm_factor = getattr(self.config, "norm_factor", "spectral")
+        norm_factor = (
+            str(getattr(self.config, "norm_factor", "neobert"))
+            .strip()
+            .replace("-", "_")
+            .lower()
+        )
+        norm_factor = {
+            "legacy_compat": "neobert",
+            "original": "muon_reference",
+        }.get(norm_factor, norm_factor)
         if norm_factor == "none":
             scale = 1.0
+        elif norm_factor == "neobert":
+            scale = 0.4 * max(d_out, d_in) ** 0.5
+        elif norm_factor == "muon_reference":
+            scale = max(1.0, d_out / max(d_in, 1)) ** 0.5
         elif norm_factor == "spectral":
             scale = (d_out / max(d_in, 1)) ** 0.5
         elif norm_factor == "match_rms_adamw":
             scale = 0.2 * max(d_out, d_in) ** 0.5
-        elif norm_factor == "legacy_compat":
-            scale = 0.4 * max(d_out, d_in) ** 0.5
         else:
             raise ValueError(
                 f"Unsupported norm_factor '{norm_factor}'. "
-                "Expected one of: spectral, match_rms_adamw, none, legacy_compat."
+                "Expected one of: neobert, muon_reference, spectral, "
+                "match_rms_adamw, none."
             )
 
         return update * scale
@@ -2245,7 +2481,12 @@ class MuonClipOptimizer(Optimizer):
             :param torch.Tensor x: Input tensor.
             :return torch.Tensor: L2-normalized tensor.
             """
-            return x / (x.norm(p=2, dim=-1, keepdim=True) + 1e-8)
+            denom = (
+                x.float()
+                .norm(p=2, dim=-1, keepdim=True)
+                .clamp_min(self.model_config.norm_eps)
+            )
+            return x / denom.to(dtype=x.dtype)
 
         return sqk * _justnorm(xq), sqk * _justnorm(xk)
 
@@ -2258,18 +2499,8 @@ class MuonClipOptimizer(Optimizer):
         :param torch.Tensor eta_per_head: Scaling factors per head.
         :param float alpha: Q/K scaling balance (0.5 = equal).
         """
-        # Dimensions derived from model config
-        hidden_size = self.model_config.hidden_size
-        num_heads = self.model_config.num_attention_heads
-        head_dim = hidden_size // num_heads
-
-        expected_shape = (3 * hidden_size, hidden_size)
-        if param.shape != expected_shape:
-            raise RuntimeError(
-                "Unexpected fused QKV parameter layout "
-                f"{tuple(param.shape)}; expected {expected_shape} for per-head interleaved "
-                "rows [Q_h, K_h, V_h]."
-            )
+        param_view, head_dim, _ = self._view_interleaved_qkv_matrix(param)
+        num_heads = int(self.model_config.num_attention_heads)
 
         # Ensure scaling factors are finite and on the right device/dtype
         eta = eta_per_head.to(device=param.device, dtype=param.dtype)
@@ -2279,9 +2510,6 @@ class MuonClipOptimizer(Optimizer):
         eta_q = eta.pow(alpha).view(num_heads, 1, 1)
         eta_k = eta.pow(1 - alpha).view(num_heads, 1, 1)
 
-        # Reshape to [H, 3*D, hidden] to match EncoderBlock._att_block:
-        # self.qkv(x).view(B,S,H,3*D).chunk(3, dim=-1).
-        param_view = param.view(num_heads, 3 * head_dim, hidden_size)
         q_slice = slice(0, head_dim)
         k_slice = slice(head_dim, 2 * head_dim)
         param_view[:, q_slice].mul_(eta_q)  # Query rows per head

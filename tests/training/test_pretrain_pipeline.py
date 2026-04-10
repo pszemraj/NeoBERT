@@ -3,7 +3,6 @@
 
 import os
 import tempfile
-import warnings
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,27 +10,66 @@ import pytest
 import torch
 from accelerate.utils import DistributedType
 from datasets import Dataset, DatasetDict
-from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import PreTrainedTokenizerFast
+from transformers import BatchEncoding
 
 from neobert.checkpointing import MODEL_WEIGHTS_NAME, load_model_safetensors
 from neobert.config import Config, ConfigLoader
+from neobert.dataloader import get_dataloader
 from neobert.pretraining.masked_objective import MaskedObjectiveOut
 from neobert.pretraining.trainer import (
     _compute_weight_norm_for_logging,
-    _ensure_pinned_cpu_batch,
     _gather_decoder_weight_for_masked_objective,
     _infer_eval_split_name,
+    _requires_streaming_eval_budget,
     _resolve_eval_samples,
     _resolve_loader_perf_settings,
     _resolve_streaming_eval_budget,
     _save_portable_checkpoint_weights,
+    _should_use_loader_pin_memory,
     _run_masked_objective_step,
     _split_train_dataset_for_eval_samples,
     _should_backward_inside_gathered_decoder_weight,
     _sync_tokenizer_derived_config,
     trainer,
 )
+from neobert.streaming import RetryingStreamingDataset
+from neobert.training_utils import _pin_cpu_tensors
+from tests.tokenizer_utils import build_wordlevel_tokenizer
+
+
+class _HuggingFaceMarkerStreamingDataset:
+    """Minimal Hugging Face-style stream marker for DataLoader kwarg tests."""
+
+    _ex_iterable = object()
+
+    def __init__(self) -> None:
+        """Initialize a tokenized streaming dataset stub."""
+        self._state = {}
+
+    def state_dict(self) -> dict[str, object]:
+        """Return a resumable cursor payload.
+
+        :return dict[str, object]: Cursor payload.
+        """
+        return dict(self._state)
+
+    def load_state_dict(self, state_dict: dict[str, object]) -> None:
+        """Load a resumable cursor payload.
+
+        :param dict[str, object] state_dict: Cursor payload.
+        """
+        self._state = dict(state_dict)
+
+    def __iter__(self):
+        """Yield tokenized examples.
+
+        :return collections.abc.Iterator[dict[str, list[int]]]: Example iterator.
+        """
+        yield {
+            "input_ids": [4, 5],
+            "attention_mask": [1, 1],
+            "special_tokens_mask": [0, 0],
+        }
 
 
 class TestPretrainPipeline:
@@ -90,60 +128,29 @@ class TestPretrainPipeline:
         config.trainer.max_steps = 1
         config.wandb.mode = "disabled"
 
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message=r".*epoch parameter in `scheduler\\.step\\(\\)`.*",
-                category=UserWarning,
-            )
-            try:
-                trainer(config)
-            except Exception as exc:
-                expected_errors = [
-                    "hfapi",
-                    "connection",
-                    "disk",
-                    "cuda",
-                    "404",
-                    "sentencepiece",
-                    "repository not found",
-                    "input_ids",
-                    "valueerror",
-                ]
-                error_str = str(exc).lower()
-                if not any(err in error_str for err in expected_errors):
-                    raise
+        try:
+            trainer(config)
+        except Exception as exc:
+            expected_errors = [
+                "hfapi",
+                "connection",
+                "disk",
+                "cuda",
+                "404",
+                "sentencepiece",
+                "repository not found",
+                "input_ids",
+                "valueerror",
+            ]
+            error_str = str(exc).lower()
+            if not any(err in error_str for err in expected_errors):
+                raise
 
 
 class TestPretrainComponents:
     """Test individual pretraining components."""
 
-    def _make_tokenizer(self) -> PreTrainedTokenizerFast:
-        """Build a minimal tokenizer for tests.
-
-        :return PreTrainedTokenizerFast: Tokenizer with a tiny word-level vocab.
-        """
-        vocab = {
-            "[PAD]": 0,
-            "[UNK]": 1,
-            "[MASK]": 2,
-            "[SEP]": 3,
-            "hello": 4,
-            "world": 5,
-            "test": 6,
-            "sentence": 7,
-        }
-        tokenizer = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
-        tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
-        return PreTrainedTokenizerFast(
-            tokenizer_object=tokenizer,
-            pad_token="[PAD]",
-            unk_token="[UNK]",
-            mask_token="[MASK]",
-            sep_token="[SEP]",
-        )
-
-    def test_ensure_pinned_cpu_batch_repins_flat_and_nested_tensors(self):
+    def test_pin_cpu_tensors_repins_flat_and_nested_tensors(self):
         """Ensure CPU repinning covers flat and nested tensor containers."""
         cases = [
             {
@@ -172,10 +179,23 @@ class TestPretrainComponents:
                     lambda out: out["nested"]["meta"][1].is_pinned(),
                 ],
             },
+            {
+                "batch": BatchEncoding(
+                    {
+                        "input_ids": torch.randint(0, 10, (2, 4), dtype=torch.long),
+                        "attention_mask": torch.ones((2, 4), dtype=torch.long),
+                    }
+                ),
+                "checks": [
+                    lambda out: isinstance(out, BatchEncoding),
+                    lambda out: out["input_ids"].is_pinned(),
+                    lambda out: out["attention_mask"].is_pinned(),
+                ],
+            },
         ]
         for case in cases:
             try:
-                out = _ensure_pinned_cpu_batch(case["batch"])
+                out = _pin_cpu_tensors(case["batch"])
             except RuntimeError as exc:
                 pytest.skip(f"pin_memory not supported in this environment: {exc}")
                 return
@@ -183,7 +203,7 @@ class TestPretrainComponents:
             for check in case["checks"]:
                 assert check(out)
 
-            out_again = _ensure_pinned_cpu_batch(out)
+            out_again = _pin_cpu_tensors(out)
             assert out_again is out
 
     def test_sync_tokenizer_derived_config_pads_vocab_and_pad_id(self):
@@ -191,7 +211,9 @@ class TestPretrainComponents:
         cfg = Config()
         cfg.model.vocab_size = 17
         cfg.tokenizer.vocab_size = 17
-        tokenizer = self._make_tokenizer()
+        tokenizer = build_wordlevel_tokenizer(
+            vocab={"hello": 4, "world": 5, "test": 6, "sentence": 7},
+        )
 
         original, resolved, added = _sync_tokenizer_derived_config(cfg, tokenizer)
 
@@ -565,6 +587,115 @@ class TestPretrainComponents:
         assert persistent_workers
         assert prefetch_factor == 2
         assert notes == []
+
+    def test_should_use_loader_pin_memory(self):
+        """Loader-side pinning requires pin_memory and prepare_data_loader support."""
+
+        class _AcceleratorWithPrepare:
+            @staticmethod
+            def prepare_data_loader(*args, **kwargs):
+                return args[0]
+
+        class _AcceleratorWithoutPrepare:
+            pass
+
+        assert _should_use_loader_pin_memory(
+            pin_memory=True,
+            accelerator=_AcceleratorWithPrepare(),
+        )
+        assert not _should_use_loader_pin_memory(
+            pin_memory=True,
+            accelerator=_AcceleratorWithoutPrepare(),
+        )
+        assert not _should_use_loader_pin_memory(
+            pin_memory=False,
+            accelerator=_AcceleratorWithPrepare(),
+        )
+
+    def test_get_dataloader_propagates_requested_pin_memory(self):
+        """Requested loader pinning should be forwarded to ``torch.DataLoader``."""
+        tokenizer = build_wordlevel_tokenizer(
+            vocab={"hello": 4, "world": 5},
+        )
+        dataset = Dataset.from_dict(
+            {
+                "input_ids": [[4, 5, 0]],
+                "attention_mask": [[1, 1, 0]],
+                "special_tokens_mask": [[0, 0, 1]],
+            }
+        )
+        with patch("neobert.dataloader.dataloader.DataLoader") as dataloader_cls:
+            sentinel = object()
+            dataloader_cls.return_value = sentinel
+
+            dataloader = get_dataloader(
+                dataset,
+                tokenizer,
+                batch_size=1,
+                num_workers=0,
+                pin_memory=True,
+                persistent_workers=False,
+            )
+
+        assert dataloader is sentinel
+        assert dataloader_cls.call_args.kwargs["pin_memory"] is True
+
+    def test_get_dataloader_omits_shuffle_for_huggingface_stream_marker(self):
+        """Hugging Face-style streaming datasets should avoid map-style shuffle."""
+        tokenizer = build_wordlevel_tokenizer(
+            vocab={"hello": 4, "world": 5},
+        )
+        dataset = _HuggingFaceMarkerStreamingDataset()
+        with patch("neobert.dataloader.dataloader.DataLoader") as dataloader_cls:
+            sentinel = object()
+            dataloader_cls.return_value = sentinel
+
+            dataloader = get_dataloader(
+                dataset,
+                tokenizer,
+                batch_size=1,
+                num_workers=0,
+                shuffle=True,
+                persistent_workers=False,
+            )
+
+        assert dataloader is sentinel
+        assert "shuffle" not in dataloader_cls.call_args.kwargs
+
+    def test_get_dataloader_adapts_huggingface_marker_stream_for_torch(self):
+        """Detected streams should work with PyTorch even without torch subclassing."""
+        tokenizer = build_wordlevel_tokenizer(
+            vocab={"hello": 4, "world": 5},
+        )
+        dataset = _HuggingFaceMarkerStreamingDataset()
+
+        dataloader = get_dataloader(
+            dataset,
+            tokenizer,
+            batch_size=1,
+            num_workers=0,
+            shuffle=True,
+            persistent_workers=False,
+            mlm_probability=0.0,
+        )
+        batch = next(iter(dataloader))
+
+        assert "input_ids" in batch
+        assert "labels" in batch
+
+    def test_streaming_eval_budget_required_for_retry_wrapped_eval_dataset(self):
+        """Retry wrappers must not hide streaming eval datasets from budget guards."""
+        dataset = _HuggingFaceMarkerStreamingDataset()
+        wrapped = RetryingStreamingDataset(
+            dataset,
+            label="unit-test",
+            max_retries=1,
+            base_backoff_seconds=0.01,
+            max_backoff_seconds=0.01,
+            sleep_fn=lambda _seconds: None,
+        )
+
+        assert _requires_streaming_eval_budget(wrapped)
 
     def test_resolve_tokenize_num_proc_falls_back_to_cpu_count(self):
         """Ensure tokenization num_proc falls back when affinity is unavailable."""

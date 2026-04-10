@@ -6,10 +6,9 @@ import warnings
 
 import numpy as np
 import torch
-from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import PreTrainedTokenizerFast
 
 from neobert.collator import CustomCollatorForMLM, DataCollatorWithPacking, get_collator
+from tests.tokenizer_utils import build_wordlevel_tokenizer
 
 
 class DummyPadCollator:
@@ -49,21 +48,6 @@ class DummyPadCollator:
 
 class TestCollatorPacking(unittest.TestCase):
     """Tests for edge cases in sequence packing."""
-
-    @staticmethod
-    def _make_tokenizer(padding_side: str = "right") -> PreTrainedTokenizerFast:
-        """Build a minimal tokenizer for collator tests."""
-        vocab = {"[PAD]": 0, "[UNK]": 1, "[MASK]": 2, "hello": 3, "world": 4}
-        tokenizer = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
-        tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
-        fast = PreTrainedTokenizerFast(
-            tokenizer_object=tokenizer,
-            pad_token="[PAD]",
-            unk_token="[UNK]",
-            mask_token="[MASK]",
-        )
-        fast.padding_side = padding_side
-        return fast
 
     @staticmethod
     def _packed_to_list(packed):
@@ -150,7 +134,11 @@ class TestCollatorPacking(unittest.TestCase):
 
     def test_return_packed_seqlens_omits_key_when_left_padded(self):
         """Ensure packed_seqlens is omitted for non-right-padded masks."""
-        tokenizer = self._make_tokenizer(padding_side="left")
+        tokenizer = build_wordlevel_tokenizer(
+            vocab={"hello": 3, "world": 4},
+            padding_side="left",
+            include_sep=False,
+        )
         collator = get_collator(tokenizer, return_packed_seqlens=True)
         features = [{"input_ids": [2, 3]}, {"input_ids": [2]}]
         with warnings.catch_warnings(record=True) as caught:
@@ -164,7 +152,10 @@ class TestCollatorPacking(unittest.TestCase):
 
     def test_mask_all_numpy_path_masks_without_801010_split(self):
         """Ensure numpy masking path follows 100% mask-all semantics."""
-        tokenizer = self._make_tokenizer()
+        tokenizer = build_wordlevel_tokenizer(
+            vocab={"hello": 3, "world": 4},
+            include_sep=False,
+        )
         collator = CustomCollatorForMLM(
             tokenizer=tokenizer,
             mlm_probability=1.0,
@@ -186,7 +177,10 @@ class TestCollatorPacking(unittest.TestCase):
 
     def test_mask_all_false_keeps_hf_801010_corruption(self):
         """Ensure default collator path does not force 100% [MASK] replacement."""
-        tokenizer = self._make_tokenizer()
+        tokenizer = build_wordlevel_tokenizer(
+            vocab={"hello": 3, "world": 4},
+            include_sep=False,
+        )
         collator = get_collator(
             tokenizer=tokenizer,
             mlm_probability=1.0,

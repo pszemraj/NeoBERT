@@ -1,27 +1,25 @@
 # NeoBERT
 
 > [!IMPORTANT]
-> This repository is a fork of [chandar-lab/NeoBERT](https://github.com/chandar-lab/NeoBERT) focused on active experimentation and training-system iteration.
+> This repository builds on the original [chandar-lab/NeoBERT](https://github.com/chandar-lab/NeoBERT) codebase and is focused on active experimentation and training-system iteration.
 
 ## Description
 
-NeoBERT is an encoder architecture for masked-language-model pretraining,
-embedding extraction, and downstream evaluation (GLUE/MTEB).
+NeoBERT is an encoder architecture for masked-language-model pretraining, embedding extraction, and downstream evaluation (GLUE/MTEB).
 
-This fork adds:
+This repo adds:
 
 - configurable attention backends (`sdpa`, `flash_attn_varlen` for packed training),
 - optional Liger kernel dispatch (`kernel_backend: auto|liger|torch`),
 - safetensors-first checkpointing,
 - end-to-end training/eval/export scripts with config-driven workflows.
 
-Pretraining loss path is selected with one explicit flag:
-`trainer.masked_logits_only_loss`.
+Pretraining loss path is selected with one explicit flag: `trainer.masked_logits_only_loss`.
 
 - `true` (default, recommended): masked-logits-only path.
 - `false` (legacy/debug): original full-logits CE path.
 
-Paper (original): <https://arxiv.org/abs/2502.19587>
+Original paper: <https://arxiv.org/abs/2502.19587>
 
 ## Install
 
@@ -41,7 +39,7 @@ pip install -e .[flash] --no-build-isolation
 pip install -e .[legacy-checkpoints]
 ```
 
-See [docs/troubleshooting.md](docs/troubleshooting.md) for environment issues.
+See [docs/guides/troubleshooting.md](docs/guides/troubleshooting.md) for environment issues.
 
 ## Verify Setup
 
@@ -66,18 +64,14 @@ python tests/run_tests.py
 
 ## Documentation
 
-- [docs/README.md](docs/README.md)
-- [Training Guide](docs/training.md)
-- [Configuration Reference](docs/configuration.md)
-- [Evaluation Guide](docs/evaluation.md)
-- [Export Guide](docs/export.md)
-- [Architecture](docs/architecture.md)
-- [Troubleshooting](docs/troubleshooting.md)
-- [Testing](docs/testing.md)
-- [Dev Notes](docs/dev.md)
+- [Documentation index](docs/README.md)
+- [Training Guide](docs/guides/training.md)
+- [Training Optimization](docs/guides/training-optimization.md)
+- [Configuration Reference](docs/reference/configuration.md)
+- [Evaluation Guide](docs/guides/evaluation.md)
+- [Troubleshooting](docs/guides/troubleshooting.md)
 
-Directory READMEs under `configs/`, `scripts/`, `tests/`, and `jobs/` focus on
-entrypoints and quick usage.
+Directory READMEs under `configs/`, `scripts/`, `tests/`, and `jobs/` focus on entrypoints and quick usage.
 
 ## Repository Layout
 

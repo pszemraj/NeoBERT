@@ -38,7 +38,8 @@ def test_pretraining_config_to_lm_forward_smoke(tiny_pretrain_config_path) -> No
 
 def test_glue_config_to_classifier_logits_and_loss_smoke(tiny_glue_config_path) -> None:
     """GLUE config should build classifier and compute logits/loss shapes."""
-    from neobert.model import NeoBERTConfig, NeoBERTHFForSequenceClassification
+    from neobert.huggingface import NeoBERTHFForSequenceClassification
+    from neobert.model import NeoBERTConfig
 
     cfg = ConfigLoader.load(str(tiny_glue_config_path))
 

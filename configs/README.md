@@ -2,7 +2,7 @@
 
 Repository configs for training and evaluation workflows.
 
-Field definitions and defaults are in [docs/configuration.md](../docs/configuration.md).
+Field definitions and defaults are in [docs/reference/configuration.md](../docs/reference/configuration.md).
 
 ## Layout
 
@@ -14,7 +14,8 @@ Tiny smoke-test configs live under [Test Config Files](../tests/configs/README.m
 
 ## Related Docs
 
-- [Configuration reference](../docs/configuration.md)
-- [Training guide](../docs/training.md)
-- [Evaluation guide](../docs/evaluation.md)
+- [Configuration reference](../docs/reference/configuration.md)
+- [Training guide](../docs/guides/training.md)
+- [Training optimization](../docs/guides/training-optimization.md)
+- [Evaluation guide](../docs/guides/evaluation.md)
 - [Tiny test configs](../tests/configs/README.md)

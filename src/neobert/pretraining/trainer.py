@@ -57,16 +57,35 @@ from neobert.pretraining.masked_objective import (
     MaskedPositionsOnlyMLMObjective,
 )
 from neobert.scheduler import get_scheduler, resolve_scheduler_steps
+from neobert.streaming import (
+    RetryingStreamingDataset,
+    is_streaming_dataset,
+    peek_streaming_example,
+    retry_streaming_operation,
+    supports_streaming_iteration_resume,
+)
+from neobert.tokenization_cache import (
+    build_tokenization_manifest,
+    resolve_tokenized_cache_dir,
+    validate_tokenized_cache_manifest,
+    write_tokenized_cache_manifest,
+)
 from neobert.tokenizer import get_tokenizer, resolve_text_column
 from neobert.training_utils import (
     _compute_l2_norm_for_logging,
     _maybe_compile_model,
     _maybe_prepare_for_forward,
+    _pin_cpu_tensors,
+    _resolve_cuda_pin_memory,
     _resolve_resume_checkpoint,
     _update_global_norm_metric_for_logging,
+    attach_optimizer_param_names,
     create_accelerator,
     resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
+    save_optimizer_param_name_manifest,
+    sync_resume_source_of_truth,
+    validate_optimizer_param_name_manifest,
     validate_distributed_runtime_policy,
     validate_muon_distributed_compatibility,
     validate_muon_runtime_topology,
@@ -138,6 +157,56 @@ def _format_percent(value: float) -> str:
     :return str: Human-readable percentage string.
     """
     return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def _streaming_retry_settings(cfg: Config) -> tuple[int, float, float]:
+    """Resolve transient streaming read retry settings from config.
+
+    :param Config cfg: Active runtime config.
+    :return tuple[int, float, float]: ``(retries, base_backoff, max_backoff)``.
+    """
+    return (
+        int(cfg.dataset.streaming_read_retries),
+        float(cfg.dataset.streaming_read_retry_backoff_seconds),
+        float(cfg.dataset.streaming_read_retry_max_backoff_seconds),
+    )
+
+
+def _maybe_wrap_streaming_dataset_for_retries(
+    dataset: Dataset,
+    *,
+    label: str,
+    cfg: Config,
+) -> Dataset:
+    """Wrap a streaming dataset so transient hub read failures restart iteration.
+
+    :param Dataset dataset: Dataset to wrap.
+    :param str label: Human-readable dataset label for logs/errors.
+    :param Config cfg: Active runtime config.
+    :return Dataset: Wrapped dataset when retries are enabled, otherwise the original.
+    """
+    if isinstance(dataset, RetryingStreamingDataset):
+        return dataset
+    if not is_streaming_dataset(dataset):
+        return dataset
+    retries, base_backoff, max_backoff = _streaming_retry_settings(cfg)
+    if retries <= 0:
+        return dataset
+    if not supports_streaming_iteration_resume(dataset):
+        logger.warning(
+            "Streaming read retries are enabled for %s, but the dataset does not "
+            "expose resumable iteration state; leaving it unwrapped to avoid "
+            "duplicating or skipping examples after a transient failure.",
+            label,
+        )
+        return dataset
+    return RetryingStreamingDataset(
+        dataset,
+        label=label,
+        max_retries=retries,
+        base_backoff_seconds=base_backoff,
+        max_backoff_seconds=max_backoff,
+    )
 
 
 def _log_masking_strategy(cfg: Config) -> None:
@@ -419,71 +488,8 @@ def _move_batch_to_device(batch: BatchEncoding, device: torch.device) -> BatchEn
     """
     if hasattr(batch, "to") and not torch.is_tensor(batch):
         batch = dict(batch)
-    # ``non_blocking`` overlaps copies when DataLoader uses pinned host memory.
+    # ``non_blocking`` overlaps copies when the batch uses pinned host memory.
     return send_to_device(batch, device, non_blocking=True)
-
-
-def _ensure_pinned_cpu_batch(batch: BatchEncoding) -> BatchEncoding:
-    """Pin CPU tensor values in a batch for async host->device transfer.
-
-    ``torch.cat``/``torch.split`` on pinned tensors produce non-pinned outputs.
-    Packed-batch stitching can therefore drop pinned memory guarantees unless we
-    re-pin the final CPU tensors before ``send_to_device(..., non_blocking=True)``.
-
-    :param BatchEncoding batch: Batch mapping of tensors/lists/scalars.
-    :return BatchEncoding: Batch with CPU tensors pinned when needed.
-    """
-
-    def _pin_value(value: Any) -> tuple[Any, bool]:
-        """Pin tensors in nested structures and report whether anything changed.
-
-        :param Any value: Candidate tensor/container/scalar value.
-        :return tuple[Any, bool]: Possibly pinned value and change flag.
-        """
-        if torch.is_tensor(value):
-            if value.device.type != "cpu" or value.is_pinned():
-                return value, False
-            return value.pin_memory(), True
-
-        if isinstance(value, dict):
-            updated: dict[Any, Any] = {}
-            changed = False
-            for key, inner in value.items():
-                pinned_inner, inner_changed = _pin_value(inner)
-                updated[key] = pinned_inner
-                changed = changed or inner_changed
-            if not changed:
-                return value, False
-            return updated, True
-
-        if isinstance(value, list):
-            updated_list: list[Any] = []
-            changed = False
-            for inner in value:
-                pinned_inner, inner_changed = _pin_value(inner)
-                updated_list.append(pinned_inner)
-                changed = changed or inner_changed
-            if not changed:
-                return value, False
-            return updated_list, True
-
-        if isinstance(value, tuple):
-            updated_items: list[Any] = []
-            changed = False
-            for inner in value:
-                pinned_inner, inner_changed = _pin_value(inner)
-                updated_items.append(pinned_inner)
-                changed = changed or inner_changed
-            if not changed:
-                return value, False
-            return tuple(updated_items), True
-
-        return value, False
-
-    pinned_batch, repinned = _pin_value(dict(batch))
-    if not repinned:
-        return batch
-    return pinned_batch
 
 
 def _pad_tokenizer_to_multiple(
@@ -594,6 +600,10 @@ def _load_streaming_split(
     dataset_name: str,
     split: str,
     dataset_kwargs: dict[str, object],
+    *,
+    streaming_read_retries: int = 0,
+    streaming_read_retry_backoff_seconds: float = 1.0,
+    streaming_read_retry_max_backoff_seconds: float = 8.0,
 ) -> Dataset:
     """Load a streaming dataset split with optional slice notation.
 
@@ -603,14 +613,23 @@ def _load_streaming_split(
     :param str dataset_name: Dataset identifier.
     :param str split: Split string (e.g., "train[:1%]").
     :param dict[str, object] dataset_kwargs: Additional kwargs for HF datasets.
+    :param int streaming_read_retries: Retry count for transient streaming reads.
+    :param float streaming_read_retry_backoff_seconds: Initial retry backoff.
+    :param float streaming_read_retry_max_backoff_seconds: Maximum retry backoff.
     :return Dataset: Streaming dataset (IterableDataset).
     """
     base, start_token, end_token = _parse_split_slice(split)
-    dataset = load_dataset(
-        dataset_name,
-        split=base,
-        streaming=True,
-        **dataset_kwargs,
+    dataset = retry_streaming_operation(
+        lambda: load_dataset(
+            dataset_name,
+            split=base,
+            streaming=True,
+            **dataset_kwargs,
+        ),
+        context=f"load streaming split {dataset_name}:{base}",
+        max_retries=streaming_read_retries,
+        base_backoff_seconds=streaming_read_retry_backoff_seconds,
+        max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
     )
 
     if start_token is None and end_token is None:
@@ -622,7 +641,13 @@ def _load_streaming_split(
     total_examples: Optional[int] = None
     if needs_total:
         try:
-            builder = load_dataset_builder(dataset_name, **dataset_kwargs)
+            builder = retry_streaming_operation(
+                lambda: load_dataset_builder(dataset_name, **dataset_kwargs),
+                context=f"load dataset builder {dataset_name}",
+                max_retries=streaming_read_retries,
+                base_backoff_seconds=streaming_read_retry_backoff_seconds,
+                max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+            )
             if base in builder.info.splits:
                 total_examples = builder.info.splits[base].num_examples
         except Exception as exc:
@@ -659,17 +684,29 @@ def _infer_eval_split_name(
     dataset_kwargs: dict[str, object],
     *,
     train_split: Optional[str],
+    streaming_read_retries: int = 0,
+    streaming_read_retry_backoff_seconds: float = 1.0,
+    streaming_read_retry_max_backoff_seconds: float = 8.0,
 ) -> Optional[str]:
     """Infer a reasonable eval split name from dataset metadata.
 
     :param str dataset_name: Dataset identifier.
     :param dict[str, object] dataset_kwargs: Additional kwargs for HF datasets.
     :param str | None train_split: Train split selector (possibly sliced).
+    :param int streaming_read_retries: Retry count for transient streaming reads.
+    :param float streaming_read_retry_backoff_seconds: Initial retry backoff.
+    :param float streaming_read_retry_max_backoff_seconds: Maximum retry backoff.
     :return str | None: Preferred eval split name or ``None``.
     """
     train_base = _parse_split_slice(train_split or "train")[0].lower()
     try:
-        builder = load_dataset_builder(dataset_name, **dataset_kwargs)
+        builder = retry_streaming_operation(
+            lambda: load_dataset_builder(dataset_name, **dataset_kwargs),
+            context=f"infer eval split for {dataset_name}",
+            max_retries=streaming_read_retries,
+            base_backoff_seconds=streaming_read_retry_backoff_seconds,
+            max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+        )
         split_names = list(getattr(builder.info, "splits", {}).keys())
     except Exception as exc:
         logger.warning(
@@ -824,6 +861,15 @@ def _resolve_streaming_eval_budget(
 
     eval_batch_size = max(1, int(per_device_eval_batch_size))
     return max(1, math.ceil(eval_samples / eval_batch_size)), "dataset.eval_samples"
+
+
+def _requires_streaming_eval_budget(eval_dataset: object | None) -> bool:
+    """Return whether an eval dataset needs an explicit streaming budget.
+
+    :param object | None eval_dataset: Evaluation dataset to inspect.
+    :return bool: ``True`` when the dataset is streaming-style.
+    """
+    return eval_dataset is not None and is_streaming_dataset(eval_dataset)
 
 
 def _run_eval(
@@ -981,7 +1027,7 @@ def _resolve_loader_perf_settings(
     """Resolve effective dataloader performance settings.
 
     Applies conservative CUDA-friendly defaults when users leave knobs unset:
-    - ``pin_memory=True`` on CUDA
+    - pinned host-memory staging on CUDA
     - ``prefetch_factor=4`` when workers are enabled and no value is provided
 
     :param Config cfg: Training config.
@@ -990,7 +1036,10 @@ def _resolve_loader_perf_settings(
         ``(pin_memory, persistent_workers, prefetch_factor, notes)``.
     """
     num_workers = max(0, int(cfg.dataset.num_workers))
-    pin_memory = bool(cfg.dataset.pin_memory)
+    pin_memory, notes = _resolve_cuda_pin_memory(
+        cfg.dataset.pin_memory,
+        device=device,
+    )
     persistent_workers = bool(cfg.dataset.persistent_workers and num_workers > 0)
     prefetch_factor = cfg.dataset.prefetch_factor
     if num_workers <= 0:
@@ -1002,14 +1051,7 @@ def _resolve_loader_perf_settings(
                 f"dataset.prefetch_factor must be > 0 when set, got {prefetch_factor}."
             )
 
-    notes: list[str] = []
     if device.type == "cuda":
-        if not pin_memory:
-            pin_memory = True
-            notes.append(
-                "dataset.pin_memory was false; enabling pin_memory=True on CUDA "
-                "to improve host->device transfer overlap."
-            )
         if num_workers > 0 and prefetch_factor is None:
             prefetch_factor = 4
             notes.append(
@@ -1017,6 +1059,27 @@ def _resolve_loader_perf_settings(
             )
 
     return pin_memory, persistent_workers, prefetch_factor, notes
+
+
+def _should_use_loader_pin_memory(
+    *,
+    pin_memory: bool,
+    accelerator: Accelerator,
+) -> bool:
+    """Return whether pinned CPU staging should happen inside the dataloader.
+
+    Loader-side pinning is enabled whenever the runtime supports it so that
+    every consumer (training loop, eval loop) gets page-locked batches for
+    ``non_blocking`` H2D copies.  The training path additionally re-pins
+    after gradient-accumulation concatenation (``torch.cat`` produces
+    unpinned tensors); the ``_pin_cpu_tensors`` helper is a no-op when
+    tensors are already pinned.
+
+    :param bool pin_memory: Whether pinned CPU staging is enabled overall.
+    :param Accelerator accelerator: Runtime accelerator instance.
+    :return bool: ``True`` when loader-side pinning should be enabled.
+    """
+    return bool(pin_memory and hasattr(accelerator, "prepare_data_loader"))
 
 
 def _scale_gradients(model: torch.nn.Module, scale: torch.Tensor) -> None:
@@ -1385,7 +1448,11 @@ def _maybe_shuffle_streaming_dataset(
     :param callable | None print_fn: Optional logging callback.
     :return Dataset: Shuffled dataset (or the original dataset if no shuffle is applied).
     """
-    if buffer_size <= 0 or not hasattr(dataset, "shuffle"):
+    if (
+        buffer_size <= 0
+        or not is_streaming_dataset(dataset)
+        or not hasattr(dataset, "shuffle")
+    ):
         return dataset
 
     shuffled = dataset.shuffle(buffer_size=buffer_size, seed=seed)
@@ -1497,6 +1564,13 @@ def trainer(cfg: Config) -> None:
         str(checkpoint_dir),
         str(output_dir),
     )
+    if cfg.trainer.resume_from_checkpoint and resume_checkpoint_path:
+        sync_resume_source_of_truth(
+            cfg,
+            resume_checkpoint_path,
+            task="pretraining",
+            log=logger,
+        )
 
     # Accelerator object - disable automatic checkpoint naming so the trainer can
     # control a single checkpoint tree (checkpoints/<step>).
@@ -1642,6 +1716,11 @@ def trainer(cfg: Config) -> None:
     metrics["train/batches_in_epoch"] = int(metrics.get("train/batches_in_epoch", 0))
 
     is_streaming = cfg.dataset.streaming
+    (
+        streaming_read_retries,
+        streaming_read_retry_backoff_seconds,
+        streaming_read_retry_max_backoff_seconds,
+    ) = _streaming_retry_settings(cfg)
 
     if cfg.datacollator.pack_sequences:
         logger.info(
@@ -1737,6 +1816,9 @@ def trainer(cfg: Config) -> None:
                     cfg.dataset.name,
                     cfg.dataset.train_split,
                     dataset_kwargs,
+                    streaming_read_retries=streaming_read_retries,
+                    streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+                    streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
                 )
             else:
                 train_dataset = load_dataset(
@@ -1746,12 +1828,28 @@ def trainer(cfg: Config) -> None:
                     **dataset_kwargs,
                 )
         else:
-            dataset = load_dataset(
-                cfg.dataset.name,
-                streaming=cfg.dataset.streaming,
-                **dataset_kwargs,
+            dataset = (
+                retry_streaming_operation(
+                    lambda: load_dataset(
+                        cfg.dataset.name,
+                        streaming=True,
+                        **dataset_kwargs,
+                    ),
+                    context=f"load streaming dataset {cfg.dataset.name}",
+                    max_retries=streaming_read_retries,
+                    base_backoff_seconds=streaming_read_retry_backoff_seconds,
+                    max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+                )
+                if cfg.dataset.streaming
+                else load_dataset(
+                    cfg.dataset.name,
+                    streaming=False,
+                    **dataset_kwargs,
+                )
             )
             train_dataset = dataset["train"]
+
+    is_streaming = is_streaming_dataset(train_dataset)
 
     # Check if dataset needs tokenization
     # For streaming datasets, we need to check differently
@@ -1760,7 +1858,13 @@ def trainer(cfg: Config) -> None:
     if train_dataset is not None:
         if is_streaming:
             # For streaming datasets, peek at the first example
-            first_example = next(iter(train_dataset))
+            first_example = peek_streaming_example(
+                train_dataset,
+                context="inspect training stream schema",
+                max_retries=streaming_read_retries,
+                base_backoff_seconds=streaming_read_retry_backoff_seconds,
+                max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+            )
             needs_tokenization = "input_ids" not in first_example
         else:
             needs_tokenization = "input_ids" not in train_dataset.column_names
@@ -1771,15 +1875,33 @@ def trainer(cfg: Config) -> None:
 
         # For non-streaming datasets, check if pre-tokenization is requested
         if not is_streaming and cfg.dataset.pre_tokenize:
-            # Create output directory
-            if cfg.dataset.pre_tokenize_output:
-                output_dir = cfg.dataset.pre_tokenize_output
-            else:
-                output_dir = f"tokenized_data/{cfg.dataset.name.replace('/', '_')}"
+            text_column = resolve_text_column(
+                train_dataset,
+                is_streaming=False,
+                preferred=cfg.dataset.text_column,
+            )
+            tokenization_manifest = build_tokenization_manifest(
+                tokenizer,
+                dataset_name=cfg.dataset.name,
+                dataset_config=cfg.dataset.config,
+                dataset_path=cfg.dataset.path,
+                column_name=text_column,
+                max_length=tokenize_max_length,
+                truncation=cfg.tokenizer.truncation,
+                add_special_tokens=add_special_tokens,
+                return_special_tokens_mask=return_special_tokens_mask,
+            )
+            output_dir = resolve_tokenized_cache_dir(
+                requested_output_dir=cfg.dataset.pre_tokenize_output,
+                dataset_name=cfg.dataset.name,
+                manifest=tokenization_manifest,
+            )
 
-            Path(output_dir).mkdir(parents=True, exist_ok=True)
-            success_flag = Path(output_dir) / ".tokenize_complete"
-            failure_flag = Path(output_dir) / ".tokenize_failed"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            success_flag = output_dir / ".tokenize_complete"
+            failure_flag = output_dir / ".tokenize_failed"
+            if success_flag.exists():
+                validate_tokenized_cache_manifest(output_dir, tokenization_manifest)
 
             accelerator.print(f"Pre-tokenizing dataset to: {output_dir}")
 
@@ -1787,11 +1909,6 @@ def trainer(cfg: Config) -> None:
                 if failure_flag.exists():
                     failure_flag.unlink()
                 try:
-                    text_column = resolve_text_column(
-                        train_dataset,
-                        is_streaming=False,
-                        preferred=cfg.dataset.text_column,
-                    )
                     tokenized_dataset = tokenize(
                         train_dataset,
                         tokenizer,
@@ -1802,8 +1919,12 @@ def trainer(cfg: Config) -> None:
                         num_proc=cfg.dataset.num_proc,
                         add_special_tokens=add_special_tokens,
                         return_special_tokens_mask=return_special_tokens_mask,
+                        streaming_read_retries=streaming_read_retries,
+                        streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+                        streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
                     )
                     tokenized_dataset.save_to_disk(output_dir)
+                    write_tokenized_cache_manifest(output_dir, tokenization_manifest)
                 except Exception as exc:
                     failure_flag.write_text(str(exc))
                 else:
@@ -1818,6 +1939,7 @@ def trainer(cfg: Config) -> None:
                 )
                 raise RuntimeError(f"Tokenization failed: {err_msg}")
 
+            validate_tokenized_cache_manifest(output_dir, tokenization_manifest)
             accelerator.print(f"Pre-tokenization complete. Loading from: {output_dir}")
             # Load the pre-tokenized dataset
             train_dataset = load_from_disk(output_dir)
@@ -1828,6 +1950,9 @@ def trainer(cfg: Config) -> None:
                 train_dataset,
                 is_streaming,
                 preferred=cfg.dataset.text_column,
+                streaming_read_retries=streaming_read_retries,
+                streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+                streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
             )
             tokenize_num_proc = (
                 None
@@ -1851,8 +1976,11 @@ def trainer(cfg: Config) -> None:
                     num_proc=tokenize_num_proc,
                     add_special_tokens=add_special_tokens,
                     return_special_tokens_mask=return_special_tokens_mask,
+                    streaming_read_retries=streaming_read_retries,
+                    streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+                    streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
                 )
-        if cfg.dataset.streaming:
+        if is_streaming:
             accelerator.print("Tokenization setup complete for streaming dataset.")
         else:
             accelerator.print(
@@ -1871,6 +1999,9 @@ def trainer(cfg: Config) -> None:
             cfg.dataset.name,
             dataset_kwargs,
             train_split=cfg.dataset.train_split,
+            streaming_read_retries=streaming_read_retries,
+            streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+            streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
         )
         if inferred_eval_split is not None:
             eval_split = inferred_eval_split
@@ -1896,6 +2027,9 @@ def trainer(cfg: Config) -> None:
                     cfg.dataset.name,
                     eval_split,
                     dataset_kwargs,
+                    streaming_read_retries=streaming_read_retries,
+                    streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+                    streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
                 )
             else:
                 eval_dataset = load_dataset(
@@ -1949,7 +2083,13 @@ def trainer(cfg: Config) -> None:
         )
         eval_needs_tokenization = False
         if eval_is_streaming:
-            first_example = next(iter(eval_dataset))
+            first_example = peek_streaming_example(
+                eval_dataset,
+                context="inspect eval stream schema",
+                max_retries=streaming_read_retries,
+                base_backoff_seconds=streaming_read_retry_backoff_seconds,
+                max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+            )
             eval_needs_tokenization = "input_ids" not in first_example
         else:
             eval_needs_tokenization = "input_ids" not in eval_dataset.column_names
@@ -1961,6 +2101,9 @@ def trainer(cfg: Config) -> None:
                 eval_dataset,
                 eval_is_streaming,
                 preferred=cfg.dataset.text_column,
+                streaming_read_retries=streaming_read_retries,
+                streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+                streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
             )
             eval_num_proc = (
                 None
@@ -1982,24 +2125,42 @@ def trainer(cfg: Config) -> None:
                     num_proc=eval_num_proc,
                     add_special_tokens=add_special_tokens,
                     return_special_tokens_mask=return_special_tokens_mask,
+                    streaming_read_retries=streaming_read_retries,
+                    streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+                    streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
                 )
 
         if not eval_is_streaming:
             accelerator.print(f"Eval dataset size: {len(eval_dataset)}")
 
-    if cfg.dataset.streaming and hasattr(cfg.dataset, "shuffle_buffer_size"):
+    if is_streaming and hasattr(cfg.dataset, "shuffle_buffer_size"):
         train_dataset = _maybe_shuffle_streaming_dataset(
             train_dataset,
             cfg.dataset.shuffle_buffer_size,
             cfg.seed,
             print_fn=accelerator.print,
         )
+        train_dataset = _maybe_wrap_streaming_dataset_for_retries(
+            train_dataset,
+            label=f"{cfg.dataset.name}:{cfg.dataset.train_split or 'train'}",
+            cfg=cfg,
+        )
+        if eval_dataset is not None and eval_is_streaming:
+            eval_dataset = _maybe_wrap_streaming_dataset_for_retries(
+                eval_dataset,
+                label=f"{cfg.dataset.name}:{eval_split or 'eval'}",
+                cfg=cfg,
+            )
 
     pin_memory, persistent_workers, prefetch_factor, loader_perf_notes = (
         _resolve_loader_perf_settings(cfg, device=accelerator.device)
     )
     for note in loader_perf_notes:
         logger.info(note)
+    loader_pin_memory = _should_use_loader_pin_memory(
+        pin_memory=pin_memory,
+        accelerator=accelerator,
+    )
 
     # Dataloader
     collator_max_length = cfg.datacollator.max_length or cfg.dataset.max_seq_length
@@ -2008,7 +2169,7 @@ def trainer(cfg: Config) -> None:
         tokenizer,
         batch_size=cfg.trainer.per_device_train_batch_size,
         num_workers=cfg.dataset.num_workers,
-        pin_memory=pin_memory,
+        pin_memory=loader_pin_memory,
         persistent_workers=persistent_workers,
         prefetch_factor=prefetch_factor,
         mlm_probability=cfg.datacollator.mlm_probability,
@@ -2026,7 +2187,7 @@ def trainer(cfg: Config) -> None:
             tokenizer,
             batch_size=cfg.trainer.per_device_eval_batch_size,
             num_workers=cfg.dataset.num_workers,
-            pin_memory=pin_memory,
+            pin_memory=loader_pin_memory,
             persistent_workers=persistent_workers,
             prefetch_factor=prefetch_factor,
             mlm_probability=cfg.datacollator.mlm_probability,
@@ -2094,8 +2255,10 @@ def trainer(cfg: Config) -> None:
         logger.info(f"QK-clipping: {muon_cfg.enable_clipping}")
         logger.info(f"Clipping threshold: {muon_cfg.clipping_threshold}")
         logger.info(f"Newton-Schulz iterations: {muon_cfg.ns_steps}")
+        logger.info(f"Nesterov: {muon_cfg.nesterov}")
         logger.info(f"Orthogonalization: {muon_cfg.orthogonalization}")
         logger.info(f"Norm factor: {muon_cfg.norm_factor}")
+        logger.info(f"Param policy: {muon_cfg.param_policy}")
         logger.info(f"Clipping warmup steps: {muon_cfg.clipping_warmup_steps}")
         logger.info(f"Clipping interval: {muon_cfg.clipping_interval}")
         logger.info(f"QK chunk size: {muon_cfg.clipping_qk_chunk_size}")
@@ -2115,6 +2278,7 @@ def trainer(cfg: Config) -> None:
         eps=cfg.optimizer.eps,
         muon_config=cfg.optimizer.muon_config,
     )
+    attach_optimizer_param_names(model, optimizer)
     _, warmup_steps, decay_steps, constant_steps = resolve_scheduler_steps(
         trainer_max_steps=cfg.trainer.max_steps,
         total_steps=cfg.scheduler.total_steps,
@@ -2265,12 +2429,7 @@ def trainer(cfg: Config) -> None:
             "ablation/debug and has higher memory use."
         )
     eval_max_batches = getattr(cfg.trainer, "eval_max_batches", None)
-    eval_dataset_is_streaming = (
-        eval_dataset is not None
-        and cfg.dataset.streaming
-        and hasattr(eval_dataset, "take")
-        and hasattr(eval_dataset, "skip")
-    )
+    eval_dataset_is_streaming = _requires_streaming_eval_budget(eval_dataset)
     if eval_dataset_is_streaming:
         eval_max_batches, eval_budget_source = _resolve_streaming_eval_budget(
             eval_max_batches=eval_max_batches,
@@ -2291,6 +2450,7 @@ def trainer(cfg: Config) -> None:
             raise FileNotFoundError(
                 f"resume_from_checkpoint path not found: {resume_checkpoint_path}"
             )
+        validate_optimizer_param_name_manifest(optimizer, resume_checkpoint)
         accelerator.load_state(str(resume_checkpoint))
         validate_muon_runtime_topology(
             accelerator=accelerator,
@@ -2392,7 +2552,7 @@ def trainer(cfg: Config) -> None:
 
             if manual_device_move:
                 if pin_memory and accelerator.device.type == "cuda":
-                    batch = _ensure_pinned_cpu_batch(batch)
+                    batch = _pin_cpu_tensors(batch)
                 batch = _move_batch_to_device(batch, accelerator.device)
 
             # Update number of batches only when we will execute a backward pass.
@@ -2645,6 +2805,8 @@ def trainer(cfg: Config) -> None:
                     checkpoint_path = checkpoint_dir / step_tag
                     accelerator.save_state(output_dir=str(checkpoint_path))
                     accelerator.wait_for_everyone()
+                    if accelerator.is_main_process:
+                        save_optimizer_param_name_manifest(optimizer, checkpoint_path)
                     _save_portable_checkpoint_weights(
                         model, accelerator, checkpoint_path
                     )
@@ -2736,7 +2898,7 @@ def trainer(cfg: Config) -> None:
         skipped_train_dataloader = None
 
         # For streaming datasets, update the epoch to ensure different shuffling
-        if cfg.dataset.streaming and hasattr(train_dataset, "set_epoch"):
+        if is_streaming and hasattr(train_dataset, "set_epoch"):
             # Called after epoch increment so the next epoch uses the new seed.
             train_dataset.set_epoch(metrics["train/epochs"])
             accelerator.print(

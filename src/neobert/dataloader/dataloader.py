@@ -9,6 +9,7 @@ from transformers import PreTrainedTokenizer
 
 # Ours
 from neobert.collator import get_collator
+from neobert.streaming import ensure_torch_iterable_dataset, is_streaming_dataset
 
 
 def get_dataloader(
@@ -37,7 +38,7 @@ def get_dataloader(
     :param int num_workers: Number of dataloader workers.
     :param int batch_size: Batch size per device.
     :param bool shuffle: Whether to shuffle the dataset each epoch.
-    :param bool pin_memory: Whether to pin memory in the dataloader.
+    :param bool pin_memory: Whether the dataloader should pin CPU batches.
     :param bool persistent_workers: Keep workers alive across epochs.
     :param int | None prefetch_factor: Number of prefetched batches per worker.
     :param bool pack_sequences: Whether to pack sequences before collation.
@@ -58,7 +59,9 @@ def get_dataloader(
     )
 
     # Check if this is a streaming dataset
-    is_streaming = hasattr(dataset, "_iter") or "IterableDataset" in str(type(dataset))
+    is_streaming = is_streaming_dataset(dataset)
+    if is_streaming:
+        dataset = ensure_torch_iterable_dataset(dataset)
 
     # Streaming datasets can't use shuffle in DataLoader
     dataloader_kwargs = {
@@ -66,7 +69,7 @@ def get_dataloader(
         "collate_fn": collate_fn,
         "num_workers": num_workers,
         "batch_size": batch_size,
-        "pin_memory": pin_memory,
+        "pin_memory": bool(pin_memory),
         "persistent_workers": persistent_workers if num_workers > 0 else False,
         # Keep tail batches (important for unbiased eval); training logic tolerates
         # smaller final batches when packing is enabled.
