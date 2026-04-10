@@ -253,6 +253,49 @@ def test_create_accelerator_resets_on_state_mismatch_error(
     assert reset_calls == [("gradient", None), ("accelerator", True)]
 
 
+def test_create_accelerator_resets_when_cpu_request_reuses_cuda_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CPU requests should not silently reuse stale CUDA accelerator state."""
+    import neobert.training_utils as training_utils
+
+    reset_calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        training_utils.AcceleratorState,
+        "_reset_state",
+        lambda reset_partial_state=False: reset_calls.append(
+            ("accelerator", bool(reset_partial_state))
+        ),
+    )
+    monkeypatch.setattr(
+        training_utils.GradientState,
+        "_reset_state",
+        lambda: reset_calls.append(("gradient", None)),
+    )
+
+    calls: list[dict[str, object]] = []
+
+    def _fake_factory(**kwargs: object) -> SimpleNamespace:
+        calls.append(dict(kwargs))
+        device = torch.device("cuda" if len(calls) == 1 else "cpu")
+        return SimpleNamespace(device=device, **kwargs)
+
+    out = create_accelerator(
+        use_cpu=True,
+        log=logging.getLogger("test"),
+        accelerator_factory=_fake_factory,
+        mixed_precision="bf16",
+    )
+
+    assert out.device.type == "cpu"
+    assert calls == [
+        {"mixed_precision": "bf16", "cpu": True},
+        {"mixed_precision": "bf16", "cpu": True},
+    ]
+    assert reset_calls == [("gradient", None), ("accelerator", True)]
+
+
 def test_create_accelerator_reraises_unrelated_value_errors() -> None:
     """Non-state errors from Accelerator construction must propagate unchanged."""
 

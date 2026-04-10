@@ -488,7 +488,7 @@ def create_accelerator(
         accelerator_kwargs["cpu"] = True
     _maybe_set_local_cuda_device(use_cpu=use_cpu, log=log)
     try:
-        return accelerator_factory(**accelerator_kwargs)
+        accelerator = accelerator_factory(**accelerator_kwargs)
     except ValueError as exc:
         if _is_accelerator_state_reinit_error(exc):
             log.warning(
@@ -499,8 +499,27 @@ def create_accelerator(
                 accelerator_kwargs.get("mixed_precision"),
             )
             _reset_accelerate_runtime_state()
-            return accelerator_factory(**accelerator_kwargs)
-        raise
+            accelerator = accelerator_factory(**accelerator_kwargs)
+        else:
+            raise
+
+    device = getattr(accelerator, "device", None)
+    if use_cpu and getattr(device, "type", None) == "cuda":
+        log.warning(
+            "Accelerator returned CUDA device despite trainer.use_cpu=true, likely "
+            "because stale Accelerate singleton state was reused. Resetting state "
+            "and recreating the accelerator."
+        )
+        _reset_accelerate_runtime_state()
+        accelerator = accelerator_factory(**accelerator_kwargs)
+        device = getattr(accelerator, "device", None)
+        if getattr(device, "type", None) == "cuda":
+            raise RuntimeError(
+                "Accelerator still resolved to CUDA after resetting state while "
+                "trainer.use_cpu=true."
+            )
+
+    return accelerator
 
 
 def validate_muon_distributed_compatibility(
