@@ -23,6 +23,7 @@ import torch
 import transformers
 import yaml
 from neobert.checkpointing import load_deepspeed_fp32_state_dict
+from neobert.modeling_utils import swiglu_intermediate_size
 from safetensors.torch import load_file, save_file
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
@@ -161,17 +162,6 @@ def maybe_alias_decoder_weights(
     return state_dict
 
 
-def _swiglu_intermediate_size(intermediate_size: int, multiple_of: int = 8) -> int:
-    """Compute the reduced SwiGLU hidden size used in training.
-
-    :param int intermediate_size: Config intermediate size.
-    :param int multiple_of: Alignment multiple.
-    :return int: Effective SwiGLU hidden size.
-    """
-    hidden = int(2 * intermediate_size / 3)
-    return multiple_of * ((hidden + multiple_of - 1) // multiple_of)
-
-
 def _check_shape(
     state_dict: Dict[str, torch.Tensor], key: str, expected: Tuple[int, ...]
 ) -> None:
@@ -226,7 +216,7 @@ def validate_state_dict_layout(
         _check_shape(state_dict, f"{prefix}.wo.weight", (hidden_size, hidden_size))
 
         if hidden_act == "swiglu":
-            mlp_hidden = _swiglu_intermediate_size(model_config["intermediate_size"])
+            mlp_hidden = swiglu_intermediate_size(model_config["intermediate_size"])
             _check_shape(
                 state_dict, f"{prefix}.ffn.w1.weight", (mlp_hidden, hidden_size)
             )

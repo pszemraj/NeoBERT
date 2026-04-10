@@ -112,8 +112,6 @@ def _load_hub_masked_lm(model_name: str, *, max_length: int) -> Any:
 
 if __name__ == "__main__":
     parser = ArgumentParser()
-    # Model
-    # parser.add_argument("--source", type=str, help="")
     parser.add_argument("--model_name", type=str, help="")
     parser.add_argument("--from_hub", action="store_true", help="")
     parser.add_argument("--config_path", type=str, help="", required=False)

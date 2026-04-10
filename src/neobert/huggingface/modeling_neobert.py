@@ -48,6 +48,10 @@ def _import_symbol(candidates: tuple[str, ...], symbol: str) -> Any:
     raise last_exc
 
 
+# Keep small math/runtime helpers local in this file. The exporter copies
+# ``modeling_neobert.py`` as standalone Hugging Face remote code, so importing
+# these from ``neobert.modeling_utils`` would make exported model folders depend
+# on an installed NeoBERT package.
 def swiglu_intermediate_size(intermediate_size: int, multiple_of: int = 8) -> int:
     """Compute reduced SwiGLU hidden size rounded to alignment multiple.
 

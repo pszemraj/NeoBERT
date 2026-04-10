@@ -32,6 +32,7 @@ from neobert.checkpointing import (
     prune_step_checkpoints as _prune_step_checkpoints,
     resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
     save_portable_checkpoint_weights as _save_portable_checkpoint_weights,
+    strip_runtime_prefixes,
 )
 from neobert.collator.collator import (
     _is_right_padded_mask,
@@ -308,17 +309,9 @@ def _normalize_contrastive_pretrained_backbone_state_dict(
     :return dict[str, torch.Tensor]: Normalized encoder-only state dict.
     :raises ValueError: If key normalization would collide.
     """
-    runtime_prefixes = ("_orig_mod.", "module.")
     normalized: dict[str, torch.Tensor] = {}
     for raw_key, value in state_dict.items():
-        key = str(raw_key)
-        while True:
-            for prefix in runtime_prefixes:
-                if key.startswith(prefix):
-                    key = key[len(prefix) :]
-                    break
-            else:
-                break
+        key = strip_runtime_prefixes(str(raw_key))
         if key.startswith("decoder."):
             continue
         if key.startswith("model."):

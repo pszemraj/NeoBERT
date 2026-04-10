@@ -185,12 +185,6 @@ def get_optimizer(
 
             return MuonClipOptimizer(model, model_config, muon_clip_cfg)
 
-        # case "SOAP":
-        #     assert distributed_type is not DistributedType.DEEPSPEED, (
-        #         "SOAP does not support DeepSpeed"
-        #     )
-        #     return SOAP(model.parameters(), **kwargs)
-
         case _:
             raise ValueError(
                 f"Unknown optimizer: {optimizer_name}. Supported: adam, adamw, muonclip"

@@ -2,10 +2,8 @@
 """Tests for streaming dataset shuffle helpers."""
 
 import unittest
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import requests
 import torch
 
 from neobert.config import Config
@@ -20,19 +18,7 @@ from neobert.streaming import (
     is_streaming_dataset,
     peek_streaming_example,
 )
-
-
-def _http_error(status_code: int) -> requests.exceptions.HTTPError:
-    """Construct an HTTPError with a response-like object.
-
-    :param int status_code: HTTP status code to attach.
-    :return requests.exceptions.HTTPError: HTTP error instance.
-    """
-    response = SimpleNamespace(status_code=status_code)
-    return requests.exceptions.HTTPError(
-        f"{status_code} transient failure",
-        response=response,
-    )
+from tests.streaming_test_utils import http_error
 
 
 class DummyStreamingDataset:
@@ -218,7 +204,7 @@ class TestStreamingPercentSlice(unittest.TestCase):
         def _flaky_load(*args, **kwargs):
             calls["count"] += 1
             if calls["count"] == 1:
-                raise _http_error(503)
+                raise http_error(503)
             return mock_dataset
 
         with patch("neobert.pretraining.trainer.load_dataset", side_effect=_flaky_load):
@@ -250,7 +236,7 @@ class _PeekFlakyDataset(torch.utils.data.IterableDataset):
         """
         if not self.failed:
             self.failed = True
-            raise _http_error(503)
+            raise http_error(503)
         yield {"text": "ok"}
 
 
@@ -310,7 +296,7 @@ class _RetryableFlakyDataset(torch.utils.data.IterableDataset):
         while cursor < len(self.values):
             if cursor == self.fail_at and self.failures_remaining > 0:
                 self.failures_remaining -= 1
-                raise _http_error(503)
+                raise http_error(503)
             value = self.values[cursor]
             cursor += 1
             self._state = {"cursor": cursor, "epoch": self.epoch}
@@ -355,7 +341,7 @@ class _StatefulCursorStreamingDataset(torch.utils.data.IterableDataset):
         if self.fail_once_after_advance:
             self.fail_once_after_advance = False
             self.cursor += 1
-            raise _http_error(503)
+            raise http_error(503)
         while self.cursor < len(self.values):
             value = self.values[self.cursor]
             self.cursor += 1
@@ -559,7 +545,7 @@ class TestStreamingRetryHelpers(unittest.TestCase):
                 while cursor < len(self.values):
                     if cursor in self.fail_at_positions:
                         self.fail_at_positions.discard(cursor)
-                        raise _http_error(503)
+                        raise http_error(503)
                     cursor += 1
                     self._state = {"cursor": cursor, "epoch": self.epoch}
                     yield self.values[cursor - 1]

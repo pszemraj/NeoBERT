@@ -32,7 +32,7 @@ def _unwrap_compile_wrappers(model: nn.Module) -> nn.Module:
     return base
 
 
-def _strip_runtime_prefixes(key: str) -> str:
+def strip_runtime_prefixes(key: str) -> str:
     """Strip runtime wrapper prefixes from a state-dict key.
 
     :param str key: Raw state-dict key.
@@ -61,7 +61,7 @@ def _state_dict_for_safetensors(
     for key, value in raw_state_dict.items():
         if not torch.is_tensor(value):
             continue
-        normalized_key = _strip_runtime_prefixes(str(key))
+        normalized_key = strip_runtime_prefixes(str(key))
         if normalized_key in payload:
             raise ValueError(
                 "State dict contains multiple keys that normalize to "
@@ -94,7 +94,7 @@ def _canonicalize_loaded_state_dict(
     """
     payload: dict[str, torch.Tensor] = {}
     for raw_key, value in raw_state_dict.items():
-        normalized_key = _strip_runtime_prefixes(str(raw_key))
+        normalized_key = strip_runtime_prefixes(str(raw_key))
         if normalized_key in payload:
             raise ValueError(
                 "Loaded state dict contains multiple keys that normalize to "

@@ -12,8 +12,6 @@ from neobert.contrastive.datasets import (
     CONTRASTIVE_DATASETS,
     discover_cached_contrastive_dataset_names,
     load_cached_contrastive_datasets,
-    normalize_contrastive_dataset_name_token,
-    resolve_contrastive_dataset_name,
     resolve_contrastive_dataset_names,
 )
 from neobert.tokenization_cache import (
@@ -22,28 +20,6 @@ from neobert.tokenization_cache import (
     write_tokenized_cache_manifest,
 )
 from neobert.tokenizer import get_tokenizer, tokenize
-
-
-def _normalize_dataset_name_token(value: Any) -> str:
-    """Normalize a dataset selector token for registry matching.
-
-    :param Any value: Raw dataset selector.
-    :return str: Uppercase alphanumeric token.
-    """
-    return normalize_contrastive_dataset_name_token(value)
-
-
-def _resolve_single_dataset_name(requested: Any) -> str:
-    """Resolve one dataset selector to a canonical contrastive registry key.
-
-    Accepts canonical keys (for example ``ALLNLI``), class names, and common
-    built-in Hugging Face dataset IDs such as ``sentence-transformers/all-nli``.
-
-    :param Any requested: Raw selector value.
-    :return str: Canonical registry key.
-    :raises ValueError: If the selector cannot be resolved.
-    """
-    return resolve_contrastive_dataset_name(requested)
 
 
 def _resolve_dataset_names(cfg: Any) -> list[str]:
@@ -57,22 +33,13 @@ def _resolve_dataset_names(cfg: Any) -> list[str]:
     return resolve_contrastive_dataset_names(requested)
 
 
-def _discover_cached_dataset_names(all_dir: Path) -> list[str]:
-    """Return cached contrastive split names with complete on-disk payloads.
-
-    :param Path all_dir: Root ``all/`` directory containing cached split folders.
-    :return list[str]: Cached split names in registry order.
-    """
-    return discover_cached_contrastive_dataset_names(all_dir)
-
-
 def _write_cached_dataset_manifest(all_dir: Path) -> list[str]:
     """Write the cached contrastive split manifest from directories on disk.
 
     :param Path all_dir: Root ``all/`` directory containing cached split folders.
     :return list[str]: Manifest split names that were written.
     """
-    cached_names = _discover_cached_dataset_names(all_dir)
+    cached_names = discover_cached_contrastive_dataset_names(all_dir)
     with (all_dir / "dataset_dict.json").open("w", encoding="utf-8") as handle:
         json.dump({"splits": cached_names}, handle, indent=2)
     return cached_names

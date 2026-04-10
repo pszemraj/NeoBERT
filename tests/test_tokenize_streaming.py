@@ -2,7 +2,6 @@
 """Tests for streaming dataset tokenization helpers."""
 
 import unittest
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import requests
@@ -10,20 +9,8 @@ from datasets import Dataset
 
 from neobert.tokenizer import tokenize
 from neobert.tokenizer.tokenizer import get_tokenizer
+from tests.streaming_test_utils import http_error
 from tests.tokenizer_utils import build_wordlevel_tokenizer
-
-
-def _http_error(status_code: int) -> requests.exceptions.HTTPError:
-    """Construct an HTTPError with a response-like object.
-
-    :param int status_code: HTTP status code to attach.
-    :return requests.exceptions.HTTPError: HTTP error instance.
-    """
-    response = SimpleNamespace(status_code=status_code)
-    return requests.exceptions.HTTPError(
-        f"{status_code} transient failure",
-        response=response,
-    )
 
 
 class _FlakySchemaStreamingDataset:
@@ -57,7 +44,7 @@ class _FlakySchemaStreamingDataset:
         """
         if self.failures_remaining > 0:
             self.failures_remaining -= 1
-            raise _http_error(503)
+            raise http_error(503)
         yield {"text": "hello world", "meta": "source"}
 
     def map(self, **kwargs):
