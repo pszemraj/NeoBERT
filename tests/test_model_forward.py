@@ -13,6 +13,7 @@ from neobert.model import (
     NeoBERTLMHead,
     NormNeoBERT,
 )
+from neobert.model.model import NormEncoderBlock
 from neobert.huggingface import NeoBERTHFForSequenceClassification
 from neobert.kernels.attention import (
     prepare_packed_flash_metadata as _prepare_packed_flash_metadata_real,
@@ -282,6 +283,27 @@ class TestModelForward(unittest.TestCase):
         self.assertEqual(outputs.shape, expected_shape)
         self.assertFalse(torch.isnan(outputs).any())
         self.assertFalse(torch.isinf(outputs).any())
+
+    def test_norm_encoder_justnorm_uses_configured_eps_in_fp32(self):
+        """nGPT justnorm should clamp with config norm_eps in fp32."""
+        config = NeoBERTConfig(
+            hidden_size=8,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=16,
+            vocab_size=32,
+            max_length=8,
+            norm_eps=1e-3,
+            ngpt=True,
+        )
+        block = NormEncoderBlock(config)
+        x = torch.full((1, 1, config.hidden_size), 1e-5, dtype=torch.bfloat16)
+
+        out = block.justnorm(x)
+
+        expected = x.float() / config.norm_eps
+        self.assertEqual(out.dtype, torch.bfloat16)
+        self.assertTrue(torch.allclose(out.float(), expected, atol=1e-4))
 
     def test_neobert_lm_head(self):
         """Test NeoBERT with language modeling head."""

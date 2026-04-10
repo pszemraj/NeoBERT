@@ -123,7 +123,69 @@ class TestContrastivePipeline:
         step_dir = Path(temp_output_dir) / "checkpoints" / "1"
         assert step_dir.is_dir()
         assert (step_dir / "model.safetensors").is_file()
+        assert (step_dir / "config.yaml").is_file()
+        assert (step_dir / "optimizer_param_names.json").is_file()
+        assert (step_dir / "tokenizer").is_dir()
         assert not (Path(temp_output_dir) / "model_checkpoints").exists()
+
+    def test_contrastive_pooling_modes_respect_attention_mask(self):
+        """Configured contrastive pooling should affect pooled embeddings."""
+        try:
+            from neobert.contrastive.trainer import _pool_sequence
+        except ImportError as e:
+            pytest.skip(f"Contrastive trainer module not available: {e}")
+
+        hidden = torch.tensor(
+            [
+                [[1.0, 2.0], [5.0, 0.0], [9.0, 9.0]],
+                [[3.0, -1.0], [4.0, 6.0], [7.0, 8.0]],
+            ]
+        )
+        mask = torch.tensor([[1, 1, 0], [1, 0, 0]])
+
+        avg = _pool_sequence(hidden, mask, "avg")
+        cls = _pool_sequence(hidden, mask, "cls")
+        max_pool = _pool_sequence(hidden, mask, "max")
+
+        assert torch.allclose(avg, torch.tensor([[3.0, 1.0], [3.0, -1.0]]))
+        assert torch.allclose(cls, torch.tensor([[1.0, 2.0], [3.0, -1.0]]))
+        assert torch.allclose(max_pool, torch.tensor([[5.0, 2.0], [3.0, -1.0]]))
+
+    def test_contrastive_loss_backward_normalizes_summed_loss(self):
+        """Summed contrastive CE should be mean-normalized before backward."""
+        try:
+            from neobert.contrastive.trainer import _contrastive_loss_for_backward
+        except ImportError as e:
+            pytest.skip(f"Contrastive trainer module not available: {e}")
+
+        loss_sum = torch.tensor(6.0, requires_grad=True)
+        loss = _contrastive_loss_for_backward(loss_sum, query_count=3)
+        loss.backward()
+
+        assert loss.item() == 2.0
+        assert torch.allclose(loss_sum.grad, torch.tensor(1.0 / 3.0))
+
+    def test_contrastive_dropout_guard_only_applies_to_simcse_branch(
+        self, tiny_contrastive_config_path: Path, temp_output_dir: str
+    ):
+        """Dropout zero is invalid only when pretraining SimCSE steps can run."""
+        config = ConfigLoader.load(str(tiny_contrastive_config_path))
+        config.dataset.path = ""
+        config.trainer.output_dir = temp_output_dir
+        config.model.dropout_prob = 0.0
+
+        try:
+            from neobert.contrastive.trainer import trainer
+        except ImportError as e:
+            pytest.skip(f"Contrastive trainer dependencies unavailable: {e}")
+
+        config.contrastive.pretraining_prob = 0.1
+        with pytest.raises(ValueError, match="pretraining_prob > 0"):
+            trainer(config)
+
+        config.contrastive.pretraining_prob = 0.0
+        with pytest.raises(ValueError, match="dataset.path"):
+            trainer(config)
 
     def test_muonclip_trainer_passes_model_config(
         self, tiny_contrastive_config_path: Path, temp_output_dir: str

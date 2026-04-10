@@ -64,6 +64,12 @@ from neobert.streaming import (
     retry_streaming_operation,
     supports_streaming_iteration_resume,
 )
+from neobert.tokenization_cache import (
+    build_tokenization_manifest,
+    resolve_tokenized_cache_dir,
+    validate_tokenized_cache_manifest,
+    write_tokenized_cache_manifest,
+)
 from neobert.tokenizer import get_tokenizer, resolve_text_column
 from neobert.training_utils import (
     _compute_l2_norm_for_logging,
@@ -73,9 +79,13 @@ from neobert.training_utils import (
     _resolve_cuda_pin_memory,
     _resolve_resume_checkpoint,
     _update_global_norm_metric_for_logging,
+    attach_optimizer_param_names,
     create_accelerator,
     resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
+    save_optimizer_param_name_manifest,
+    sync_resume_source_of_truth,
+    validate_optimizer_param_name_manifest,
     validate_distributed_runtime_policy,
     validate_muon_distributed_compatibility,
     validate_muon_runtime_topology,
@@ -1554,6 +1564,13 @@ def trainer(cfg: Config) -> None:
         str(checkpoint_dir),
         str(output_dir),
     )
+    if cfg.trainer.resume_from_checkpoint and resume_checkpoint_path:
+        sync_resume_source_of_truth(
+            cfg,
+            resume_checkpoint_path,
+            task="pretraining",
+            log=logger,
+        )
 
     # Accelerator object - disable automatic checkpoint naming so the trainer can
     # control a single checkpoint tree (checkpoints/<step>).
@@ -1858,15 +1875,33 @@ def trainer(cfg: Config) -> None:
 
         # For non-streaming datasets, check if pre-tokenization is requested
         if not is_streaming and cfg.dataset.pre_tokenize:
-            # Create output directory
-            if cfg.dataset.pre_tokenize_output:
-                output_dir = cfg.dataset.pre_tokenize_output
-            else:
-                output_dir = f"tokenized_data/{cfg.dataset.name.replace('/', '_')}"
+            text_column = resolve_text_column(
+                train_dataset,
+                is_streaming=False,
+                preferred=cfg.dataset.text_column,
+            )
+            tokenization_manifest = build_tokenization_manifest(
+                tokenizer,
+                dataset_name=cfg.dataset.name,
+                dataset_config=cfg.dataset.config,
+                dataset_path=cfg.dataset.path,
+                column_name=text_column,
+                max_length=tokenize_max_length,
+                truncation=cfg.tokenizer.truncation,
+                add_special_tokens=add_special_tokens,
+                return_special_tokens_mask=return_special_tokens_mask,
+            )
+            output_dir = resolve_tokenized_cache_dir(
+                requested_output_dir=cfg.dataset.pre_tokenize_output,
+                dataset_name=cfg.dataset.name,
+                manifest=tokenization_manifest,
+            )
 
-            Path(output_dir).mkdir(parents=True, exist_ok=True)
-            success_flag = Path(output_dir) / ".tokenize_complete"
-            failure_flag = Path(output_dir) / ".tokenize_failed"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            success_flag = output_dir / ".tokenize_complete"
+            failure_flag = output_dir / ".tokenize_failed"
+            if success_flag.exists():
+                validate_tokenized_cache_manifest(output_dir, tokenization_manifest)
 
             accelerator.print(f"Pre-tokenizing dataset to: {output_dir}")
 
@@ -1874,11 +1909,6 @@ def trainer(cfg: Config) -> None:
                 if failure_flag.exists():
                     failure_flag.unlink()
                 try:
-                    text_column = resolve_text_column(
-                        train_dataset,
-                        is_streaming=False,
-                        preferred=cfg.dataset.text_column,
-                    )
                     tokenized_dataset = tokenize(
                         train_dataset,
                         tokenizer,
@@ -1894,6 +1924,7 @@ def trainer(cfg: Config) -> None:
                         streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
                     )
                     tokenized_dataset.save_to_disk(output_dir)
+                    write_tokenized_cache_manifest(output_dir, tokenization_manifest)
                 except Exception as exc:
                     failure_flag.write_text(str(exc))
                 else:
@@ -1908,6 +1939,7 @@ def trainer(cfg: Config) -> None:
                 )
                 raise RuntimeError(f"Tokenization failed: {err_msg}")
 
+            validate_tokenized_cache_manifest(output_dir, tokenization_manifest)
             accelerator.print(f"Pre-tokenization complete. Loading from: {output_dir}")
             # Load the pre-tokenized dataset
             train_dataset = load_from_disk(output_dir)
@@ -2246,6 +2278,7 @@ def trainer(cfg: Config) -> None:
         eps=cfg.optimizer.eps,
         muon_config=cfg.optimizer.muon_config,
     )
+    attach_optimizer_param_names(model, optimizer)
     _, warmup_steps, decay_steps, constant_steps = resolve_scheduler_steps(
         trainer_max_steps=cfg.trainer.max_steps,
         total_steps=cfg.scheduler.total_steps,
@@ -2417,6 +2450,7 @@ def trainer(cfg: Config) -> None:
             raise FileNotFoundError(
                 f"resume_from_checkpoint path not found: {resume_checkpoint_path}"
             )
+        validate_optimizer_param_name_manifest(optimizer, resume_checkpoint)
         accelerator.load_state(str(resume_checkpoint))
         validate_muon_runtime_topology(
             accelerator=accelerator,
@@ -2771,6 +2805,8 @@ def trainer(cfg: Config) -> None:
                     checkpoint_path = checkpoint_dir / step_tag
                     accelerator.save_state(output_dir=str(checkpoint_path))
                     accelerator.wait_for_everyone()
+                    if accelerator.is_main_process:
+                        save_optimizer_param_name_manifest(optimizer, checkpoint_path)
                     _save_portable_checkpoint_weights(
                         model, accelerator, checkpoint_path
                     )

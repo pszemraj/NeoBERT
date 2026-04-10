@@ -113,6 +113,14 @@ For hub-backed streaming datasets:
 - retry recovery resumes from the last yielded example when the underlying HF iterable dataset supports `state_dict()/load_state_dict()`, and the retry wrapper remains visible to checkpoint/save-state resume paths and streaming eval-budget checks,
 - shuffled streams can still perturb exact in-buffer order after a retry because HF refill semantics do not preserve the old shuffle buffer contents.
 
+## Contrastive Objective Details
+
+Contrastive CE is still accumulated as a summed loss for logging, but the training loop divides by local query count before backward so gradient scale does not change just because a task uses a larger local batch size. `train/loss` remains a per-sample mean in metrics.
+
+`contrastive.pooling` is active in the trainer. Use `avg` for masked mean pooling, `cls` for the first token, or `max` for masked max pooling.
+
+When `contrastive.pretraining_prob > 0`, `model.dropout_prob` must be greater than zero so the SimCSE-style anti-forgetting branch has stochastic two-view corruption.
+
 ## Distributed Muon
 
 The maintained distributed Muon path is:

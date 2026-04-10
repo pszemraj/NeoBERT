@@ -13,7 +13,7 @@ This guide covers pretraining and contrastive workflows. Full field-level schema
 | `scripts/contrastive/finetune.py`         | contrastive fine-tuning           |
 | `scripts/contrastive/preprocess.py`       | contrastive dataset preprocessing |
 
-For contrastive preprocessing, `dataset.name` may be omitted, `ALL`, a canonical key such as `ALLNLI`, or an HF dataset ID alias such as `sentence-transformers/all-nli`, `embedding-data/QQP_triplets`, or `WhereIsAI/github-issue-similarity`. Both preprocessing and contrastive training load only the requested cached splits from `all/`; other cached split directories may remain on disk for later reuse.
+For contrastive preprocessing, `dataset.name` may be omitted, `ALL`, a canonical key such as `ALLNLI`, or an HF dataset ID alias such as `sentence-transformers/all-nli`, `embedding-data/QQP_triplets`, or `WhereIsAI/github-issue-similarity`. Both preprocessing and contrastive training load only the requested cached splits from `all/`; other cached split directories may remain on disk for later reuse. Cached split reuse is guarded by `tokenization_manifest.json`, so changing tokenizer/max-length/tokenization settings requires `dataset.force_redownload: true` or a fresh cache.
 
 ## Pretraining
 
@@ -134,6 +134,7 @@ Unified pretraining checkpoints (resume + export assets):
 <output_dir>/checkpoints/<step>/
   model.safetensors
   optimizer.bin / scheduler.bin / random_states_*.pkl
+  optimizer_param_names.json
   custom_checkpoint_*.pkl
   config.yaml
   tokenizer_info.json
@@ -159,6 +160,10 @@ python scripts/pretraining/pretrain.py \
 ```
 
 Confirm in logs that startup loads `outputs/.../checkpoints/<step>/` and that training resumes from the saved global step instead of step 0.
+
+Resume treats checkpoint metadata as authoritative for model/tokenizer/data objective fields. If the current launch config disagrees with the checkpoint's `config.yaml`, the checkpoint values win before tokenizer/model/dataloader construction, and `tokenizer/` inside the checkpoint is used when present.
+
+Optimizer state is guarded by `optimizer_param_names.json`. Resume fails fast if the current optimizer parameter-group order differs from the order saved with the checkpoint, because PyTorch optimizer buffers are positional inside groups.
 
 For the streaming SmolLM2 configs in this repo, resume is best-effort: trainer restores checkpoint state and advances the stream by the consumed batches before continuing. Late checkpoints can take noticeable time to replay, and shuffled streams do not guarantee exact sample continuity.
 
@@ -187,8 +192,11 @@ Notes:
 - resume and export both operate from `<output_dir>/checkpoints/`.
 - pretraining resume with `dataset.streaming: true` uses best-effort stream advancement based on saved batch counters.
 - for exact deterministic continuation, prefer pre-tokenized `dataset.streaming: false` runs.
+- TODO: replace the fail-fast optimizer parameter-name manifest with a true name-keyed optimizer-state transplant if the repo later needs optimizer resume across intentional parameter-registration refactors.
 
 ## Pre-tokenized Datasets
+
+Pre-tokenized caches include `tokenization_manifest.json`, which records the tokenizer vocab hash, special-token map, text columns, max length, truncation, and special-token settings. Existing caches without a manifest, or with a manifest that does not match the current tokenization contract, are rejected instead of being reused silently.
 
 Two common paths:
 

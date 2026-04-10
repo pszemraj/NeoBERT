@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -11,16 +12,20 @@ import torch
 from accelerate.state import AcceleratorState, GradientState
 from accelerate.utils import DataLoaderConfiguration, DistributedType
 
-from neobert.config import Config
+from neobert.config import Config, ConfigLoader
 from neobert.model import NeoBERT, NeoBERTConfig
 from neobert.optimizer import get_optimizer
 from neobert.training_utils import (
     _compute_l2_norm_for_logging,
     _maybe_compile_model,
     _update_global_norm_metric_for_logging,
+    attach_optimizer_param_names,
     create_accelerator,
     resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
+    save_optimizer_param_name_manifest,
+    sync_resume_source_of_truth,
+    validate_optimizer_param_name_manifest,
     validate_distributed_runtime_policy,
     validate_muon_distributed_compatibility,
     validate_muon_runtime_topology,
@@ -176,6 +181,104 @@ def test_resolve_wandb_watch_mode_matrix() -> None:
             assert warning is not None
         else:
             assert warning is None
+
+
+def test_sync_resume_source_of_truth_uses_checkpoint_config(
+    tmp_path: Path,
+) -> None:
+    """Resume should use checkpoint tokenizer/model/objective fields."""
+    checkpoint_dir = tmp_path / "checkpoints" / "10"
+    tokenizer_dir = checkpoint_dir / "tokenizer"
+    tokenizer_dir.mkdir(parents=True)
+
+    checkpoint_cfg = Config()
+    checkpoint_cfg.model.hidden_size = 128
+    checkpoint_cfg.model.dropout_prob = 0.2
+    checkpoint_cfg.tokenizer.name = "checkpoint-tokenizer"
+    checkpoint_cfg.tokenizer.max_length = 256
+    checkpoint_cfg.dataset.name = "checkpoint-dataset"
+    checkpoint_cfg.dataset.path = "checkpoint-data"
+    checkpoint_cfg.dataset.max_seq_length = 256
+    checkpoint_cfg.datacollator.mlm_probability = 0.3
+    checkpoint_cfg.datacollator.pack_sequences = True
+    checkpoint_cfg.contrastive.pooling = "max"
+    checkpoint_cfg.contrastive.pretraining_prob = 0.4
+    ConfigLoader.save(checkpoint_cfg, str(checkpoint_dir / "config.yaml"))
+
+    runtime_cfg = Config()
+    runtime_cfg.model.hidden_size = 64
+    runtime_cfg.model.dropout_prob = 0.0
+    runtime_cfg.tokenizer.name = "runtime-tokenizer"
+    runtime_cfg.tokenizer.max_length = 128
+    runtime_cfg.dataset.name = "runtime-dataset"
+    runtime_cfg.dataset.path = "runtime-data"
+    runtime_cfg.dataset.max_seq_length = 128
+    runtime_cfg.datacollator.mlm_probability = 0.15
+    runtime_cfg.datacollator.pack_sequences = False
+    runtime_cfg.contrastive.pooling = "avg"
+    runtime_cfg.contrastive.pretraining_prob = 0.0
+
+    sync_resume_source_of_truth(
+        runtime_cfg,
+        checkpoint_dir,
+        task="contrastive",
+        log=logging.getLogger("test"),
+    )
+
+    assert runtime_cfg.model.hidden_size == 128
+    assert runtime_cfg.model.dropout_prob == 0.2
+    assert runtime_cfg.tokenizer.path == str(tokenizer_dir)
+    assert runtime_cfg.tokenizer.max_length == 256
+    assert runtime_cfg.dataset.name == "checkpoint-dataset"
+    assert runtime_cfg.dataset.path == "checkpoint-data"
+    assert runtime_cfg.dataset.max_seq_length == 256
+    assert runtime_cfg.datacollator.mlm_probability == 0.3
+    assert runtime_cfg.datacollator.pack_sequences is True
+    assert runtime_cfg.contrastive.pooling == "max"
+    assert runtime_cfg.contrastive.pretraining_prob == 0.4
+
+
+def test_sync_resume_source_of_truth_rejects_missing_config(tmp_path: Path) -> None:
+    """Resume without checkpoint config must fail before runtime state load."""
+    checkpoint_dir = tmp_path / "checkpoints" / "10"
+    checkpoint_dir.mkdir(parents=True)
+
+    with pytest.raises(RuntimeError, match="config.yaml"):
+        sync_resume_source_of_truth(
+            Config(),
+            checkpoint_dir,
+            task="pretraining",
+            log=logging.getLogger("test"),
+        )
+
+
+def test_optimizer_param_name_manifest_rejects_reordered_groups(
+    tmp_path: Path,
+) -> None:
+    """Same-shaped parameter reordering must not load optimizer state silently."""
+
+    class OrderedPair(torch.nn.Module):
+        def __init__(self, reverse: bool = False) -> None:
+            super().__init__()
+            if reverse:
+                self.second = torch.nn.Linear(2, 2, bias=False)
+                self.first = torch.nn.Linear(2, 2, bias=False)
+            else:
+                self.first = torch.nn.Linear(2, 2, bias=False)
+                self.second = torch.nn.Linear(2, 2, bias=False)
+
+    model = OrderedPair(reverse=False)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    attach_optimizer_param_names(model, optimizer)
+    save_optimizer_param_name_manifest(optimizer, tmp_path)
+
+    validate_optimizer_param_name_manifest(optimizer, tmp_path)
+
+    reordered_model = OrderedPair(reverse=True)
+    reordered_optimizer = torch.optim.AdamW(reordered_model.parameters(), lr=1e-3)
+    attach_optimizer_param_names(reordered_model, reordered_optimizer)
+    with pytest.raises(RuntimeError, match="parameter order changed"):
+        validate_optimizer_param_name_manifest(reordered_optimizer, tmp_path)
 
 
 def test_create_accelerator_recreates_state_for_mixed_precision_reuse() -> None:

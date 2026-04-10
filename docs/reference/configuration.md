@@ -198,7 +198,7 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 | `dataset.num_proc`            | `int`         | `4`     | Multiprocessing workers for tokenization map.               |
 | `dataset.shuffle_buffer_size` | `int`         | `10000` | Streaming shuffle buffer.                                   |
 | `dataset.pre_tokenize`        | `bool`        | `false` | Pre-tokenize non-streaming datasets and persist results.    |
-| `dataset.pre_tokenize_output` | `str \| None` | `null`  | Output path for pre-tokenized datasets.                     |
+| `dataset.pre_tokenize_output` | `str \| None` | `null`  | Output path for pre-tokenized datasets; cache reuse requires a matching `tokenization_manifest.json`. |
 | `dataset.cache_dir`           | `str \| None` | `null`  | HF datasets cache directory.                                |
 | `dataset.trust_remote_code`   | `bool`        | `false` | Allow remote dataset code execution.                        |
 
@@ -375,7 +375,7 @@ Save cadence/retention knobs live under [Training Loop](#training-loop): `traine
 | `pretrained_checkpoint` | `str` | `"latest"` | Checkpoint selector for downstream tasks. |
 
 > [!NOTE]
-> Pretraining and GLUE resumable state checkpoints are written under `output_dir/checkpoints/<step>/`. GLUE transfer/loading helpers still accept legacy `output_dir/model_checkpoints/<step>/` layouts for older runs. Resume path resolution uses numeric step directories and picks the highest available step for `resume_from_checkpoint: latest`. DeepSpeed `latest` indirection files are optional legacy metadata and are only consulted by DeepSpeed conversion/loading helpers when present.
+> Pretraining, contrastive, and GLUE resumable state checkpoints are written under `output_dir/checkpoints/<step>/`. Pretraining and contrastive step directories include config/tokenizer metadata plus optimizer parameter-name manifests for faithful resume. GLUE transfer/loading helpers still accept legacy `output_dir/model_checkpoints/<step>/` layouts for older runs. Resume path resolution uses numeric step directories and picks the highest available step for `resume_from_checkpoint: latest`. DeepSpeed `latest` indirection files are optional legacy metadata and are only consulted by DeepSpeed conversion/loading helpers when present.
 
 ---
 
@@ -439,7 +439,7 @@ Save cadence/retention knobs live under [Training Loop](#training-loop): `traine
 | Key                                     | Type                 | Default    | Description                                                                 |
 | --------------------------------------- | -------------------- | ---------- | --------------------------------------------------------------------------- |
 | `contrastive.temperature`               | `float`              | `0.05`     | Contrastive temperature.                                                    |
-| `contrastive.pooling`                   | `str`                | `"avg"`    | Pooling mode: `avg`, `cls`, `max`.                                          |
+| `contrastive.pooling`                   | `str`                | `"avg"`    | Pooling mode used by contrastive training: `avg`, `cls`, `max`.             |
 | `contrastive.loss_type`                 | `str`                | `"simcse"` | Loss variant: `simcse`, `supcon`.                                           |
 | `contrastive.hard_negative_weight`      | `float`              | `0.0`      | Additional hard-negative weighting.                                         |
 | `contrastive.pretraining_prob`          | `float`              | `0.3`      | Fraction of steps that draw the pretraining branch in contrastive training. |
@@ -463,6 +463,9 @@ Save cadence/retention knobs live under [Training Loop](#training-loop): `traine
 | Rule                                                                              | Type               | Details                                                                                                             |
 | --------------------------------------------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------- |
 | `trainer.resume_from_checkpoint` with `dataset.streaming=true`                    | **BEST-EFFORT**    | Streaming resume restores state and advances stream by consumed batches; exact sample continuity is not guaranteed. |
+| `trainer.resume_from_checkpoint` with checkpoint `config.yaml` drift              | **CHECKPOINT WINS** | Resume loads checkpoint model/tokenizer/data objective fields before constructing runtime objects; missing checkpoint config fails fast. |
+| `trainer.resume_from_checkpoint` with optimizer parameter-order drift             | **ERROR**          | Resume validates `optimizer_param_names.json` before loading optimizer state to avoid positional momentum/buffer corruption. |
+| Reusing pre-tokenized caches                                                     | **MANIFEST CHECK** | Caches without a matching `tokenization_manifest.json` are rejected; delete/regenerate the cache or choose a new output path. |
 | Streaming eval with neither `trainer.eval_max_batches` nor `dataset.eval_samples` | **ERROR**          | Set an explicit eval budget for reproducible streaming metrics.                                                     |
 | `dataset.validation_split` with `dataset.streaming=true`                          | **WARNING / SKIP** | Validation split creation is skipped for streaming datasets.                                                        |
 | `scheduler.warmup_percent` and `scheduler.warmup_steps`                           | **PRECEDENCE**     | `warmup_percent` overrides absolute warmup steps.                                                                   |
@@ -473,6 +476,7 @@ Save cadence/retention knobs live under [Training Loop](#training-loop): `traine
 | `optimizer.name=muonclip` with FSDP v1                                             | **ERROR**          | MuonClip distributed mode requires FSDP2 (`fsdp_version=2`).                                                       |
 | Any DeepSpeed runtime                                                              | **ERROR**          | DeepSpeed execution is unsupported in this repo; use Accelerate FSDP v2 for distributed runs. Legacy DeepSpeed checkpoint conversion remains available separately. |
 | `trainer.mixed_precision='no'` with `model.attn_backend=flash_attn_varlen`         | **AUTO-ADJUST**    | Runtime switches attention backend to `sdpa` with a warning.                                                       |
+| `contrastive.pretraining_prob > 0` with `model.dropout_prob <= 0`                 | **ERROR**          | SimCSE-style anti-forgetting steps require dropout-created views.                                                   |
 | `datacollator.pack_sequences=true` with `model.attn_backend=sdpa`                 | **WARNING**        | Works, but slower than `flash_attn_varlen`; SDPA uses fallback path.                                                |
 | `dataset.path` and `dataset.name` both set                                        | **PRECEDENCE**     | Existing local `dataset.path` is used first; hub dataset acts as fallback.                                          |
 | Tokenizer/model vocab sizes                                                       | **IMPORTANT**      | Runtime now pads tokenizer with inert tokens so tokenizer length matches model vocab size.                          |

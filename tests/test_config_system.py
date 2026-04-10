@@ -70,6 +70,23 @@ class TestConfigSystem(unittest.TestCase):
         self.assertEqual(config.trainer.per_device_train_batch_size, 2)
         self.assertEqual(config.dataset.max_seq_length, 128)
 
+    def test_saved_default_config_loads_without_legacy_none_conflicts(self):
+        """Saved configs should roundtrip even with null deprecated aliases."""
+        config = Config()
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            path = f.name
+
+        try:
+            ConfigLoader.save(config, path)
+            loaded = ConfigLoader.load(path)
+        finally:
+            os.unlink(path)
+
+        self.assertEqual(loaded.trainer.per_device_train_batch_size, 16)
+        self.assertEqual(loaded.trainer.per_device_eval_batch_size, 32)
+        self.assertEqual(loaded.trainer.save_total_limit, 3)
+
     def test_cli_override_system(self):
         """Test CLI override functionality."""
         config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"

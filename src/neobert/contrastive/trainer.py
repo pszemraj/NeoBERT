@@ -49,9 +49,13 @@ from neobert.training_utils import (
     _resolve_cuda_pin_memory,
     _resolve_resume_checkpoint,
     _update_global_norm_metric_for_logging,
+    attach_optimizer_param_names,
     create_accelerator,
     resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
+    save_optimizer_param_name_manifest,
+    sync_resume_source_of_truth,
+    validate_optimizer_param_name_manifest,
     validate_distributed_runtime_policy,
     validate_muon_distributed_compatibility,
     validate_muon_runtime_topology,
@@ -118,6 +122,81 @@ def _resolve_checkpoint_tag(checkpoint_dir: Path, checkpoint: str | int | None) 
             )
         return str(max(steps))
     return str(checkpoint)
+
+
+def _resolve_contrastive_pooling(pooling: str) -> str:
+    """Normalize and validate contrastive sequence pooling.
+
+    :param str pooling: Configured pooling mode.
+    :return str: Normalized pooling mode.
+    :raises ValueError: If the pooling mode is unsupported.
+    """
+    normalized = str(pooling).strip().lower()
+    if normalized not in {"avg", "cls", "max"}:
+        raise ValueError(
+            "contrastive.pooling must be one of {'avg', 'cls', 'max'}, "
+            f"got {pooling!r}."
+        )
+    return normalized
+
+
+def _pool_sequence(
+    hidden: torch.Tensor,
+    attention_mask: torch.Tensor,
+    pooling: str,
+) -> torch.Tensor:
+    """Pool token embeddings using the configured contrastive strategy.
+
+    :param torch.Tensor hidden: Sequence embeddings of shape ``[batch, seq, hidden]``.
+    :param torch.Tensor attention_mask: 0/1 attention mask of shape ``[batch, seq]``.
+    :param str pooling: Pooling mode, one of ``avg``, ``cls``, or ``max``.
+    :return torch.Tensor: Pooled embeddings of shape ``[batch, hidden]``.
+    """
+    mask = attention_mask.bool()
+    if pooling == "avg":
+        weights = mask.unsqueeze(-1).to(dtype=hidden.dtype)
+        denom = mask.sum(dim=1, keepdim=True).clamp_min(1).to(dtype=hidden.dtype)
+        return (hidden * weights).sum(dim=1) / denom
+    if pooling == "cls":
+        return hidden[:, 0]
+    if pooling == "max":
+        floor = torch.finfo(hidden.dtype).min
+        masked = hidden.masked_fill(~mask.unsqueeze(-1), floor)
+        pooled = masked.max(dim=1).values
+        return torch.where(
+            mask.any(dim=1, keepdim=True), pooled, torch.zeros_like(pooled)
+        )
+    raise ValueError(f"Unknown contrastive.pooling={pooling!r}")
+
+
+def _contrastive_loss_for_backward(
+    loss_sum: torch.Tensor,
+    *,
+    query_count: int,
+) -> torch.Tensor:
+    """Normalize summed contrastive loss before backpropagation.
+
+    :param torch.Tensor loss_sum: Summed query loss.
+    :param int query_count: Number of local query examples in the microbatch.
+    :return torch.Tensor: Per-query loss used for gradients.
+    """
+    return loss_sum / max(int(query_count), 1)
+
+
+def _save_contrastive_checkpoint_metadata(
+    cfg: Config,
+    tokenizer: Any,
+    checkpoint_path: Path,
+) -> None:
+    """Save contrastive resume/export metadata beside checkpoint state.
+
+    :param Config cfg: Runtime config.
+    :param Any tokenizer: Tokenizer with ``save_pretrained``.
+    :param Path checkpoint_path: Checkpoint step directory.
+    """
+    ConfigLoader.save(cfg, str(checkpoint_path / "config.yaml"))
+    tokenizer_dir = checkpoint_path / "tokenizer"
+    tokenizer.save_pretrained(tokenizer_dir)
 
 
 def _sync_contrastive_runtime_from_pretraining(
@@ -376,10 +455,32 @@ def trainer(cfg: Config) -> None:
 
     :param Config cfg: Training configuration.
     """
-    # Check if dropout is non zero
-    if cfg.model.dropout_prob <= 0:
+    output_dir = Path(cfg.trainer.output_dir)
+    checkpoint_dir = output_dir / "checkpoints"
+    resume_checkpoint_path, iteration = _resolve_resume_checkpoint(
+        cfg.trainer.resume_from_checkpoint,
+        str(checkpoint_dir),
+        str(output_dir),
+    )
+    if cfg.trainer.resume_from_checkpoint and resume_checkpoint_path:
+        sync_resume_source_of_truth(
+            cfg,
+            resume_checkpoint_path,
+            task="contrastive",
+            log=logger,
+        )
+
+    cfg.contrastive.pooling = _resolve_contrastive_pooling(cfg.contrastive.pooling)
+    pretraining_mix_prob = float(cfg.contrastive.pretraining_prob)
+    if pretraining_mix_prob < 0.0 or pretraining_mix_prob > 1.0:
         raise ValueError(
-            "Dropout needs to be positive in order to perform steps of SimCSE."
+            "contrastive.pretraining_prob must be in [0, 1], got "
+            f"{pretraining_mix_prob}."
+        )
+    if pretraining_mix_prob > 0.0 and cfg.model.dropout_prob <= 0:
+        raise ValueError(
+            "contrastive.pretraining_prob > 0 requires model.dropout_prob > 0 "
+            "for SimCSE-style two-view corruption."
         )
     if not cfg.dataset.path:
         raise ValueError(
@@ -390,12 +491,6 @@ def trainer(cfg: Config) -> None:
         cfg.model.attn_backend,
         fallback_to_sdpa=True,
     )
-    pretraining_mix_prob = float(cfg.contrastive.pretraining_prob)
-    if pretraining_mix_prob < 0.0 or pretraining_mix_prob > 1.0:
-        raise ValueError(
-            "contrastive.pretraining_prob must be in [0, 1], got "
-            f"{pretraining_mix_prob}."
-        )
 
     pretrained_checkpoint_dir = getattr(
         cfg.contrastive, "pretrained_checkpoint_dir", None
@@ -432,17 +527,6 @@ def trainer(cfg: Config) -> None:
             cfg, "use_deepspeed", False
         ):
             use_deepspeed = cfg._raw_model_dict.get("deepspeed")
-
-    # Checkpoint layout: contrastive now writes all artifacts under
-    # output_dir/checkpoints/<step>/. Legacy model_checkpoints roots are not
-    # supported for new runs or initialization.
-    output_dir = Path(cfg.trainer.output_dir)
-    checkpoint_dir = output_dir / "checkpoints"
-    resume_checkpoint_path, iteration = _resolve_resume_checkpoint(
-        cfg.trainer.resume_from_checkpoint,
-        str(checkpoint_dir),
-        str(output_dir),
-    )
 
     project_config = ProjectConfiguration(
         str(output_dir),
@@ -771,6 +855,7 @@ def trainer(cfg: Config) -> None:
         eps=cfg.optimizer.eps,
         muon_config=cfg.optimizer.muon_config,
     )
+    attach_optimizer_param_names(model, optimizer)
 
     # Scheduler
     _, warmup_steps, decay_steps, constant_steps = resolve_scheduler_steps(
@@ -843,6 +928,7 @@ def trainer(cfg: Config) -> None:
                 raise FileNotFoundError(
                     f"resume_from_checkpoint path not found: {resume_checkpoint_path}"
                 )
+            validate_optimizer_param_name_manifest(optimizer, resume_checkpoint)
             accelerator.load_state(str(resume_checkpoint))
             validate_muon_runtime_topology(
                 accelerator=accelerator,
@@ -879,6 +965,9 @@ def trainer(cfg: Config) -> None:
         step_tag = str(int(metrics["train/steps"]))
         checkpoint_path = checkpoint_dir / step_tag
         accelerator.save_state(output_dir=str(checkpoint_path))
+        if accelerator.is_main_process:
+            save_optimizer_param_name_manifest(optimizer, checkpoint_path)
+            _save_contrastive_checkpoint_metadata(cfg, tokenizer, checkpoint_path)
         _save_portable_checkpoint_weights(model, accelerator, checkpoint_path)
         accelerator.wait_for_everyone()
         print(f"Done on rank {accelerator.process_index}")
@@ -1022,17 +1111,23 @@ def trainer(cfg: Config) -> None:
         else:
             negatives = None
 
-        pooled_queries = (queries * batch["attention_mask_queries"].unsqueeze(-1)).sum(
-            dim=1
-        ) / batch["attention_mask_queries"].sum(dim=1, keepdim=True)
-        pooled_corpus = (corpus * batch["attention_mask_corpus"].unsqueeze(-1)).sum(
-            dim=1
-        ) / batch["attention_mask_corpus"].sum(dim=1, keepdim=True)
+        pooled_queries = _pool_sequence(
+            queries,
+            batch["attention_mask_queries"],
+            cfg.contrastive.pooling,
+        )
+        pooled_corpus = _pool_sequence(
+            corpus,
+            batch["attention_mask_corpus"],
+            cfg.contrastive.pooling,
+        )
 
         if negatives is not None:
-            pooled_negatives = (
-                negatives * batch["attention_mask_negative"].unsqueeze(-1)
-            ).sum(dim=1) / batch["attention_mask_negative"].sum(dim=1, keepdim=True)
+            pooled_negatives = _pool_sequence(
+                negatives,
+                batch["attention_mask_negative"],
+                cfg.contrastive.pooling,
+            )
         else:
             pooled_negatives = None
 
@@ -1084,7 +1179,8 @@ def trainer(cfg: Config) -> None:
             # Update specific number of batches
             metrics[f"train/{task_name}_batches"] += 1
 
-        # Else, we do a step of SimCSE with the original pretraing dataset in order to avoid catastrophic forgetting. Warning: dropout needs to be greater than zero!
+        # Else, run a SimCSE-style step on the original pretraining dataset
+        # to reduce catastrophic forgetting.
         else:
             batch = _next_batch("pretraining")
             batch = _normalize_batch(batch, allow_single_view=True)
@@ -1119,7 +1215,7 @@ def trainer(cfg: Config) -> None:
         )
         with sync_context:
             with accelerator.autocast():
-                train_loss = _forward_and_loss(
+                train_loss_sum = _forward_and_loss(
                     batch,
                     pad_mask_queries=pad_mask_queries,
                     packed_queries=packed_queries,
@@ -1128,11 +1224,16 @@ def trainer(cfg: Config) -> None:
                     pad_mask_negatives=pad_mask_negatives,
                     packed_negatives=packed_negatives,
                 )
+            query_count = int(batch["input_ids_queries"].shape[0])
+            train_loss = _contrastive_loss_for_backward(
+                train_loss_sum,
+                query_count=query_count,
+            )
             accelerator.backward(train_loss)
 
         # Log local metrics for this microbatch
-        metrics["train/local_samples"] += batch["input_ids_queries"].shape[0]
-        metrics["train/local_sum_loss"] += train_loss.item()
+        metrics["train/local_samples"] += query_count
+        metrics["train/local_sum_loss"] += float(train_loss_sum.detach().float().item())
 
         if is_last_microbatch:
             should_log = (metrics["train/steps"] + 1) % log_interval == 0
@@ -1185,6 +1286,11 @@ def trainer(cfg: Config) -> None:
                 # to a single step directory.
                 accelerator.save_state(output_dir=str(checkpoint_path))
                 accelerator.wait_for_everyone()
+                if accelerator.is_main_process:
+                    save_optimizer_param_name_manifest(optimizer, checkpoint_path)
+                    _save_contrastive_checkpoint_metadata(
+                        cfg, tokenizer, checkpoint_path
+                    )
                 _save_portable_checkpoint_weights(model, accelerator, checkpoint_path)
                 accelerator.wait_for_everyone()
 

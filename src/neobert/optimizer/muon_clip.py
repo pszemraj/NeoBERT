@@ -2481,7 +2481,12 @@ class MuonClipOptimizer(Optimizer):
             :param torch.Tensor x: Input tensor.
             :return torch.Tensor: L2-normalized tensor.
             """
-            return x / (x.norm(p=2, dim=-1, keepdim=True) + 1e-8)
+            denom = (
+                x.float()
+                .norm(p=2, dim=-1, keepdim=True)
+                .clamp_min(self.model_config.norm_eps)
+            )
+            return x / denom.to(dtype=x.dtype)
 
         return sqk * _justnorm(xq), sqk * _justnorm(xk)
 

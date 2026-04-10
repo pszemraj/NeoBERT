@@ -1071,53 +1071,56 @@ class ConfigLoader:
             # trainer.train_batch_size -> trainer.per_device_train_batch_size
             if "train_batch_size" in trainer:
                 train_batch_size = trainer.pop("train_batch_size")
-                if "per_device_train_batch_size" in trainer and trainer[
-                    "per_device_train_batch_size"
-                ] not in (None, train_batch_size):
-                    raise ValueError(
-                        "Both 'trainer.train_batch_size' and "
-                        "'trainer.per_device_train_batch_size' are set with different values."
+                if train_batch_size is not None:
+                    if "per_device_train_batch_size" in trainer and trainer[
+                        "per_device_train_batch_size"
+                    ] not in (None, train_batch_size):
+                        raise ValueError(
+                            "Both 'trainer.train_batch_size' and "
+                            "'trainer.per_device_train_batch_size' are set with different values."
+                        )
+                    if trainer.get("per_device_train_batch_size") is None:
+                        trainer["per_device_train_batch_size"] = train_batch_size
+                    ConfigLoader._warn_legacy(
+                        "Config key 'trainer.train_batch_size' is deprecated; use "
+                        "'trainer.per_device_train_batch_size'."
                     )
-                if trainer.get("per_device_train_batch_size") is None:
-                    trainer["per_device_train_batch_size"] = train_batch_size
-                ConfigLoader._warn_legacy(
-                    "Config key 'trainer.train_batch_size' is deprecated; use "
-                    "'trainer.per_device_train_batch_size'."
-                )
 
             # trainer.eval_batch_size -> trainer.per_device_eval_batch_size
             if "eval_batch_size" in trainer:
                 eval_batch_size = trainer.pop("eval_batch_size")
-                if "per_device_eval_batch_size" in trainer and trainer[
-                    "per_device_eval_batch_size"
-                ] not in (None, eval_batch_size):
-                    raise ValueError(
-                        "Both 'trainer.eval_batch_size' and "
-                        "'trainer.per_device_eval_batch_size' are set with different values."
+                if eval_batch_size is not None:
+                    if "per_device_eval_batch_size" in trainer and trainer[
+                        "per_device_eval_batch_size"
+                    ] not in (None, eval_batch_size):
+                        raise ValueError(
+                            "Both 'trainer.eval_batch_size' and "
+                            "'trainer.per_device_eval_batch_size' are set with different values."
+                        )
+                    if trainer.get("per_device_eval_batch_size") is None:
+                        trainer["per_device_eval_batch_size"] = eval_batch_size
+                    ConfigLoader._warn_legacy(
+                        "Config key 'trainer.eval_batch_size' is deprecated; use "
+                        "'trainer.per_device_eval_batch_size'."
                     )
-                if trainer.get("per_device_eval_batch_size") is None:
-                    trainer["per_device_eval_batch_size"] = eval_batch_size
-                ConfigLoader._warn_legacy(
-                    "Config key 'trainer.eval_batch_size' is deprecated; use "
-                    "'trainer.per_device_eval_batch_size'."
-                )
 
             # trainer.max_ckpt -> trainer.save_total_limit
             if "max_ckpt" in trainer:
                 max_ckpt = trainer.pop("max_ckpt")
-                if "save_total_limit" in trainer and trainer[
-                    "save_total_limit"
-                ] not in (None, max_ckpt):
-                    raise ValueError(
-                        "Both 'trainer.max_ckpt' and 'trainer.save_total_limit' are set "
-                        "with different values."
+                if max_ckpt is not None:
+                    if "save_total_limit" in trainer and trainer[
+                        "save_total_limit"
+                    ] not in (None, max_ckpt):
+                        raise ValueError(
+                            "Both 'trainer.max_ckpt' and 'trainer.save_total_limit' are set "
+                            "with different values."
+                        )
+                    if trainer.get("save_total_limit") is None:
+                        trainer["save_total_limit"] = max_ckpt
+                    ConfigLoader._warn_legacy(
+                        "Config key 'trainer.max_ckpt' is deprecated; use "
+                        "'trainer.save_total_limit'."
                     )
-                if trainer.get("save_total_limit") is None:
-                    trainer["save_total_limit"] = max_ckpt
-                ConfigLoader._warn_legacy(
-                    "Config key 'trainer.max_ckpt' is deprecated; use "
-                    "'trainer.save_total_limit'."
-                )
 
         # dataset.tokenizer_name -> tokenizer.name
         dataset = normalized.get("dataset", {})
@@ -1210,18 +1213,28 @@ class ConfigLoader:
         # wandb.log_interval -> trainer.logging_steps
         wandb = normalized.get("wandb", {})
         if isinstance(wandb, dict) and "log_interval" in wandb:
-            log_interval = wandb["log_interval"]
+            log_interval = wandb.pop("log_interval")
             trainer = _section("trainer")
-            if "logging_steps" in trainer and trainer["logging_steps"] != log_interval:
-                raise ValueError(
-                    "Both 'wandb.log_interval' and 'trainer.logging_steps' are set with "
-                    "different values."
+            if log_interval is not None:
+                if (
+                    "logging_steps" in trainer
+                    and trainer["logging_steps"] != log_interval
+                ):
+                    raise ValueError(
+                        "Both 'wandb.log_interval' and 'trainer.logging_steps' are set with "
+                        "different values."
+                    )
+                if "logging_steps" not in trainer:
+                    trainer["logging_steps"] = log_interval
+                    ConfigLoader._warn_legacy(
+                        "Config key 'wandb.log_interval' is deprecated for trainer logging; "
+                        "use 'trainer.logging_steps'."
+                    )
+            else:
+                ConfigLoader._warn_legacy(
+                    "Config key 'wandb.log_interval' is deprecated for trainer logging; "
+                    "use 'trainer.logging_steps'."
                 )
-            trainer.setdefault("logging_steps", log_interval)
-            ConfigLoader._warn_legacy(
-                "Config key 'wandb.log_interval' is deprecated for trainer logging; "
-                "use 'trainer.logging_steps'."
-            )
 
         # scheduler.num_cycles is unsupported by the current scheduler implementation.
         scheduler = normalized.get("scheduler", {})
@@ -1296,14 +1309,15 @@ class ConfigLoader:
                 for legacy_key, contrastive_key in contrastive_key_map.items():
                     if legacy_key in model:
                         value = model.pop(legacy_key)
-                        if contrastive_key in contrastive and contrastive[
-                            contrastive_key
-                        ] not in (None, value):
-                            raise ValueError(
-                                "Both 'model."
-                                f"{legacy_key}' and 'contrastive.{contrastive_key}' "
-                                "are set with different values."
-                            )
+                        if contrastive_key in contrastive:
+                            if contrastive[contrastive_key] not in (None, value):
+                                raise ValueError(
+                                    "Both 'model."
+                                    f"{legacy_key}' and 'contrastive.{contrastive_key}' "
+                                    "are set with different values."
+                                )
+                            if contrastive[contrastive_key] == value:
+                                continue
                         contrastive.setdefault(contrastive_key, value)
                         ConfigLoader._warn_legacy(
                             "Config key 'model."
@@ -1329,11 +1343,14 @@ class ConfigLoader:
                 for legacy_key, glue_key in glue_key_map.items():
                     if legacy_key in model:
                         value = model.pop(legacy_key)
-                        if glue_key in glue and glue[glue_key] not in (None, value):
-                            raise ValueError(
-                                f"Both 'model.{legacy_key}' and 'glue.{glue_key}' are set with "
-                                "different values."
-                            )
+                        if glue_key in glue:
+                            if glue[glue_key] not in (None, value):
+                                raise ValueError(
+                                    f"Both 'model.{legacy_key}' and 'glue.{glue_key}' are set with "
+                                    "different values."
+                                )
+                            if glue[glue_key] == value:
+                                continue
                         glue.setdefault(glue_key, value)
                         ConfigLoader._warn_legacy(
                             f"Config key 'model.{legacy_key}' is deprecated; use 'glue.{glue_key}'."
