@@ -372,10 +372,10 @@ def resolve_step_checkpoint_selector(
 ) -> str:
     """Resolve ``checkpoint`` to a concrete step/tag for loading.
 
-    ``latest`` honors an already-selected direct checkpoint path first, then a
-    root-level DeepSpeed ``latest`` file when present. When neither exists, scan
-    for the highest loadable numbered step so portable checkpoint roots without
-    DeepSpeed metadata still work.
+    ``latest`` honors a root-level ``latest`` file first, then an already-selected
+    direct checkpoint path. When neither exists, scan for the highest loadable
+    numbered step so portable checkpoint roots without DeepSpeed metadata still
+    work.
 
     :param str | Path checkpoint_root: Root directory or direct checkpoint path.
     :param str | int checkpoint: Requested checkpoint selector.
@@ -387,16 +387,16 @@ def resolve_step_checkpoint_selector(
     if requested_tag.lower() != "latest":
         return requested_tag
 
-    direct_tag = _resolve_direct_checkpoint_tag(checkpoint_root)
-    if direct_tag is not None:
-        return direct_tag
-
     latest_path = checkpoint_root / "latest"
     if latest_path.is_file():
         latest_tag = latest_path.read_text(encoding="utf-8").strip()
         if not latest_tag:
             raise ValueError(f"DeepSpeed latest file is empty: {latest_path}")
         return latest_tag
+
+    direct_tag = _resolve_direct_checkpoint_tag(checkpoint_root)
+    if direct_tag is not None:
+        return direct_tag
 
     candidates = sorted(
         (

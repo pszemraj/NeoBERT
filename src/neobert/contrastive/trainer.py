@@ -249,6 +249,15 @@ def _sync_contrastive_runtime_from_pretraining(
             ", ".join(sorted(model_mismatches)),
         )
 
+    tokenizer_mismatches: list[str] = []
+    if hasattr(cfg.tokenizer, "max_length") and hasattr(
+        model_pretraining_config.tokenizer, "max_length"
+    ):
+        pretraining_max_length = deepcopy(model_pretraining_config.tokenizer.max_length)
+        if cfg.tokenizer.max_length != pretraining_max_length:
+            tokenizer_mismatches.append("max_length")
+        cfg.tokenizer.max_length = pretraining_max_length
+
     checkpoint_tokenizer_dir = checkpoint_step_dir / "tokenizer"
     if checkpoint_tokenizer_dir.is_dir():
         tokenizer_path = str(checkpoint_tokenizer_dir)
@@ -266,7 +275,6 @@ def _sync_contrastive_runtime_from_pretraining(
             "revision",
             "allow_special_token_rewrite",
         )
-        tokenizer_mismatches: list[str] = []
         for key in tokenizer_keys:
             if not hasattr(cfg.tokenizer, key) or not hasattr(
                 model_pretraining_config.tokenizer, key
@@ -278,12 +286,12 @@ def _sync_contrastive_runtime_from_pretraining(
             if getattr(cfg.tokenizer, key) != pretraining_value:
                 tokenizer_mismatches.append(key)
             setattr(cfg.tokenizer, key, pretraining_value)
-        if tokenizer_mismatches:
-            logger.warning(
-                "Contrastive tokenizer config differs from pretrained checkpoint config for %s; "
-                "using pretrained tokenizer values.",
-                ", ".join(sorted(tokenizer_mismatches)),
-            )
+    if tokenizer_mismatches:
+        logger.warning(
+            "Contrastive tokenizer config differs from pretrained checkpoint config for %s; "
+            "using pretrained tokenizer values.",
+            ", ".join(sorted(tokenizer_mismatches)),
+        )
 
 
 def _normalize_contrastive_pretrained_backbone_state_dict(

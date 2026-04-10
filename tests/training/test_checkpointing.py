@@ -217,10 +217,11 @@ def test_resolve_deepspeed_checkpoint_root_and_tag_for_nested_accelerate_layout(
 
 
 def test_resolve_step_checkpoint_selector_prefers_latest_file() -> None:
-    """DeepSpeed ``latest`` metadata should stay authoritative when present."""
+    """``latest`` metadata should beat root and numbered checkpoint payloads."""
     with tempfile.TemporaryDirectory() as tmpdir:
         checkpoint_root = Path(tmpdir)
         (checkpoint_root / "latest").write_text("456\n", encoding="utf-8")
+        (checkpoint_root / MODEL_WEIGHTS_NAME).touch()
         portable_step = checkpoint_root / "999"
         portable_step.mkdir(parents=True, exist_ok=True)
         (portable_step / MODEL_WEIGHTS_NAME).touch()

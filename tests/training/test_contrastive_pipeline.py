@@ -338,6 +338,7 @@ class TestContrastivePipeline:
         cfg.model.dropout_prob = 0.2
         cfg.tokenizer.path = None
         cfg.tokenizer.name = "runtime-tokenizer"
+        cfg.tokenizer.max_length = 128
         cfg.tokenizer.revision = "runtime-rev"
 
         pretraining_cfg = Config()
@@ -346,6 +347,7 @@ class TestContrastivePipeline:
         pretraining_cfg.model.vocab_size = 512
         pretraining_cfg.model.dropout_prob = 0.0
         pretraining_cfg.tokenizer.name = "checkpoint-tokenizer"
+        pretraining_cfg.tokenizer.max_length = 384
         pretraining_cfg.tokenizer.revision = "checkpoint-rev"
 
         checkpoint_step_dir = tmp_path / "123"
@@ -364,6 +366,7 @@ class TestContrastivePipeline:
         assert cfg.model.dropout_prob == 0.2
         assert cfg.tokenizer.path == str(checkpoint_tokenizer_dir)
         assert cfg.tokenizer.name == "runtime-tokenizer"
+        assert cfg.tokenizer.max_length == 384
         assert cfg.tokenizer.revision == "runtime-rev"
 
 
