@@ -87,6 +87,36 @@ class TestConfigSystem(unittest.TestCase):
         self.assertEqual(loaded.trainer.per_device_eval_batch_size, 32)
         self.assertEqual(loaded.trainer.save_total_limit, 3)
 
+    def test_saved_config_with_custom_logging_steps_roundtrips(self):
+        """Checkpoint configs must reload for resume with any logging cadence."""
+        config = Config()
+        config.trainer.logging_steps = 5
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            path = f.name
+
+        try:
+            ConfigLoader.save(config, path)
+            loaded = ConfigLoader.load(path)
+        finally:
+            os.unlink(path)
+
+        self.assertEqual(loaded.trainer.logging_steps, 5)
+
+    def test_legacy_wandb_log_interval_migrates_to_logging_steps(self):
+        """Old YAMLs using wandb.log_interval still map onto trainer.logging_steps."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write("wandb:\n  log_interval: 50\n")
+            path = f.name
+
+        try:
+            with self.assertWarns(UserWarning):
+                loaded = ConfigLoader.load(path)
+        finally:
+            os.unlink(path)
+
+        self.assertEqual(loaded.trainer.logging_steps, 50)
+
     def test_cli_override_system(self):
         """Test CLI override functionality."""
         config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"

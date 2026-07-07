@@ -328,7 +328,6 @@ class WandbConfig:
     tags: List[str] = field(default_factory=list)
     mode: str = "online"
     watch: str = "gradients"
-    log_interval: int = 100
     resume: str = "never"
     dir: str = "logs/wandb"
 

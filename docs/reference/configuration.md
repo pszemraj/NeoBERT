@@ -392,7 +392,6 @@ Save cadence/retention knobs live under [Training Loop](#training-loop): `traine
 | `wandb.tags`         | `list[str]`   | `[]`           | Run tags.                                                                                  |
 | `wandb.mode`         | `str`         | `"online"`     | `online`, `offline`, or `disabled`.                                                        |
 | `wandb.watch`        | `str`         | `"gradients"`  | Model-watch mode: `gradients`, `parameters`, `all`, or disabled (`off`/`none`/`disabled`). |
-| `wandb.log_interval` | `int`         | `100`          | Legacy field; trainer logging uses `trainer.logging_steps`.                                |
 | `wandb.resume`       | `str`         | `"never"`      | W&B resume policy.                                                                         |
 | `wandb.dir`          | `str`         | `"logs/wandb"` | Artifact/run directory.                                                                    |
 
