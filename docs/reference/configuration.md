@@ -182,7 +182,7 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 | `dataset.validation_split` | `float \| None` | `null`         | Fraction for random eval split (non-streaming only).                                                               |
 
 > [!NOTE]
-> Streaming pretraining defaults to `dataset.eval_split: null`. When unset, trainer attempts to auto-detect a validation-style split (`validation`, `eval`, `test`, `dev`). If none exists and `dataset.eval_samples` is set, it builds eval from the first `eval_samples` training examples and skips those from the training stream to avoid leakage.
+> Streaming eval-split resolution (auto-detection, `eval_samples` reservation, required budgets) is described in [Streaming Eval Strategy](../guides/training.md#streaming-eval-strategy).
 
 ### Performance and Preprocessing
 
@@ -192,7 +192,7 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 | `dataset.pin_memory`          | `bool`        | `false` | Enable pinned CPU staging for non-blocking H2D copies; NeoBERT may force it on for CUDA runs and stage either in the `DataLoader` or via a final manual repin depending on the transfer path. |
 | `dataset.persistent_workers`  | `bool`        | `true`  | Keep DataLoader workers alive across epochs.                |
 | `dataset.prefetch_factor`     | `int \| None` | `null`  | Worker prefetch depth when workers > 0.                     |
-| `dataset.streaming_read_retries` | `int`      | `4`     | Outer retry count for transient streaming read failures after the underlying HF client exhausts its own per-request retries. Mid-iteration recovery resumes from the last successfully yielded example and requires a streaming dataset that exposes `state_dict()/load_state_dict()`. |
+| `dataset.streaming_read_retries` | `int`      | `4`     | Outer retry count for transient streaming read failures after the underlying HF client exhausts its own per-request retries. Recovery semantics: [Training Optimization](../guides/training-optimization.md#dataloader-and-streaming-throughput). |
 | `dataset.streaming_read_retry_backoff_seconds` | `float` | `5.0` | Initial exponential-backoff delay for transient streaming read retries. |
 | `dataset.streaming_read_retry_max_backoff_seconds` | `float` | `60.0` | Maximum capped backoff delay for transient streaming read retries. |
 | `dataset.num_proc`            | `int`         | `4`     | Multiprocessing workers for tokenization map.               |
@@ -213,8 +213,6 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 
 > [!NOTE]
 > `dataset.pretraining_prob` is deprecated and normalized to `contrastive.pretraining_prob`.
->
-> Streaming retry recovery resumes from the last yielded example when the underlying HF iterable dataset exposes `state_dict()/load_state_dict()`. When the source stream is shuffled, HF snapshots do not include shuffle-buffer contents, so a retry recovery skips up to `dataset.shuffle_buffer_size` buffered-but-unyielded examples and logs a warning; unshuffled streams recover exactly-once.
 >
 > Contrastive preprocessing accepts an omitted `dataset.name`, `dataset.name: ALL`, canonical registry keys such as `ALLNLI`, or common HF dataset IDs from the built-in wrapper registry (for example `sentence-transformers/all-nli`, `embedding-data/QQP_triplets`, or `WhereIsAI/github-issue-similarity`). When `dataset.load_all_from_disk=true`, cached split directories under `all/` are loaded only for the requested selection and missing splits fail fast. Subset preprocess refreshes preserve other cached split entries already present under `all/`.
 

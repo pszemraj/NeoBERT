@@ -94,7 +94,7 @@ Actions:
 - Streaming resume is best-effort: trainer restores state and skips consumed batches from stream start/current epoch position.
 - For large consumed-step counts, startup can take a while due to stream advancement.
 - With shuffled streams, exact sample continuity is not guaranteed.
-- Transient-read retry recovery on shuffled streams skips up to `dataset.shuffle_buffer_size` buffered examples and logs a warning when it happens; unshuffled streams recover exactly-once.
+- Transient-read retry recovery on shuffled streams can skip buffered examples and logs a warning when it happens; see [streaming recovery semantics](training-optimization.md#dataloader-and-streaming-throughput).
 - If you need deterministic continuation, pre-tokenize to disk and run with `dataset.streaming: false`.
 
 ### Streaming eval budget error
