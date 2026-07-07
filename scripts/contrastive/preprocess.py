@@ -91,7 +91,8 @@ def pipeline(cfg: Any) -> DatasetDict:
         for name in selected_names:
             dataset_cls = CONTRASTIVE_DATASETS[name]
             dataset_dir = all_dir / name
-            if dataset_dir.is_dir() and not force_redownload:
+            reuse_cached = dataset_dir.is_dir() and not force_redownload
+            if reuse_cached:
                 print(f"Loading tokenized {name} from disk...")
                 subdataset = dataset_cls.from_disk(dataset_dir).dataset
                 token_columns = tuple(
@@ -99,24 +100,11 @@ def pipeline(cfg: Any) -> DatasetDict:
                     for col in subdataset.column_names
                     if col.startswith("input_ids_")
                 )
-                manifest = build_tokenization_manifest(
-                    tokenizer,
-                    dataset_name=name,
-                    dataset_config=None,
-                    dataset_path=dataset_path,
-                    column_name=token_columns,
-                    max_length=getattr(cfg.tokenizer, "max_length", 512),
-                    truncation=getattr(cfg.tokenizer, "truncation", True),
-                    add_special_tokens=True,
-                    return_special_tokens_mask=False,
-                )
-                validate_tokenized_cache_manifest(dataset_dir, manifest)
             else:
                 if dataset_dir.is_dir():
                     shutil.rmtree(dataset_dir)
                 print(f"Loading {name} from huggingface and preprocessing...")
                 subdataset = dataset_cls().dataset
-                print(f"Tokenizing {name}...")
                 token_columns = tuple(
                     col
                     for col in subdataset.column_names
@@ -127,17 +115,22 @@ def pipeline(cfg: Any) -> DatasetDict:
                         f"{name} has no tokenizable columns in "
                         f"{subdataset.column_names!r}."
                     )
-                manifest = build_tokenization_manifest(
-                    tokenizer,
-                    dataset_name=name,
-                    dataset_config=None,
-                    dataset_path=dataset_path,
-                    column_name=token_columns,
-                    max_length=getattr(cfg.tokenizer, "max_length", 512),
-                    truncation=getattr(cfg.tokenizer, "truncation", True),
-                    add_special_tokens=True,
-                    return_special_tokens_mask=False,
-                )
+
+            manifest = build_tokenization_manifest(
+                tokenizer,
+                dataset_name=name,
+                dataset_config=None,
+                dataset_path=dataset_path,
+                column_name=token_columns,
+                max_length=getattr(cfg.tokenizer, "max_length", 512),
+                truncation=getattr(cfg.tokenizer, "truncation", True),
+                add_special_tokens=True,
+                return_special_tokens_mask=False,
+            )
+            if reuse_cached:
+                validate_tokenized_cache_manifest(dataset_dir, manifest)
+            else:
+                print(f"Tokenizing {name}...")
                 subdataset = tokenize(
                     subdataset,
                     tokenizer,
