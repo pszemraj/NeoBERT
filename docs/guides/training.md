@@ -161,7 +161,7 @@ python scripts/pretraining/pretrain.py \
 
 Confirm in logs that startup loads `outputs/.../checkpoints/<step>/` and that training resumes from the saved global step instead of step 0.
 
-Resume treats checkpoint metadata as authoritative for model/tokenizer/data objective fields. If the current launch config disagrees with the checkpoint's `config.yaml`, the checkpoint values win before tokenizer/model/dataloader construction, and `tokenizer/` inside the checkpoint is used when present.
+Resume treats checkpoint metadata as authoritative for model/tokenizer/data objective fields. If the current launch config disagrees with the checkpoint's `config.yaml`, the checkpoint values win before tokenizer/model/dataloader construction, and `tokenizer/` inside the checkpoint is used when present. All `trainer.*` runtime/performance knobs (batch size, gradient accumulation, precision, compile flags, loss path, step budget) stay controlled by the current launch config, so overrides such as `--trainer.per_device_train_batch_size` are honored on resume.
 
 Optimizer state is guarded by `optimizer_param_names.json`. Resume fails fast if the current optimizer parameter-group order differs from the order saved with the checkpoint, because PyTorch optimizer buffers are positional inside groups.
 

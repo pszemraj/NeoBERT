@@ -811,9 +811,12 @@ def sync_resume_source_of_truth(
 
     A resumable checkpoint contains optimizer and scheduler state, so silently
     combining it with a different tokenizer, model shape, masking contract, or
-    contrastive objective is not a faithful continuation. Runtime-only knobs such
-    as ``trainer.max_steps`` and logging cadence intentionally remain controlled
-    by the current launch config.
+    contrastive objective is not a faithful continuation. The entire ``trainer``
+    section (batch size, gradient accumulation, precision, compile flags, loss
+    path, ``max_steps``, logging cadence, ...) intentionally remains controlled
+    by the current launch config: those knobs shape runtime execution, not the
+    optimizer/scheduler state being restored, and operators legitimately change
+    them mid-run (for example rebalancing batch size after a hardware change).
 
     :param Any cfg: Mutable runtime config.
     :param str | Path | None resume_checkpoint_path: Resolved checkpoint step path.
@@ -923,25 +926,6 @@ def sync_resume_source_of_truth(
             section="datacollator",
         )
     )
-    changed.extend(
-        _copy_checkpoint_config_fields(
-            cfg.trainer,
-            checkpoint_cfg.trainer,
-            (
-                "per_device_train_batch_size",
-                "gradient_accumulation_steps",
-                "gradient_clipping",
-                "mixed_precision",
-                "masked_logits_only_loss",
-                "gradient_checkpointing",
-                "torch_compile",
-                "torch_compile_dynamic",
-                "torch_compile_backend",
-            ),
-            section="trainer",
-        )
-    )
-
     if task == "contrastive":
         changed.extend(
             _copy_checkpoint_config_fields(

@@ -267,6 +267,10 @@ def test_sync_resume_source_of_truth_uses_checkpoint_config(
     checkpoint_cfg.datacollator.pack_sequences = True
     checkpoint_cfg.contrastive.pooling = "max"
     checkpoint_cfg.contrastive.pretraining_prob = 0.4
+    checkpoint_cfg.trainer.per_device_train_batch_size = 8
+    checkpoint_cfg.trainer.gradient_accumulation_steps = 4
+    checkpoint_cfg.trainer.gradient_checkpointing = True
+    checkpoint_cfg.trainer.torch_compile = True
     ConfigLoader.save(checkpoint_cfg, str(checkpoint_dir / "config.yaml"))
 
     runtime_cfg = Config()
@@ -281,6 +285,10 @@ def test_sync_resume_source_of_truth_uses_checkpoint_config(
     runtime_cfg.datacollator.pack_sequences = False
     runtime_cfg.contrastive.pooling = "avg"
     runtime_cfg.contrastive.pretraining_prob = 0.0
+    runtime_cfg.trainer.per_device_train_batch_size = 32
+    runtime_cfg.trainer.gradient_accumulation_steps = 1
+    runtime_cfg.trainer.gradient_checkpointing = False
+    runtime_cfg.trainer.torch_compile = False
 
     sync_resume_source_of_truth(
         runtime_cfg,
@@ -300,6 +308,11 @@ def test_sync_resume_source_of_truth_uses_checkpoint_config(
     assert runtime_cfg.datacollator.pack_sequences is True
     assert runtime_cfg.contrastive.pooling == "max"
     assert runtime_cfg.contrastive.pretraining_prob == 0.4
+    # Trainer runtime/performance knobs stay launch-controlled on resume.
+    assert runtime_cfg.trainer.per_device_train_batch_size == 32
+    assert runtime_cfg.trainer.gradient_accumulation_steps == 1
+    assert runtime_cfg.trainer.gradient_checkpointing is False
+    assert runtime_cfg.trainer.torch_compile is False
 
 
 def test_sync_resume_source_of_truth_rejects_missing_config(tmp_path: Path) -> None:
