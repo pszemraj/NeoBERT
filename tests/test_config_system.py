@@ -157,6 +157,8 @@ class TestConfigSystem(unittest.TestCase):
             "true",
             "--tokenizer.allow_special_token_rewrite",
             "false",
+            "--trainer.resume_from_checkpoint",
+            "latest",
         ]
 
         # Mock sys.argv
@@ -187,6 +189,7 @@ class TestConfigSystem(unittest.TestCase):
             self.assertFalse(config.trainer.enforce_full_packed_batches)
             self.assertTrue(config.tokenizer.trust_remote_code)
             self.assertFalse(config.tokenizer.allow_special_token_rewrite)
+            self.assertEqual(config.trainer.resume_from_checkpoint, "latest")
 
             # Check that non-overridden values remain the same
             self.assertEqual(config.model.num_hidden_layers, 2)

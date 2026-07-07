@@ -2252,6 +2252,11 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
     )
     parser.add_argument("--trainer.output_dir", type=str, help="Output directory")
     parser.add_argument(
+        "--trainer.resume_from_checkpoint",
+        type=str,
+        help="Resume from a checkpoint: 'latest', a step number, or a path",
+    )
+    parser.add_argument(
         "--trainer.gradient_clipping", type=float, help="Gradient clipping"
     )
     parser.add_argument(
