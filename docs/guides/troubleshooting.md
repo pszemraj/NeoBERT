@@ -42,7 +42,6 @@ Symptoms:
 
 - PyTorch raises a CUDA/bf16 GEMM error soon after startup
 - bf16 matmuls fail on one PyTorch build but succeed on another
-- flash-attn may need to be disabled manually by setting `mixed_precision: no`
 
 What happens:
 
