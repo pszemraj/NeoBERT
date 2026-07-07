@@ -20,7 +20,7 @@ Checklist:
 
 1. use `attn_backend: flash_attn_varlen` for packed runs,
 2. ensure flash-attn is installed,
-3. tune dataloader knobs (`dataset.num_workers`, `pin_memory`, `persistent_workers`, `prefetch_factor`); on CUDA, `pin_memory` keeps host buffers pinned, with loader-side pinning on the default Accelerate-managed path and final-batch repinning on packed/manual-transfer paths,
+3. tune dataloader knobs (`dataset.num_workers`, `pin_memory`, `persistent_workers`, `prefetch_factor`); pinning-path behavior is described in [Training Optimization](training-optimization.md#dataloader-and-streaming-throughput),
 4. compare `tokens/sec` (not only `steps/sec`) when `enforce_full_packed_batches=true`.
 
 ### Pretraining OOM from logits memory

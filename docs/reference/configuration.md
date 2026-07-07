@@ -90,7 +90,6 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 | `datacollator.mask_all`               | `bool`        | `false`         | `false` uses sampled-token BERT-style 80/10/10 masking.              |
 | `datacollator.pack_sequences`         | `bool`        | `false`         | Enable packed-sequence collation.                                    |
 | `trainer.resume_from_checkpoint`      | `str \| None` | `null`          | Checkpoint to resume from.                                           |
-| `use_deepspeed`                       | `bool`        | `false`         | Legacy hint for loading DeepSpeed-formatted contrastive checkpoints; it does not enable a runtime backend. |
 
 > [!NOTE]
 > Runtime preprocessing synchronizes tokenizer-derived values (including `model.pad_token_id`) and aligns vocab size for model/tokenizer consistency.
@@ -189,7 +188,7 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 | Key                           | Type          | Default | Description                                                 |
 | ----------------------------- | ------------- | ------- | ----------------------------------------------------------- |
 | `dataset.num_workers`         | `int`         | `16`    | DataLoader worker count.                                    |
-| `dataset.pin_memory`          | `bool`        | `false` | Enable pinned CPU staging for non-blocking H2D copies; NeoBERT may force it on for CUDA runs and stage either in the `DataLoader` or via a final manual repin depending on the transfer path. |
+| `dataset.pin_memory`          | `bool`        | `false` | Enable pinned CPU staging for non-blocking H2D copies; CUDA runs may force it on. Pinning-path behavior: [Training Optimization](../guides/training-optimization.md#dataloader-and-streaming-throughput). |
 | `dataset.persistent_workers`  | `bool`        | `true`  | Keep DataLoader workers alive across epochs.                |
 | `dataset.prefetch_factor`     | `int \| None` | `null`  | Worker prefetch depth when workers > 0.                     |
 | `dataset.streaming_read_retries` | `int`      | `4`     | Outer retry count for transient streaming read failures after the underlying HF client exhausts its own per-request retries. Recovery semantics: [Training Optimization](../guides/training-optimization.md#dataloader-and-streaming-throughput). |
