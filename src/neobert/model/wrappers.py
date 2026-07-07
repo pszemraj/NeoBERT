@@ -208,17 +208,13 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
 
     @torch.no_grad()
     def encode(self, sentences: list[str], **kwargs: Any) -> torch.Tensor:
-        """Encodes the given sentences using the encoder.
+        """Encode the given sentences using the encoder.
 
-        Args:
-            sentences: The sentences to encode.
-            **kwargs: Optional overrides for the DataLoader.
-                - num_workers (int): DataLoader worker processes (default: 0).
-                - pin_memory (bool | None): Pin CPU memory for CUDA transfer. Defaults
-                  to ``True`` on CUDA devices, otherwise ``False``.
-
-        Returns:
-            The encoded sentences.
+        :param list[str] sentences: The sentences to encode.
+        :param Any kwargs: Optional DataLoader overrides — ``num_workers``
+            (int, default 0) and ``pin_memory`` (bool | None, defaults to
+            ``True`` on CUDA devices, otherwise ``False``).
+        :return torch.Tensor: Encoded sentence embeddings.
         """
         from datasets import Dataset
         from torch.utils.data import DataLoader
