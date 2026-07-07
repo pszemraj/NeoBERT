@@ -335,7 +335,7 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 | `clipping_layers_mapping`      | `dict[str, str]` | `{}`              | Projection-name overrides for non-standard attention blocks. |
 
 > [!NOTE]
-> The shipped defaults are `norm_factor=neobert` and `param_policy=hidden_2d`. Use `all_2d` explicitly when you want exact v0.1.3-style Muon scope for compatibility benchmarking.
+> The shipped defaults are `norm_factor=neobert` and `param_policy=hidden_2d`. Use `all_2d` explicitly when you want exact v0.1.3-style Muon scope for compatibility benchmarking. Legacy `norm_factor` values `legacy_compat` and `original` are accepted and normalized to `neobert` and `muon_reference` respectively.
 >
 > [Training Optimization](../guides/training-optimization.md) explains the
 > shipped Muon defaults, normalization modes, fused-QKV handling, clipping, and distributed tradeoffs.

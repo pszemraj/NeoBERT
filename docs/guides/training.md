@@ -12,6 +12,7 @@ This guide covers pretraining and contrastive workflows. Full field-level schema
 | `scripts/pretraining/longer_seq.py`       | continue run at longer context    |
 | `scripts/contrastive/finetune.py`         | contrastive fine-tuning           |
 | `scripts/contrastive/preprocess.py`       | contrastive dataset preprocessing |
+| `scripts/contrastive/download.py`         | pre-download contrastive datasets |
 
 For contrastive preprocessing, `dataset.name` may be omitted, `ALL`, a canonical registry key, or a supported HF dataset ID alias; accepted values and cached-split loading rules are in the [Data Source reference](../reference/configuration.md#data-source). Cached split reuse is guarded by `tokenization_manifest.json`, so changing tokenizer/max-length/tokenization settings requires `dataset.force_redownload: true` or a fresh cache.
 
@@ -128,7 +129,7 @@ Current project default is `true`; new pretraining runs should keep `masked_logi
 
 ## Checkpointing and Resume
 
-Unified pretraining checkpoints (resume + export assets):
+Step checkpoints (resume + export assets) share one layout across pretraining, contrastive, and GLUE:
 
 ```text
 <output_dir>/checkpoints/<step>/
@@ -143,7 +144,7 @@ Unified pretraining checkpoints (resume + export assets):
     custom_checkpoint_*.pkl
 ```
 
-The top-level `model.safetensors` is the portable export/eval payload and intentionally materializes tied tensors under every expected key. Accelerate's resume state lives under `accelerate/` so its strictly-loaded model file cannot collide with the portable payload; resume falls back to the step root for checkpoints written before this layout.
+The top-level `model.safetensors` is the portable export/eval payload and intentionally materializes tied tensors under every expected key. Accelerate's resume state lives under `accelerate/` so its strictly-loaded model file cannot collide with the portable payload; resume falls back to the step root for checkpoints written before this layout. Contrastive step checkpoints carry the same metadata files; GLUE step checkpoints omit the config/tokenizer metadata and optimizer manifest.
 
 Resume examples:
 
