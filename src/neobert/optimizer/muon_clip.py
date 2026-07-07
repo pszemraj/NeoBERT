@@ -17,6 +17,12 @@ from torch.utils.hooks import RemovableHandle
 
 logger = logging.getLogger(__name__)
 
+# Legacy norm_factor spellings accepted in configs, remapped to canonical names.
+_NORM_FACTOR_ALIASES = {
+    "legacy_compat": "neobert",
+    "original": "muon_reference",
+}
+
 try:
     from torch.distributed.tensor import DTensor
     from torch.distributed.tensor.placement_types import Shard
@@ -203,10 +209,7 @@ class MuonClipConfig:
             )
 
         norm_factor = str(self.norm_factor).strip().replace("-", "_").lower()
-        norm_factor = {
-            "legacy_compat": "neobert",
-            "original": "muon_reference",
-        }.get(norm_factor, norm_factor)
+        norm_factor = _NORM_FACTOR_ALIASES.get(norm_factor, norm_factor)
         valid_norm_factors = {
             "neobert",
             "muon_reference",
@@ -1838,10 +1841,7 @@ class MuonClipOptimizer(Optimizer):
             .replace("-", "_")
             .lower()
         )
-        norm_factor = {
-            "legacy_compat": "neobert",
-            "original": "muon_reference",
-        }.get(norm_factor, norm_factor)
+        norm_factor = _NORM_FACTOR_ALIASES.get(norm_factor, norm_factor)
         if norm_factor == "none":
             scale = 1.0
         elif norm_factor == "neobert":
