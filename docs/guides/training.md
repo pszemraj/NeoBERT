@@ -133,13 +133,17 @@ Unified pretraining checkpoints (resume + export assets):
 ```text
 <output_dir>/checkpoints/<step>/
   model.safetensors
-  optimizer.bin / scheduler.bin / random_states_*.pkl
   optimizer_param_names.json
-  custom_checkpoint_*.pkl
   config.yaml
   tokenizer_info.json
   tokenizer/
+  accelerate/
+    model.safetensors
+    optimizer.bin / scheduler.bin / random_states_*.pkl
+    custom_checkpoint_*.pkl
 ```
+
+The top-level `model.safetensors` is the portable export/eval payload and intentionally materializes tied tensors under every expected key. Accelerate's resume state lives under `accelerate/` so its strictly-loaded model file cannot collide with the portable payload; resume falls back to the step root for checkpoints written before this layout.
 
 Resume examples:
 

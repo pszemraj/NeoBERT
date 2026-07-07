@@ -30,8 +30,10 @@ from neobert.checkpointing import (
     load_deepspeed_fp32_state_dict,
     load_step_checkpoint_state_dict,
     prune_step_checkpoints as _prune_step_checkpoints,
+    resolve_accelerate_state_dir,
     resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
     resolve_step_checkpoint_selector,
+    save_accelerate_state,
     save_portable_checkpoint_weights as _save_portable_checkpoint_weights,
     strip_runtime_prefixes,
 )
@@ -930,7 +932,7 @@ def trainer(cfg: Config) -> None:
                     f"resume_from_checkpoint path not found: {resume_checkpoint_path}"
                 )
             validate_optimizer_param_name_manifest(optimizer, resume_checkpoint)
-            accelerator.load_state(str(resume_checkpoint))
+            accelerator.load_state(str(resolve_accelerate_state_dir(resume_checkpoint)))
             validate_muon_runtime_topology(
                 accelerator=accelerator,
                 optimizer=optimizer,
@@ -965,7 +967,7 @@ def trainer(cfg: Config) -> None:
         )
         step_tag = str(int(metrics["train/steps"]))
         checkpoint_path = checkpoint_dir / step_tag
-        accelerator.save_state(output_dir=str(checkpoint_path))
+        save_accelerate_state(accelerator, checkpoint_path)
         if accelerator.is_main_process:
             save_optimizer_param_name_manifest(optimizer, checkpoint_path)
             _save_contrastive_checkpoint_metadata(cfg, tokenizer, checkpoint_path)
@@ -1285,7 +1287,7 @@ def trainer(cfg: Config) -> None:
                 checkpoint_path = checkpoint_dir / step_tag
                 # Save resumable optimizer/scheduler/metric state + portable weights
                 # to a single step directory.
-                accelerator.save_state(output_dir=str(checkpoint_path))
+                save_accelerate_state(accelerator, checkpoint_path)
                 accelerator.wait_for_everyone()
                 if accelerator.is_main_process:
                     save_optimizer_param_name_manifest(optimizer, checkpoint_path)

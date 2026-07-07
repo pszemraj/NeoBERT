@@ -37,7 +37,9 @@ from transformers import BatchEncoding, PreTrainedTokenizerBase
 
 from neobert.checkpointing import (
     prune_step_checkpoints as _prune_step_checkpoints,
+    resolve_accelerate_state_dir,
     resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
+    save_accelerate_state,
     save_portable_checkpoint_weights as _save_portable_checkpoint_weights,
 )
 from neobert.config import (
@@ -2451,7 +2453,7 @@ def trainer(cfg: Config) -> None:
                 f"resume_from_checkpoint path not found: {resume_checkpoint_path}"
             )
         validate_optimizer_param_name_manifest(optimizer, resume_checkpoint)
-        accelerator.load_state(str(resume_checkpoint))
+        accelerator.load_state(str(resolve_accelerate_state_dir(resume_checkpoint)))
         validate_muon_runtime_topology(
             accelerator=accelerator,
             optimizer=optimizer,
@@ -2803,7 +2805,7 @@ def trainer(cfg: Config) -> None:
                 if should_save:
                     step_tag = str(metrics["train/steps"])
                     checkpoint_path = checkpoint_dir / step_tag
-                    accelerator.save_state(output_dir=str(checkpoint_path))
+                    save_accelerate_state(accelerator, checkpoint_path)
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
                         save_optimizer_param_name_manifest(optimizer, checkpoint_path)

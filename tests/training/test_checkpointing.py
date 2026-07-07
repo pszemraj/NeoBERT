@@ -10,14 +10,17 @@ from safetensors.torch import save_file
 from torch import nn
 
 from neobert.checkpointing import (
+    ACCELERATE_STATE_DIR,
     MODEL_WEIGHTS_NAME,
     load_deepspeed_fp32_state_dict,
     load_model_safetensors,
     load_step_checkpoint_state_dict,
     model_state_dict_for_safetensors,
+    resolve_accelerate_state_dir,
     resolve_deepspeed_checkpoint_root_and_tag,
     resolve_step_checkpoint_dir,
     resolve_step_checkpoint_selector,
+    save_accelerate_state,
     save_model_safetensors,
     save_state_dict_safetensors,
 )
@@ -65,6 +68,49 @@ def test_model_state_dict_for_safetensors_strips_compile_prefixes() -> None:
     assert "model.encoder.weight" in payload
     assert "decoder.weight" in payload
     assert all(not key.startswith("_orig_mod.") for key in payload)
+
+
+def test_accelerate_resume_state_coexists_with_portable_weights(
+    tmp_path: Path,
+) -> None:
+    """Tied-weight checkpoints must keep resume state loadable beside exports.
+
+    The portable ``model.safetensors`` duplicates tied tensors for export/eval
+    consumers, which safetensors' strict ``load_model`` rejects; regression
+    coverage for the layout that separates Accelerate resume state from it.
+    """
+    from accelerate import Accelerator
+    from accelerate.state import AcceleratorState
+    from neobert.checkpointing import save_portable_checkpoint_weights
+
+    AcceleratorState._reset_state(True)
+    try:
+        accelerator = Accelerator(cpu=True)
+        model = accelerator.prepare(_make_small_lm())
+        assert model.decoder.weight is model.model.encoder.weight
+
+        step_dir = tmp_path / "100"
+        state_dir = save_accelerate_state(accelerator, step_dir)
+        assert state_dir == step_dir / ACCELERATE_STATE_DIR
+        assert save_portable_checkpoint_weights(model, accelerator, step_dir)
+
+        portable_keys = load_model_safetensors(step_dir, map_location="cpu").keys()
+        assert "model.encoder.weight" in portable_keys
+        assert "decoder.weight" in portable_keys
+
+        # Must not raise: resume state and portable payload live side by side.
+        accelerator.load_state(str(resolve_accelerate_state_dir(step_dir)))
+    finally:
+        AcceleratorState._reset_state(True)
+
+
+def test_resolve_accelerate_state_dir_falls_back_to_step_root(
+    tmp_path: Path,
+) -> None:
+    """Checkpoints written before the accelerate/ layout resolve to the root."""
+    assert resolve_accelerate_state_dir(tmp_path) == tmp_path
+    (tmp_path / ACCELERATE_STATE_DIR).mkdir()
+    assert resolve_accelerate_state_dir(tmp_path) == tmp_path / ACCELERATE_STATE_DIR
 
 
 def test_save_and_load_model_safetensors_roundtrip() -> None:

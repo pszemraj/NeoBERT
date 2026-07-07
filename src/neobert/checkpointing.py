@@ -10,6 +10,7 @@ from safetensors.torch import load_file, save_file
 from torch import nn
 
 MODEL_WEIGHTS_NAME = "model.safetensors"
+ACCELERATE_STATE_DIR = "accelerate"
 logger = logging.getLogger(__name__)
 _RUNTIME_PREFIXES = ("_orig_mod.", "module.")
 _DEEPSPEED_TAG_DIR_PATTERNS = (
@@ -532,6 +533,36 @@ def prune_step_checkpoints(checkpoint_dir: str | Path, retention_limit: int) -> 
             logger.warning("Checkpoint already removed before prune: %s", old_path)
         except OSError as exc:
             logger.warning("Failed to remove old checkpoint %s: %s", old_path, exc)
+
+
+def resolve_accelerate_state_dir(checkpoint_path: str | Path) -> Path:
+    """Resolve where Accelerate ``save_state`` artifacts live for a step checkpoint.
+
+    Accelerate resume state is written to an ``accelerate/`` subdirectory so its
+    model payload cannot collide with the portable ``model.safetensors`` export:
+    the portable file intentionally duplicates tied tensors for export/eval
+    consumers, which safetensors' strict ``load_model`` rejects on resume.
+    Step checkpoints written before this layout keep their state at the
+    checkpoint root, so fall back when the subdirectory is absent.
+
+    :param str | Path checkpoint_path: Step checkpoint directory.
+    :return Path: Directory to pass to ``Accelerator.load_state``.
+    """
+    checkpoint_path = Path(checkpoint_path)
+    state_dir = checkpoint_path / ACCELERATE_STATE_DIR
+    return state_dir if state_dir.is_dir() else checkpoint_path
+
+
+def save_accelerate_state(accelerator: Any, checkpoint_path: str | Path) -> Path:
+    """Save Accelerate resume state into a step checkpoint's state subdirectory.
+
+    :param Any accelerator: Active accelerator runtime.
+    :param str | Path checkpoint_path: Step checkpoint directory.
+    :return Path: Directory the state was written to.
+    """
+    state_dir = Path(checkpoint_path) / ACCELERATE_STATE_DIR
+    accelerator.save_state(output_dir=str(state_dir))
+    return state_dir
 
 
 def save_portable_checkpoint_weights(
