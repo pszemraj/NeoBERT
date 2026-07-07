@@ -1187,6 +1187,7 @@ class TestMuonClipOptimizer:
             f"param={max_name} max_diff={max_diff:.6e}"
         )
 
+    @pytest.mark.filterwarnings("ignore:TypedStorage is deprecated:UserWarning")
     def test_distributed_checkpoint_filesystem_roundtrip_restores_muon_state(
         self,
         model,
