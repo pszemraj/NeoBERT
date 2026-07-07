@@ -31,6 +31,7 @@ from neobert.checkpointing import (
     load_step_checkpoint_state_dict,
     prune_step_checkpoints as _prune_step_checkpoints,
     resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
+    resolve_step_checkpoint_selector,
     save_portable_checkpoint_weights as _save_portable_checkpoint_weights,
     strip_runtime_prefixes,
 )
@@ -104,25 +105,24 @@ def _normalize_contrastive_pretrained_checkpoint_root(
 def _resolve_checkpoint_tag(checkpoint_dir: Path, checkpoint: str | int | None) -> str:
     """Resolve a checkpoint tag to a concrete step directory name.
 
+    Resolution delegates to :func:`neobert.checkpointing.resolve_step_checkpoint_selector`
+    so ``latest`` handling (latest file, direct step dirs, loadability scan) stays
+    identical across tasks; this wrapper only adds ``None`` coercion and a hard
+    failure when ``latest`` cannot be resolved to a concrete step.
+
     :param Path checkpoint_dir: Base directory that holds checkpoint step folders.
     :param str | int | None checkpoint: Tag or step to resolve, or ``None``/"latest".
+    :raises ValueError: If ``latest`` resolves to no loadable checkpoint step.
     :return str: Resolved checkpoint step tag.
     """
-    if checkpoint is None or str(checkpoint).lower() == "latest":
-        latest_path = checkpoint_dir / "latest"
-        if latest_path.is_file():
-            return latest_path.read_text(encoding="utf-8").strip()
-        steps = [
-            int(entry.name)
-            for entry in checkpoint_dir.iterdir()
-            if entry.is_dir() and entry.name.isdigit()
-        ]
-        if not steps:
-            raise ValueError(
-                f"No checkpoint steps found in {checkpoint_dir} to resolve 'latest'."
-            )
-        return str(max(steps))
-    return str(checkpoint)
+    requested = "latest" if checkpoint is None else str(checkpoint)
+    resolved = resolve_step_checkpoint_selector(checkpoint_dir, requested)
+    if requested.lower() == "latest" and resolved.lower() == "latest":
+        raise ValueError(
+            f"No loadable checkpoint steps found in {checkpoint_dir} to resolve "
+            "'latest'."
+        )
+    return resolved
 
 
 def _resolve_contrastive_pooling(pooling: str) -> str:
