@@ -1672,18 +1672,11 @@ class MuonClipOptimizer(Optimizer):
         :param torch.Tensor muon_input: Interleaved fused-QKV update tensor.
         :return torch.Tensor: Fused update tensor rebuilt from per-projection Muon.
         """
-        q_update, k_update, v_update = self._split_interleaved_qkv_matrix(muon_input)
-        q_update = self._normalize_muon_update(
-            self._orthogonalize_update(q_update),
-            q_update.shape,
-        )
-        k_update = self._normalize_muon_update(
-            self._orthogonalize_update(k_update),
-            k_update.shape,
-        )
-        v_update = self._normalize_muon_update(
-            self._orthogonalize_update(v_update),
-            v_update.shape,
+        q_update, k_update, v_update = (
+            self._normalize_muon_update(
+                self._orthogonalize_update(update), update.shape
+            )
+            for update in self._split_interleaved_qkv_matrix(muon_input)
         )
         return self._merge_interleaved_qkv_matrix(q_update, k_update, v_update)
 
