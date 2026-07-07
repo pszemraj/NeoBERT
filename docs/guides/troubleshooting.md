@@ -142,11 +142,11 @@ Actions:
 
 ```bash
 # Validate exported model
-conda run -s --name neobert python scripts/export-hf/validate.py /path/to/exported/model
+python scripts/export-hf/validate.py /path/to/exported/model
 
 # Tiny pretraining smoke test
-conda run -s --name neobert python scripts/pretraining/pretrain.py tests/configs/pretraining/test_tiny_pretrain.yaml
+python scripts/pretraining/pretrain.py tests/configs/pretraining/test_tiny_pretrain.yaml
 
 # Focused tests for packed attention path
-conda run -s --name neobert pytest tests/kernels/test_attention.py tests/test_model_forward.py -q
+pytest tests/kernels/test_attention.py tests/test_model_forward.py -q
 ```

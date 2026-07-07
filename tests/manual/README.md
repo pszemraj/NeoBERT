@@ -5,11 +5,11 @@ Opt-in validation and benchmark scripts under `tests/manual/`.
 ## Commands
 
 ```bash
-conda run -s --name neobert pytest -q tests/manual/test_muonclip_integration.py -s
-conda run -s --name neobert python tests/manual/test_muonclip_training.py
-conda run -s --name neobert python tests/manual/validate_muonclip.py
-conda run -s --name neobert torchrun --standalone --nproc_per_node=2 tests/manual/test_muonclip_fsdp2_golden.py
-conda run -s --name neobert torchrun --standalone --nproc_per_node=2 tests/manual/test_muonclip_accelerate_fsdp2_resume.py
+pytest -q tests/manual/test_muonclip_integration.py -s
+python tests/manual/test_muonclip_training.py
+python tests/manual/validate_muonclip.py
+torchrun --standalone --nproc_per_node=2 tests/manual/test_muonclip_fsdp2_golden.py
+torchrun --standalone --nproc_per_node=2 tests/manual/test_muonclip_accelerate_fsdp2_resume.py
 ```
 
 ## Notes

@@ -55,7 +55,7 @@ Use Accelerate with FSDP v2 and transformer-based wrapping:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 \
-conda run -s --name neobert accelerate launch \
+accelerate launch \
   --multi_gpu --num_processes 2 --num_machines 1 \
   --mixed_precision bf16 \
   --dynamo_backend no \

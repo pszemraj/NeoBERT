@@ -12,7 +12,7 @@ helpers alone:
 - run the next step and compare against uninterrupted continuation.
 
 Run on a CUDA machine with 2 ranks:
-`conda run -s --name neobert torchrun --standalone --nproc_per_node=2 tests/manual/test_muonclip_accelerate_fsdp2_resume.py`
+`torchrun --standalone --nproc_per_node=2 tests/manual/test_muonclip_accelerate_fsdp2_resume.py`
 """
 
 from __future__ import annotations

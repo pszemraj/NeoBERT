@@ -7,34 +7,34 @@ This guide covers running and extending the NeoBERT regression suite.
 ### Full suite
 
 ```bash
-conda run --name neobert pytest -q
+pytest -q
 ```
 
 Or via helper:
 
 ```bash
-conda run --name neobert python tests/run_tests.py
+python tests/run_tests.py
 ```
 
 ### Subsets
 
 ```bash
 # One file
-conda run --name neobert pytest tests/kernels/test_attention.py -q
+pytest tests/kernels/test_attention.py -q
 
 # One directory
-conda run --name neobert pytest tests/training -q
+pytest tests/training -q
 
 # Verbose investigation
-conda run --name neobert pytest tests/test_model_forward.py -vv --showlocals
+pytest tests/test_model_forward.py -vv --showlocals
 ```
 
 ### Helper flags
 
 ```bash
-conda run --name neobert python tests/run_tests.py --test-dir training
-conda run --name neobert python tests/run_tests.py --pattern "test_*compile*.py"
-conda run --name neobert python tests/run_tests.py --no-pytest
+python tests/run_tests.py --test-dir training
+python tests/run_tests.py --pattern "test_*compile*.py"
+python tests/run_tests.py --no-pytest
 ```
 
 ## Manual Validation Scripts
