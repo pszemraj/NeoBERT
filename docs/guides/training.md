@@ -42,7 +42,7 @@ python scripts/pretraining/pretrain.py \
 | Replicated multi-GPU | `accelerate launch --num_processes N ...` | one full model replica per rank | Adam/AdamW scale-out or launcher sanity checks |
 | Sharded multi-GPU | `accelerate launch --use_fsdp --fsdp_version 2 ...` | model and optimizer state sharded across ranks | primary distributed pretraining path |
 
-The maintained multi-rank MuonClip path is the sharded one: Accelerate FSDP2 with a 1D row-sharded DTensor mesh. Do not combine MuonClip with tensor parallelism, context parallelism, or other multi-axis DTensor layouts.
+The maintained multi-rank MuonClip path is the sharded one: Accelerate FSDP2 with a 1D row-sharded DTensor mesh. Mesh constraints are listed in [Distributed Muon](training-optimization.md#distributed-muon).
 
 ### Distributed validation
 
@@ -66,7 +66,7 @@ conda run -s --name neobert accelerate launch \
   --wandb.enabled false
 ```
 
-MuonClip's FSDP2 path currently supports only a 1D row-sharded device mesh. Do not combine it with tensor/context parallelism or other multi-axis DTensor meshes. DeepSpeed is no longer a supported runtime backend in this repo; use Accelerate FSDP v2 for distributed training. Legacy DeepSpeed ZeRO checkpoint conversion remains available via the optional `neobert[legacy-checkpoints]` extra.
+DeepSpeed is no longer a supported runtime backend in this repo; use Accelerate FSDP v2 for distributed training. Legacy DeepSpeed ZeRO checkpoint conversion remains available via the optional `neobert[legacy-checkpoints]` extra.
 
 For the explicit no-clipping variant, keep the same launch flags and replace the config path with `configs/pretraining/pretrain_neobert100m_smollm2data_muonclip_noclip.yaml`.
 
