@@ -35,7 +35,9 @@ from neobert.checkpointing import (
     MODEL_WEIGHTS_NAME,
     load_step_checkpoint_state_dict,
     prune_step_checkpoints as _prune_step_checkpoints,
+    resolve_accelerate_state_dir,
     resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
+    save_accelerate_state,
     save_portable_checkpoint_weights,
 )
 from neobert.kernels.attention import canonicalize_attn_backend
@@ -762,7 +764,7 @@ def save_training_checkpoint(
     checkpoint_path = resume_checkpoint_dir / checkpoint_tag
 
     # Save resumable Accelerate state for true optimizer/scheduler resume.
-    accelerator.save_state(output_dir=str(checkpoint_path))
+    save_accelerate_state(accelerator, checkpoint_path)
     accelerator.wait_for_everyone()
     save_portable_checkpoint_weights(model, accelerator, checkpoint_path)
     accelerator.wait_for_everyone()
@@ -1532,7 +1534,7 @@ def trainer(cfg: Config) -> None:
             )
 
         accelerator.print(f"Resuming GLUE run from checkpoint: {resume_checkpoint}")
-        accelerator.load_state(str(resume_checkpoint))
+        accelerator.load_state(str(resolve_accelerate_state_dir(resume_checkpoint)))
         validate_muon_runtime_topology(
             accelerator=accelerator,
             optimizer=optimizer,
