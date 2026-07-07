@@ -70,7 +70,7 @@ DeepSpeed is no longer a supported runtime backend in this repo; use Accelerate 
 
 For the explicit no-clipping variant, keep the same launch flags and replace the config path with `configs/pretraining/pretrain_neobert100m_smollm2data_muonclip_noclip.yaml`.
 
-Distributed launch policy for this repo:
+### Distributed launch policy
 
 - Accelerate launch flags control process topology and FSDP plugin selection (`--num_processes`, `--use_fsdp`, `--fsdp_version`, wrap policy).
 - NeoBERT config controls the actual training precision through `trainer.mixed_precision`. Pass a matching `accelerate launch --mixed_precision` value only to keep launcher output quiet; if you omit it, Accelerate may warn about its CLI default even though the trainer still constructs `Accelerator(mixed_precision=...)` from config.

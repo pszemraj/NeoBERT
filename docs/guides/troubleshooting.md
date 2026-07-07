@@ -59,22 +59,8 @@ Actions:
 
 ### Accelerate launch warnings about mixed precision or dynamo
 
-Symptoms:
-
-- `accelerate launch` says its default `--mixed_precision` is `no`
-- `accelerate launch` says its default `--dynamo_backend` is `no`
-
-What happens:
-
-1. those warnings describe omitted launcher flags, not a NeoBERT override,
-2. NeoBERT still constructs `Accelerator(...)` from `trainer.mixed_precision` and the repo's compile settings,
-3. passing matching launcher flags keeps the startup output aligned with the actual runtime policy.
-
-Actions:
-
-1. pass `accelerate launch --mixed_precision bf16` when the config uses bf16,
-2. keep `--dynamo_backend no` unless you are intentionally testing launcher-side dynamo,
-3. use `--wandb.name ...` for run naming; `--wandb.run` is not a NeoBERT CLI key.
+- `accelerate launch` warnings about its default `--mixed_precision` or `--dynamo_backend` describe omitted launcher flags, not a NeoBERT override; the trainer still constructs `Accelerator(...)` from `trainer.mixed_precision` and the repo's compile settings.
+- Pass matching launcher flags (`--mixed_precision bf16`, `--dynamo_backend no`) to keep startup output aligned with the runtime policy; see [Distributed launch policy](training.md#distributed-launch-policy).
 
 ### `torch.compile` warnings/recompiles
 
