@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from pathlib import Path
@@ -21,6 +22,7 @@ from neobert.training_utils import (
     _update_global_norm_metric_for_logging,
     attach_optimizer_param_names,
     create_accelerator,
+    optimizer_state_semantics,
     resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
     save_optimizer_param_name_manifest,
@@ -356,6 +358,60 @@ def test_optimizer_param_name_manifest_rejects_reordered_groups(
     attach_optimizer_param_names(reordered_model, reordered_optimizer)
     with pytest.raises(RuntimeError, match="parameter order changed"):
         validate_optimizer_param_name_manifest(reordered_optimizer, tmp_path)
+
+
+def test_optimizer_state_semantics_tags() -> None:
+    """Semantics tags come from STATE_SEMANTICS or a class-name default."""
+    from neobert.optimizer import MuonClipOptimizer
+
+    model = torch.nn.Linear(2, 2, bias=False)
+    adamw = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    assert optimizer_state_semantics(adamw) == "adamw-v1"
+    assert MuonClipOptimizer.STATE_SEMANTICS == "muonclip-heavyball-v1"
+
+
+def test_optimizer_param_name_manifest_rejects_missing_manifest(
+    tmp_path: Path,
+) -> None:
+    """Checkpoints without a manifest must not resume optimizer state silently."""
+    model = torch.nn.Linear(2, 2, bias=False)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    attach_optimizer_param_names(model, optimizer)
+
+    with pytest.raises(RuntimeError, match="predates the optimizer resume manifest"):
+        validate_optimizer_param_name_manifest(optimizer, tmp_path)
+
+
+def test_optimizer_param_name_manifest_rejects_outdated_schema(
+    tmp_path: Path,
+) -> None:
+    """Bare name-list manifests lack state semantics and must be rejected."""
+    model = torch.nn.Linear(2, 2, bias=False)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    attach_optimizer_param_names(model, optimizer)
+
+    manifest_path = tmp_path / "optimizer_param_names.json"
+    manifest_path.write_text(json.dumps([["weight"]]), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="outdated manifest schema"):
+        validate_optimizer_param_name_manifest(optimizer, tmp_path)
+
+
+def test_optimizer_param_name_manifest_rejects_changed_state_semantics(
+    tmp_path: Path,
+) -> None:
+    """State saved under a different update rule must not load silently."""
+    model = torch.nn.Linear(2, 2, bias=False)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    attach_optimizer_param_names(model, optimizer)
+    manifest_path = save_optimizer_param_name_manifest(optimizer, tmp_path)
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["state_semantics"] = "adamw-v0"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="state semantics changed"):
+        validate_optimizer_param_name_manifest(optimizer, tmp_path)
 
 
 def test_create_accelerator_recreates_state_for_mixed_precision_reuse() -> None:

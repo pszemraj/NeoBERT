@@ -1015,18 +1015,40 @@ def optimizer_param_name_groups(optimizer: Any) -> list[list[str]]:
     return payload
 
 
+def optimizer_state_semantics(optimizer: Any) -> str:
+    """Return the tag naming how the optimizer's per-parameter state is defined.
+
+    Optimizers that change their update rule in a way that reinterprets saved
+    state declare a ``STATE_SEMANTICS`` class attribute and bump it on such
+    changes. Optimizers without an explicit tag get a stable default derived
+    from the class name (their state semantics are pinned by the framework).
+
+    :param Any optimizer: Optimizer or Accelerate optimizer wrapper.
+    :return str: State-semantics tag recorded in resume manifests.
+    """
+    unwrapped = _unwrap_optimizer(optimizer)
+    semantics = getattr(type(unwrapped), "STATE_SEMANTICS", None)
+    if semantics is not None:
+        return str(semantics)
+    return f"{type(unwrapped).__name__.lower()}-v1"
+
+
 def save_optimizer_param_name_manifest(
     optimizer: Any,
     checkpoint_path: str | Path,
 ) -> Path:
-    """Persist optimizer parameter ordering beside a training checkpoint.
+    """Persist optimizer parameter ordering and state semantics beside a checkpoint.
 
     :param Any optimizer: Optimizer or Accelerate optimizer wrapper.
     :param str | Path checkpoint_path: Checkpoint step directory.
     :return Path: Written manifest path.
     """
     path = Path(checkpoint_path) / OPTIMIZER_PARAM_NAMES_MANIFEST
-    payload = optimizer_param_name_groups(optimizer)
+    payload = {
+        "schema_version": 1,
+        "state_semantics": optimizer_state_semantics(optimizer),
+        "param_name_groups": optimizer_param_name_groups(optimizer),
+    }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return path
 
@@ -1035,25 +1057,51 @@ def validate_optimizer_param_name_manifest(
     optimizer: Any,
     checkpoint_path: str | Path,
 ) -> None:
-    """Fail fast if optimizer parameter ordering differs from a checkpoint.
+    """Fail fast if optimizer state cannot be faithfully restored from a checkpoint.
 
-    PyTorch optimizer state is positional inside parameter groups. This guard
-    prevents same-shaped parameters from inheriting the wrong optimizer buffers
-    after a model refactor or construction-order change.
+    PyTorch optimizer state is positional inside parameter groups, so a model
+    refactor or construction-order change silently hands same-shaped parameters
+    the wrong buffers. The manifest also records state-semantics tags so state
+    written under a different update rule (for example a momentum-scale change)
+    is rejected instead of silently mis-scaling post-resume updates. There is
+    deliberately no fallback for checkpoints without a current-schema manifest:
+    their optimizer state is unverifiable and this repo does not carry
+    checkpoint back-compat before a stable release.
 
     :param Any optimizer: Optimizer or Accelerate optimizer wrapper.
     :param str | Path checkpoint_path: Checkpoint step directory.
-    :raises RuntimeError: If the manifest is missing or does not match.
+    :raises RuntimeError: If the manifest is missing, outdated, or does not match.
     """
     path = Path(checkpoint_path) / OPTIMIZER_PARAM_NAMES_MANIFEST
     if not path.is_file():
         raise RuntimeError(
-            f"{path} is missing; refusing a silent positional optimizer resume."
+            f"{path} is missing; refusing a silent positional optimizer resume. "
+            "This checkpoint predates the optimizer resume manifest, so its "
+            "optimizer state cannot be verified against the current optimizer "
+            "(parameter order and state semantics are unrecorded). Start a new "
+            "run, or continue from the model weights without optimizer state."
         )
 
     saved = json.loads(path.read_text(encoding="utf-8"))
-    current = optimizer_param_name_groups(optimizer)
-    if saved != current:
+    if not isinstance(saved, dict) or "param_name_groups" not in saved:
+        raise RuntimeError(
+            f"{path} uses an outdated manifest schema without state-semantics "
+            "metadata; refusing to resume optimizer state written by an older "
+            "trainer. Start a new run, or re-save the checkpoint with a current "
+            "trainer."
+        )
+
+    saved_semantics = saved.get("state_semantics")
+    current_semantics = optimizer_state_semantics(optimizer)
+    if saved_semantics != current_semantics:
+        raise RuntimeError(
+            "Optimizer state semantics changed since the checkpoint was written "
+            f"(checkpoint: {saved_semantics!r}, current: {current_semantics!r}). "
+            "Refusing to reinterpret saved optimizer state under a different "
+            "update rule."
+        )
+
+    if saved["param_name_groups"] != optimizer_param_name_groups(optimizer):
         raise RuntimeError(
             "Optimizer parameter order changed since the checkpoint was written. "
             "Refusing to load optimizer state positionally."

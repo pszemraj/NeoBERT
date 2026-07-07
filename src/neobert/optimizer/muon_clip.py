@@ -550,6 +550,12 @@ class MuonClipOptimizer(Optimizer):
     Uses Muon for 2D params, Adam for 1D params, with optional QK clipping.
     """
 
+    # Names the meaning of per-parameter state tensors (heavy-ball momentum
+    # buffers: buf = beta * buf + grad). Bump whenever an update-rule change
+    # alters how saved state must be interpreted, so resume fails fast instead
+    # of silently feeding stale-scale buffers into the new rule.
+    STATE_SEMANTICS = "muonclip-heavyball-v1"
+
     def __init__(
         self, model: torch.nn.Module, model_config: Any, config: MuonClipConfig
     ) -> None:
