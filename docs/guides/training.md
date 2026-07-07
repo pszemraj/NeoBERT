@@ -13,7 +13,7 @@ This guide covers pretraining and contrastive workflows. Full field-level schema
 | `scripts/contrastive/finetune.py`         | contrastive fine-tuning           |
 | `scripts/contrastive/preprocess.py`       | contrastive dataset preprocessing |
 
-For contrastive preprocessing, `dataset.name` may be omitted, `ALL`, a canonical key such as `ALLNLI`, or an HF dataset ID alias such as `sentence-transformers/all-nli`, `embedding-data/QQP_triplets`, or `WhereIsAI/github-issue-similarity`. Both preprocessing and contrastive training load only the requested cached splits from `all/`; other cached split directories may remain on disk for later reuse. Cached split reuse is guarded by `tokenization_manifest.json`, so changing tokenizer/max-length/tokenization settings requires `dataset.force_redownload: true` or a fresh cache.
+For contrastive preprocessing, `dataset.name` may be omitted, `ALL`, a canonical registry key, or a supported HF dataset ID alias; accepted values and cached-split loading rules are in the [Data Source reference](../reference/configuration.md#data-source). Cached split reuse is guarded by `tokenization_manifest.json`, so changing tokenizer/max-length/tokenization settings requires `dataset.force_redownload: true` or a fresh cache.
 
 ## Pretraining
 
@@ -235,7 +235,7 @@ Ensure `dataset.path` points to output from `scripts/contrastive/preprocess.py`.
 - Use `gradient_checkpointing` for memory headroom on long contexts.
 - Use `gradient_clipping` for stability on deep/long runs.
 - `train/grad_norm` is logged as the global pre-clip norm after accumulation and any token-based scaling, so clipping does not hide overshoot in tracker plots.
-- For paper-style NeoBERT masking strategy, set `datacollator.mask_all: true`. Default `false` uses sampled-token 80/10/10 corruption. For `p = datacollator.mlm_probability`, global token mix is: `(1 - p)` untouched, `0.8p` `[MASK]`, `0.1p` random-token, `0.1p` original-token.
+- For paper-style NeoBERT masking strategy, set `datacollator.mask_all: true`. Default `false` uses sampled-token 80/10/10 corruption; the exact token-mix math is in [Data Collator](../reference/configuration.md#data-collator).
 - For packed + compile runs, measure `tokens/sec` rather than `steps/sec`.
 
 ## Related Docs
