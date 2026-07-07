@@ -481,6 +481,47 @@ class TestStreamingRetryHelpers(unittest.TestCase):
 
         self.assertEqual(list(wrapped), [0, 1, 2, 3])
 
+    def test_retrying_streaming_dataset_warns_on_lossy_shuffle_buffer_recovery(self):
+        """Shuffled streams must surface that retry recovery drops buffered examples."""
+        dataset = _RetryableFlakyDataset([0, 1, 2, 3], fail_at=2, fail_times=1)
+        dataset._shuffling = object()  # mimic HF IterableDataset.shuffle() marker
+        wrapped = RetryingStreamingDataset(
+            dataset,
+            label="unit-test",
+            max_retries=1,
+            base_backoff_seconds=0.01,
+            max_backoff_seconds=0.01,
+            sleep_fn=lambda _seconds: None,
+        )
+
+        with self.assertLogs("neobert.streaming", level="WARNING") as logs:
+            self.assertEqual(list(wrapped), [0, 1, 2, 3])
+
+        self.assertTrue(
+            any("shuffle buffer" in message for message in logs.output),
+            logs.output,
+        )
+
+    def test_retrying_streaming_dataset_recovery_stays_quiet_without_shuffle(self):
+        """Unshuffled streams recover exactly-once and must not warn about buffers."""
+        dataset = _RetryableFlakyDataset([0, 1, 2, 3], fail_at=2, fail_times=1)
+        wrapped = RetryingStreamingDataset(
+            dataset,
+            label="unit-test",
+            max_retries=1,
+            base_backoff_seconds=0.01,
+            max_backoff_seconds=0.01,
+            sleep_fn=lambda _seconds: None,
+        )
+
+        with self.assertLogs("neobert.streaming", level="WARNING") as logs:
+            self.assertEqual(list(wrapped), [0, 1, 2, 3])
+
+        self.assertFalse(
+            any("shuffle buffer" in message for message in logs.output),
+            logs.output,
+        )
+
     def test_retrying_streaming_dataset_restores_cursor_advanced_before_failure(self):
         """Retries must not skip examples when the dataset advances before failing."""
         dataset = _StatefulCursorStreamingDataset(

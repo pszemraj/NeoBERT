@@ -137,6 +137,19 @@ def supports_streaming_iteration_resume(dataset: object) -> bool:
     )
 
 
+def streaming_state_restore_drops_shuffle_buffer(dataset: object) -> bool:
+    """Return whether restoring iterator state discards an in-memory shuffle buffer.
+
+    HF iterable datasets do not serialize shuffle-buffer contents in
+    ``state_dict()``; restoring a snapshot rewinds the source cursor but refills
+    the buffer from new data, so buffered-but-unyielded examples are skipped.
+
+    :param object dataset: Dataset-like object to inspect.
+    :return bool: ``True`` when the dataset carries an in-memory shuffle buffer.
+    """
+    return getattr(dataset, "_shuffling", None) is not None
+
+
 def _iter_exception_chain(exc: BaseException) -> Iterator[BaseException]:
     """Yield an exception plus its causal chain.
 
@@ -302,7 +315,14 @@ def peek_streaming_example(
 
 
 class RetryingStreamingDataset(torch.utils.data.IterableDataset):
-    """Wrap a streaming dataset and restart iteration after transient failures."""
+    """Wrap a streaming dataset and restart iteration after transient failures.
+
+    For unshuffled resumable streams, retry recovery is exactly-once: the cursor
+    snapshot rewinds to the last yielded example. Shuffled HF streams do not
+    serialize shuffle-buffer contents, so a retry restore refills the buffer and
+    may skip up to ``shuffle_buffer_size`` buffered-but-unyielded examples; the
+    wrapper logs a warning whenever such a lossy recovery happens.
+    """
 
     def __init__(
         self,
@@ -390,9 +410,13 @@ class RetryingStreamingDataset(torch.utils.data.IterableDataset):
 
         The retry budget counts consecutive failures at a given resume point.
         Each successful yield resets the counter so isolated transient blips
-        hours apart do not accumulate toward the budget. Recovery always reloads
-        a snapshot captured before the failed read so resumable dataset cursors
-        cannot skip the failure boundary.
+        hours apart do not accumulate toward the budget. Recovery reloads a
+        snapshot captured before the failed read, so the source cursor cannot
+        skip past the failure boundary. Examples held in an in-memory shuffle
+        buffer are not part of HF snapshot state, however: recovery on a
+        shuffled stream refills the buffer and may skip buffered-but-unyielded
+        examples (bounded by the shuffle buffer size), which is logged as a
+        warning when it happens.
 
         :raises RuntimeError: If transient failures persist beyond the retry budget.
         :return collections.abc.Iterator[Any]: Example iterator.
@@ -444,4 +468,11 @@ class RetryingStreamingDataset(torch.utils.data.IterableDataset):
                     self._epoch,
                     exc,
                 )
+                if streaming_state_restore_drops_shuffle_buffer(self.dataset):
+                    logger.warning(
+                        "Retry recovery for %s reloads the stream cursor without "
+                        "the in-memory shuffle buffer; up to shuffle_buffer_size "
+                        "buffered examples may be skipped.",
+                        self.label,
+                    )
                 self.sleep_fn(delay)

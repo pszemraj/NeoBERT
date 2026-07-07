@@ -111,7 +111,7 @@ For hub-backed streaming datasets:
 - Hugging Face iterable streams are detected as streaming datasets before DataLoader construction, adapted to PyTorch's iterable API when needed, and not given map-style options such as DataLoader-level `shuffle`,
 - NeoBERT retries transient read failures while inspecting schemas and during long-running stream iteration,
 - retry recovery resumes from the last yielded example when the underlying HF iterable dataset supports `state_dict()/load_state_dict()`, and the retry wrapper remains visible to checkpoint/save-state resume paths and streaming eval-budget checks,
-- shuffled streams can still perturb exact in-buffer order after a retry because HF refill semantics do not preserve the old shuffle buffer contents.
+- shuffled streams lose the in-memory shuffle buffer on retry recovery because HF `state_dict()` does not serialize buffer contents: the cursor rewinds correctly, but up to `dataset.shuffle_buffer_size` buffered-but-unyielded examples are skipped and the buffer refills from new data. The wrapper logs a warning whenever such a lossy recovery happens; unshuffled streams recover exactly-once.
 
 ## Contrastive Objective Details
 

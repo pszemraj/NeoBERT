@@ -214,7 +214,7 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 > [!NOTE]
 > `dataset.pretraining_prob` is deprecated and normalized to `contrastive.pretraining_prob`.
 >
-> Streaming retry recovery resumes from the last yielded example when the underlying HF iterable dataset exposes `state_dict()/load_state_dict()`. When the source stream is shuffled, HF refill semantics can still perturb the exact in-buffer order after a retry.
+> Streaming retry recovery resumes from the last yielded example when the underlying HF iterable dataset exposes `state_dict()/load_state_dict()`. When the source stream is shuffled, HF snapshots do not include shuffle-buffer contents, so a retry recovery skips up to `dataset.shuffle_buffer_size` buffered-but-unyielded examples and logs a warning; unshuffled streams recover exactly-once.
 >
 > Contrastive preprocessing accepts an omitted `dataset.name`, `dataset.name: ALL`, canonical registry keys such as `ALLNLI`, or common HF dataset IDs from the built-in wrapper registry (for example `sentence-transformers/all-nli`, `embedding-data/QQP_triplets`, or `WhereIsAI/github-issue-similarity`). When `dataset.load_all_from_disk=true`, cached split directories under `all/` are loaded only for the requested selection and missing splits fail fast. Subset preprocess refreshes preserve other cached split entries already present under `all/`.
 
