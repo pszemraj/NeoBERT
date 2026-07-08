@@ -115,6 +115,20 @@ class _RuntimeShardedGradParam(_RuntimeTopologyDTensorParam):
         self.grad = grad
 
 
+class _CompileWrapper(torch.nn.Module):
+    def __init__(self, module: torch.nn.Module) -> None:
+        super().__init__()
+        self._orig_mod = module
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Run the wrapped module forward.
+
+        :param torch.Tensor inputs: Input tensor.
+        :return torch.Tensor: Wrapped module output.
+        """
+        return self._orig_mod(inputs)
+
+
 def test_maybe_compile_model_allows_muonclip_clipping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -358,6 +372,44 @@ def test_optimizer_param_name_manifest_rejects_reordered_groups(
     attach_optimizer_param_names(reordered_model, reordered_optimizer)
     with pytest.raises(RuntimeError, match="parameter order changed"):
         validate_optimizer_param_name_manifest(reordered_optimizer, tmp_path)
+
+
+def test_optimizer_param_name_manifest_ignores_runtime_wrapper_prefixes(
+    tmp_path: Path,
+) -> None:
+    """Compile/distributed wrapper prefixes must not affect resume manifests."""
+    compiled_checkpoint = tmp_path / "compiled"
+    compiled_checkpoint.mkdir()
+    compiled_model = _CompileWrapper(torch.nn.Linear(2, 2))
+    compiled_optimizer = torch.optim.AdamW(compiled_model.parameters(), lr=1e-3)
+    attach_optimizer_param_names(compiled_model, compiled_optimizer)
+    manifest_path = save_optimizer_param_name_manifest(
+        compiled_optimizer,
+        compiled_checkpoint,
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["param_name_groups"] == [["weight", "bias"]]
+
+    uncompiled_model = torch.nn.Linear(2, 2)
+    uncompiled_optimizer = torch.optim.AdamW(uncompiled_model.parameters(), lr=1e-3)
+    attach_optimizer_param_names(uncompiled_model, uncompiled_optimizer)
+    validate_optimizer_param_name_manifest(uncompiled_optimizer, compiled_checkpoint)
+
+    uncompiled_checkpoint = tmp_path / "uncompiled"
+    uncompiled_checkpoint.mkdir()
+    save_optimizer_param_name_manifest(uncompiled_optimizer, uncompiled_checkpoint)
+
+    compiled_resume_model = _CompileWrapper(torch.nn.Linear(2, 2))
+    compiled_resume_optimizer = torch.optim.AdamW(
+        compiled_resume_model.parameters(),
+        lr=1e-3,
+    )
+    attach_optimizer_param_names(compiled_resume_model, compiled_resume_optimizer)
+    validate_optimizer_param_name_manifest(
+        compiled_resume_optimizer,
+        uncompiled_checkpoint,
+    )
 
 
 def test_optimizer_state_semantics_tags() -> None:

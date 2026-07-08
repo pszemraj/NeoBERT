@@ -14,6 +14,8 @@ from accelerate import Accelerator
 from accelerate.state import AcceleratorState, GradientState
 from accelerate.utils import DistributedType
 
+from neobert.checkpointing import strip_runtime_prefixes
+
 try:
     from transformers import BatchEncoding
 except Exception:  # pragma: no cover - transformers import should succeed in repo env
@@ -982,7 +984,10 @@ def attach_optimizer_param_names(
     :param Any optimizer: Optimizer or Accelerate optimizer wrapper.
     :raises RuntimeError: If an optimizer parameter cannot be mapped to a model name.
     """
-    name_by_id = {id(param): name for name, param in model.named_parameters()}
+    name_by_id = {
+        id(param): strip_runtime_prefixes(str(name))
+        for name, param in model.named_parameters()
+    }
     for group in _optimizer_param_groups(optimizer):
         names: list[str] = []
         for param in group["params"]:
@@ -1011,7 +1016,7 @@ def optimizer_param_name_groups(optimizer: Any) -> list[list[str]]:
                 "Optimizer parameter names are missing for group "
                 f"{group_idx}; call attach_optimizer_param_names() before checkpointing."
             )
-        payload.append([str(name) for name in names])
+        payload.append([strip_runtime_prefixes(str(name)) for name in names])
     return payload
 
 
@@ -1101,7 +1106,11 @@ def validate_optimizer_param_name_manifest(
             "update rule."
         )
 
-    if saved["param_name_groups"] != optimizer_param_name_groups(optimizer):
+    saved_param_name_groups = [
+        [strip_runtime_prefixes(str(name)) for name in group]
+        for group in saved["param_name_groups"]
+    ]
+    if saved_param_name_groups != optimizer_param_name_groups(optimizer):
         raise RuntimeError(
             "Optimizer parameter order changed since the checkpoint was written. "
             "Refusing to load optimizer state positionally."
