@@ -531,6 +531,36 @@ def trainer(cfg: Config) -> None:
         ):
             use_deepspeed = cfg._raw_model_dict.get("deepspeed")
 
+    resolved_pretrained_checkpoint_dir: Path | None = None
+    resolved_pretrained_checkpoint_tag: str | None = None
+    if pretrained_checkpoint_dir:
+        resolved_pretrained_checkpoint_dir = (
+            _normalize_contrastive_pretrained_checkpoint_root(pretrained_checkpoint_dir)
+        )
+        resolved_pretrained_checkpoint_tag = _resolve_checkpoint_tag(
+            resolved_pretrained_checkpoint_dir,
+            pretrained_checkpoint
+            if pretrained_checkpoint is not None
+            else cfg.pretrained_checkpoint,
+        )
+        checkpoint_step_dir = (
+            resolved_pretrained_checkpoint_dir / resolved_pretrained_checkpoint_tag
+        )
+        checkpoint_config_path = checkpoint_step_dir / "config.yaml"
+        if checkpoint_config_path.is_file():
+            model_pretraining_config = ConfigLoader.load(str(checkpoint_config_path))
+            _sync_contrastive_runtime_from_pretraining(
+                cfg,
+                model_pretraining_config,
+                checkpoint_step_dir=checkpoint_step_dir,
+            )
+        else:
+            logger.warning(
+                "Pretrained checkpoint step %s is missing config.yaml; contrastive "
+                "trainer cannot verify tokenizer/backbone metadata beyond weight keys.",
+                checkpoint_step_dir,
+            )
+
     project_config = ProjectConfiguration(
         str(output_dir),
         automatic_checkpoint_naming=False,
@@ -580,36 +610,6 @@ def trainer(cfg: Config) -> None:
             f"{pretraining_mix_prob * 100.0:.1f}% of steps sample the pretraining "
             "dataset branch (SimCSE anti-forgetting path)."
         )
-
-    resolved_pretrained_checkpoint_dir: Path | None = None
-    resolved_pretrained_checkpoint_tag: str | None = None
-    if pretrained_checkpoint_dir:
-        resolved_pretrained_checkpoint_dir = (
-            _normalize_contrastive_pretrained_checkpoint_root(pretrained_checkpoint_dir)
-        )
-        resolved_pretrained_checkpoint_tag = _resolve_checkpoint_tag(
-            resolved_pretrained_checkpoint_dir,
-            pretrained_checkpoint
-            if pretrained_checkpoint is not None
-            else cfg.pretrained_checkpoint,
-        )
-        checkpoint_step_dir = (
-            resolved_pretrained_checkpoint_dir / resolved_pretrained_checkpoint_tag
-        )
-        checkpoint_config_path = checkpoint_step_dir / "config.yaml"
-        if checkpoint_config_path.is_file():
-            model_pretraining_config = ConfigLoader.load(str(checkpoint_config_path))
-            _sync_contrastive_runtime_from_pretraining(
-                cfg,
-                model_pretraining_config,
-                checkpoint_step_dir=checkpoint_step_dir,
-            )
-        else:
-            logger.warning(
-                "Pretrained checkpoint step %s is missing config.yaml; contrastive "
-                "trainer cannot verify tokenizer/backbone metadata beyond weight keys.",
-                checkpoint_step_dir,
-            )
 
     # Initialise the wandb run and pass wandb parameters
     if wandb_enabled:

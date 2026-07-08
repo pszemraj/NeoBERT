@@ -3,6 +3,7 @@
 
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -368,6 +369,86 @@ class TestContrastivePipeline:
         assert cfg.tokenizer.name == "runtime-tokenizer"
         assert cfg.tokenizer.max_length == 384
         assert cfg.tokenizer.revision == "runtime-rev"
+
+    def test_contrastive_tracker_config_uses_checkpoint_metadata(
+        self,
+        tmp_path: Path,
+    ):
+        """Resolved tracker config should include pretrained checkpoint sync."""
+        from importlib import import_module
+
+        from neobert.utils import prepare_wandb_config as real_prepare_wandb_config
+
+        trainer_module = import_module("neobert.contrastive.trainer")
+
+        class StopAfterResolvedConfig(Exception):
+            pass
+
+        cfg = Config()
+        cfg.task = "contrastive"
+        cfg.dataset.path = "prepared-contrastive-dataset"
+        cfg.contrastive.pretraining_prob = 0.0
+        cfg.contrastive.pretrained_checkpoint_dir = str(tmp_path)
+        cfg.contrastive.pretrained_checkpoint = "123"
+        cfg.model.hidden_size = 128
+        cfg.model.num_hidden_layers = 3
+        cfg.model.vocab_size = 256
+        cfg.tokenizer.path = None
+        cfg.tokenizer.max_length = 128
+        cfg.wandb.enabled = False
+        cfg.wandb.mode = "disabled"
+
+        checkpoint_step_dir = tmp_path / "checkpoints" / "123"
+        checkpoint_tokenizer_dir = checkpoint_step_dir / "tokenizer"
+        checkpoint_tokenizer_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_cfg = Config()
+        checkpoint_cfg.model.hidden_size = 384
+        checkpoint_cfg.model.num_hidden_layers = 6
+        checkpoint_cfg.model.vocab_size = 1024
+        checkpoint_cfg.tokenizer.max_length = 512
+        ConfigLoader.save(checkpoint_cfg, str(checkpoint_step_dir / "config.yaml"))
+
+        captured: dict[str, object] = {}
+
+        def _capture_prepare(runtime_cfg: Config) -> dict[str, object]:
+            payload = real_prepare_wandb_config(runtime_cfg)
+            captured["payload"] = payload
+            return payload
+
+        def _stop_after_print(message: str) -> None:
+            captured["message"] = message
+            raise StopAfterResolvedConfig
+
+        accelerator = SimpleNamespace(
+            is_main_process=True,
+            print=_stop_after_print,
+        )
+        with (
+            mock.patch(
+                "neobert.contrastive.trainer.create_accelerator",
+                return_value=accelerator,
+            ),
+            mock.patch(
+                "neobert.contrastive.trainer.validate_distributed_runtime_policy",
+            ),
+            mock.patch(
+                "neobert.contrastive.trainer.validate_muon_distributed_compatibility",
+            ),
+            mock.patch(
+                "neobert.contrastive.trainer.prepare_wandb_config",
+                side_effect=_capture_prepare,
+            ),
+            pytest.raises(StopAfterResolvedConfig),
+        ):
+            trainer_module.trainer(cfg)
+
+        payload = captured["payload"]
+        assert isinstance(payload, dict)
+        assert payload["model"]["hidden_size"] == 384
+        assert payload["model"]["num_hidden_layers"] == 6
+        assert payload["model"]["vocab_size"] == 1024
+        assert payload["tokenizer"]["path"] == str(checkpoint_tokenizer_dir)
+        assert payload["tokenizer"]["max_length"] == 512
 
 
 class TestContrastiveLoss:
