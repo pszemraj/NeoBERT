@@ -15,13 +15,9 @@ import torch.distributed as dist
 from torch.optim import Optimizer
 from torch.utils.hooks import RemovableHandle
 
-logger = logging.getLogger(__name__)
+from neobert.config import normalize_muon_norm_factor, normalize_muon_param_policy
 
-# Legacy norm_factor spellings accepted in configs, remapped to canonical names.
-_NORM_FACTOR_ALIASES = {
-    "legacy_compat": "neobert",
-    "original": "muon_reference",
-}
+logger = logging.getLogger(__name__)
 
 try:
     from torch.distributed.tensor import DTensor
@@ -208,33 +204,9 @@ class MuonClipConfig:
                 f"Valid options: {', '.join(sorted(valid_algos))}"
             )
 
-        norm_factor = str(self.norm_factor).strip().replace("-", "_").lower()
-        norm_factor = _NORM_FACTOR_ALIASES.get(norm_factor, norm_factor)
-        valid_norm_factors = {
-            "neobert",
-            "muon_reference",
-            "spectral",
-            "match_rms_adamw",
-            "none",
-        }
-        if norm_factor not in valid_norm_factors:
-            raise ValueError(
-                f"Unsupported norm_factor '{self.norm_factor}'. "
-                f"Valid options: {', '.join(sorted(valid_norm_factors))}"
-            )
-
-        param_policy = str(self.param_policy).strip().replace("-", "_").lower()
-        param_policy = {"transformer_only": "hidden_2d"}.get(param_policy, param_policy)
-        valid_param_policies = {"all_2d", "hidden_2d"}
-        if param_policy not in valid_param_policies:
-            raise ValueError(
-                f"Unsupported param_policy '{self.param_policy}'. "
-                f"Valid options: {', '.join(sorted(valid_param_policies))}"
-            )
-
         self.orthogonalization = algo
-        self.norm_factor = norm_factor
-        self.param_policy = param_policy
+        self.norm_factor = normalize_muon_norm_factor(self.norm_factor)
+        self.param_policy = normalize_muon_param_policy(self.param_policy)
         self.algorithm = algo
         # Reset explicit toggle to prevent downstream confusion
         self.polar_express = None
@@ -1834,13 +1806,8 @@ class MuonClipOptimizer(Optimizer):
             return update
 
         d_out, d_in = int(param_shape[0]), int(param_shape[1])
-        norm_factor = (
-            str(getattr(self.config, "norm_factor", "neobert"))
-            .strip()
-            .replace("-", "_")
-            .lower()
-        )
-        norm_factor = _NORM_FACTOR_ALIASES.get(norm_factor, norm_factor)
+        # MuonClipConfig.__post_init__ normalizes spellings; read canonically.
+        norm_factor = str(getattr(self.config, "norm_factor", "neobert"))
         if norm_factor == "none":
             scale = 1.0
         elif norm_factor == "neobert":

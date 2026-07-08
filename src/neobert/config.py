@@ -157,6 +157,75 @@ class TokenizerConfig:
     allow_special_token_rewrite: bool = False
 
 
+# Single source of truth for Muon enum spellings; the optimizer-side
+# MuonClipConfig validates through these same helpers.
+_MUON_NORM_FACTOR_ALIASES = {
+    "legacy_compat": "neobert",
+    "original": "muon_reference",
+}
+_MUON_NORM_FACTORS = frozenset(
+    {"neobert", "muon_reference", "spectral", "match_rms_adamw", "none"}
+)
+_MUON_PARAM_POLICY_ALIASES = {"transformer_only": "hidden_2d"}
+_MUON_PARAM_POLICIES = frozenset({"all_2d", "hidden_2d"})
+
+
+def _normalize_muon_choice(
+    value: Any,
+    *,
+    aliases: Dict[str, str],
+    valid: frozenset,
+    field_name: str,
+) -> str:
+    """Normalize a Muon enum-like config value and validate it.
+
+    :param Any value: Raw configured value.
+    :param dict[str, str] aliases: Legacy spelling remaps applied after casing.
+    :param frozenset valid: Canonical accepted values.
+    :param str field_name: Field name used in error messages.
+    :raises ValueError: If the normalized value is not a valid option.
+    :return str: Canonical normalized value.
+    """
+    normalized = str(value).strip().replace("-", "_").lower()
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in valid:
+        raise ValueError(
+            f"Unsupported {field_name} '{value}'. "
+            f"Valid options: {', '.join(sorted(valid))}"
+        )
+    return normalized
+
+
+def normalize_muon_norm_factor(value: Any) -> str:
+    """Normalize a Muon ``norm_factor`` spelling to its canonical value.
+
+    :param Any value: Raw configured value.
+    :raises ValueError: If the value is not a supported norm factor.
+    :return str: Canonical norm-factor name.
+    """
+    return _normalize_muon_choice(
+        value,
+        aliases=_MUON_NORM_FACTOR_ALIASES,
+        valid=_MUON_NORM_FACTORS,
+        field_name="norm_factor",
+    )
+
+
+def normalize_muon_param_policy(value: Any) -> str:
+    """Normalize a Muon ``param_policy`` spelling to its canonical value.
+
+    :param Any value: Raw configured value.
+    :raises ValueError: If the value is not a supported param policy.
+    :return str: Canonical param-policy name.
+    """
+    return _normalize_muon_choice(
+        value,
+        aliases=_MUON_PARAM_POLICY_ALIASES,
+        valid=_MUON_PARAM_POLICIES,
+        field_name="param_policy",
+    )
+
+
 @dataclass
 class MuonConfig:
     """Muon optimizer-specific configuration."""
@@ -189,34 +258,8 @@ class MuonConfig:
                 stacklevel=2,
             )
 
-        norm_factor = str(self.norm_factor).strip().replace("-", "_").lower()
-        norm_factor = {
-            "legacy_compat": "neobert",
-            "original": "muon_reference",
-        }.get(norm_factor, norm_factor)
-        valid_norm_factors = {
-            "neobert",
-            "muon_reference",
-            "spectral",
-            "match_rms_adamw",
-            "none",
-        }
-        if norm_factor not in valid_norm_factors:
-            raise ValueError(
-                f"Unsupported norm_factor '{self.norm_factor}'. "
-                f"Valid options: {', '.join(sorted(valid_norm_factors))}"
-            )
-        self.norm_factor = norm_factor
-
-        param_policy = str(self.param_policy).strip().replace("-", "_").lower()
-        param_policy = {"transformer_only": "hidden_2d"}.get(param_policy, param_policy)
-        valid_param_policies = {"all_2d", "hidden_2d"}
-        if param_policy not in valid_param_policies:
-            raise ValueError(
-                f"Unsupported param_policy '{self.param_policy}'. "
-                f"Valid options: {', '.join(sorted(valid_param_policies))}"
-            )
-        self.param_policy = param_policy
+        self.norm_factor = normalize_muon_norm_factor(self.norm_factor)
+        self.param_policy = normalize_muon_param_policy(self.param_policy)
         if self.polar_express is not None:
             warnings.warn(
                 "MuonConfig.polar_express is deprecated; use orthogonalization instead.",
