@@ -395,11 +395,20 @@ class RetryingStreamingDataset(torch.utils.data.IterableDataset):
         checkpoints were written without the wrapper.
 
         :param Any state_dict: Wrapper or wrapped-dataset resume payload.
+        :raises ValueError: If a wrapper payload carries an unsupported version.
         """
         dataset_state = state_dict
         epoch = self._epoch
         if isinstance(state_dict, Mapping):
             if _WRAPPER_DATASET_STATE_KEY in state_dict:
+                version = state_dict.get(_WRAPPER_STATE_VERSION_KEY)
+                if version != _WRAPPER_STATE_VERSION:
+                    raise ValueError(
+                        "Unsupported retrying-streaming wrapper state version "
+                        f"{version!r}; this build reads version "
+                        f"{_WRAPPER_STATE_VERSION}. Refusing to reinterpret "
+                        "resume state written under a different format."
+                    )
                 dataset_state = state_dict[_WRAPPER_DATASET_STATE_KEY]
                 epoch = int(state_dict.get(_WRAPPER_STATE_EPOCH_KEY, epoch))
             elif "epoch" in state_dict:

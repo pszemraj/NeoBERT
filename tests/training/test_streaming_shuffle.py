@@ -690,6 +690,24 @@ class TestStreamingRetryHelpers(unittest.TestCase):
         self.assertEqual(resumed_dataset.epoch, 7)
         self.assertEqual(list(resumed), [2, 3])
 
+    def test_retrying_streaming_dataset_rejects_unknown_state_version(self):
+        """Wrapper payloads with a different format version must fail fast."""
+        wrapped = RetryingStreamingDataset(
+            _RetryableFlakyDataset([0, 1, 2, 3], fail_at=99, fail_times=0),
+            label="unit-test",
+            max_retries=1,
+            base_backoff_seconds=0.01,
+            max_backoff_seconds=0.01,
+            sleep_fn=lambda _seconds: None,
+        )
+        tampered_state = wrapped.state_dict()
+        tampered_state["_retrying_streaming_wrapper_version"] = 999
+
+        with self.assertRaises(ValueError) as ctx:
+            wrapped.load_state_dict(tampered_state)
+
+        self.assertIn("wrapper state version", str(ctx.exception))
+
     def test_retrying_streaming_dataset_loads_raw_dataset_state(self):
         """Raw dataset resume payloads should remain loadable through the wrapper."""
         raw_state = {"cursor": 2, "epoch": 5}
