@@ -540,12 +540,16 @@ class NormEncoderBlock(nn.Module):
     def justnorm(self, x: torch.Tensor) -> torch.Tensor:
         """Apply L2 normalization across the last dimension.
 
+        The norm reduces in fp32 via ``vector_norm(dtype=...)``, which avoids
+        materializing a full fp32 copy of ``x`` while keeping the reduction
+        numerically identical to ``x.float().norm(...)``.
+
         :param torch.Tensor x: Input tensor.
         :return torch.Tensor: Normalized tensor.
         """
-        denom = (
-            x.float().norm(p=2, dim=-1, keepdim=True).clamp_min(self.config.norm_eps)
-        )
+        denom = torch.linalg.vector_norm(
+            x, dim=-1, keepdim=True, dtype=torch.float32
+        ).clamp_min(self.config.norm_eps)
         return x / denom.to(dtype=x.dtype)
 
     def forward(
