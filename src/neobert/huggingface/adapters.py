@@ -62,6 +62,9 @@ class NeoBERTHFForSequenceClassification(_BaseSequenceClassifier):
         """
         del token_type_ids, position_ids, inputs_embeds, output_attentions
         del output_hidden_states
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
         if attention_mask is not None:
             if attention_mask.is_floating_point() and attention_mask.min() < 0:
                 # Already additive (0/-inf): converting again would invert it.

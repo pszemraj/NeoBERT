@@ -700,6 +700,38 @@ class TestModelForward(unittest.TestCase):
         self.assertTrue(hasattr(outputs_default, "logits"))
         self.assertIsInstance(outputs_tuple, tuple)
 
+        # The training-time adapter must honor the same HF default: an omitted
+        # return_dict resolves to config.use_return_dict (True) and yields a
+        # SequenceClassifierOutput, not a tuple. It takes the training-model
+        # config (needs attn_backend), so build one explicitly.
+        from neobert.model.model import NeoBERTConfig as TrainNeoBERTConfig
+
+        adapter = NeoBERTHFForSequenceClassification(
+            TrainNeoBERTConfig(
+                hidden_size=32,
+                num_hidden_layers=1,
+                num_attention_heads=2,
+                intermediate_size=64,
+                vocab_size=100,
+                max_length=16,
+                attn_backend="sdpa",
+                num_labels=2,
+            )
+        )
+        adapter.eval()
+        with torch.no_grad():
+            adapter_default = adapter(
+                input_ids=input_ids, attention_mask=attention_mask
+            )
+            adapter_tuple = adapter(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                return_dict=False,
+            )
+        self.assertNotIsInstance(adapter_default, tuple)
+        self.assertTrue(hasattr(adapter_default, "logits"))
+        self.assertIsInstance(adapter_tuple, tuple)
+
         base_model = NeoBERT(config)
         base_model.eval()
         with torch.no_grad():
