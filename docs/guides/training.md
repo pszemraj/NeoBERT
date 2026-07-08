@@ -170,7 +170,7 @@ Resume treats checkpoint metadata as authoritative for model/tokenizer/data obje
 
 Optimizer state is guarded by `optimizer_param_names.json`. Resume fails fast if the current optimizer parameter-group order differs from the order saved with the checkpoint (PyTorch optimizer buffers are positional inside groups), or if the optimizer's recorded state semantics differ from the current implementation (for example a momentum-rule change that reinterprets saved buffers). For MuonClip, the recorded semantics also include the configured update-rule selectors (`norm_factor`, `param_policy`, `orthogonalization`, `nesterov`), so resuming under a drifted selector - including a changed repo default - fails fast instead of silently rescaling updates mid-run; tunables such as learning rate and betas stay freely resumable. Runtime wrapper prefixes such as `_orig_mod.` and `module.` are stripped before manifest comparison, so toggling `trainer.torch_compile` or distributed wrapper surfaces does not count as parameter-order drift. Checkpoints written before the manifest existed are rejected by design: their optimizer state is unverifiable, and this repo does not carry checkpoint back-compat before a stable release - start a new run or continue from model weights only.
 
-For the streaming SmolLM2 configs in this repo, resume is best-effort: trainer restores checkpoint state and advances the stream by the consumed batches before continuing. Late checkpoints can take noticeable time to replay, and shuffled streams do not guarantee exact sample continuity.
+Streaming resume has two modes. When the stream is exactly checkpointable, the trainer registers the dataset cursor (and the packed-fragment buffer) with Accelerate `save_state/load_state` and restores the exact stream position on resume - no batch replay, and buffered-but-untrained packed fragments are preserved. Exact cursor resume requires `dataset.num_workers: 0` and no active shuffle buffer (`dataset.shuffle_buffer_size: 0`): a `DataLoader` with workers forks the iterable dataset into worker processes whose cursors advance independently of the parent object Accelerate checkpoints (the saved parent cursor would be stale), and an in-memory shuffle buffer is not serialized (restore would skip buffered examples). When either condition does not hold, resume falls back to best-effort skip advancement - the trainer restores checkpoint state and re-advances the stream by the consumed batch count - which a log line at startup announces. Late checkpoints can take noticeable time to replay under the fallback, and shuffled streams do not guarantee exact sample continuity there.
 
 For strict deterministic continuation, switch to a non-streaming tokenized dataset and resume there:
 
@@ -195,8 +195,9 @@ This resumes model/optimizer/scheduler states, but data order will not exactly m
 Notes:
 
 - resume and export both operate from `<output_dir>/checkpoints/`.
-- pretraining resume with `dataset.streaming: true` uses best-effort stream advancement based on saved batch counters.
-- for exact deterministic continuation, prefer pre-tokenized `dataset.streaming: false` runs.
+- pretraining resume with `dataset.streaming: true` is exact when `dataset.num_workers: 0` and `dataset.shuffle_buffer_size: 0` (Accelerate-checkpointed cursor + fragment buffer); otherwise it falls back to best-effort stream advancement based on saved batch counters.
+- changing `dataset.num_workers` or `dataset.shuffle_buffer_size` between saving and resuming changes the set of Accelerate-registered objects, so `load_state` fails fast on the mismatch - keep them stable across a resume (this repo carries no checkpoint back-compat before a stable release).
+- for exact deterministic continuation with worker parallelism, prefer pre-tokenized `dataset.streaming: false` runs.
 - deferred: a name-keyed optimizer-state transplant that would allow resume across intentional parameter-registration refactors is tracked in [Deferred Work](../TODO.md).
 
 ## Pre-tokenized Datasets
