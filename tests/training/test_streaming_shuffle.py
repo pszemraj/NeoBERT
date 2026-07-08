@@ -4,6 +4,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
+import requests
 import torch
 
 from neobert.config import Config
@@ -16,6 +17,7 @@ from neobert.pretraining.trainer import (
 from neobert.streaming import (
     RetryingStreamingDataset,
     is_streaming_dataset,
+    is_transient_streaming_error,
     peek_streaming_example,
 )
 from tests.streaming_test_utils import http_error
@@ -405,6 +407,57 @@ class _HuggingFaceStyleStreamingDataset:
             cursor += 1
             self._state = {"cursor": cursor}
             yield value
+
+
+class TestTransientErrorClassification(unittest.TestCase):
+    """Validate transient-vs-permanent classification of streaming errors."""
+
+    def test_network_typed_errors_are_transient(self):
+        """Typed network failures classify as transient without message checks."""
+        self.assertTrue(
+            is_transient_streaming_error(requests.exceptions.ConnectionError("boom"))
+        )
+        self.assertTrue(is_transient_streaming_error(http_error(503)))
+
+    def test_non_transient_http_status_is_permanent(self):
+        """Client errors such as 404 must not be retried."""
+        self.assertFalse(is_transient_streaming_error(http_error(404)))
+
+    def test_message_match_requires_network_exception_type(self):
+        """Network-sounding text in arbitrary exception types must fail fast."""
+        self.assertFalse(
+            is_transient_streaming_error(
+                RuntimeError("Authentication failed: connection refused by auth proxy")
+            )
+        )
+        self.assertFalse(
+            is_transient_streaming_error(ValueError("read timeout must be > 0"))
+        )
+        self.assertFalse(
+            is_transient_streaming_error(
+                KeyError("missing config field: connect_timeout_seconds")
+            )
+        )
+
+    def test_message_match_applies_to_network_exception_types(self):
+        """OSError/requests errors without structured metadata match by message."""
+        self.assertTrue(
+            is_transient_streaming_error(
+                OSError("Remote end closed connection without response")
+            )
+        )
+        self.assertTrue(
+            is_transient_streaming_error(
+                requests.exceptions.RequestException("connection reset by peer")
+            )
+        )
+
+    def test_transient_cause_inside_wrapper_exception_is_detected(self):
+        """A permanent-looking wrapper with a transient network cause retries."""
+        wrapper = RuntimeError("dataset generation failed")
+        wrapper.__cause__ = requests.exceptions.ConnectionError("reset")
+
+        self.assertTrue(is_transient_streaming_error(wrapper))
 
 
 class TestStreamingRetryHelpers(unittest.TestCase):

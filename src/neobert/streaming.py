@@ -167,6 +167,11 @@ def _iter_exception_chain(exc: BaseException) -> Iterator[BaseException]:
 def is_transient_streaming_error(exc: BaseException) -> bool:
     """Return whether an exception looks like a transient remote-read failure.
 
+    Message-fragment matching is restricted to network-layer exception types
+    (``OSError`` and ``requests`` errors). Arbitrary exceptions whose text
+    merely mentions e.g. ``timeout`` (config validation, auth failures inside
+    dataset scripts) must fail fast instead of burning the retry budget.
+
     :param BaseException exc: Exception to classify.
     :return bool: ``True`` for retryable network/service failures.
     """
@@ -188,6 +193,8 @@ def is_transient_streaming_error(exc: BaseException) -> bool:
             _TRANSIENT_OS_ERRNOS
         ):
             return True
+        if not isinstance(candidate, (OSError, requests.exceptions.RequestException)):
+            continue
         message = str(candidate).strip().lower()
         if message and any(
             fragment in message for fragment in _TRANSIENT_MESSAGE_FRAGMENTS
