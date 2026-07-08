@@ -58,6 +58,7 @@ from neobert.training_utils import (
     resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
     save_optimizer_param_name_manifest,
+    should_save_step_checkpoint,
     sync_resume_source_of_truth,
     validate_optimizer_param_name_manifest,
     validate_distributed_runtime_policy,
@@ -1279,10 +1280,12 @@ def trainer(cfg: Config) -> None:
                 metrics["train/learning_rate"] = optimizer.param_groups[0]["lr"]
                 metrics.log(accelerator)
 
-            should_save = (
-                save_model
-                and save_strategy == "steps"
-                and metrics["train/steps"] % cfg.trainer.save_steps == 0
+            should_save = should_save_step_checkpoint(
+                step=metrics["train/steps"],
+                max_steps=cfg.trainer.max_steps,
+                save_steps=cfg.trainer.save_steps,
+                save_model=save_model,
+                save_strategy=save_strategy,
             )
             if should_save:
                 step_tag = str(metrics["train/steps"])

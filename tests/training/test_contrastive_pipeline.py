@@ -50,15 +50,25 @@ class TestContrastivePipeline:
             with pytest.raises(ValueError, match="model_checkpoints"):
                 _normalize_contrastive_pretrained_checkpoint_root(legacy_root)
 
+    @pytest.mark.parametrize(
+        "max_steps, save_steps",
+        # (1, 2): the terminal step is not a save_steps tick, so it exercises the
+        # guaranteed final-checkpoint path (nothing would be saved without it).
+        [(1, 1), (1, 2)],
+    )
     def test_contrastive_trainer_saves_under_checkpoints_root(
-        self, tiny_contrastive_config_path: Path, temp_output_dir: str
+        self,
+        tiny_contrastive_config_path: Path,
+        temp_output_dir: str,
+        max_steps: int,
+        save_steps: int,
     ):
         """Ensure contrastive saves portable weights under ``checkpoints/<step>/``."""
         config = ConfigLoader.load(str(tiny_contrastive_config_path))
         config.dataset.path = temp_output_dir
         config.trainer.output_dir = temp_output_dir
-        config.trainer.max_steps = 1
-        config.trainer.save_steps = 1
+        config.trainer.max_steps = max_steps
+        config.trainer.save_steps = save_steps
         config.trainer.save_total_limit = 1
         config.trainer.logging_steps = 1
         config.trainer.save_strategy = "steps"
@@ -121,7 +131,7 @@ class TestContrastivePipeline:
 
         cached_loader.assert_called_once()
         assert cached_loader.call_args.kwargs["selected_names"] == ["ALLNLI"]
-        step_dir = Path(temp_output_dir) / "checkpoints" / "1"
+        step_dir = Path(temp_output_dir) / "checkpoints" / str(max_steps)
         assert step_dir.is_dir()
         assert (step_dir / "model.safetensors").is_file()
         assert (step_dir / "config.yaml").is_file()

@@ -1041,6 +1041,34 @@ def optimizer_state_semantics(optimizer: Any) -> str:
     return f"{type(unwrapped).__name__.lower()}-v1"
 
 
+def should_save_step_checkpoint(
+    *,
+    step: int,
+    max_steps: int,
+    save_steps: int,
+    save_model: bool,
+    save_strategy: str,
+) -> bool:
+    """Whether to write a step checkpoint after ``step``.
+
+    Saves on every ``save_steps`` tick and always on the terminal step, so a run
+    whose ``max_steps`` is not a multiple of ``save_steps`` still persists its
+    final trained weights instead of leaving ``latest`` at a stale earlier step.
+
+    :param int step: Post-update global step count.
+    :param int max_steps: Configured terminal step count.
+    :param int save_steps: Step-based save interval.
+    :param bool save_model: Whether model saving is enabled.
+    :param str save_strategy: Configured save strategy; only ``steps`` saves here.
+    :return bool: ``True`` when a checkpoint should be written for this step.
+    """
+    if not save_model or save_strategy != "steps":
+        return False
+    if step >= max_steps:
+        return True
+    return save_steps > 0 and step % save_steps == 0
+
+
 def save_optimizer_param_name_manifest(
     optimizer: Any,
     checkpoint_path: str | Path,

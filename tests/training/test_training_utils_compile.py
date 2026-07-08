@@ -26,6 +26,7 @@ from neobert.training_utils import (
     resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
     save_optimizer_param_name_manifest,
+    should_save_step_checkpoint,
     sync_resume_source_of_truth,
     validate_optimizer_param_name_manifest,
     validate_distributed_runtime_policy,
@@ -1030,3 +1031,30 @@ def test_get_optimizer_rejects_muonclip_under_deepspeed() -> None:
             eps=1e-8,
             muon_config={"enable_clipping": False},
         )
+
+
+def test_should_save_step_checkpoint_guarantees_terminal_step() -> None:
+    """Terminal step must checkpoint even when max_steps is not a save tick."""
+    # save_steps tick
+    assert should_save_step_checkpoint(
+        step=20, max_steps=100, save_steps=20, save_model=True, save_strategy="steps"
+    )
+    # non-terminal, non-tick -> no save
+    assert not should_save_step_checkpoint(
+        step=21, max_steps=100, save_steps=20, save_model=True, save_strategy="steps"
+    )
+    # terminal step that is NOT a save_steps multiple -> must still save
+    assert should_save_step_checkpoint(
+        step=101, max_steps=101, save_steps=20, save_model=True, save_strategy="steps"
+    )
+    # any step at/after max_steps saves (guards >= boundary)
+    assert should_save_step_checkpoint(
+        step=105, max_steps=101, save_steps=20, save_model=True, save_strategy="steps"
+    )
+    # disabled saving / non-steps strategy never saves, even at the terminal step
+    assert not should_save_step_checkpoint(
+        step=101, max_steps=101, save_steps=20, save_model=False, save_strategy="steps"
+    )
+    assert not should_save_step_checkpoint(
+        step=101, max_steps=101, save_steps=20, save_model=True, save_strategy="no"
+    )
