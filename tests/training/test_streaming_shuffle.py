@@ -9,7 +9,6 @@ import torch
 
 from neobert.config import Config
 from neobert.pretraining.trainer import (
-    BatchFragmentCheckpoint,
     _maybe_wrap_streaming_dataset_for_retries,
     _maybe_shuffle_streaming_dataset,
     _load_streaming_split,
@@ -20,8 +19,6 @@ from neobert.streaming import (
     is_streaming_dataset,
     is_transient_streaming_error,
     peek_streaming_example,
-    streaming_cursor_checkpointable,
-    streaming_state_restore_drops_shuffle_buffer,
 )
 from tests.streaming_test_utils import http_error
 
@@ -693,182 +690,35 @@ class TestStreamingRetryHelpers(unittest.TestCase):
         self.assertEqual(resumed_dataset.epoch, 7)
         self.assertEqual(list(resumed), [2, 3])
 
-    def test_accelerate_checkpoint_round_trips_streaming_cursor(self):
-        """Registered streaming cursor must survive Accelerate save/load state.
+    def test_prepared_dataloader_advances_raw_cursor_past_trained_batch(self):
+        """Raw dataset cursor is not a valid streaming-resume checkpoint boundary.
 
-        This is the trainer-level integration behind exact process-restart
-        resume: register the wrapper, save Accelerate state after consuming two
-        examples, rebuild a fresh dataset, and load state. Iteration must
-        continue from the next unconsumed example without skip_first_batches.
+        The trainer consumes the dataset through an Accelerate-prepared
+        ``DataLoader``. Its adapter (``DataLoaderShard`` here, with
+        ``dispatch_batches=False``) iterates one batch ahead: it fetches the next
+        batch before yielding the current one. So when the trainer has received
+        (and will train on) only the first batch, the raw dataset cursor has
+        already advanced through the prefetched second batch. Checkpointing the
+        raw cursor and trusting it on resume would silently drop that
+        prefetched-but-untrained batch, which is why trainer-level exact streaming
+        resume is disabled in favor of skip-based resume. Exact resume needs a
+        stateful-dataloader boundary (tracked in docs/TODO.md).
         """
-        import tempfile
-
         from accelerate import Accelerator
 
-        values = [10, 11, 12, 13, 14]
-        source = _StatefulCursorStreamingDataset(values, fail_once_after_advance=False)
-        wrapper = RetryingStreamingDataset(
-            source,
-            label="unit-test",
-            max_retries=1,
-            base_backoff_seconds=0.0,
-            max_backoff_seconds=0.0,
-            sleep_fn=lambda _seconds: None,
-        )
-
-        accelerator = Accelerator()
-        accelerator.register_for_checkpointing(wrapper)
-
-        iterator = iter(wrapper)
-        self.assertEqual([next(iterator), next(iterator)], [10, 11])
-
-        with tempfile.TemporaryDirectory() as state_dir:
-            accelerator.save_state(state_dir)
-
-            fresh_source = _StatefulCursorStreamingDataset(
-                values, fail_once_after_advance=False
-            )
-            fresh_wrapper = RetryingStreamingDataset(
-                fresh_source,
-                label="unit-test",
-                max_retries=1,
-                base_backoff_seconds=0.0,
-                max_backoff_seconds=0.0,
-                sleep_fn=lambda _seconds: None,
-            )
-            fresh_accelerator = Accelerator()
-            fresh_accelerator.register_for_checkpointing(fresh_wrapper)
-            fresh_accelerator.load_state(state_dir)
-
-        # The restored cursor resumes at the next unconsumed example (12), and
-        # iterating yields the remainder without replaying already-seen data.
-        self.assertEqual(fresh_source.cursor, 2)
-        self.assertEqual(list(iter(fresh_wrapper)), [12, 13, 14])
-
-    def test_streaming_cursor_checkpointable_allows_single_worker_unshuffled(self):
-        """Exact cursor checkpointing is eligible only in the config where it holds."""
         dataset = _StatefulCursorStreamingDataset(
-            [0, 1, 2, 3], fail_once_after_advance=False
+            list(range(12)), fail_once_after_advance=False
         )
-        self.assertTrue(streaming_cursor_checkpointable(dataset, num_workers=0))
+        loader = torch.utils.data.DataLoader(dataset, batch_size=2, num_workers=0)
+        prepared = Accelerator().prepare(loader)
 
-    def test_streaming_cursor_checkpointable_rejects_dataloader_workers(self):
-        """Multi-worker loaders fork the dataset cursor, so exact resume is unsafe.
+        iterator = iter(prepared)
+        first_batch = next(iterator)
 
-        A PyTorch ``DataLoader`` with ``num_workers > 0`` copies the
-        ``IterableDataset`` into worker processes whose cursors advance
-        independently. Accelerate checkpoints the parent object, whose cursor
-        stays stale, so trusting it on resume would replay/duplicate data. The
-        eligibility guard must reject this instead of claiming an exact restore.
-        """
-        dataset = _StatefulCursorStreamingDataset(
-            [0, 1, 2, 3], fail_once_after_advance=False
-        )
-        self.assertFalse(streaming_cursor_checkpointable(dataset, num_workers=1))
-        self.assertFalse(streaming_cursor_checkpointable(dataset, num_workers=4))
-
-    def test_streaming_cursor_checkpointable_rejects_active_shuffle_buffer(self):
-        """An in-memory shuffle buffer is not serialized, so cursor restore is lossy."""
-        dataset = _StatefulCursorStreamingDataset(
-            [0, 1, 2, 3], fail_once_after_advance=False
-        )
-        dataset._shuffling = object()  # mimic HF IterableDataset.shuffle() marker
-        self.assertFalse(streaming_cursor_checkpointable(dataset, num_workers=0))
-
-    def test_streaming_cursor_checkpointable_requires_resume_hooks(self):
-        """Datasets without state_dict/load_state_dict cannot be cursor-checkpointed."""
-        dataset = _StatelessStreamingDataset([0, 1, 2])
-        self.assertFalse(streaming_cursor_checkpointable(dataset, num_workers=0))
-
-    def test_shuffle_buffer_detection_sees_through_retry_wrapper(self):
-        """Shuffle marker lives on the inner dataset and must be found through wrappers.
-
-        The trainer inspects ``train_dataset`` after retry-wrapping, so the
-        predicate must unwrap :class:`RetryingStreamingDataset` to find the inner
-        HF ``_shuffling`` marker; otherwise a wrapped shuffled stream would be
-        misreported as buffer-free and wrongly treated as exactly resumable.
-        """
-        inner = _StatefulCursorStreamingDataset(
-            [0, 1, 2, 3], fail_once_after_advance=False
-        )
-        inner._shuffling = object()
-        wrapped = RetryingStreamingDataset(
-            inner,
-            label="unit-test",
-            max_retries=1,
-            base_backoff_seconds=0.0,
-            max_backoff_seconds=0.0,
-            sleep_fn=lambda _seconds: None,
-        )
-        self.assertTrue(streaming_state_restore_drops_shuffle_buffer(wrapped))
-        self.assertFalse(streaming_cursor_checkpointable(wrapped, num_workers=0))
-
-    def test_accelerate_checkpoint_round_trips_stored_batch_fragment(self):
-        """Buffered packed fragments must survive Accelerate save/load on exact resume.
-
-        In packed mode the streaming cursor advances past raw examples that the
-        trainer holds in ``stored_batch`` for later merging. A checkpoint taken
-        while that buffer is non-empty must persist the fragments (registered as
-        custom_checkpoint_2 alongside the dataset) so resume replays them instead
-        of dropping untrained data.
-        """
-        import tempfile
-
-        from accelerate import Accelerator
-
-        values = [10, 11, 12, 13, 14]
-        source = _StatefulCursorStreamingDataset(values, fail_once_after_advance=False)
-        wrapper = RetryingStreamingDataset(
-            source,
-            label="unit-test",
-            max_retries=1,
-            base_backoff_seconds=0.0,
-            max_backoff_seconds=0.0,
-            sleep_fn=lambda _seconds: None,
-        )
-        fragment = BatchFragmentCheckpoint(
-            ("input_ids", "attention_mask", "labels", "packed_seqlens")
-        )
-        # Simulate a buffered undersized packed microbatch left over after a step.
-        fragment.batch["input_ids"] = torch.arange(6).reshape(2, 3)
-        fragment.batch["packed_seqlens"] = [3, 3]
-
-        accelerator = Accelerator()
-        # Registration order must mirror the trainer: dataset then fragment buffer.
-        accelerator.register_for_checkpointing(wrapper)
-        accelerator.register_for_checkpointing(fragment)
-
-        with tempfile.TemporaryDirectory() as state_dir:
-            accelerator.save_state(state_dir)
-
-            fresh_source = _StatefulCursorStreamingDataset(
-                values, fail_once_after_advance=False
-            )
-            fresh_wrapper = RetryingStreamingDataset(
-                fresh_source,
-                label="unit-test",
-                max_retries=1,
-                base_backoff_seconds=0.0,
-                max_backoff_seconds=0.0,
-                sleep_fn=lambda _seconds: None,
-            )
-            fresh_fragment = BatchFragmentCheckpoint(
-                ("input_ids", "attention_mask", "labels", "packed_seqlens")
-            )
-            live_ref = fresh_fragment.batch
-            fresh_accelerator = Accelerator()
-            fresh_accelerator.register_for_checkpointing(fresh_wrapper)
-            fresh_accelerator.register_for_checkpointing(fresh_fragment)
-            fresh_accelerator.load_state(state_dir)
-
-        # Fragments are restored in place (the loop's live reference stays valid).
-        self.assertIs(fresh_fragment.batch, live_ref)
-        self.assertTrue(
-            torch.equal(
-                fresh_fragment.batch["input_ids"], torch.arange(6).reshape(2, 3)
-            )
-        )
-        self.assertEqual(fresh_fragment.batch["packed_seqlens"], [3, 3])
+        # The trainer has received only [0, 1], but the prepared loader already
+        # pulled [2, 3] as lookahead, so the raw cursor sits at 4, not 2.
+        self.assertEqual(first_batch.tolist(), [0, 1])
+        self.assertEqual(dataset.state_dict()["cursor"], 4)
 
     def test_retrying_streaming_dataset_rejects_unknown_state_version(self):
         """Wrapper payloads with a different format version must fail fast."""
