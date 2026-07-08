@@ -2334,7 +2334,12 @@ class MuonClipOptimizer(Optimizer):
                     if bias_is_full:
                         logits = logits + bias[:, :, q_start:q_end, k_start:k_end]
                     else:
+                        # Key-padding mask (B,1,1,S): mask padded keys, and mask
+                        # padded query rows too (transpose to the query axis) so
+                        # the per-head max ignores PAD-token queries. The loss
+                        # ignores pad positions; the clipping metric must as well.
                         logits = logits + bias[..., k_start:k_end]
+                        logits = logits + bias[..., q_start:q_end].transpose(-1, -2)
 
                 chunk_max = logits.amax(dim=(-2, -1))
                 q_max = torch.maximum(q_max, chunk_max)

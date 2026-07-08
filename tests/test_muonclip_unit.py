@@ -1149,6 +1149,35 @@ class TestMuonClipOptimizer:
 
         assert torch.allclose(full_max, chunked_max)
 
+    def test_logit_max_ignores_padded_query_positions(self, model):
+        """Clipping metric must exclude PAD-token query rows, not just PAD keys."""
+        model_instance, config = model
+        muon_config = MuonClipConfig(enable_clipping=False, clipping_qk_chunk_size=2)
+        optimizer = MuonClipOptimizer(model_instance, config, muon_config)
+
+        heads = config.num_attention_heads
+        dim_head = config.dim_head
+        # Seq len 4: positions 0,1 are real; 2,3 are right-padding.
+        xq = torch.zeros(1, heads, 4, dim_head)
+        xk = torch.zeros(1, heads, 4, dim_head)
+        # Real query/key pairs produce a modest logit of 1.0.
+        xq[:, :, 0:2, 0] = 1.0
+        xk[:, :, 0:2, 0] = 1.0
+        # Padded query position 2 aligns hugely with real key 0. The key axis
+        # does not mask it (key 0 is valid), so only query-axis masking prevents
+        # this PAD-token query from dominating the per-head max.
+        xq[:, :, 2, 0] = 1000.0
+
+        # Additive key-padding mask (B, S): keys/positions 2,3 are padding.
+        pad_mask = torch.tensor([[0.0, 0.0, float("-inf"), float("-inf")]])
+
+        per_step_max = optimizer._attention_logit_max(
+            xq_heads=xq, xk_heads=xk, scale=1.0, pad_mask=pad_mask
+        )
+
+        # The real-token max is 1.0; the PAD-query logit of 1000 must be excluded.
+        assert torch.allclose(per_step_max, torch.ones(1, heads))
+
     def test_state_dict_persists_step(self, model):
         """Ensure MuonClip step counter persists across state dicts."""
         model_instance, config = model
