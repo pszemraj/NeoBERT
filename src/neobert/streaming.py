@@ -128,6 +128,11 @@ def ensure_torch_iterable_dataset(dataset: object) -> object:
 def supports_streaming_iteration_resume(dataset: object) -> bool:
     """Return whether a dataset exposes resumable iterator state hooks.
 
+    Resume helpers assume the stateful-dataset contract HF iterable datasets
+    implement: ``state_dict()`` returns a snapshot detached from live iterator
+    state, while ``load_state_dict()`` may retain and later mutate the payload
+    it is given (so callers defensively copy before loading).
+
     :param object dataset: Dataset-like object to inspect.
     :return bool: ``True`` when ``state_dict`` and ``load_state_dict`` are callable.
     """
@@ -298,7 +303,7 @@ def peek_streaming_example(
             sleep_fn=sleep_fn,
         )
 
-    resume_state = deepcopy(dataset.state_dict())
+    resume_state = dataset.state_dict()
 
     def _peek_once() -> Any:
         """Read the next example from the saved resume position.
@@ -451,11 +456,13 @@ class RetryingStreamingDataset(torch.utils.data.IterableDataset):
                 # Snapshot before constructing/advancing the iterator so retries
                 # restart from the last known-good cursor, even if the dataset
                 # mutates its own state before surfacing a transient read error.
-                resume_state = deepcopy(self.dataset.state_dict())
+                # state_dict() returns a detached snapshot per the resume
+                # contract, so no extra copy is taken on this per-example path.
+                resume_state = self.dataset.state_dict()
                 iterator = iter(self.dataset)
                 while True:
                     example = next(iterator)
-                    resume_state = deepcopy(self.dataset.state_dict())
+                    resume_state = self.dataset.state_dict()
                     retries = 0
                     yield example
             except StopIteration:
