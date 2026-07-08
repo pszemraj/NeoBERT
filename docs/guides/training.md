@@ -197,7 +197,7 @@ Notes:
 - resume and export both operate from `<output_dir>/checkpoints/`.
 - pretraining resume with `dataset.streaming: true` uses best-effort stream advancement based on saved batch counters.
 - for exact deterministic continuation, prefer pre-tokenized `dataset.streaming: false` runs.
-- TODO: replace the fail-fast optimizer parameter-name manifest with a true name-keyed optimizer-state transplant if the repo later needs optimizer resume across intentional parameter-registration refactors.
+- deferred: a name-keyed optimizer-state transplant that would allow resume across intentional parameter-registration refactors is tracked in [Deferred Work](../TODO.md).
 
 ## Pre-tokenized Datasets
 
