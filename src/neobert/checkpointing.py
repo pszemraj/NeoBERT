@@ -350,18 +350,19 @@ def _resolve_direct_checkpoint_tag(checkpoint_path: Path) -> str | None:
     return None
 
 
-def _is_loadable_step_checkpoint(checkpoint_root: Path, step: int) -> bool:
-    """Return whether ``step`` can be loaded from ``checkpoint_root``.
+def _is_loadable_step_checkpoint(checkpoint_root: Path, tag: str) -> bool:
+    """Return whether the step directory ``tag`` is loadable from ``checkpoint_root``.
 
     :param Path checkpoint_root: Root directory containing checkpoint steps.
-    :param int step: Numeric checkpoint step to validate.
+    :param str tag: Step directory name to validate, kept verbatim so
+        zero-padded names written by external tools resolve correctly.
     :return bool: True when either portable or DeepSpeed weights are loadable.
     """
-    step_dir = checkpoint_root / str(step)
+    step_dir = checkpoint_root / tag
     if (step_dir / MODEL_WEIGHTS_NAME).is_file():
         return True
     try:
-        resolve_deepspeed_checkpoint_root_and_tag(checkpoint_root, tag=str(step))
+        resolve_deepspeed_checkpoint_root_and_tag(checkpoint_root, tag=tag)
     except (FileNotFoundError, ValueError):
         return False
     return True
@@ -401,15 +402,16 @@ def resolve_step_checkpoint_selector(
 
     candidates = sorted(
         (
-            int(path.name)
+            path.name
             for path in checkpoint_root.iterdir()
             if path.is_dir() and path.name.isdigit()
         ),
+        key=int,
         reverse=True,
     )
-    for step in candidates:
-        if _is_loadable_step_checkpoint(checkpoint_root, step):
-            return str(step)
+    for tag in candidates:
+        if _is_loadable_step_checkpoint(checkpoint_root, tag):
+            return tag
     return requested_tag
 
 

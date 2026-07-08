@@ -294,6 +294,19 @@ def test_resolve_step_checkpoint_selector_picks_highest_loadable_numbered_step()
     assert resolved == "300"
 
 
+def test_resolve_step_checkpoint_selector_keeps_zero_padded_step_names() -> None:
+    """Zero-padded step directories must resolve verbatim, not via int round-trip."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint_root = Path(tmpdir)
+        step_dir = checkpoint_root / "00050"
+        step_dir.mkdir(parents=True, exist_ok=True)
+        (step_dir / MODEL_WEIGHTS_NAME).touch()
+
+        resolved = resolve_step_checkpoint_selector(checkpoint_root, "latest")
+
+    assert resolved == "00050"
+
+
 def test_resolve_step_checkpoint_selector_accepts_direct_step_dir_for_latest() -> None:
     """Direct step paths should resolve ``latest`` to their own step tag."""
     with tempfile.TemporaryDirectory() as tmpdir:
