@@ -690,6 +690,58 @@ class TestStreamingRetryHelpers(unittest.TestCase):
         self.assertEqual(resumed_dataset.epoch, 7)
         self.assertEqual(list(resumed), [2, 3])
 
+    def test_accelerate_checkpoint_round_trips_streaming_cursor(self):
+        """Registered streaming cursor must survive Accelerate save/load state.
+
+        This is the trainer-level integration behind exact process-restart
+        resume: register the wrapper, save Accelerate state after consuming two
+        examples, rebuild a fresh dataset, and load state. Iteration must
+        continue from the next unconsumed example without skip_first_batches.
+        """
+        import tempfile
+
+        from accelerate import Accelerator
+
+        values = [10, 11, 12, 13, 14]
+        source = _StatefulCursorStreamingDataset(values, fail_once_after_advance=False)
+        wrapper = RetryingStreamingDataset(
+            source,
+            label="unit-test",
+            max_retries=1,
+            base_backoff_seconds=0.0,
+            max_backoff_seconds=0.0,
+            sleep_fn=lambda _seconds: None,
+        )
+
+        accelerator = Accelerator()
+        accelerator.register_for_checkpointing(wrapper)
+
+        iterator = iter(wrapper)
+        self.assertEqual([next(iterator), next(iterator)], [10, 11])
+
+        with tempfile.TemporaryDirectory() as state_dir:
+            accelerator.save_state(state_dir)
+
+            fresh_source = _StatefulCursorStreamingDataset(
+                values, fail_once_after_advance=False
+            )
+            fresh_wrapper = RetryingStreamingDataset(
+                fresh_source,
+                label="unit-test",
+                max_retries=1,
+                base_backoff_seconds=0.0,
+                max_backoff_seconds=0.0,
+                sleep_fn=lambda _seconds: None,
+            )
+            fresh_accelerator = Accelerator()
+            fresh_accelerator.register_for_checkpointing(fresh_wrapper)
+            fresh_accelerator.load_state(state_dir)
+
+        # The restored cursor resumes at the next unconsumed example (12), and
+        # iterating yields the remainder without replaying already-seen data.
+        self.assertEqual(fresh_source.cursor, 2)
+        self.assertEqual(list(iter(fresh_wrapper)), [12, 13, 14])
+
     def test_retrying_streaming_dataset_rejects_unknown_state_version(self):
         """Wrapper payloads with a different format version must fail fast."""
         wrapped = RetryingStreamingDataset(

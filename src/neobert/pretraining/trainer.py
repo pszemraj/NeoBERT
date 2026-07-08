@@ -2173,6 +2173,23 @@ def trainer(cfg: Config) -> None:
                 cfg=cfg,
             )
 
+    # Register the streaming train dataset for checkpointing so its iteration
+    # cursor is saved and restored with Accelerate state. This makes process/
+    # checkpoint resume exact (resume from the last yielded example) instead of
+    # relying on approximate, expensive batch skipping. Registration order must
+    # match between the saving and resuming run; both take this same path for a
+    # given config (metrics registered earlier -> custom_checkpoint_0, dataset
+    # here -> custom_checkpoint_1).
+    streaming_dataset_checkpointed = (
+        is_streaming and supports_streaming_iteration_resume(train_dataset)
+    )
+    if streaming_dataset_checkpointed:
+        accelerator.register_for_checkpointing(train_dataset)
+        logger.info(
+            "Registered streaming train dataset for checkpoint/resume; its "
+            "iteration cursor will be saved and restored with Accelerate state."
+        )
+
     pin_memory, persistent_workers, prefetch_factor, loader_perf_notes = (
         _resolve_loader_perf_settings(cfg, device=accelerator.device)
     )
@@ -2480,16 +2497,24 @@ def trainer(cfg: Config) -> None:
             log=logger,
             context="pretraining resume",
         )
-        if is_streaming and hasattr(train_dataset, "set_epoch"):
-            resume_epoch = int(metrics.get("train/epochs", 0))
-            train_dataset.set_epoch(resume_epoch)
+        if streaming_dataset_checkpointed:
+            # accelerator.load_state() restored the dataset cursor and epoch, so
+            # iterate from there directly; batch skipping would double-advance.
             logger.info(
-                "Restored streaming dataset epoch to "
-                f"{resume_epoch} before resume skipping."
+                "Restored streaming dataset cursor from checkpointed dataset "
+                "state; resuming iteration without batch skipping."
             )
-        skipped_train_dataloader = _prepare_resume_dataloader(
-            train_dataloader, metrics, accelerator, is_streaming
-        )
+        else:
+            if is_streaming and hasattr(train_dataset, "set_epoch"):
+                resume_epoch = int(metrics.get("train/epochs", 0))
+                train_dataset.set_epoch(resume_epoch)
+                logger.info(
+                    "Restored streaming dataset epoch to "
+                    f"{resume_epoch} before resume skipping."
+                )
+            skipped_train_dataloader = _prepare_resume_dataloader(
+                train_dataloader, metrics, accelerator, is_streaming
+            )
     elif cfg.trainer.resume_from_checkpoint:
         logger.warning(
             "resume_from_checkpoint is set but no valid checkpoints were found in "
