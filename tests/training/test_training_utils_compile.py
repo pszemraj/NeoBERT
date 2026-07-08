@@ -959,15 +959,8 @@ def test_compute_l2_norm_for_logging_uses_dtensor_owner_for_gradients() -> None:
     assert reduce_calls == [(100.0, "sum")]
 
 
-def test_get_optimizer_disables_muonclip_clipping_under_fsdp(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """FSDP MuonClip builds must force clipping off and emit a warning once."""
-    import neobert.optimizer.optimizer as optimizer_module
-
-    monkeypatch.setattr(
-        optimizer_module, "_WARNED_MUONCLIP_FSDP_CLIPPING_DISABLE", False
-    )
+def test_get_optimizer_rejects_muonclip_clipping_under_fsdp() -> None:
+    """FSDP MuonClip with clipping must fail fast, not silently downgrade."""
     model_cfg = NeoBERTConfig(
         hidden_size=32,
         num_hidden_layers=1,
@@ -981,8 +974,8 @@ def test_get_optimizer_disables_muonclip_clipping_under_fsdp(
     )
     model = NeoBERT(model_cfg)
 
-    with caplog.at_level(logging.WARNING):
-        optimizer = get_optimizer(
+    with pytest.raises(ValueError, match="enable_clipping=false"):
+        get_optimizer(
             model,
             DistributedType.FSDP,
             model_config=model_cfg,
@@ -994,9 +987,20 @@ def test_get_optimizer_disables_muonclip_clipping_under_fsdp(
             muon_config={"enable_clipping": True},
         )
 
+    # An explicit Muon-only run is still allowed under FSDP.
+    optimizer = get_optimizer(
+        model,
+        DistributedType.FSDP,
+        model_config=model_cfg,
+        name="muonclip",
+        lr=1e-4,
+        weight_decay=0.0,
+        betas=(0.9, 0.95),
+        eps=1e-8,
+        muon_config={"enable_clipping": False},
+    )
     assert hasattr(optimizer, "config")
     assert not optimizer.config.enable_clipping
-    assert "Auto-disabling clipping" in caplog.text
 
 
 def test_get_optimizer_rejects_muonclip_under_deepspeed() -> None:

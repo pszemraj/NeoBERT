@@ -567,7 +567,7 @@ class TestMuonClipOptimizer:
 
         assert optimizer.STATE_SEMANTICS == (
             "muonclip-heavyball-v1|norm_factor=spectral|param_policy=hidden_2d"
-            "|orthogonalization=polar_express|nesterov=True"
+            "|orthogonalization=polar_express|nesterov=True|clipping=False"
         )
 
     def test_resume_manifest_rejects_changed_norm_factor(self, model, tmp_path):
@@ -597,6 +597,35 @@ class TestMuonClipOptimizer:
 
         with pytest.raises(RuntimeError, match="state semantics changed"):
             validate_optimizer_param_name_manifest(rescaled, tmp_path)
+
+    def test_resume_manifest_rejects_changed_clipping_mode(self, model, tmp_path):
+        """Resuming a clipping run as Muon-only (or vice versa) must fail fast."""
+        from neobert.training_utils import (
+            attach_optimizer_param_names,
+            save_optimizer_param_name_manifest,
+            validate_optimizer_param_name_manifest,
+        )
+
+        model_instance, config = model
+        clipped = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(enable_clipping=True),
+        )
+        assert "clipping=True" in clipped.STATE_SEMANTICS
+        attach_optimizer_param_names(model_instance, clipped)
+        save_optimizer_param_name_manifest(clipped, tmp_path)
+        validate_optimizer_param_name_manifest(clipped, tmp_path)
+
+        muon_only = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(enable_clipping=False),
+        )
+        attach_optimizer_param_names(model_instance, muon_only)
+
+        with pytest.raises(RuntimeError, match="state semantics changed"):
+            validate_optimizer_param_name_manifest(muon_only, tmp_path)
 
     def test_parameter_grouping(self, model):
         """Default grouping should keep embeddings/output weights on Adam."""
@@ -1513,8 +1542,8 @@ class TestMuonClipOptimizer:
                     {"name", "layer_idx", "is_qkv", "proj_type"}
                 )
 
-    def test_sharded_runtime_clipping_disable_preserves_config_intent(self, model):
-        """Runtime disable should not rewrite user config intent."""
+    def test_sharded_runtime_clipping_rejects_instead_of_downgrading(self, model):
+        """Sharded Muon params with clipping enabled must fail fast, not downgrade."""
         model_instance, config = model
         optimizer = MuonClipOptimizer(
             model_instance,
@@ -1524,13 +1553,8 @@ class TestMuonClipOptimizer:
         assert optimizer.config.enable_clipping
         assert optimizer.should_clip_update(0)
 
-        optimizer._disable_clipping_for_sharded_runtime()
-
-        assert optimizer.config.enable_clipping
-        assert not optimizer.should_clip_update(0)
-        assert not optimizer._runtime_clipping_enabled
-        if optimizer.hook_system is not None:
-            assert not optimizer.hook_system.enabled
+        with pytest.raises(RuntimeError, match="enable_clipping=false"):
+            optimizer._reject_clipping_under_sharded_runtime()
 
     def test_dtensor_update_rejects_multidim_device_mesh(self, model, monkeypatch):
         """DTensor Muon path should fail fast on unsupported multi-axis meshes."""

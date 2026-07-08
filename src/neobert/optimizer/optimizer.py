@@ -12,7 +12,6 @@ from torch.optim import Adam, AdamW
 from neobert.optimizer.muon_clip import MuonClipConfig, MuonClipOptimizer
 
 logger = logging.getLogger(__name__)
-_WARNED_MUONCLIP_FSDP_CLIPPING_DISABLE = False
 
 
 def _build_adamw_param_groups(
@@ -96,7 +95,6 @@ def get_optimizer(
             return optimizer
 
         case "muonclip" | "muon-clip" | "muon_clip":
-            global _WARNED_MUONCLIP_FSDP_CLIPPING_DISABLE
             if model_config is None:
                 raise ValueError(
                     "MuonClip requires model_config to be passed. "
@@ -143,18 +141,21 @@ def get_optimizer(
                 distributed_type is DistributedType.FSDP
                 and muon_clip_cfg.enable_clipping
             ):
-                # Keep this factory-side disable for now. MuonClip hooks are
-                # created before ``accelerator.prepare()``, so preserving
-                # ``config.enable_clipping`` without a dedicated post-prepare
-                # runtime toggle would still capture activations on the first
-                # sharded step. Track the intent/runtime split cleanup separately.
-                muon_clip_cfg.enable_clipping = False
-                if not _WARNED_MUONCLIP_FSDP_CLIPPING_DISABLE:
-                    logger.warning(
-                        "MuonClip QK clipping is not supported under FSDP2 sharded Muon "
-                        "updates. Auto-disabling clipping for this run."
-                    )
-                    _WARNED_MUONCLIP_FSDP_CLIPPING_DISABLE = True
+                # QK clipping is unsupported under FSDP2 sharded Muon updates
+                # (hooks are created before accelerator.prepare(), and the
+                # owner-compute path cannot run the activation-capture flow).
+                # Fail fast rather than silently downgrading to Muon-only: that
+                # would change the optimizer recipe without record. The user
+                # must opt into Muon-only explicitly (the *_muonclip_noclip
+                # config does exactly this).
+                raise ValueError(
+                    "optimizer.name=muonclip requested QK clipping "
+                    "(muon_config.enable_clipping=true), but QK clipping is not "
+                    "supported under FSDP2 sharded Muon updates. Set "
+                    "optimizer.muon_config.enable_clipping=false for an explicit "
+                    "Muon-only run (see the *_muonclip_noclip config), or run "
+                    "without FSDP2 sharding to keep QK clipping."
+                )
 
             if (
                 distributed_type is DistributedType.FSDP

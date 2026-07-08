@@ -14,10 +14,6 @@ Deferred because it is an overhead-only win (identical FLOPs, fewer launches) th
 - stacking the split matrices in `_orthogonalize_fused_qkv_update` and applying `_normalize_muon_update` per matrix (all three share one shape, so the scale is common),
 - verifying against `tests/test_muonclip_unit.py` reference implementations and the manual FSDP2 golden tests (`tests/manual/test_muonclip_fsdp2_golden.py`), plus a wall-clock benchmark demonstrating the win in eager mode.
 
-### Split MuonClip clipping intent from runtime toggle
-
-`get_optimizer` (`src/neobert/optimizer/optimizer.py`) mutates `config.enable_clipping = False` under FSDP2 because hooks are created before `accelerator.prepare()`. A dedicated post-prepare runtime toggle would preserve the configured intent separately from the runtime decision. Noted in a factory-side comment; tracked here so it survives comment churn.
-
 ## Resume
 
 ### Name-keyed optimizer-state transplant

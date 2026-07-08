@@ -61,7 +61,7 @@ Two clipping systems exist and they are separate:
 - `trainer.gradient_clipping`: clips final accumulated gradients
 - `optimizer.muon_config.enable_clipping`: MuonClip QK activation clipping
 
-QK clipping is auto-disabled for sharded FSDP2 Muon runs because the current owner-compute path does not support the activation-hook capture flow.
+QK clipping is not supported for sharded FSDP2 Muon runs because the current owner-compute path does not support the activation-hook capture flow. Rather than silently downgrade a clipping run to Muon-only (which is a different optimizer recipe), the optimizer factory fails fast when `enable_clipping=true` is combined with FSDP2. For an FSDP2 Muon-only run, set `optimizer.muon_config.enable_clipping=false` explicitly (the `*_muonclip_noclip` configs do this). The effective clipping mode is also recorded in the optimizer resume manifest, so resuming a clipping checkpoint as Muon-only (or vice versa) fails fast instead of silently changing the recipe.
 
 ## Gradient Accumulation and Logged Norms
 

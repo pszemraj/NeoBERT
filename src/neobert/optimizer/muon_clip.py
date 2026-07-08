@@ -545,7 +545,10 @@ class MuonClipOptimizer(Optimizer):
         # changing state layout. Recording them in the resume manifest makes a
         # drifted value (including a changed repo default) fail fast instead
         # of silently rescaling updates mid-run; tunables such as lr/betas
-        # stay resumable.
+        # stay resumable. clipping is included because MuonClip-with-clipping
+        # and Muon-only are different optimizer recipes; both the factory and
+        # the runtime guard fail fast rather than silently downgrade, so
+        # config.enable_clipping always equals the effective clipping mode.
         self.STATE_SEMANTICS = "|".join(
             (
                 type(self).STATE_SEMANTICS,
@@ -553,6 +556,7 @@ class MuonClipOptimizer(Optimizer):
                 f"param_policy={config.param_policy}",
                 f"orthogonalization={config.orthogonalization}",
                 f"nesterov={config.nesterov}",
+                f"clipping={config.enable_clipping}",
             )
         )
         self._step = 0
@@ -567,7 +571,6 @@ class MuonClipOptimizer(Optimizer):
             Tuple[Tuple[int, ...], Tuple[int, ...], int], List[int]
         ] = {}
         self._runtime_clipping_enabled = bool(self.config.enable_clipping)
-        self._clipping_disabled_warning_emitted = False
         if torch.cuda.is_available():
             try:
                 # bfloat16 offers good perf/stability balance for polar iteration
@@ -1051,7 +1054,7 @@ class MuonClipOptimizer(Optimizer):
         if self._runtime_clipping_enabled and any(
             self._is_dtensor(param) for param in group["params"]
         ):
-            self._disable_clipping_for_sharded_runtime()
+            self._reject_clipping_under_sharded_runtime()
 
         group_param_info = group.get("param_info")
         for param_idx, param in enumerate(group["params"]):
@@ -1276,21 +1279,21 @@ class MuonClipOptimizer(Optimizer):
                         f"metadata that does not match parameter '{param_name}'."
                     )
 
-    def _disable_clipping_for_sharded_runtime(self) -> None:
-        """Disable QK clipping once when sharded Muon updates are detected."""
-        if not self._runtime_clipping_enabled:
-            return
-        if not self._clipping_disabled_warning_emitted:
-            logger.warning(
-                "MuonClip QK clipping is disabled under FSDP2 sharded Muon updates. "
-                "Proceeding with Muon-only optimization."
-            )
-            self._clipping_disabled_warning_emitted = True
+    def _reject_clipping_under_sharded_runtime(self) -> None:
+        """Fail fast when QK clipping is still active on sharded Muon params.
 
-        self._runtime_clipping_enabled = False
-        if self.hook_system is not None:
-            self.hook_system.clear()
-            self.hook_system.set_enabled(False, clear_cache_when_disabling=False)
+        :raises RuntimeError: When clipping is enabled and DTensor parameters are
+            detected. Silently downgrading to Muon-only would change the optimizer
+            recipe without record; the caller must opt into Muon-only explicitly.
+        """
+        raise RuntimeError(
+            "MuonClip QK clipping is enabled but this runtime shards Muon "
+            "parameters as DTensors, which the owner-compute clipping path does "
+            "not support. Silently dropping to Muon-only would change the "
+            "optimizer recipe mid-run. Set optimizer.muon_config.enable_clipping="
+            "false for an explicit Muon-only run (see the *_muonclip_noclip "
+            "config), or run without FSDP2 sharding to keep QK clipping."
+        )
 
     def _process_group_cache_key(
         self, process_group: dist.ProcessGroup

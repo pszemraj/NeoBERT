@@ -340,7 +340,7 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 >
 > `orthogonalization` changes compute precision behavior on CUDA: `newton_schulz` upcasts BF16 gradients to FP32 for the iteration and casts back; `polar_express` runs in BF16 work dtype (when available) for higher throughput.
 >
-> Under sharded FSDP2 Muon runs, `enable_clipping=true` is auto-disabled at optimizer construction time because the current owner-compute path does not support the activation-hook capture flow used by QK clipping.
+> Under sharded FSDP2 Muon runs, `enable_clipping=true` is rejected at optimizer construction time (the owner-compute path does not support the activation-hook capture flow used by QK clipping). The factory fails fast rather than silently downgrading to Muon-only; set `enable_clipping=false` explicitly for an FSDP2 Muon-only run. The effective clipping mode is recorded in the optimizer resume manifest, so a clipping/Muon-only mismatch on resume also fails fast.
 
 ---
 
