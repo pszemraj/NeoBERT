@@ -525,7 +525,9 @@ class MuonClipOptimizer(Optimizer):
     # Names the meaning of per-parameter state tensors (heavy-ball momentum
     # buffers: buf = beta * buf + grad). Bump whenever an update-rule change
     # alters how saved state must be interpreted, so resume fails fast instead
-    # of silently feeding stale-scale buffers into the new rule.
+    # of silently feeding stale-scale buffers into the new rule. Instances
+    # shadow this tag with config qualifiers (see __init__) so resuming under
+    # a changed update-rule selector is rejected as well.
     STATE_SEMANTICS = "muonclip-heavyball-v1"
 
     def __init__(
@@ -539,6 +541,20 @@ class MuonClipOptimizer(Optimizer):
         """
         self.config = config
         self.model_config = model_config
+        # Config selectors that redefine the Muon update geometry without
+        # changing state layout. Recording them in the resume manifest makes a
+        # drifted value (including a changed repo default) fail fast instead
+        # of silently rescaling updates mid-run; tunables such as lr/betas
+        # stay resumable.
+        self.STATE_SEMANTICS = "|".join(
+            (
+                type(self).STATE_SEMANTICS,
+                f"norm_factor={config.norm_factor}",
+                f"param_policy={config.param_policy}",
+                f"orthogonalization={config.orthogonalization}",
+                f"nesterov={config.nesterov}",
+            )
+        )
         self._step = 0
         self._last_metrics: Dict[str, float] = {}
         self._layer_mapping = dict(self.config.clipping_layers_mapping)

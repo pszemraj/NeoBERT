@@ -422,6 +422,15 @@ def test_optimizer_state_semantics_tags() -> None:
     assert MuonClipOptimizer.STATE_SEMANTICS == "muonclip-heavyball-v1"
 
 
+def test_optimizer_state_semantics_honors_instance_qualified_tags() -> None:
+    """Config-qualified instance tags must shadow the class-level tag."""
+    model = torch.nn.Linear(2, 2, bias=False)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    optimizer.STATE_SEMANTICS = "adamw-v1|norm_factor=spectral"
+
+    assert optimizer_state_semantics(optimizer) == "adamw-v1|norm_factor=spectral"
+
+
 def test_optimizer_param_name_manifest_rejects_missing_manifest(
     tmp_path: Path,
 ) -> None:

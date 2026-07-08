@@ -91,7 +91,7 @@ Actions:
 
 - `optimizer_param_names.json is missing`: the checkpoint predates the optimizer resume manifest, so parameter order and state semantics cannot be verified. Start a new run or continue from model weights only; this repo does not carry checkpoint back-compat before a stable release.
 - `outdated manifest schema`: the manifest was written before state-semantics tracking. Re-save the checkpoint with a current trainer or start fresh.
-- `Optimizer state semantics changed`: the optimizer's update rule changed since the checkpoint was written (for example a momentum-scale change), so its saved buffers would be misinterpreted. Start a new run.
+- `Optimizer state semantics changed`: the optimizer's update rule changed since the checkpoint was written - an implementation change (for example a momentum-scale change), or for MuonClip a drifted update-rule selector (`norm_factor`, `param_policy`, `orthogonalization`, `nesterov`), including a changed repo default. Re-pin the checkpoint's selectors explicitly in the launch config to continue, or start a new run.
 - `Optimizer parameter order changed`: the model's parameter registration order differs from the checkpoint; PyTorch optimizer state is positional, so a silent load would hand buffers to the wrong parameters.
 
 ### Resume fails with `Unexpected key(s) in state_dict: "model.encoder.weight"`

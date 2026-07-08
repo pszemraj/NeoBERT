@@ -556,6 +556,48 @@ class TestMuonClipOptimizer:
         assert optimizer._step == 0
         assert optimizer.config.orthogonalization == "polar_express"
 
+    def test_state_semantics_qualified_by_update_rule_config(self, model):
+        """Instance tags must record the update-rule selectors."""
+        model_instance, config = model
+        optimizer = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(enable_clipping=False, norm_factor="spectral"),
+        )
+
+        assert optimizer.STATE_SEMANTICS == (
+            "muonclip-heavyball-v1|norm_factor=spectral|param_policy=hidden_2d"
+            "|orthogonalization=polar_express|nesterov=True"
+        )
+
+    def test_resume_manifest_rejects_changed_norm_factor(self, model, tmp_path):
+        """A drifted norm_factor (e.g. a new repo default) must fail resume."""
+        from neobert.training_utils import (
+            attach_optimizer_param_names,
+            save_optimizer_param_name_manifest,
+            validate_optimizer_param_name_manifest,
+        )
+
+        model_instance, config = model
+        spectral = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(enable_clipping=False, norm_factor="spectral"),
+        )
+        attach_optimizer_param_names(model_instance, spectral)
+        save_optimizer_param_name_manifest(spectral, tmp_path)
+        validate_optimizer_param_name_manifest(spectral, tmp_path)
+
+        rescaled = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(enable_clipping=False, norm_factor="neobert"),
+        )
+        attach_optimizer_param_names(model_instance, rescaled)
+
+        with pytest.raises(RuntimeError, match="state semantics changed"):
+            validate_optimizer_param_name_manifest(rescaled, tmp_path)
+
     def test_parameter_grouping(self, model):
         """Default grouping should keep embeddings/output weights on Adam."""
         model_instance, config = model

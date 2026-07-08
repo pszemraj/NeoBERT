@@ -1025,14 +1025,17 @@ def optimizer_state_semantics(optimizer: Any) -> str:
 
     Optimizers that change their update rule in a way that reinterprets saved
     state declare a ``STATE_SEMANTICS`` class attribute and bump it on such
-    changes. Optimizers without an explicit tag get a stable default derived
-    from the class name (their state semantics are pinned by the framework).
+    changes. Optimizers whose update rule additionally depends on configuration
+    (for example MuonClip's norm-factor selection) shadow the class tag with a
+    qualified instance attribute so config drift is rejected on resume too.
+    Optimizers without an explicit tag get a stable default derived from the
+    class name (their state semantics are pinned by the framework).
 
     :param Any optimizer: Optimizer or Accelerate optimizer wrapper.
     :return str: State-semantics tag recorded in resume manifests.
     """
     unwrapped = _unwrap_optimizer(optimizer)
-    semantics = getattr(type(unwrapped), "STATE_SEMANTICS", None)
+    semantics = getattr(unwrapped, "STATE_SEMANTICS", None)
     if semantics is not None:
         return str(semantics)
     return f"{type(unwrapped).__name__.lower()}-v1"
