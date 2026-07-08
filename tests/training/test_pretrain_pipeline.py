@@ -23,6 +23,7 @@ from neobert.pretraining.trainer import (
     _requires_streaming_eval_budget,
     _resolve_eval_samples,
     _resolve_loader_perf_settings,
+    _resolve_resume_checkpoint_and_eval_samples,
     _resolve_streaming_eval_budget,
     _save_portable_checkpoint_weights,
     _should_use_loader_pin_memory,
@@ -753,6 +754,34 @@ class TestPretrainComponents:
                 eval_samples=None,
                 per_device_eval_batch_size=32,
             )
+
+    def test_resume_eval_samples_uses_checkpoint_config(self, tmp_path: Path):
+        """Resume should derive eval_samples after checkpoint config sync."""
+        output_dir = tmp_path / "run"
+        checkpoint_dir = output_dir / "checkpoints" / "10"
+        checkpoint_dir.mkdir(parents=True)
+
+        checkpoint_cfg = Config()
+        checkpoint_cfg.dataset.eval_samples = 17
+        ConfigLoader.save(checkpoint_cfg, str(checkpoint_dir / "config.yaml"))
+
+        runtime_cfg = Config()
+        runtime_cfg.trainer.output_dir = str(output_dir)
+        runtime_cfg.trainer.resume_from_checkpoint = "latest"
+        runtime_cfg.dataset.eval_samples = None
+
+        resume_path, iteration, eval_samples = (
+            _resolve_resume_checkpoint_and_eval_samples(
+                runtime_cfg,
+                output_dir / "checkpoints",
+                output_dir,
+            )
+        )
+
+        assert Path(resume_path) == checkpoint_dir
+        assert iteration == 11
+        assert runtime_cfg.dataset.eval_samples == 17
+        assert eval_samples == 17
 
     def test_eval_split_selection_helpers(self):
         """Ensure eval split discovery and train/eval partition helpers stay stable."""

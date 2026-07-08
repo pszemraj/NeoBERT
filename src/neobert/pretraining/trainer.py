@@ -152,6 +152,34 @@ def _resolve_eval_samples(value: Any) -> Optional[int]:
     return resolved
 
 
+def _resolve_resume_checkpoint_and_eval_samples(
+    cfg: Config,
+    checkpoint_dir: Path,
+    output_dir: Path,
+) -> tuple[Optional[str], int, Optional[int]]:
+    """Resolve resume state and derive eval sample cap after config sync.
+
+    :param Config cfg: Mutable training configuration.
+    :param Path checkpoint_dir: Canonical checkpoint root.
+    :param Path output_dir: Training output root.
+    :return tuple[str | None, int, int | None]: Resume path, iteration, and eval cap.
+    """
+    resume_checkpoint_path, iteration = _resolve_resume_checkpoint(
+        cfg.trainer.resume_from_checkpoint,
+        str(checkpoint_dir),
+        str(output_dir),
+    )
+    if cfg.trainer.resume_from_checkpoint and resume_checkpoint_path:
+        sync_resume_source_of_truth(
+            cfg,
+            resume_checkpoint_path,
+            task="pretraining",
+            log=logger,
+        )
+    eval_samples = _resolve_eval_samples(getattr(cfg.dataset, "eval_samples", None))
+    return resume_checkpoint_path, iteration, eval_samples
+
+
 def _format_percent(value: float) -> str:
     """Format a percentage value for log output.
 
@@ -1554,25 +1582,15 @@ def trainer(cfg: Config) -> None:
     masked_logits_only_loss = _resolve_masked_logits_only_loss(
         getattr(cfg.trainer, "masked_logits_only_loss", True)
     )
-    eval_samples = _resolve_eval_samples(getattr(cfg.dataset, "eval_samples", None))
 
     # Checkpoint layout (BREAKING): all resumable/exportable artifacts are written
     # under output_dir/checkpoints/<step>/.
     output_dir = Path(cfg.trainer.output_dir)
     checkpoint_dir = output_dir / "checkpoints"
     checkpoint_retention_limit = _resolve_checkpoint_retention_limit(cfg)
-    resume_checkpoint_path, iteration = _resolve_resume_checkpoint(
-        cfg.trainer.resume_from_checkpoint,
-        str(checkpoint_dir),
-        str(output_dir),
+    resume_checkpoint_path, iteration, eval_samples = (
+        _resolve_resume_checkpoint_and_eval_samples(cfg, checkpoint_dir, output_dir)
     )
-    if cfg.trainer.resume_from_checkpoint and resume_checkpoint_path:
-        sync_resume_source_of_truth(
-            cfg,
-            resume_checkpoint_path,
-            task="pretraining",
-            log=logger,
-        )
 
     # Accelerator object - disable automatic checkpoint naming so the trainer can
     # control a single checkpoint tree (checkpoints/<step>).
