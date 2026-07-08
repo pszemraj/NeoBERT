@@ -396,8 +396,21 @@ class TestModelForward(unittest.TestCase):
                 return_dict=True,
             )
         self.assertTrue(hasattr(hf_outputs, "logits"))
-        self.assertTrue(hasattr(hf_outputs, "hidden_states"))
         self.assertEqual(hf_outputs.logits.shape, (self.batch_size, 2))
+        # hidden_states must be None (not the raw final tensor) to satisfy the
+        # HF SequenceClassifierOutput contract.
+        self.assertIsNone(hf_outputs.hidden_states)
+
+        # Unsupported HF features must fail loudly rather than be silently
+        # dropped and produce structurally wrong outputs downstream.
+        with self.assertRaises(NotImplementedError):
+            hf_model(
+                inputs_embeds=torch.zeros(self.batch_size, self.input_ids.shape[1], 64),
+            )
+        with self.assertRaises(NotImplementedError):
+            hf_model(input_ids=self.input_ids, output_attentions=True)
+        with self.assertRaises(NotImplementedError):
+            hf_model(input_ids=self.input_ids, output_hidden_states=True)
 
     def test_hf_attention_mask_semantics_and_mode_equivalence(self):
         """Ensure HF mask normalization and SDPA/eager paths stay equivalent."""

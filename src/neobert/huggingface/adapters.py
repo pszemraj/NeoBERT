@@ -58,10 +58,27 @@ class NeoBERTHFForSequenceClassification(_BaseSequenceClassifier):
         :param bool | None output_attentions: Whether to return attentions.
         :param bool | None output_hidden_states: Whether to return hidden states.
         :param bool | None return_dict: Whether to return dict outputs.
+        :raises NotImplementedError: If ``inputs_embeds``, ``output_attentions``,
+            or ``output_hidden_states`` is requested; the training-time backbone
+            exposes none of these. Use the export HF model for those features.
         :return SequenceClassifierOutput | tuple: Model outputs.
         """
-        del token_type_ids, position_ids, inputs_embeds, output_attentions
-        del output_hidden_states
+        if inputs_embeds is not None:
+            raise NotImplementedError(
+                "NeoBERTHFForSequenceClassification does not support inputs_embeds. "
+                "Pass input_ids, or route through the export HF model."
+            )
+        if output_attentions:
+            raise NotImplementedError(
+                "NeoBERTHFForSequenceClassification does not expose attentions. "
+                "Use the export HF model for output_attentions=True."
+            )
+        if output_hidden_states:
+            raise NotImplementedError(
+                "NeoBERTHFForSequenceClassification does not expose all-layer hidden "
+                "states. Use the export HF model for output_hidden_states=True."
+            )
+        del token_type_ids, position_ids
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
@@ -106,9 +123,13 @@ class NeoBERTHFForSequenceClassification(_BaseSequenceClassifier):
             output = (logits,)
             return ((loss,) + output) if loss is not None else output
 
+        # hidden_states must be None or a tuple of per-layer tensors per the HF
+        # contract; the training-time backbone returns only the final tensor, so
+        # expose nothing here rather than mislabel it (see output_hidden_states
+        # guard above).
         return SequenceClassifierOutput(
             loss=loss,
             logits=logits,
-            hidden_states=hidden_representation,
+            hidden_states=None,
             attentions=None,
         )
