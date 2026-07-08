@@ -149,10 +149,53 @@ def streaming_state_restore_drops_shuffle_buffer(dataset: object) -> bool:
     ``state_dict()``; restoring a snapshot rewinds the source cursor but refills
     the buffer from new data, so buffered-but-unyielded examples are skipped.
 
+    The shuffle marker lives on the underlying HF dataset, so wrappers such as
+    :class:`RetryingStreamingDataset` and :class:`TorchIterableDatasetAdapter`
+    are unwrapped via their ``dataset`` attribute before inspection; otherwise a
+    wrapped shuffled stream would be misreported as buffer-free.
+
     :param object dataset: Dataset-like object to inspect.
     :return bool: ``True`` when the dataset carries an in-memory shuffle buffer.
     """
-    return getattr(dataset, "_shuffling", None) is not None
+    current = dataset
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        if getattr(current, "_shuffling", None) is not None:
+            return True
+        seen.add(id(current))
+        current = getattr(current, "dataset", None)
+    return False
+
+
+def streaming_cursor_checkpointable(dataset: object, *, num_workers: int) -> bool:
+    """Return whether the streaming cursor can be checkpointed exactly.
+
+    Exact cursor checkpointing registers the dataset object with Accelerate and
+    trusts its restored cursor instead of replaying skipped batches. That is only
+    valid when the registered object is the one whose iterator actually advances,
+    and when a restore reproduces the exact stream position:
+
+    - PyTorch ``DataLoader`` with ``num_workers > 0`` forks the
+      :class:`~torch.utils.data.IterableDataset` into worker processes whose
+      cursors advance independently of the parent object Accelerate checkpoints;
+      the saved parent cursor would be stale, replaying or duplicating data.
+    - An active in-memory shuffle buffer is not serialized, so a restore refills
+      it from new data and skips buffered-but-unyielded examples.
+
+    Both cases must fall back to approximate skip-based resume rather than claim
+    an exact cursor restore.
+
+    :param object dataset: Dataset-like object to inspect.
+    :param int num_workers: DataLoader worker count for the training loader.
+    :return bool: ``True`` when the cursor can be checkpointed and restored exactly.
+    """
+    if not supports_streaming_iteration_resume(dataset):
+        return False
+    if int(num_workers) != 0:
+        return False
+    if streaming_state_restore_drops_shuffle_buffer(dataset):
+        return False
+    return True
 
 
 def _iter_exception_chain(exc: BaseException) -> Iterator[BaseException]:

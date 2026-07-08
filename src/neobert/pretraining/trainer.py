@@ -1,5 +1,6 @@
 """Pretraining loop for masked language modeling."""
 
+import copy
 import inspect
 import json
 import logging
@@ -64,6 +65,7 @@ from neobert.streaming import (
     is_streaming_dataset,
     peek_streaming_example,
     retry_streaming_operation,
+    streaming_cursor_checkpointable,
     supports_streaming_iteration_resume,
 )
 from neobert.tokenization_cache import (
@@ -1176,6 +1178,66 @@ def _compute_weight_norm_for_logging(
     return _compute_l2_norm_for_logging(model.parameters(), accelerator)
 
 
+class BatchFragmentCheckpoint:
+    """Accelerate-checkpointable wrapper around the trainer fragment buffer.
+
+    Packed collation can emit undersized microbatches that the trainer buffers in
+    ``stored_batch`` and merges into later steps. The streaming cursor advances
+    past those raw examples as they are read, so a checkpoint that saves only the
+    cursor would drop the buffered-but-untrained fragments on resume. Registering
+    this object alongside the streaming dataset persists the buffer so exact
+    resume replays those fragments instead of skipping them.
+
+    The wrapped :attr:`batch` dict is the live buffer the training loop mutates in
+    place; ``load_state_dict`` restores into that same object so references held
+    by the loop stay valid after ``accelerator.load_state``.
+    """
+
+    VERSION = 1
+
+    def __init__(self, keys: tuple[str, ...]) -> None:
+        """Initialize an empty fragment buffer.
+
+        :param tuple[str, ...] keys: Initial buffer keys, each seeded to ``None``.
+        """
+        self.batch: dict[str, Any] = {key: None for key in keys}
+
+    def state_dict(self) -> dict[str, Any]:
+        """Return a device-independent snapshot of the buffered fragments.
+
+        :return dict[str, Any]: Versioned buffer snapshot with tensors on CPU.
+        """
+        return {
+            "version": self.VERSION,
+            "batch": {
+                key: (
+                    value.detach().cpu()
+                    if torch.is_tensor(value)
+                    else copy.deepcopy(value)
+                )
+                for key, value in self.batch.items()
+            },
+        }
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        """Restore buffered fragments in-place from a snapshot.
+
+        :param dict[str, Any] state_dict: Snapshot produced by :meth:`state_dict`.
+        :raises ValueError: If the snapshot version or payload is unrecognized.
+        """
+        version = int(state_dict.get("version", -1))
+        if version != self.VERSION:
+            raise ValueError(
+                f"Unsupported batch-fragment checkpoint version {version}; "
+                f"this build reads version {self.VERSION}."
+            )
+        loaded = state_dict.get("batch")
+        if not isinstance(loaded, dict):
+            raise ValueError("Batch-fragment checkpoint is missing 'batch'.")
+        self.batch.clear()
+        self.batch.update(loaded)
+
+
 def _clear_stored_batch(stored_batch: BatchEncoding) -> None:
     """Drop buffered batch fragments in-place.
 
@@ -2173,21 +2235,44 @@ def trainer(cfg: Config) -> None:
                 cfg=cfg,
             )
 
-    # Register the streaming train dataset for checkpointing so its iteration
-    # cursor is saved and restored with Accelerate state. This makes process/
-    # checkpoint resume exact (resume from the last yielded example) instead of
-    # relying on approximate, expensive batch skipping. Registration order must
-    # match between the saving and resuming run; both take this same path for a
-    # given config (metrics registered earlier -> custom_checkpoint_0, dataset
-    # here -> custom_checkpoint_1).
-    streaming_dataset_checkpointed = (
-        is_streaming and supports_streaming_iteration_resume(train_dataset)
+    # Register the streaming train dataset (and the packed-fragment buffer) for
+    # checkpointing so iteration state is saved and restored with Accelerate.
+    # This makes process/checkpoint resume exact (resume from the last yielded
+    # example) instead of relying on approximate, expensive batch skipping.
+    #
+    # Exact cursor restore is only correct when the registered dataset object is
+    # the one whose cursor advances and a restore reproduces the stream position:
+    # DataLoader workers (num_workers > 0) own forked cursors the parent never
+    # sees, and an active shuffle buffer is not serialized. When either holds we
+    # keep the approximate skip fallback rather than trust a stale/lossy cursor.
+    #
+    # Registration order must match between the saving and resuming run; both
+    # take this same path for a given config (metrics registered earlier ->
+    # custom_checkpoint_0, dataset -> custom_checkpoint_1, fragment buffer ->
+    # custom_checkpoint_2).
+    streaming_dataset_checkpointed = is_streaming and streaming_cursor_checkpointable(
+        train_dataset, num_workers=cfg.dataset.num_workers
+    )
+    stored_batch_buffer = BatchFragmentCheckpoint(
+        ("input_ids", "attention_mask", "labels", "packed_seqlens")
     )
     if streaming_dataset_checkpointed:
         accelerator.register_for_checkpointing(train_dataset)
+        accelerator.register_for_checkpointing(stored_batch_buffer)
         logger.info(
-            "Registered streaming train dataset for checkpoint/resume; its "
-            "iteration cursor will be saved and restored with Accelerate state."
+            "Registered streaming train dataset and fragment buffer for "
+            "checkpoint/resume; the iteration cursor will be saved and restored "
+            "exactly with Accelerate state."
+        )
+    elif is_streaming and supports_streaming_iteration_resume(train_dataset):
+        logger.warning(
+            "Streaming dataset supports resumable iteration, but exact cursor "
+            "checkpointing is disabled: dataset.num_workers=%s (requires 0) or an "
+            "active in-memory shuffle buffer would drop buffered examples on "
+            "restore. Resume will use approximate batch skipping. Set "
+            "dataset.num_workers=0 and dataset.shuffle_buffer_size=0 for exact "
+            "cursor resume.",
+            int(cfg.dataset.num_workers),
         )
 
     pin_memory, persistent_workers, prefetch_factor, loader_perf_notes = (
@@ -2547,12 +2632,12 @@ def trainer(cfg: Config) -> None:
     )
     local_loss_path_other = torch.zeros((), device=accelerator.device, dtype=torch.long)
     logged_masked_loss_path = False
-    stored_batch = {
-        "input_ids": None,
-        "attention_mask": None,
-        "labels": None,
-        "packed_seqlens": None,
-    }
+    # Use the checkpointed fragment buffer as the live store so packed fragments
+    # buffered at save time are restored (not skipped) on exact resume. When
+    # exact resume is disabled this buffer is simply never registered; on resume
+    # it starts empty, matching the approximate skip fallback. accelerator.load_state
+    # above already restored buffer.batch in place, so this picks up any fragments.
+    stored_batch = stored_batch_buffer.batch
     warned_low_token_scale = False
     while cfg.trainer.max_steps > metrics["train/steps"]:
         # Use skipped_train_dataloader the first epoch after resuming
@@ -2580,7 +2665,10 @@ def trainer(cfg: Config) -> None:
             ):
                 # ``to_target_batch_size`` may emit variable-size microbatches
                 # at epoch tails; update correctness is preserved by token-based
-                # gradient rescaling in ``_gradient_token_scale``.
+                # gradient rescaling in ``_gradient_token_scale``. It mutates
+                # ``stored_batch`` in place and returns the same object, so the
+                # rebind here keeps ``stored_batch is stored_batch_buffer.batch``
+                # and buffered fragments remain checkpointable on exact resume.
                 batch, stored_batch = to_target_batch_size(
                     batch, stored_batch, cfg.trainer.per_device_train_batch_size
                 )
