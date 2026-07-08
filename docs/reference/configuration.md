@@ -187,7 +187,7 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 
 | Key                           | Type          | Default | Description                                                 |
 | ----------------------------- | ------------- | ------- | ----------------------------------------------------------- |
-| `dataset.num_workers`         | `int`         | `16`    | DataLoader worker count. Exact streaming resume requires `0` (workers own forked cursors the checkpointed parent never sees); see [Training](../guides/training.md#checkpointing-and-resume). |
+| `dataset.num_workers`         | `int`         | `16`    | DataLoader worker count.                                    |
 | `dataset.pin_memory`          | `bool`        | `false` | Enable pinned CPU staging for non-blocking H2D copies; CUDA runs may force it on. Pinning-path behavior: [Training Optimization](../guides/training-optimization.md#dataloader-and-streaming-throughput). |
 | `dataset.persistent_workers`  | `bool`        | `true`  | Keep DataLoader workers alive across epochs.                |
 | `dataset.prefetch_factor`     | `int \| None` | `null`  | Worker prefetch depth when workers > 0.                     |
@@ -195,7 +195,7 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 | `dataset.streaming_read_retry_backoff_seconds` | `float` | `5.0` | Initial exponential-backoff delay for transient streaming read retries. |
 | `dataset.streaming_read_retry_max_backoff_seconds` | `float` | `60.0` | Maximum capped backoff delay for transient streaming read retries. |
 | `dataset.num_proc`            | `int`         | `4`     | Multiprocessing workers for tokenization map.               |
-| `dataset.shuffle_buffer_size` | `int`         | `10000` | Streaming shuffle buffer. Exact streaming resume requires `0`; a non-empty buffer is not serialized, so a cursor restore would skip buffered examples and falls back to best-effort skip advancement. |
+| `dataset.shuffle_buffer_size` | `int`         | `10000` | Streaming shuffle buffer.                                   |
 | `dataset.pre_tokenize`        | `bool`        | `false` | Pre-tokenize non-streaming datasets and persist results.    |
 | `dataset.pre_tokenize_output` | `str \| None` | `null`  | Output path for pre-tokenized datasets; cache reuse requires a matching `tokenization_manifest.json`. |
 | `dataset.cache_dir`           | `str \| None` | `null`  | HF datasets cache directory.                                |

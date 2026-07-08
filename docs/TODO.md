@@ -22,6 +22,17 @@ The `optimizer_param_names.json` manifest fails fast when optimizer parameter or
 
 ## Streaming
 
+### Exact streaming resume via a stateful-dataloader boundary
+
+Trainer-level streaming resume is approximate (skip-based): on resume it re-advances the stream by the consumed batch count instead of restoring a cursor. Checkpointing the raw `train_dataset` cursor is unsafe because the dataset is consumed through an Accelerate-prepared `DataLoader` whose adapter (`DataLoaderShard`/`DataLoaderDispatcher`) iterates one batch ahead (and dispatch mode can prefetch `num_processes` batches) before yielding the batch the trainer optimizes - so the raw cursor at checkpoint time is ahead of the last trained batch, and trusting it would silently drop prefetched-but-untrained examples (regression: `tests/training/test_streaming_shuffle.py::TestStreamingRetryHelpers::test_prepared_dataloader_advances_raw_cursor_past_trained_batch`).
+
+Deferred because the correct boundary is the prepared dataloader, not the dataset, and wiring that up is a focused piece of work of its own. Completing it requires:
+
+- enabling Accelerate's `use_stateful_dataloader` (backed by torchdata `StatefulDataLoader`) via `DataLoaderConfiguration`, so the prepared loader accounts for its own prefetch/lookahead state,
+- checkpointing the prepared/stateful dataloader's `state_dict()` (plus the trainer's `stored_batch` packed-fragment buffer, which holds buffered-but-untrained examples across steps) rather than the raw dataset,
+- an integration regression through `accelerator.prepare_data_loader()`: consume one yielded batch, save, rebuild, load, and assert resume yields the next untrained batch (not the batch after the loader's lookahead),
+- confirming behavior under both `num_workers=0` and `num_workers>0`, and with an active HF shuffle buffer (whose contents are not serialized).
+
 ### Optional snapshot cadence for retry resume
 
 `RetryingStreamingDataset.__iter__` (`src/neobert/streaming.py`) calls `dataset.state_dict()` after every yielded example to guarantee exactly-once retry recovery. The payload is small (HF serializes cursor counters, never shuffle-buffer contents), so this is currently cheap; if profiling of a deep `.map()`/`.filter()` pipeline ever shows the per-yield snapshot mattering, add an opt-in snapshot-every-N-examples knob. That trades the exactly-once guarantee for "may re-yield up to N-1 examples on retry," so it must stay opt-in and documented. Snapshot-on-failure is not an alternative: nested iterable state advances past the failed example before the exception surfaces.
