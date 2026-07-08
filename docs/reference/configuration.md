@@ -253,8 +253,7 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 > [!IMPORTANT]
 > `trainer.masked_logits_only_loss` is a run-level path selector, not a multi-objective mixing interface. Choose one path for the run. The project default is `true`; use `false` only when intentionally running a legacy full-logits baseline.
 >
-> Gradient-accumulation, effective-batch, and norm-logging behavior is detailed in
-> [Training Optimization](../guides/training-optimization.md#gradient-accumulation-and-logged-norms).
+> Gradient-accumulation, effective-batch, and norm-logging behavior is detailed in [Training Optimization](../guides/training-optimization.md#gradient-accumulation-and-logged-norms).
 
 ### Control and Legacy Compatibility
 
@@ -337,8 +336,7 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 > [!NOTE]
 > The shipped defaults are `norm_factor=neobert` and `param_policy=hidden_2d`. Use `all_2d` explicitly when you want exact v0.1.3-style Muon scope for compatibility benchmarking. Legacy `norm_factor` values `legacy_compat` and `original` are accepted and normalized to `neobert` and `muon_reference` respectively.
 >
-> [Training Optimization](../guides/training-optimization.md) explains the
-> shipped Muon defaults, normalization modes, fused-QKV handling, clipping, and distributed tradeoffs.
+> [Training Optimization](../guides/training-optimization.md) explains the shipped Muon defaults, normalization modes, fused-QKV handling, clipping, and distributed tradeoffs.
 >
 > `orthogonalization` changes compute precision behavior on CUDA: `newton_schulz` upcasts BF16 gradients to FP32 for the iteration and casts back; `polar_express` runs in BF16 work dtype (when available) for higher throughput.
 >
