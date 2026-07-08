@@ -12,6 +12,8 @@ from transformers import (
     PreTrainedTokenizerBase,
 )
 
+from neobert.utils import additive_attention_mask
+
 
 # Adapted from https://github.com/huggingface/transformers/blob/125de4164364420854d7fe537a9bd2fdaf7369d4/src/transformers/data/data_collator.py#L828
 class CustomCollatorForMLM(DataCollatorForLanguageModeling):
@@ -426,10 +428,8 @@ def get_collator(
                         "to avoid corrupting packed attention.",
                         stacklevel=2,
                     )
-            # Use float32 masks for softmax stability (bf16 can propagate NaNs).
-            batch["attention_mask"] = torch.where(
-                attention_mask == 1, 0.0, float("-inf")
-            ).to(torch.float32)
+            # Float32 masks for softmax stability (bf16 can propagate NaNs).
+            batch["attention_mask"] = additive_attention_mask(attention_mask)
             return batch
 
     return collate_fn

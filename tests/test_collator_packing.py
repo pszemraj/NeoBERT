@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from neobert.collator import CustomCollatorForMLM, DataCollatorWithPacking, get_collator
+from neobert.utils import additive_attention_mask
 from tests.tokenizer_utils import build_wordlevel_tokenizer
 
 
@@ -219,3 +220,37 @@ class TestCollatorPacking(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "Could not resolve pad_token_id"):
             collator([{"input_ids": [1, 2, 3]}])
+
+
+class TestAdditiveAttentionMask(unittest.TestCase):
+    """Validate the shared keep/pad to additive mask conversion."""
+
+    def test_integer_mask_converts_to_zero_and_neg_inf(self):
+        """0/1 integer masks map to 0 at kept and -inf at padded positions."""
+        mask = torch.tensor([[1, 1, 0]], dtype=torch.long)
+
+        additive = additive_attention_mask(mask)
+
+        self.assertEqual(additive.dtype, torch.float32)
+        self.assertEqual(additive[0, 0].item(), 0.0)
+        self.assertEqual(additive[0, 1].item(), 0.0)
+        self.assertEqual(additive[0, 2].item(), float("-inf"))
+
+    def test_bool_mask_keeps_true_positions(self):
+        """Bool masks keep True positions attendable."""
+        mask = torch.tensor([[True, False]])
+
+        additive = additive_attention_mask(mask)
+
+        self.assertEqual(additive[0, 0].item(), 0.0)
+        self.assertEqual(additive[0, 1].item(), float("-inf"))
+
+    def test_float_binary_mask_and_dtype_override(self):
+        """Float 0/1 masks convert and honor the requested output dtype."""
+        mask = torch.tensor([[1.0, 0.0]])
+
+        additive = additive_attention_mask(mask, dtype=torch.bfloat16)
+
+        self.assertEqual(additive.dtype, torch.bfloat16)
+        self.assertEqual(additive[0, 0].item(), 0.0)
+        self.assertEqual(additive[0, 1].item(), float("-inf"))

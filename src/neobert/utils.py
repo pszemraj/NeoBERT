@@ -109,6 +109,26 @@ _PRETRAINING_TRAINER_EXCLUDE_FIELDS = {
 _SIMPLE_STRING_TOKEN_RE = re.compile(r"^[A-Za-z0-9_./:=+-]+$")
 
 
+def additive_attention_mask(
+    attention_mask: torch.Tensor,
+    *,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Convert a keep/pad attention mask to an additive ``0``/``-inf`` mask.
+
+    Canonical conversion used by every non-packed attention path (GLUE,
+    contrastive, MTEB, collator, HF adapter) so mask semantics cannot drift
+    between them. Nonzero entries mean "attend" per the HF convention; bool
+    masks keep ``True`` positions. Prefer ``torch.float32`` output: ``-inf``
+    additive masks in reduced precision can propagate NaNs through softmax.
+
+    :param torch.Tensor attention_mask: Keep/pad mask (bool or 0/1 numeric).
+    :param torch.dtype dtype: Output dtype for the additive mask.
+    :return torch.Tensor: Additive mask, ``0`` where kept and ``-inf`` where padded.
+    """
+    return torch.where(attention_mask != 0, 0.0, float("-inf")).to(dtype)
+
+
 def _serialize_config(cfg: Any) -> Dict[str, Any]:
     """Serialize a config-like object into a dictionary.
 

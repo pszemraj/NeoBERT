@@ -71,7 +71,12 @@ from neobert.contrastive.datasets import (
 )
 from neobert.contrastive.loss import SupConLoss
 from neobert.contrastive.metrics import Metrics
-from neobert.utils import configure_tf32, format_resolved_config, prepare_wandb_config
+from neobert.utils import (
+    additive_attention_mask,
+    configure_tf32,
+    format_resolved_config,
+    prepare_wandb_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1153,10 +1158,7 @@ def trainer(cfg: Config) -> None:
             """
             if use_packed:
                 return None, _build_packed_seqlens(mask, name=name)
-            pad_mask = torch.where(mask == 1, float(0.0), float("-inf")).type(
-                dtype_pad_mask
-            )
-            return pad_mask, None
+            return additive_attention_mask(mask, dtype=dtype_pad_mask), None
 
         if coin_flip > pretraining_mix_prob:
             # Randomly select which task to draw a batch from

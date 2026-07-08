@@ -58,7 +58,12 @@ from neobert.training_utils import (
     validate_muon_distributed_compatibility,
     validate_muon_runtime_topology,
 )
-from neobert.utils import configure_tf32, format_resolved_config, prepare_wandb_config
+from neobert.utils import (
+    additive_attention_mask,
+    configure_tf32,
+    format_resolved_config,
+    prepare_wandb_config,
+)
 from neobert.glue.validation import GlueValidationError, validate_glue_config
 
 logger = get_logger(__name__)
@@ -791,9 +796,7 @@ def _build_glue_attention_mask(
     """
     if use_hf_signature:
         return attention_mask
-    return torch.where(attention_mask == 1, float(0.0), float("-inf")).type(
-        dtype_pad_mask
-    )
+    return additive_attention_mask(attention_mask, dtype=dtype_pad_mask)
 
 
 def _create_glue_data_collator(

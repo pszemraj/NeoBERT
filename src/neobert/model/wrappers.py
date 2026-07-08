@@ -12,6 +12,7 @@ from torch import nn
 from transformers import DataCollatorWithPadding, PreTrainedTokenizerFast
 
 from neobert.training_utils import _pin_cpu_tensors
+from neobert.utils import additive_attention_mask
 
 from .model import (
     NeoBERT,
@@ -310,9 +311,7 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
                         dtype=mask_dtype,
                         non_blocking=non_blocking,
                     )
-                    additive_mask = torch.where(
-                        pool_mask == 1, float(0.0), float("-inf")
-                    ).type(mask_dtype)
+                    additive_mask = additive_attention_mask(pool_mask, dtype=mask_dtype)
                     outputs = self.model(input_ids, additive_mask)
 
                 if self.pooling == "avg":

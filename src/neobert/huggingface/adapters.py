@@ -11,6 +11,7 @@ from neobert.model.classification import (
     _resolve_classifier_config,
 )
 from neobert.model.model import NeoBERTConfig
+from neobert.utils import additive_attention_mask
 
 
 class NeoBERTHFForSequenceClassification(_BaseSequenceClassifier):
@@ -62,18 +63,11 @@ class NeoBERTHFForSequenceClassification(_BaseSequenceClassifier):
         del token_type_ids, position_ids, inputs_embeds, output_attentions
         del output_hidden_states
         if attention_mask is not None:
-            if attention_mask.dtype is torch.bool:
-                additive_mask = torch.where(attention_mask, float(0.0), float("-inf"))
-            elif attention_mask.is_floating_point() and attention_mask.min() < 0:
-                additive_mask = attention_mask
+            if attention_mask.is_floating_point() and attention_mask.min() < 0:
+                # Already additive (0/-inf): converting again would invert it.
+                additive_mask = attention_mask.to(torch.float32)
             else:
-                additive_mask = torch.where(
-                    attention_mask == 0,
-                    float("-inf"),
-                    float(0.0),
-                )
-            if additive_mask.dtype != torch.float32:
-                additive_mask = additive_mask.to(torch.float32)
+                additive_mask = additive_attention_mask(attention_mask)
         else:
             additive_mask = None
 
