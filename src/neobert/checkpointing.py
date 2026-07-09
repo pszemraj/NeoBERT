@@ -520,15 +520,18 @@ def resolve_accelerate_state_dir(checkpoint_path: str | Path) -> Path:
     model payload cannot collide with the portable ``model.safetensors`` export:
     the portable file intentionally duplicates tied tensors for export/eval
     consumers, which safetensors' strict ``load_model`` rejects on resume.
-    Step checkpoints written before this layout keep their state at the
-    checkpoint root, so fall back when the subdirectory is absent.
 
     :param str | Path checkpoint_path: Step checkpoint directory.
     :return Path: Directory to pass to ``Accelerator.load_state``.
+    :raises FileNotFoundError: If the checkpoint has no Accelerate state directory.
     """
     checkpoint_path = Path(checkpoint_path)
     state_dir = checkpoint_path / ACCELERATE_STATE_DIR
-    return state_dir if state_dir.is_dir() else checkpoint_path
+    if not state_dir.is_dir():
+        raise FileNotFoundError(
+            f"Checkpoint has no Accelerate state directory: {state_dir}"
+        )
+    return state_dir
 
 
 def save_accelerate_state(accelerator: Any, checkpoint_path: str | Path) -> Path:

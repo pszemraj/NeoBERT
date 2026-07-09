@@ -103,11 +103,12 @@ def test_accelerate_resume_state_coexists_with_portable_weights(
         AcceleratorState._reset_state(True)
 
 
-def test_resolve_accelerate_state_dir_falls_back_to_step_root(
+def test_resolve_accelerate_state_dir_requires_canonical_layout(
     tmp_path: Path,
 ) -> None:
-    """Checkpoints written before the accelerate/ layout resolve to the root."""
-    assert resolve_accelerate_state_dir(tmp_path) == tmp_path
+    """Resume state must use the canonical accelerate/ subdirectory."""
+    with pytest.raises(FileNotFoundError, match="no Accelerate state directory"):
+        resolve_accelerate_state_dir(tmp_path)
     (tmp_path / ACCELERATE_STATE_DIR).mkdir()
     assert resolve_accelerate_state_dir(tmp_path) == tmp_path / ACCELERATE_STATE_DIR
 
