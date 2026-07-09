@@ -201,7 +201,7 @@ Notes:
 
 ## Pre-tokenized Datasets
 
-Pre-tokenized caches include `tokenization_manifest.json`, which records the tokenizer vocab hash, special-token map, text columns, max length, truncation, and special-token settings. Existing caches without a manifest, or with a manifest that does not match the current tokenization contract, are rejected instead of being reused silently.
+Pre-tokenized caches include `tokenization_manifest.json`, which records the tokenizer vocab hash, special-token map, text columns, max length, truncation, and special-token settings. Existing caches without a manifest, or with a manifest that does not match the current tokenization contract, are rejected instead of being reused silently. The contract is path-independent: it captures how the tokenizer tokenizes, not where it was loaded from, so it deliberately excludes the tokenizer's `name_or_path`. This keeps caches valid across checkpoint resume, where the tokenizer is reloaded from the checkpoint-local `tokenizer/` directory (a different path for the identical tokenizer) and a path-dependent contract would otherwise reject an explicit cache or force full re-tokenization of a default one.
 
 Two common paths:
 

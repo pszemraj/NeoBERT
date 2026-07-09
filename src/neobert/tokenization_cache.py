@@ -72,14 +72,21 @@ def build_tokenization_manifest(
     :return dict[str, Any]: Stable manifest payload.
     """
     vocab_hash = tokenizer_vocab_hash(tokenizer)
+    # The tokenizer's ``name_or_path`` is deliberately excluded: it identifies
+    # where a tokenizer was loaded from, not how it tokenizes, so it does not
+    # belong in the tokenization contract. Including it also breaks checkpoint
+    # resume, where the tokenizer is reloaded from the checkpoint-local
+    # ``tokenizer/`` directory (a different path for the identical tokenizer);
+    # that would spuriously invalidate a valid cache and force full
+    # re-tokenization. The vocab hash, class, and special-token fields already
+    # identify the tokenization behavior.
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "dataset_name": _jsonable(dataset_name),
         "dataset_config": _jsonable(dataset_config),
         "dataset_path": _jsonable(dataset_path),
         "column_name": _jsonable(column_name),
         "tokenizer_class": type(tokenizer).__name__,
-        "tokenizer_name_or_path": _jsonable(getattr(tokenizer, "name_or_path", None)),
         "vocab_hash": vocab_hash,
         "vocab_size": int(len(tokenizer)),
         "special_tokens_map": _jsonable(dict(tokenizer.special_tokens_map)),
