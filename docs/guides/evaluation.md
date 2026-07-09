@@ -55,7 +55,7 @@ python scripts/evaluation/run_mteb.py \
 - Task family selection is read from config field `mteb_task_type`.
 - `--task_types` can override config selection at launch time. Accepts categories (`classification`, `retrieval`, `sts`, `all`) and/or explicit task names (comma-separated).
 - `mteb_pooling` defaults to mask-aware average pooling (`avg`; `mean` is accepted as an alias). Set it to `cls` for first-token pooling.
-- Output path is currently derived from run dir + checkpoint + max length: `outputs/<run>/mteb/<ckpt>/<max_length>/`.
+- Output defaults to `outputs/<run>/mteb/<ckpt>/<max_length>/`; pass `--output_folder` to choose another result directory.
 - If using a local tokenizer, point `tokenizer.name` to that path.
 - `NeoBERTForMTEB.encode()` honors `num_workers` and `pin_memory` overrides; on CUDA it keeps loader-side pinned staging enabled for overlapped host-to-device copies.
 

@@ -164,8 +164,14 @@ def evaluate_mteb(cfg: Any) -> None:
     ckpt = resolve_step_checkpoint_selector(checkpoint_root, pretrained_checkpoint)
 
     # Define path to store results
+    configured_output = getattr(cfg, "output_folder", None)
     output_folder = (
-        pretrained_checkpoint_dir / "mteb" / str(ckpt) / str(cfg.tokenizer.max_length)
+        Path(configured_output)
+        if configured_output
+        else pretrained_checkpoint_dir
+        / "mteb"
+        / str(ckpt)
+        / str(cfg.tokenizer.max_length)
     )
 
     # Cuda
@@ -237,7 +243,9 @@ def main() -> None:
         "--task_types", type=str, default="all", help="Task types to evaluate"
     )
     parser.add_argument(
-        "--output_folder", type=str, default="results", help="Output folder"
+        "--output_folder",
+        type=Path,
+        help="Optional result directory (default: <model>/mteb/<step>/<max-length>)",
     )
 
     args, remaining = parser.parse_known_args()
