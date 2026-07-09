@@ -118,33 +118,63 @@ class TestPretrainPipeline:
                     trainer(fsdp_cfg)
                 mocked_tokenizer.assert_not_called()
 
-    def test_pretraining_setup_smoke_without_full_execution(
+    def test_pretraining_one_step_local_smoke(
         self, tiny_pretrain_config_path: Path, temp_output_dir: str
     ):
-        """Exercise trainer setup path without requiring a full successful run."""
+        """Run one pretraining update using only local deterministic fixtures."""
+        data_path = Path(temp_output_dir) / "dataset"
+        tokenizer_path = Path(temp_output_dir) / "tokenizer"
+        DatasetDict(
+            {
+                "train": Dataset.from_dict(
+                    {
+                        "text": [
+                            "hello world test sentence",
+                            "world hello sentence test",
+                            "test sentence hello world",
+                            "sentence test world hello",
+                        ]
+                    }
+                )
+            }
+        ).save_to_disk(data_path)
+        tokenizer = build_wordlevel_tokenizer(
+            vocab={"hello": 4, "world": 5, "test": 6, "sentence": 7}
+        )
+        tokenizer.save_pretrained(tokenizer_path)
+
         config = ConfigLoader.load(str(tiny_pretrain_config_path))
         config.trainer.output_dir = temp_output_dir
-        config.trainer.num_train_epochs = 0
         config.trainer.max_steps = 1
-        config.wandb.mode = "disabled"
+        config.trainer.save_model = False
+        config.trainer.save_strategy = "no"
+        config.trainer.eval_strategy = "no"
+        config.trainer.logging_steps = 1
+        config.trainer.disable_tqdm = True
+        config.trainer.mixed_precision = "no"
+        config.trainer.log_grad_norm = False
+        config.trainer.log_weight_norms = False
+        config.dataset.path = str(data_path)
+        config.dataset.train_split = "train"
+        config.dataset.eval_split = None
+        config.dataset.validation_split = None
+        config.dataset.max_seq_length = 16
+        config.tokenizer.name = str(tokenizer_path)
+        config.tokenizer.path = str(tokenizer_path)
+        config.tokenizer.max_length = 16
+        config.model.hidden_size = 32
+        config.model.num_hidden_layers = 1
+        config.model.num_attention_heads = 4
+        config.model.intermediate_size = 64
+        config.model.max_position_embeddings = 16
+        config.model.vocab_size = len(tokenizer)
+        config.tokenizer.vocab_size = len(tokenizer)
+        config.scheduler.warmup_steps = 0
+        config.scheduler.total_steps = 1
 
-        try:
-            trainer(config)
-        except Exception as exc:
-            expected_errors = [
-                "hfapi",
-                "connection",
-                "disk",
-                "cuda",
-                "404",
-                "sentencepiece",
-                "repository not found",
-                "input_ids",
-                "valueerror",
-            ]
-            error_str = str(exc).lower()
-            if not any(err in error_str for err in expected_errors):
-                raise
+        trainer(config)
+
+        assert not (Path(temp_output_dir) / "checkpoints").exists()
 
 
 class TestPretrainComponents:
