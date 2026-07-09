@@ -1207,6 +1207,42 @@ class TestMuonClipOptimizer:
         # The real-token max is 1.0; the PAD-query logit of 1000 must be excluded.
         assert torch.allclose(per_step_max, torch.ones(1, heads))
 
+    def test_eta_ignores_fully_padded_samples(self):
+        """One all-pad sample must not disable clipping for the whole head.
+
+        A fully padded example yields ``-inf`` in ``per_step_max``; a naive mean
+        over the batch propagates it and the downstream clamp turns eta into 1.0
+        (clipping off) for that head across every sample in the batch. The
+        reduction must average over valid samples so a real large logit is still
+        clipped.
+        """
+        # Head 0: one padded sample (-inf) plus a real logit of 200.
+        # Head 1: two real logits (40, 60).
+        per_step_max = torch.tensor(
+            [
+                [float("-inf"), 40.0],
+                [200.0, 60.0],
+            ]
+        )
+        eta = MuonClipOptimizer._eta_from_per_step_max(per_step_max, 50.0)
+        # Head 0 uses the real logit (200), not -inf: eta = 50 / 200 = 0.25.
+        assert eta[0].item() == pytest.approx(0.25)
+        # Head 1: mean(40, 60) = 50, eta = 50 / 50 = 1.0.
+        assert eta[1].item() == pytest.approx(1.0)
+
+    def test_eta_all_padded_head_is_noop(self):
+        """A head with no valid samples has nothing to clip, so eta = 1.0."""
+        per_step_max = torch.tensor([[float("-inf")], [float("-inf")]])
+        eta = MuonClipOptimizer._eta_from_per_step_max(per_step_max, 50.0)
+        assert eta[0].item() == pytest.approx(1.0)
+
+    def test_eta_matches_plain_mean_without_padding(self):
+        """With no padding the reduction equals the plain per-head mean factor."""
+        per_step_max = torch.tensor([[40.0, 10.0], [60.0, 30.0]])
+        eta = MuonClipOptimizer._eta_from_per_step_max(per_step_max, 50.0)
+        expected = (50.0 / per_step_max.mean(dim=0)).clamp(max=1.0)
+        assert torch.allclose(eta, expected)
+
     def test_state_dict_persists_step(self, model):
         """Ensure MuonClip step counter persists across state dicts."""
         model_instance, config = model

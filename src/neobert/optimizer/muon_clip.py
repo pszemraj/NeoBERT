@@ -2242,9 +2242,9 @@ class MuonClipOptimizer(Optimizer):
                 scale=scale,
                 pad_mask=pad_mask,
             )
-        mean_per_head = per_step_max.mean(dim=0)
-        denom = torch.clamp(mean_per_head, min=1e-6)
-        eta_per_head = (self.config.clipping_threshold / denom).clamp(max=1.0)
+        eta_per_head = self._eta_from_per_step_max(
+            per_step_max, self.config.clipping_threshold
+        )
 
         global_max: Optional[float] = None
         if per_step_max.numel() > 0:
@@ -2252,6 +2252,35 @@ class MuonClipOptimizer(Optimizer):
             if torch.isfinite(candidate):
                 global_max = float(candidate.item())
         return eta_per_head, global_max
+
+    @staticmethod
+    def _eta_from_per_step_max(
+        per_step_max: torch.Tensor, clipping_threshold: float
+    ) -> torch.Tensor:
+        """Reduce per-sample/per-head max logits to a per-head clip factor.
+
+        ``per_step_max`` is ``[B, H]`` and holds ``-inf`` for samples with no
+        valid query/key positions (a fully padded example). The clip factor is
+        ``clipping_threshold / mean(max_logit)`` capped at 1.0, but the mean must
+        be taken over valid samples only: a plain ``mean(dim=0)`` propagates one
+        ``-inf`` across the whole head, which the ``clamp(min=1e-6)`` then turns
+        into ``eta = 1.0`` - clipping silently disabled for that head for every
+        sample in the batch, not just the degenerate one. Averaging over finite
+        entries keeps a single padded sample from suppressing the clip; a head
+        with no valid samples yields ``eta = 1.0`` (nothing to clip).
+
+        :param torch.Tensor per_step_max: Per-sample/per-head max logits ``[B, H]``.
+        :param float clipping_threshold: Target maximum mean attention logit.
+        :return torch.Tensor: Per-head clip factor ``[H]`` in ``(0, 1]``.
+        """
+        finite = torch.isfinite(per_step_max)
+        valid_counts = finite.sum(dim=0)
+        finite_sums = torch.where(
+            finite, per_step_max, torch.zeros_like(per_step_max)
+        ).sum(dim=0)
+        mean_per_head = finite_sums / valid_counts.clamp(min=1)
+        denom = torch.clamp(mean_per_head, min=1e-6)
+        return (clipping_threshold / denom).clamp(max=1.0)
 
     def _attention_logit_max(
         self,
