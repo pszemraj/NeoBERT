@@ -10,12 +10,6 @@ This guide covers running and extending the NeoBERT regression suite.
 pytest -q
 ```
 
-Or via helper:
-
-```bash
-python tests/run_tests.py
-```
-
 ### Subsets
 
 ```bash
@@ -27,14 +21,9 @@ pytest tests/training -q
 
 # Verbose investigation
 pytest tests/test_model_forward.py -vv --showlocals
-```
 
-### Helper flags
-
-```bash
-python tests/run_tests.py --test-dir training
-python tests/run_tests.py --pattern "test_*compile*.py"
-python tests/run_tests.py --no-pytest
+# Match test names
+pytest -k compile -q
 ```
 
 ## Manual Validation Scripts
