@@ -63,13 +63,13 @@ accelerate launch \
   --fsdp_auto_wrap_policy TRANSFORMER_BASED_WRAP \
   --fsdp_transformer_layer_cls_to_wrap EncoderBlock \
   scripts/pretraining/pretrain.py \
-  configs/pretraining/pretrain_neobert100m_smollm2data_muonclip.yaml \
+  configs/pretraining/pretrain_neobert100m_smollm2data_muonclip_noclip.yaml \
   --wandb.enabled false
 ```
 
 DeepSpeed is no longer a supported runtime backend in this repo; use Accelerate FSDP v2 for distributed training. Legacy DeepSpeed ZeRO checkpoint conversion remains available via the optional `neobert[legacy-checkpoints]` extra.
 
-For the explicit no-clipping variant, keep the same launch flags and replace the config path with `configs/pretraining/pretrain_neobert100m_smollm2data_muonclip_noclip.yaml`.
+The `_noclip` recipe explicitly disables QK clipping, which is not supported by the FSDP2 sharded Muon update path. Use `configs/pretraining/pretrain_neobert100m_smollm2data_muonclip.yaml` only for unsharded training where QK clipping remains available.
 
 ### Distributed launch policy
 
