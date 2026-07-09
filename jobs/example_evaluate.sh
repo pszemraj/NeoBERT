@@ -6,16 +6,15 @@
 set -euo pipefail
 
 PYTHON=(conda run --name neobert python)
-BASH_IN_ENV=(conda run --name neobert bash)
 
 # GLUE evaluation - single task example
 "${PYTHON[@]}" scripts/evaluation/run_glue.py configs/glue/cola.yaml
 
-# GLUE evaluation - quick smoke test (small tasks only)
-"${BASH_IN_ENV[@]}" scripts/evaluation/glue/run_quick_glue.sh configs/glue
+# GLUE evaluation - quick smoke test (small tasks, fail-fast)
+"${PYTHON[@]}" scripts/evaluation/glue/run_glue_suite.py configs/glue --suite quick
 
-# GLUE evaluation - full suite
-"${BASH_IN_ENV[@]}" scripts/evaluation/glue/run_all_glue.sh configs/glue
+# GLUE evaluation - full suite (continues through task failures)
+"${PYTHON[@]}" scripts/evaluation/glue/run_glue_suite.py configs/glue --suite all
 
 # GLUE config generation - from a sweep directory of pretrained runs
 # CHECKPOINT_ROOT="outputs/my-sweep"
@@ -26,4 +25,4 @@ BASH_IN_ENV=(conda run --name neobert bash)
 #   --tasks cola,qnli
 #
 # Then run:
-# bash scripts/evaluation/glue/run_all_glue.sh configs/glue/generated/<run>-ckpt<step>
+# python scripts/evaluation/glue/run_glue_suite.py configs/glue/generated/<run>-ckpt<step> --suite all

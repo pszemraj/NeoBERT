@@ -13,8 +13,8 @@ python scripts/evaluation/run_glue.py configs/glue/cola.yaml
 ### Run quick/full suites
 
 ```bash
-bash scripts/evaluation/glue/run_quick_glue.sh configs/glue
-bash scripts/evaluation/glue/run_all_glue.sh configs/glue
+python scripts/evaluation/glue/run_glue_suite.py configs/glue --suite quick
+python scripts/evaluation/glue/run_glue_suite.py configs/glue --suite all
 ```
 
 ### Important GLUE behavior

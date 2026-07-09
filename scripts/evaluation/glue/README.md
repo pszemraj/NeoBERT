@@ -6,8 +6,7 @@ Automation helpers for generating, running, and summarizing GLUE configs.
 
 - `build_configs.sh` - iterate sweep outputs and generate GLUE configs
 - `build_glue_configs.py` - Python config generator
-- `run_quick_glue.sh` - smoke subset launcher
-- `run_all_glue.sh` - full GLUE launcher
+- `run_glue_suite.py` - parameterized quick/full suite launcher
 - `summarize_glue.py` - aggregate metrics table
 - `validate_glue_config.py` - config sanity checks
 
@@ -15,4 +14,5 @@ Automation helpers for generating, running, and summarizing GLUE configs.
 
 - Invoke from repository root.
 - Generated configs default to `configs/glue/generated/` unless `build_configs.sh` overrides `--config-output-dir`.
+- `run_glue_suite.py --suite quick` fails on the first task error; `--suite all` runs every task before returning a failure status.
 - GLUE workflow details are in [docs/guides/evaluation.md](../../../docs/guides/evaluation.md).

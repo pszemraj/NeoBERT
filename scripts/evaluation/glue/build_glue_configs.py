@@ -516,7 +516,8 @@ def main() -> None:
 
     print(
         "\nExample command:"
-        f"\n  bash scripts/evaluation/glue/run_all_glue.sh {final_output_dir}"
+        "\n  python scripts/evaluation/glue/run_glue_suite.py"
+        f" {final_output_dir} --suite all"
     )
 
 
