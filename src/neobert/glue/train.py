@@ -862,13 +862,11 @@ def trainer(cfg: Config) -> None:
     )
     validate_distributed_runtime_policy(
         accelerator=accelerator,
-        log=logger,
         context="glue",
     )
     validate_muon_distributed_compatibility(
         accelerator=accelerator,
         optimizer_name=cfg.optimizer.name,
-        log=logger,
         context="glue",
     )
 

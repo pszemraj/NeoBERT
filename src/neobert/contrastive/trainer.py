@@ -568,13 +568,11 @@ def trainer(cfg: Config) -> None:
     )
     validate_distributed_runtime_policy(
         accelerator=accelerator,
-        log=logger,
         context="contrastive",
     )
     validate_muon_distributed_compatibility(
         accelerator=accelerator,
         optimizer_name=cfg.optimizer.name,
-        log=logger,
         context="contrastive",
     )
     tracker_config_dict = prepare_wandb_config(cfg)

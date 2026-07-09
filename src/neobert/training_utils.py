@@ -528,22 +528,38 @@ def create_accelerator(
     return accelerator
 
 
+def resolve_fsdp_version(accelerator: Accelerator) -> int:
+    """Resolve FSDP version from Accelerate state.
+
+    Missing or malformed plugin metadata is treated as FSDP v1 so callers fail
+    closed when they require FSDP2 behavior.
+
+    :param Accelerator accelerator: Active Accelerator runtime.
+    :return int: FSDP plugin version.
+    """
+    state = getattr(accelerator, "state", None)
+    fsdp_plugin = getattr(state, "fsdp_plugin", None) if state is not None else None
+    raw_version = getattr(fsdp_plugin, "fsdp_version", None)
+    try:
+        return int(raw_version) if raw_version is not None else 1
+    except (TypeError, ValueError):
+        return 1
+
+
 def validate_muon_distributed_compatibility(
     *,
     accelerator: Accelerator,
     optimizer_name: str,
-    log: logging.Logger,
     context: str,
 ) -> None:
     """Validate MuonClip compatibility for the active distributed runtime.
 
-    MuonClip supports distributed execution only through the FSDP2
-    owner-compute path used in this repo. FSDP v1 and all DeepSpeed runtimes
-    remain unsupported.
+    MuonClip supports FSDP execution only through the FSDP2 owner-compute path
+    used in this repo. The repository-wide runtime policy rejects unsupported
+    distributed backends separately.
 
     :param Accelerator accelerator: Active Accelerator runtime.
     :param str optimizer_name: Configured optimizer name.
-    :param logging.Logger log: Logger for compatibility warnings.
     :param str context: Human-readable task context for error messages.
     :raises RuntimeError: If MuonClip is enabled with incompatible sharding.
     """
@@ -553,12 +569,7 @@ def validate_muon_distributed_compatibility(
     distributed_type = getattr(accelerator, "distributed_type", None)
     if distributed_type is DistributedType.FSDP:
         state = getattr(accelerator, "state", None)
-        fsdp_plugin = getattr(state, "fsdp_plugin", None) if state is not None else None
-        raw_version = getattr(fsdp_plugin, "fsdp_version", None)
-        try:
-            fsdp_version = int(raw_version) if raw_version is not None else 1
-        except (TypeError, ValueError):
-            fsdp_version = 1
+        fsdp_version = resolve_fsdp_version(accelerator)
 
         if fsdp_version < 2:
             raise RuntimeError(
@@ -583,29 +594,11 @@ def validate_muon_distributed_compatibility(
                 "MuonClip FSDP v2 currently supports only a 1D row-sharded device "
                 f"mesh in {context}. Disable {axes} for MuonClip runs."
             )
-        return
-
-    if distributed_type is not DistributedType.DEEPSPEED:
-        return
-
-    deepspeed_plugin = getattr(
-        getattr(accelerator, "state", None), "deepspeed_plugin", None
-    )
-    zero_stage = getattr(deepspeed_plugin, "zero_stage", None)
-    zero_suffix = ""
-    if zero_stage is not None:
-        zero_suffix = f" (ZeRO stage {int(zero_stage)})"
-    raise RuntimeError(
-        "MuonClip distributed mode is FSDP2-only in "
-        f"{context}; DeepSpeed{zero_suffix} is not supported. "
-        "Use Accelerate FSDP v2 or switch optimizers."
-    )
 
 
 def validate_distributed_runtime_policy(
     *,
     accelerator: Accelerator,
-    log: logging.Logger,
     context: str,
 ) -> None:
     """Reject distributed runtimes that this repo no longer supports.
@@ -615,7 +608,6 @@ def validate_distributed_runtime_policy(
     separately via checkpoint-loading helpers.
 
     :param Accelerator accelerator: Active Accelerator runtime.
-    :param logging.Logger log: Logger for policy warnings/errors.
     :param str context: Human-readable task context for error messages.
     :raises RuntimeError: If DeepSpeed is selected as the active runtime backend.
     """

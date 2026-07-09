@@ -823,7 +823,6 @@ def test_validate_muon_distributed_compatibility_rejects_fsdp1() -> None:
         validate_muon_distributed_compatibility(
             accelerator=accelerator,
             optimizer_name="muonclip",
-            log=logging.getLogger("test"),
             context="unit-test",
         )
 
@@ -837,7 +836,6 @@ def test_validate_muon_distributed_compatibility_allows_fsdp2() -> None:
     validate_muon_distributed_compatibility(
         accelerator=accelerator,
         optimizer_name="muonclip",
-        log=logging.getLogger("test"),
         context="unit-test",
     )
 
@@ -855,7 +853,6 @@ def test_validate_muon_distributed_compatibility_rejects_fsdp2_tp_mesh() -> None
         validate_muon_distributed_compatibility(
             accelerator=accelerator,
             optimizer_name="muonclip",
-            log=logging.getLogger("test"),
             context="unit-test",
         )
 
@@ -867,29 +864,6 @@ def test_validate_muon_distributed_compatibility_rejects_unknown_fsdp() -> None:
         validate_muon_distributed_compatibility(
             accelerator=accelerator,
             optimizer_name="muonclip",
-            log=logging.getLogger("test"),
-            context="unit-test",
-        )
-
-
-@pytest.mark.parametrize("zero_stage", [None, 0, 1, 2, 3])
-def test_validate_muon_distributed_compatibility_rejects_deepspeed(
-    zero_stage: int | None,
-) -> None:
-    """MuonClip should reject all DeepSpeed runtimes, not just ZeRO-2/3."""
-    accelerator = SimpleNamespace(
-        distributed_type=DistributedType.DEEPSPEED,
-        state=SimpleNamespace(
-            deepspeed_plugin=SimpleNamespace(zero_stage=zero_stage),
-        ),
-    )
-
-    match = "FSDP2-only" if zero_stage is None else f"ZeRO stage {zero_stage}"
-    with pytest.raises(RuntimeError, match=match):
-        validate_muon_distributed_compatibility(
-            accelerator=accelerator,
-            optimizer_name="muonclip",
-            log=logging.getLogger("test"),
             context="unit-test",
         )
 
@@ -910,7 +884,6 @@ def test_validate_distributed_runtime_policy_rejects_deepspeed(
     with pytest.raises(RuntimeError, match=match):
         validate_distributed_runtime_policy(
             accelerator=accelerator,
-            log=logging.getLogger("test"),
             context="unit-test",
         )
 

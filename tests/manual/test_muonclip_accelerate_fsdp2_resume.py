@@ -173,7 +173,6 @@ def _build_prepared_run(project_dir: Path):
     validate_muon_distributed_compatibility(
         accelerator=accelerator,
         optimizer_name="muonclip",
-        log=logger,
         context="manual accelerate fsdp2 muon resume smoke",
     )
     validate_muon_runtime_topology(

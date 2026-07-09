@@ -84,6 +84,7 @@ from neobert.training_utils import (
     _update_global_norm_metric_for_logging,
     attach_optimizer_param_names,
     create_accelerator,
+    resolve_fsdp_version,
     resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
     save_optimizer_param_name_manifest,
@@ -291,23 +292,6 @@ def _log_masking_strategy(cfg: Config) -> None:
     )
 
 
-def _resolve_fsdp_version(accelerator: Accelerator) -> int:
-    """Resolve FSDP version from Accelerate state.
-
-    Defaults to ``1`` when plugin metadata is unavailable.
-
-    :param Accelerator accelerator: Active accelerator runtime.
-    :return int: FSDP plugin version.
-    """
-    state = getattr(accelerator, "state", None)
-    fsdp_plugin = getattr(state, "fsdp_plugin", None) if state is not None else None
-    raw_version = getattr(fsdp_plugin, "fsdp_version", None)
-    try:
-        return int(raw_version) if raw_version is not None else 1
-    except (TypeError, ValueError):
-        return 1
-
-
 @contextmanager
 def _gather_decoder_weight_for_masked_objective(
     model: torch.nn.Module,
@@ -344,7 +328,7 @@ def _gather_decoder_weight_for_masked_objective(
         raise AttributeError("Could not resolve decoder.weight for masked objective.")
 
     if accelerator.distributed_type is DistributedType.FSDP:
-        fsdp_version = _resolve_fsdp_version(accelerator)
+        fsdp_version = resolve_fsdp_version(accelerator)
         if fsdp_version >= 2:
             base_model = model
             unwrapped_model: Optional[torch.nn.Module] = None
@@ -469,7 +453,7 @@ def _should_backward_inside_gathered_decoder_weight(
     :return bool: ``True`` when backward should run inside gather context.
     """
     if accelerator.distributed_type is DistributedType.FSDP:
-        return _resolve_fsdp_version(accelerator) >= 2
+        return resolve_fsdp_version(accelerator) >= 2
     return False
 
 
@@ -1660,7 +1644,6 @@ def trainer(cfg: Config) -> None:
         )
     validate_distributed_runtime_policy(
         accelerator=accelerator,
-        log=logger,
         context="pretraining",
     )
     if getattr(accelerator, "is_main_process", True):
@@ -1676,7 +1659,7 @@ def trainer(cfg: Config) -> None:
         else:
             logger.info("Checkpoint retention policy: disabled (keep all checkpoints).")
     if accelerator.distributed_type is DistributedType.FSDP:
-        fsdp_version = _resolve_fsdp_version(accelerator)
+        fsdp_version = resolve_fsdp_version(accelerator)
         if fsdp_version < 2:
             raise RuntimeError(
                 "NeoBERT pretraining is FSDP2-first. "
@@ -1686,7 +1669,6 @@ def trainer(cfg: Config) -> None:
     validate_muon_distributed_compatibility(
         accelerator=accelerator,
         optimizer_name=cfg.optimizer.name,
-        log=logger,
         context="pretraining",
     )
 
