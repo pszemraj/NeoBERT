@@ -1265,8 +1265,12 @@ def _resolve_resume_checkpoint(
     if isinstance(resume_from_checkpoint, str):
         resume_value = resume_from_checkpoint.strip()
         if resume_value.lower() not in {"true", "latest", "auto"}:
-            resume_path = Path(resume_value)
-            if not resume_path.is_absolute():
+            is_step_selector = resume_value.isdigit()
+            if is_step_selector:
+                resume_path = checkpoint_dir_path / resume_value
+            else:
+                resume_path = Path(resume_value)
+            if not resume_path.is_absolute() and not is_step_selector:
                 candidate = output_dir_path / resume_path
                 if candidate.exists():
                     resume_path = candidate

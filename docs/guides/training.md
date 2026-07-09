@@ -154,6 +154,8 @@ python scripts/pretraining/pretrain.py \
   --trainer.resume_from_checkpoint latest
 ```
 
+A bare step selector such as `--trainer.resume_from_checkpoint 100` resolves to `<output_dir>/checkpoints/100`; `latest` scans the same checkpoint root, while absolute paths and existing output-relative paths remain available for explicit selection.
+
 ### Crash recovery
 
 Resume from the newest saved checkpoint:

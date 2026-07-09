@@ -19,6 +19,7 @@ from neobert.optimizer import get_optimizer
 from neobert.training_utils import (
     _compute_l2_norm_for_logging,
     _maybe_compile_model,
+    _resolve_resume_checkpoint,
     _update_global_norm_metric_for_logging,
     attach_optimizer_param_names,
     create_accelerator,
@@ -33,6 +34,22 @@ from neobert.training_utils import (
     validate_muon_distributed_compatibility,
     validate_muon_runtime_topology,
 )
+
+
+def test_numeric_resume_selector_resolves_under_checkpoint_root(tmp_path: Path) -> None:
+    """Bare step selectors resolve to the canonical checkpoints directory."""
+    output_dir = tmp_path / "run"
+    checkpoint_dir = output_dir / "checkpoints"
+    expected = checkpoint_dir / "100"
+    expected.mkdir(parents=True)
+    (output_dir / "100").mkdir()
+
+    resume_path, iteration = _resolve_resume_checkpoint(
+        "100", str(checkpoint_dir), str(output_dir)
+    )
+
+    assert Path(resume_path) == expected
+    assert iteration == 101
 
 
 def _make_cfg() -> Config:
