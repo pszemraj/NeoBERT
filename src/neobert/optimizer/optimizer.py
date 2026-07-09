@@ -5,11 +5,14 @@ from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, Optional
 
 import torch
-import torch.nn as nn
 from accelerate.utils import DistributedType
 from torch.optim import Adam, AdamW
 
 from neobert.optimizer.muon_clip import MuonClipConfig, MuonClipOptimizer
+from neobert.optimizer.parameter_groups import (
+    embedding_parameter_ids,
+    uses_weight_decay,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,25 +28,14 @@ def _build_adamw_param_groups(
     """
     decay_params = []
     no_decay_params = []
-    embedding_param_ids = {
-        id(param)
-        for module in model.modules()
-        if isinstance(module, nn.Embedding)
-        for param in module.parameters(recurse=False)
-    }
+    embedding_param_ids = embedding_parameter_ids(model)
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-        name_lower = name.lower()
-        if (
-            param.ndim < 2
-            or name_lower.endswith(".bias")
-            or "norm" in name_lower
-            or id(param) in embedding_param_ids
-        ):
-            no_decay_params.append(param)
-        else:
+        if uses_weight_decay(name, param, embedding_param_ids):
             decay_params.append(param)
+        else:
+            no_decay_params.append(param)
 
     return [
         {"params": decay_params, "weight_decay": weight_decay},

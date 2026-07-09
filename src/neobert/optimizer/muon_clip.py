@@ -13,6 +13,11 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tupl
 import torch
 import torch.distributed as dist
 from torch.optim import Optimizer
+
+from neobert.optimizer.parameter_groups import (
+    embedding_parameter_ids,
+    uses_weight_decay,
+)
 from torch.utils.hooks import RemovableHandle
 
 from neobert.config import normalize_muon_norm_factor, normalize_muon_param_policy
@@ -705,31 +710,6 @@ class MuonClipOptimizer(Optimizer):
 
         logger.debug("Model architecture validation passed")
 
-    def _use_adam_weight_decay(
-        self,
-        *,
-        name: str,
-        param: torch.nn.Parameter,
-        embedding_param_ids: set[int],
-    ) -> bool:
-        """Return whether a non-Muon parameter should receive Adam weight decay.
-
-        This mirrors the repo's standard AdamW grouping policy so MuonClip's
-        Adam fallback does not silently decay embeddings, biases, or norm gains.
-
-        :param str name: Fully qualified parameter name.
-        :param torch.nn.Parameter param: Parameter to classify.
-        :param set[int] embedding_param_ids: IDs belonging to embedding weights.
-        :return bool: ``True`` when decoupled Adam weight decay should apply.
-        """
-        name_lower = name.lower()
-        return not (
-            param.ndim < 2
-            or name_lower.endswith(".bias")
-            or "norm" in name_lower
-            or id(param) in embedding_param_ids
-        )
-
     def _build_param_groups(self, model: torch.nn.Module) -> List[Dict]:
         """Build parameter groups for hybrid Muon+Adam optimization.
 
@@ -786,12 +766,7 @@ class MuonClipOptimizer(Optimizer):
                         continue
                     proj_type_by_param_id[id(module.weight)] = proj_type
 
-        embedding_param_ids = {
-            id(param)
-            for module in model.modules()
-            if isinstance(module, torch.nn.Embedding)
-            for param in module.parameters(recurse=False)
-        }
+        embedding_param_ids = embedding_parameter_ids(model)
 
         for name, param in model.named_parameters():
             if not param.requires_grad:
@@ -841,11 +816,7 @@ class MuonClipOptimizer(Optimizer):
                 muon_params.append(param)
                 muon_param_info.append(param_info)
             else:
-                if self._use_adam_weight_decay(
-                    name=name,
-                    param=param,
-                    embedding_param_ids=embedding_param_ids,
-                ):
+                if uses_weight_decay(name, param, embedding_param_ids):
                     adam_decay_params.append(param)
                     adam_decay_param_info.append(param_info)
                 else:
