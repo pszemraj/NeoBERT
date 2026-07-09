@@ -292,9 +292,6 @@ class NeoBERTConfig(PretrainedConfig):
         self.base_scale = base_scale
         self.ngpt = ngpt
 
-        # Store any extra kwargs for reference
-        self.kwargs = kwargs
-
 
 class EncoderBlock(nn.Module):
     """Transformer encoder block."""

@@ -71,7 +71,7 @@ Validator checks file presence, model/tokenizer loading, MLM forward pass, and b
 - `ngpt: true` checkpoints are not supported by HF export path.
 - Export expects unpacked SwiGLU weights (`w1/w2/w3`).
 - Export target LM head is biasless. If a checkpoint includes `decoder.bias`, export fails by default unless `--allow-decoder-bias-drop` is set.
-- `attn_backend` is converted to HF `flash_attention` flag for config parity, but exported HF model remains standard/unpacked.
+- Exported HF models use their standalone standard attention implementation; training-only attention backend settings are not serialized.
 
 ## Constraints
 

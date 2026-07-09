@@ -188,7 +188,6 @@ class NeoBERTConfig(PretrainedConfig):
         rope: bool = True,
         hidden_act: str = "swiglu",
         dropout: float = 0.0,
-        flash_attention: bool = False,
         tie_word_embeddings: bool = True,
         ngpt: bool = False,
         base_scale: float = 1.0 / (960.0**0.5),
@@ -210,12 +209,16 @@ class NeoBERTConfig(PretrainedConfig):
         :param bool rope: Whether to use RoPE (otherwise learned positional embeddings).
         :param str hidden_act: Activation name ("swiglu" or "gelu").
         :param float dropout: Dropout probability for residual/MLP blocks.
-        :param bool flash_attention: Whether to prefer flash attention backends.
         :param bool tie_word_embeddings: Whether to tie input/output embeddings.
         :param bool ngpt: Whether to enable nGPT-style normalization (unsupported here).
         :param float base_scale: Base scaling factor for nGPT compatibility.
         :param Any kwargs: Additional configuration parameters.
         """
+        if "flash_attention" in kwargs:
+            raise TypeError(
+                "NeoBERTConfig does not support 'flash_attention'; the standalone "
+                "HF model selects standard attention internally."
+            )
         super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
 
         self.hidden_size = hidden_size
@@ -243,8 +246,6 @@ class NeoBERTConfig(PretrainedConfig):
             )
         self.hidden_act = normalized_act
         self.dropout = dropout
-        # Retained for config.json compatibility with training configs; silently ignored.
-        self.flash_attention = flash_attention
         self.ngpt = ngpt
         self.base_scale = base_scale
         self.tie_word_embeddings = tie_word_embeddings
@@ -252,7 +253,6 @@ class NeoBERTConfig(PretrainedConfig):
         self.pad_token_id = pad_token_id
         self.max_length = max_length
         self.max_position_embeddings = self.max_length
-        self.kwargs = kwargs
 
 
 class UnpackedSwiGLU(nn.Module):

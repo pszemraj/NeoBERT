@@ -61,7 +61,6 @@ def _check_required_config_fields(config: Dict[str, Any]) -> Optional[str]:
         "rope",
         "hidden_act",
         "dropout",
-        "flash_attention",
     ]
     missing = [field for field in required if field not in config]
     if missing:

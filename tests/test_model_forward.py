@@ -439,7 +439,6 @@ class TestModelForward(unittest.TestCase):
             intermediate_size=64,
             vocab_size=100,
             max_length=16,
-            flash_attention=False,
         )
         model = NeoBERT(config)
         model.eval()
@@ -554,7 +553,6 @@ class TestModelForward(unittest.TestCase):
             intermediate_size=64,
             vocab_size=100,
             max_length=16,
-            flash_attention=False,
             dropout=0.0,
         )
         model = NeoBERT(config)
@@ -603,7 +601,6 @@ class TestModelForward(unittest.TestCase):
             intermediate_size=64,
             vocab_size=100,
             max_length=8,
-            flash_attention=False,
         )
         model = NeoBERT(config)
         model.eval()
@@ -631,7 +628,6 @@ class TestModelForward(unittest.TestCase):
             intermediate_size=64,
             vocab_size=100,
             max_length=16,
-            flash_attention=False,
             dropout=0.0,
         )
         model = NeoBERT(config)
@@ -707,7 +703,6 @@ class TestModelForward(unittest.TestCase):
             intermediate_size=64,
             vocab_size=100,
             max_length=16,
-            flash_attention=False,
             num_labels=2,
         )
         self.assertTrue(config.use_return_dict)
@@ -785,7 +780,6 @@ class TestModelForward(unittest.TestCase):
                 intermediate_size=64,
                 vocab_size=50,
                 max_length=16,
-                flash_attention=False,
             )
         )
         lm_head.eval()
@@ -814,7 +808,6 @@ class TestModelForward(unittest.TestCase):
             intermediate_size=64,
             vocab_size=100,
             max_length=16,
-            flash_attention=False,
         )
         model = NeoBERT(base_config)
         model.eval()
@@ -837,7 +830,6 @@ class TestModelForward(unittest.TestCase):
             vocab_size=100,
             max_length=4,
             rope=False,
-            flash_attention=False,
         )
         non_rope_model = NeoBERT(non_rope_config)
         non_rope_model.eval()
@@ -850,29 +842,12 @@ class TestModelForward(unittest.TestCase):
             with torch.no_grad():
                 non_rope_model(input_ids=input_ids, position_ids=position_ids)
 
-    def test_hf_flash_attention_silently_ignored(self):
-        """Ensure flash_attention=True is silently accepted for HF config compat."""
-        from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig
+    def test_hf_flash_attention_is_rejected(self):
+        """Ensure the standalone config rejects a training-only no-op flag."""
+        from neobert.huggingface.modeling_neobert import NeoBERTConfig
 
-        # flash_attention=True should be accepted without warning (HF config compat)
-        config = NeoBERTConfig(
-            hidden_size=32,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            intermediate_size=64,
-            vocab_size=100,
-            max_length=16,
-            flash_attention=True,
-        )
-        self.assertTrue(config.flash_attention)
-
-        # Model should still work (uses SDPA regardless)
-        model = NeoBERT(config)
-        model.eval()
-        input_ids = torch.tensor([[1, 2, 3, 4]])
-        with torch.no_grad():
-            outputs = model(input_ids=input_ids)
-        self.assertEqual(outputs.last_hidden_state.shape, (1, 4, 32))
+        with self.assertRaisesRegex(TypeError, "does not support 'flash_attention'"):
+            NeoBERTConfig(flash_attention=True)
 
     def test_lm_head_tying_and_bias_behavior(self):
         """Ensure LM heads apply expected embedding tying and decoder-bias rules."""
@@ -929,7 +904,6 @@ class TestModelForward(unittest.TestCase):
                 intermediate_size=64,
                 vocab_size=16,
                 max_length=8,
-                flash_attention=False,
                 hidden_act="gelu",
                 tie_word_embeddings=True,
             )
@@ -966,7 +940,6 @@ class TestModelForward(unittest.TestCase):
                     max_length=16,
                     rope=False,
                     hidden_act="gelu",
-                    flash_attention=False,
                 ),
                 torch.tensor([[1, 2, 3, 0, 0], [4, 5, 6, 7, 8]]),
                 torch.tensor([[1, 1, 1, 0, 0], [1, 1, 1, 1, 1]]),
@@ -982,7 +955,6 @@ class TestModelForward(unittest.TestCase):
                     pad_token_id=7,
                     rope=False,
                     hidden_act="gelu",
-                    flash_attention=False,
                 ),
                 torch.tensor([[1, 2, 3, 4, 5, 6, 8, 9]]),
                 torch.ones((1, 8), dtype=torch.long),
@@ -1221,7 +1193,6 @@ class TestModelForward(unittest.TestCase):
                 vocab_size=1000,
                 max_length=32,
                 hidden_act="swiglu",
-                flash_attention=False,
             )
         )
         state = hf_swiglu.state_dict()
