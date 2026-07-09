@@ -17,4 +17,3 @@ torchrun --standalone --nproc_per_node=2 tests/manual/test_muonclip_accelerate_f
 - Raw local-shard `optimizer.state_dict()` round-trips are not a supported FSDP2 Muon resume surface.
 - Local MuonClip configuration, hooks, optimizer steps, stability, and orthogonalization are covered by `tests/test_muonclip_unit.py`.
 - These scripts validate distributed execution paths that cannot be covered by fast CPU regression tests.
-- `tests/manual/` is excluded from default `pytest -q` discovery.

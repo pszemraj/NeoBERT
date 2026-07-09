@@ -24,6 +24,5 @@ RUN_FULL=1 ./jobs/example_pretrain.sh
 
 ## Related Docs
 
-- [Scripts](../scripts/README.md)
 - [Training](../docs/guides/training.md)
 - [Evaluation](../docs/guides/evaluation.md)

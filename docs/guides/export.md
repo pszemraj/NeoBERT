@@ -86,6 +86,5 @@ Validator checks file presence, model/tokenizer loading, MLM forward pass, and b
 
 ## Related Docs
 
-- [scripts/export-hf/README.md](../../scripts/export-hf/README.md)
 - [Troubleshooting](troubleshooting.md)
 - [Evaluation](evaluation.md)

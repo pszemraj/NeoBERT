@@ -14,10 +14,7 @@ This repo adds:
 - safetensors-first checkpointing,
 - end-to-end training/eval/export scripts with config-driven workflows.
 
-Pretraining loss path is selected with one explicit flag: `trainer.masked_logits_only_loss`.
-
-- `true` (default, recommended): masked-logits-only path.
-- `false` (legacy/debug): original full-logits CE path.
+Pretraining supports masked-logits-only training and a full-logits ablation path; see [Training](docs/guides/training.md#mlm-loss-path-selection).
 
 Original paper: <https://arxiv.org/abs/2502.19587>
 
@@ -52,24 +49,9 @@ python scripts/pretraining/pretrain.py \
 pytest -q
 ```
 
-## Quick Commands
-
-| Task      | Command                                                                                                              |
-| --------- | -------------------------------------------------------------------------------------------------------------------- |
-| Pretrain  | `python scripts/pretraining/pretrain.py configs/pretraining/pretrain_neobert.yaml`                                   |
-| GLUE eval | `python scripts/evaluation/run_glue.py configs/glue/cola.yaml`                                                       |
-| MTEB eval | `python scripts/evaluation/run_mteb.py configs/pretraining/pretrain_neobert.yaml --model_name_or_path outputs/<run>` |
-| Export HF | `python scripts/export-hf/export.py outputs/<run>/checkpoints/<step>`                                                |
-| Tests     | `pytest -q`                                                                                                          |
-
 ## Documentation
 
-- [Documentation index](docs/README.md)
-- [Training Guide](docs/guides/training.md)
-- [Training Optimization](docs/guides/training-optimization.md)
-- [Configuration Reference](docs/reference/configuration.md)
-- [Evaluation Guide](docs/guides/evaluation.md)
-- [Troubleshooting](docs/guides/troubleshooting.md)
+Use the [documentation index](docs/README.md) for training, evaluation, export, configuration, architecture, testing, and troubleshooting.
 
 Directory READMEs under `configs/`, `scripts/`, `tests/`, and `jobs/` focus on entrypoints and quick usage.
 

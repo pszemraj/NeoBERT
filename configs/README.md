@@ -14,8 +14,6 @@ Tiny smoke-test configs live under [Test Config Files](../tests/configs/README.m
 
 ## Related Docs
 
-- [Configuration reference](../docs/reference/configuration.md)
 - [Training guide](../docs/guides/training.md)
 - [Training optimization](../docs/guides/training-optimization.md)
 - [Evaluation guide](../docs/guides/evaluation.md)
-- [Tiny test configs](../tests/configs/README.md)

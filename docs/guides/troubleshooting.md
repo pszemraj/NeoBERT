@@ -58,7 +58,7 @@ Actions:
 
 ### MuonClip QK clipping rejected under FSDP2
 
-- `optimizer.name=muonclip requested QK clipping ... not supported under FSDP2`: QK clipping cannot run on sharded owner-compute Muon updates, so the factory fails fast instead of silently downgrading to Muon-only (a different optimizer recipe). Set `optimizer.muon_config.enable_clipping=false` for an explicit FSDP2 Muon-only run (the `*_muonclip_noclip` configs do this), or run without FSDP2 sharding to keep clipping.
+- Set `optimizer.muon_config.enable_clipping: false` for FSDP2 Muon, or use an unsharded run for QK clipping. See [Clipping](training-optimization.md#clipping).
 
 ### Accelerate launch warnings about mixed precision or dynamo
 
@@ -80,11 +80,7 @@ Actions:
 
 ### Streaming resume is slow or not exact
 
-- Streaming resume is best-effort: trainer restores state and skips consumed batches from stream start/current epoch position.
-- For large consumed-step counts, startup can take a while due to stream advancement.
-- With shuffled streams, exact sample continuity is not guaranteed.
-- Transient-read retry recovery on shuffled streams can skip buffered examples and logs a warning when it happens; see [streaming recovery semantics](training-optimization.md#dataloader-and-streaming-throughput).
-- If you need deterministic continuation, run with `dataset.streaming: false`; map-style datasets support exact index-based resume.
+- Streaming resume replays consumed batches, so late checkpoints can take time to reach their saved position and shuffled streams do not preserve exact sample order. Use a non-streaming dataset for deterministic continuation. See [Checkpointing and Resume](training.md#checkpointing-and-resume) and [streaming recovery](training-optimization.md#dataloader-and-streaming-throughput).
 
 ### Streaming eval budget error
 
@@ -106,14 +102,11 @@ Actions:
 
 ### GLUE backend errors
 
-- GLUE wrappers use SDPA path; packed flash varlen is training-oriented.
-- Ensure GLUE configs point to valid pretrained checkpoints unless intentionally using `allow_random_weights: true`.
+- GLUE uses SDPA classifier wrappers and requires pretrained weights unless `glue.allow_random_weights: true` or `model.from_hub: true`. See [GLUE](evaluation.md#glue).
 
 ### MTEB task filtering is not what you expected
 
-- Config-based selection uses `mteb_task_type`.
-- CLI override `run_mteb.py --task_types` is also supported.
-- `--task_types` accepts categories (`classification`, `clustering`, `pair_classification`, `reranking`, `retrieval`, `sts`, `all`) and/or explicit task names (comma-separated).
+- Task selection and CLI override behavior are described in [MTEB](evaluation.md#mteb).
 
 ## Export Issues
 
@@ -129,28 +122,3 @@ Actions:
 
 - Exported HF model does not support packed metadata inputs.
 - Use standard HF batches + attention masks.
-
-## Checkpointing Notes
-
-- Training checkpoints are safetensors-first (`model.safetensors`).
-- Portable checkpoint loading recursively strips known runtime wrappers such as `_orig_mod.` and `module.` from generic compiled/distributed saves.
-- Warning about removing shared tensors during save can be expected when tied weights are de-duplicated; validate by reloading checkpoint and running a forward pass.
-
-## Environment and Dependency Notes
-
-- Flash-attn path: install optional extra `pip install -e .[flash]`.
-- Liger kernels are used when available under `kernel_backend: auto` on CUDA.
-- Keep PyTorch/CUDA versions aligned with your installed extension wheels.
-
-## Minimal Diagnostics
-
-```bash
-# Validate exported model
-python scripts/export-hf/validate.py /path/to/exported/model
-
-# Tiny pretraining smoke test
-python scripts/pretraining/pretrain.py tests/configs/pretraining/test_tiny_pretrain.yaml
-
-# Focused tests for packed attention path
-pytest tests/kernels/test_attention.py tests/test_model_forward.py -q
-```

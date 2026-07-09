@@ -69,33 +69,6 @@ Accepted list token forms:
 
 Unknown paths and invalid value types fail fast with path-specific errors. Overrides are validated with the same semantic checks as base YAML configs.
 
-## High-Impact Settings
-
-| Key                                   | Type          | Default         | Description                                                          |
-| ------------------------------------- | ------------- | --------------- | -------------------------------------------------------------------- |
-| `task`                                | `str`         | `"pretraining"` | Run mode: `pretraining`, `glue`, `mteb`, `contrastive`.              |
-| `model.hidden_size`                   | `int`         | `768`           | Main width of the transformer.                                       |
-| `model.num_hidden_layers`             | `int`         | `12`            | Depth of the encoder stack.                                          |
-| `model.num_attention_heads`           | `int`         | `12`            | Attention heads per layer.                                           |
-| `model.max_position_embeddings`       | `int`         | `512`           | Maximum sequence length the model is built for.                      |
-| `dataset.name`                        | `str`         | `"refinedweb"`  | HF dataset name when loading from hub.                               |
-| `dataset.path`                        | `str`         | `""`            | Local dataset path (preferred when available).                       |
-| `dataset.streaming`                   | `bool`        | `true`          | Stream from dataset source instead of materializing all data.        |
-| `trainer.per_device_train_batch_size` | `int`         | `16`            | Per-device train microbatch size.                                    |
-| `trainer.gradient_accumulation_steps` | `int`         | `1`             | Number of microbatches per optimizer step.                           |
-| `trainer.max_steps`                   | `int`         | `1000000`       | Total training steps.                                                |
-| `optimizer.name`                      | `str`         | `"adamw"`       | Optimizer family (`adamw`, `adam`, `muonclip`).                      |
-| `optimizer.lr`                        | `float`       | `1e-4`          | Base learning rate.                                                  |
-| `scheduler.name`                      | `str`         | `"cosine"`      | LR schedule type.                                                    |
-| `datacollator.mask_all`               | `bool`        | `false`         | `false` uses sampled-token BERT-style 80/10/10 masking.              |
-| `datacollator.pack_sequences`         | `bool`        | `false`         | Enable packed-sequence collation.                                    |
-| `trainer.resume_from_checkpoint`      | `str \| None` | `null`          | Checkpoint to resume from.                                           |
-
-> [!NOTE]
-> Runtime preprocessing synchronizes tokenizer-derived values (including `model.pad_token_id`) and aligns vocab size for model/tokenizer consistency.
-
----
-
 ## Model Architecture
 
 ### Core
@@ -128,19 +101,6 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 | `model.decoder_init_range`    | `float` | `0.02`               | Decoder init stddev.                              |
 | `model.classifier_init_range` | `float` | `0.02`               | Classifier head init stddev.                      |
 | `model.from_hub`              | `bool`  | `false`              | Metadata flag for loading behavior.               |
-
----
-
-## Positional Encoding
-
-| Key                             | Type    | Default | Description                                        |
-| ------------------------------- | ------- | ------- | -------------------------------------------------- |
-| `model.rope`                    | `bool`  | `true`  | Rotary positional encoding toggle.                 |
-| `model.max_position_embeddings` | `int`   | `512`   | Positional context length.                         |
-| `model.norm_eps`                | `float` | `1e-5`  | Stability epsilon used around attention/FFN norms. |
-
-> [!IMPORTANT]
-> If you raise context length, verify memory headroom and backend compatibility (`flash_attn_varlen` strongly recommended for packed long-context training).
 
 ---
 
@@ -325,14 +285,7 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 | `param_policy`                 | `str`            | `"hidden_2d"` | Muon routing policy (`hidden_2d` is the shipped default and applies Muon only to hidden transformer matrices; `all_2d` remains available for explicit v0.1.3-scope compatibility tests). |
 | `clipping_layers_mapping`      | `dict[str, str]` | `{}`              | Projection-name overrides for non-standard attention blocks. |
 
-> [!NOTE]
-> The shipped defaults are `norm_factor=neobert` and `param_policy=hidden_2d`. Use `all_2d` explicitly when you want exact v0.1.3-style Muon scope for compatibility benchmarking.
->
-> [Training Optimization](../guides/training-optimization.md) explains the shipped Muon defaults, normalization modes, fused-QKV handling, clipping, and distributed tradeoffs.
->
-> `orthogonalization` changes compute precision behavior on CUDA: `newton_schulz` upcasts BF16 gradients to FP32 for the iteration and casts back; `polar_express` runs in BF16 work dtype (when available) for higher throughput.
->
-> Under sharded FSDP2 Muon runs, `enable_clipping=true` is rejected at optimizer construction time (the owner-compute path does not support the activation-hook capture flow used by QK clipping). The factory fails fast rather than silently downgrading to Muon-only; set `enable_clipping=false` explicitly for an FSDP2 Muon-only run. The effective clipping mode is recorded in the optimizer resume manifest, so a clipping/Muon-only mismatch on resume also fails fast.
+Muon routing, normalization, orthogonalization, clipping, and distributed constraints are described in [Training Optimization](../guides/training-optimization.md).
 
 ---
 
@@ -361,8 +314,7 @@ Save cadence/retention knobs live under [Training Loop](#training-loop): `traine
 | ----------------------- | ----- | ---------- | ----------------------------------------- |
 | `pretrained_checkpoint` | `str` | `"latest"` | Checkpoint selector for downstream tasks. |
 
-> [!NOTE]
-> Pretraining, contrastive, and GLUE resumable state checkpoints are written under `output_dir/checkpoints/<step>/`. Pretraining and contrastive step directories include config/tokenizer metadata plus optimizer parameter-name manifests for faithful resume. GLUE step directories also write the optimizer parameter-name manifest (resume fails fast on parameter-order drift) but omit the config/tokenizer metadata; GLUE transfer/loading helpers still accept legacy `output_dir/model_checkpoints/<step>/` layouts for older runs. A bare numeric `resume_from_checkpoint` value selects that exact step under `output_dir/checkpoints/`, while `latest` picks the highest available numeric step. DeepSpeed `latest` indirection files are optional legacy metadata and are only consulted by DeepSpeed conversion/loading helpers when present.
+Checkpoint layout, selectors, and resume behavior are described in [Training](../guides/training.md#checkpointing-and-resume). Downstream loading behavior is described in [Evaluation](../guides/evaluation.md) and [Export](../guides/export.md).
 
 ---
 
@@ -487,132 +439,6 @@ Save cadence/retention knobs live under [Training Loop](#training-loop): `traine
 | `tokenizer.tokenizer_name_or_path` | `tokenizer.name`               | Deprecated alias; normalized with warning.   |
 | `optimizer.hparams.*`              | `optimizer.*`                  | Deprecated block; flattened with warning.    |
 | legacy attention booleans          | `model.attn_backend`           | Deprecated aliases; normalized with warning. |
-
----
-
-## Practical YAML Presets
-
-### 1) Base Pretraining (Balanced)
-
-```yaml
-task: pretraining
-model:
-  hidden_size: 768
-  num_hidden_layers: 12
-  num_attention_heads: 12
-  intermediate_size: 3072
-  max_position_embeddings: 512
-  attn_backend: flash_attn_varlen
-  kernel_backend: auto
-
-dataset:
-  name: refinedweb
-  streaming: true
-  max_seq_length: 512
-  num_workers: 16
-
-tokenizer:
-  name: bert-base-uncased
-  max_length: 512
-
-trainer:
-  per_device_train_batch_size: 16
-  gradient_accumulation_steps: 1
-  max_steps: 1000000
-  save_steps: 10000
-  eval_steps: 10000
-  mixed_precision: bf16
-  masked_logits_only_loss: true
-
-optimizer:
-  name: adamw
-  lr: 1e-4
-  weight_decay: 0.01
-
-scheduler:
-  name: cosine
-  warmup_steps: 10000
-
-datacollator:
-  mlm_probability: 0.15
-  mask_all: false
-  pack_sequences: false
-```
-
-### 2) Memory-Constrained Single GPU
-
-```yaml
-task: pretraining
-model:
-  hidden_size: 512
-  num_hidden_layers: 8
-  num_attention_heads: 8
-  intermediate_size: 2048
-  max_position_embeddings: 512
-  attn_backend: sdpa
-
-trainer:
-  per_device_train_batch_size: 4
-  gradient_accumulation_steps: 8
-  gradient_checkpointing: true
-  mixed_precision: bf16
-  masked_logits_only_loss: true
-  torch_compile: false
-  max_steps: 300000
-
-optimizer:
-  name: adamw
-  lr: 8e-5
-
-scheduler:
-  name: cosine
-  warmup_percent: 1.0
-
-dataset:
-  streaming: true
-  num_workers: 4
-```
-
-### 3) Resumable Local-Data Run
-
-```yaml
-task: pretraining
-dataset:
-  path: /data/neobert_tokenized
-  streaming: false
-  max_seq_length: 512
-
-trainer:
-  output_dir: outputs/neobert_run
-  resume_from_checkpoint: latest
-  save_steps: 5000
-  save_total_limit: 5
-  per_device_train_batch_size: 8
-  gradient_accumulation_steps: 4
-```
-
-### 4) Full Logging + Frequent Eval
-
-```yaml
-task: pretraining
-wandb:
-  enabled: true
-  project: neo-bert
-  mode: online
-  name: neobert-full-logging
-
-trainer:
-  logging_steps: 20
-  eval_steps: 1000
-  eval_max_batches: 200
-  log_train_accuracy: false
-  log_grad_norm: true
-  log_weight_norms: true
-
-scheduler:
-  name: cosine
-  warmup_steps: 5000
-```
 
 ---
 

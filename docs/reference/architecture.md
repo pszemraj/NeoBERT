@@ -69,21 +69,8 @@ When `ngpt: true`, `NormNeoBERT` is used:
 - It does not support packed-sequence inputs/metadata.
 - Attention-mask normalization in HF path accepts bool/additive/binary forms and normalizes internally for compatibility.
 
-## Key Config Knobs
-
-Architecture-relevant fields live under:
-
-- `model.hidden_size`, `model.num_hidden_layers`, `model.num_attention_heads`
-- `model.intermediate_size`, `model.hidden_act`
-- `model.rope`, `model.max_position_embeddings`
-- `model.rms_norm`, `model.ngpt`
-- `model.attn_backend`, `model.kernel_backend`
-
-See [Configuration Reference](configuration.md) for defaults and constraints.
-
 ## Related Docs
 
 - [Training](../guides/training.md)
 - [Training Optimization](../guides/training-optimization.md)
-- [Configuration](configuration.md)
 - [Evaluation](../guides/evaluation.md)

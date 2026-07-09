@@ -14,7 +14,7 @@ This guide covers pretraining and contrastive workflows. Full field-level schema
 | `scripts/contrastive/preprocess.py`       | contrastive dataset preprocessing |
 | `scripts/contrastive/download.py`         | pre-download contrastive datasets |
 
-For contrastive preprocessing, `dataset.name` may be omitted, `ALL`, a canonical registry key, or a supported HF dataset ID alias; accepted values and cached-split loading rules are in the [Data Source reference](../reference/configuration.md#data-source). Cached split reuse is guarded by `tokenization_manifest.json`, so changing tokenizer/max-length/tokenization settings requires `dataset.force_redownload: true` or a fresh cache.
+Contrastive dataset selection and cache-reuse rules are in the [Data Source reference](../reference/configuration.md#data-source).
 
 ## Pretraining
 
@@ -80,13 +80,7 @@ The `_noclip` recipe explicitly disables QK clipping, which is not supported by 
 
 ## Optimization
 
-Use [Training Optimization](training-optimization.md) for:
-
-- MuonClip defaults and recommended modes,
-- gradient accumulation and norm logging semantics,
-- packed-training and dataloader throughput knobs,
-- QK clipping vs standard gradient clipping,
-- distributed Muon validation and performance tradeoffs.
+See [Training Optimization](training-optimization.md) for MuonClip policy, gradient and metric semantics, packing, dataloader throughput, and distributed constraints.
 
 ## Streaming Eval Strategy
 
@@ -105,27 +99,11 @@ Runtime behavior:
 
 ## Mixed Precision and Compile
 
-- `trainer.mixed_precision`: `no | fp32 | bf16` (`bf16` recommended default)
-- runtime normalization: `fp32 -> no`, `true -> bf16`, `false -> no`
-- `fp16` is unsupported in NeoBERT training paths
-- if bf16 is unstable on a specific host, prefer a known-good PyTorch build for that machine rather than repo-local BLAS workarounds
-- explicit CPU runs (`trainer.use_cpu: true`) force `attn_backend: sdpa`
-- when mixed precision resolves to `no`, `attn_backend: flash_attn_varlen` is auto-switched to `sdpa`
-- `trainer.torch_compile`: enable `torch.compile`
-- `trainer.torch_compile_backend`: `inductor | aot_eager | eager`
-- `trainer.torch_compile_dynamic`: optional override for dynamic-shape compile; default behavior prefers static-shape compile for stability.
-- `trainer.masked_logits_only_loss`: `true | false`
+Supported precision values, compile fields, defaults, and runtime adjustments are listed in [Configuration](../reference/configuration.md#training-loop). Use `bf16` on a compatible CUDA stack, `no` for FP32 execution, and static-shape compilation unless the workload requires dynamic shapes.
 
 ## MLM Loss Path Selection
 
-Use exactly one pretraining loss path per run:
-
-- `trainer.masked_logits_only_loss: true` Uses masked-logits-only MLM loss (default and recommended). This avoids full `(B,S,V)` logits materialization in the hot pretraining path.
-- `trainer.masked_logits_only_loss: false` Uses the original NeoBERT full-logits CE path (legacy ablation/debug path).
-
-There is no mixed/cross objective mode in trainer config; this flag picks one path for the run.
-
-Current project default is `true`; new pretraining runs should keep `masked_logits_only_loss: true` unless you are intentionally running an ablation against the legacy baseline.
+`trainer.masked_logits_only_loss` selects one loss path for the entire run. Keep the default masked-logits-only path for normal training; set it to `false` only for a full-logits ablation.
 
 ## Checkpointing and Resume
 
@@ -145,14 +123,6 @@ Step checkpoints (resume + export assets) share one layout across pretraining, c
 ```
 
 The top-level `model.safetensors` is the portable export/eval payload and intentionally materializes tied tensors under every expected key. Accelerate's resume state lives under `accelerate/` so its strictly-loaded model file cannot collide with the portable payload; checkpoints without that state directory cannot be resumed as full training runs. Contrastive step checkpoints carry the same metadata files; GLUE step checkpoints omit the config/tokenizer metadata but do write the optimizer parameter-name manifest, so GLUE resume also fails fast on optimizer parameter-order drift.
-
-Resume examples:
-
-```bash
-python scripts/pretraining/pretrain.py \
-  configs/pretraining/pretrain_neobert.yaml \
-  --trainer.resume_from_checkpoint latest
-```
 
 A bare step selector such as `--trainer.resume_from_checkpoint 100` resolves to `<output_dir>/checkpoints/100`; `latest` scans the same checkpoint root, while absolute paths and existing output-relative paths remain available for explicit selection.
 
@@ -176,32 +146,7 @@ Optimizer state is guarded by `optimizer_param_names.json`. Resume fails fast if
 
 Streaming resume is approximate (skip-based), not exact. On resume the trainer restores model/optimizer/scheduler/metrics state and re-advances the stream via `accelerator.skip_first_batches` by the number of raw dataloader batches pulled in the current epoch. That count is tracked separately from trained microbatches because packed collation buffers undersized batches (a raw pull that trains no batch), so skipping by the trained-batch count would under-skip and replay data. The rank-local packed-fragment buffer is checkpointed with the raw-pull cursor so skipping consumed pulls does not discard buffered, untrained samples. The trainer does not checkpoint the dataset cursor, because the dataset is consumed through an Accelerate-prepared `DataLoader` whose adapter iterates one batch ahead (and `DataLoaderDispatcher` can prefetch `num_processes` batches) before yielding the batch the trainer optimizes - so the raw dataset cursor at checkpoint time is ahead of the last trained batch and is not a valid resume boundary. Late checkpoints can take noticeable time to replay, and shuffled streams do not guarantee exact sample continuity. Exact streaming resume needs a stateful-dataloader boundary (torchdata `StatefulDataLoader` via Accelerate `use_stateful_dataloader`) and is tracked as follow-up work in [Deferred Work](../TODO.md).
 
-For strict deterministic continuation, switch to a non-streaming tokenized dataset and resume there:
-
-```bash
-# one-time tokenize-to-disk (example path)
-python scripts/pretraining/tokenize_dataset.py \
-  --dataset EleutherAI/SmolLM2-1.7B-stage-4-100B \
-  --output tokenized_data/smollm2_32k \
-  --tokenizer BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp \
-  --max-length 1024
-
-# resume with streaming disabled and local dataset path
-python scripts/pretraining/pretrain.py \
-  configs/pretraining/pretrain_neobert100m_smollm2data_muonclip.yaml \
-  --dataset.streaming false \
-  --dataset.path tokenized_data/smollm2_32k \
-  --trainer.resume_from_checkpoint latest
-```
-
-This resumes model/optimizer/scheduler states, but data order will not exactly match the interrupted streaming run.
-
-Notes:
-
-- resume and export both operate from `<output_dir>/checkpoints/`.
-- pretraining resume with `dataset.streaming: true` uses best-effort stream advancement based on saved batch counters (the raw dataset cursor is not checkpointed; see the resume section above).
-- for exact deterministic continuation, prefer non-streaming (`dataset.streaming: false`) runs, whose map-style datasets support exact index-based resume.
-- deferred: exact streaming resume via a stateful-dataloader boundary, and a name-keyed optimizer-state transplant for resume across intentional parameter-registration refactors, are tracked in [Deferred Work](../TODO.md).
+For deterministic continuation, materialize the data as described in [Pre-tokenized Datasets](#pre-tokenized-datasets), set `dataset.streaming: false`, and resume from that local dataset. Switching an interrupted streaming run to a map-style dataset preserves model and optimizer state but cannot recreate the interrupted stream's data order. Exact streaming resume and name-keyed optimizer-state transplant are tracked in [Deferred Work](../TODO.md).
 
 ## Pre-tokenized Datasets
 
@@ -234,14 +179,6 @@ python scripts/contrastive/finetune.py \
 ```
 
 Ensure `dataset.path` points to output from `scripts/contrastive/preprocess.py`.
-
-## Practical Tips
-
-- Use `gradient_checkpointing` for memory headroom on long contexts.
-- Use `gradient_clipping` for stability on deep/long runs.
-- `train/grad_norm` is logged as the global pre-clip norm after accumulation and any token-based scaling, so clipping does not hide overshoot in tracker plots.
-- For paper-style NeoBERT masking strategy, set `datacollator.mask_all: true`. Default `false` uses sampled-token 80/10/10 corruption; the exact token-mix math is in [Data Collator](../reference/configuration.md#data-collator).
-- For packed + compile runs, measure `tokens/sec` rather than `steps/sec`.
 
 ## Related Docs
 
