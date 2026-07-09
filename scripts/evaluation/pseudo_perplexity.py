@@ -65,25 +65,11 @@ def _build_neobert_masked_lm(
         revision=cfg.tokenizer.revision,
         allow_special_token_rewrite=cfg.tokenizer.allow_special_token_rewrite,
     )
-    model_config = NeoBERTConfig(
-        hidden_size=cfg.model.hidden_size,
-        num_hidden_layers=cfg.model.num_hidden_layers,
-        num_attention_heads=cfg.model.num_attention_heads,
-        intermediate_size=cfg.model.intermediate_size,
+    model_config = NeoBERTConfig.from_model_config(
+        cfg.model,
         max_length=max_length,
-        vocab_size=cfg.model.vocab_size,
-        rope=cfg.model.rope,
-        rms_norm=cfg.model.rms_norm,
-        hidden_act=cfg.model.hidden_act,
-        dropout=cfg.model.dropout_prob,
-        norm_eps=cfg.model.norm_eps,
-        embedding_init_range=cfg.model.embedding_init_range,
-        decoder_init_range=cfg.model.decoder_init_range,
         pad_token_id=tokenizer.pad_token_id,
         attn_backend="sdpa",
-        kernel_backend=cfg.model.kernel_backend,
-        ngpt=cfg.model.ngpt,
-        base_scale=cfg.model.base_scale,
     )
     model = NeoBERTLMHead(model_config)
     state_dict = load_step_checkpoint_state_dict(

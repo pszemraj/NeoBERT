@@ -88,6 +88,60 @@ class TestModelForward(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown kernel_backend"):
             NeoBERTConfig(kernel_backend="bad_backend")
 
+    def test_runtime_config_factory_preserves_fields_and_task_overrides(self):
+        """Ensure typed model settings and explicit task overrides map canonically."""
+        from neobert.config import ModelConfig
+
+        source = ModelConfig(
+            hidden_size=48,
+            num_hidden_layers=3,
+            num_attention_heads=6,
+            intermediate_size=96,
+            max_position_embeddings=1024,
+            vocab_size=257,
+            rope=True,
+            rms_norm=False,
+            hidden_act="gelu",
+            dropout_prob=0.125,
+            norm_eps=2e-5,
+            embedding_init_range=0.011,
+            decoder_init_range=0.022,
+            classifier_init_range=0.033,
+            attn_backend="flash_attn_varlen",
+            kernel_backend="torch",
+            ngpt=True,
+            base_scale=0.25,
+            pad_token_id=1,
+        )
+
+        runtime = NeoBERTConfig.from_model_config(
+            source,
+            max_length=128,
+            pad_token_id=7,
+            attn_backend="sdpa",
+            vocab_size=384,
+            num_labels=5,
+        )
+
+        self.assertEqual(runtime.hidden_size, source.hidden_size)
+        self.assertEqual(runtime.num_hidden_layers, source.num_hidden_layers)
+        self.assertEqual(runtime.num_attention_heads, source.num_attention_heads)
+        self.assertEqual(runtime.intermediate_size, source.intermediate_size)
+        self.assertEqual(runtime.dropout, source.dropout_prob)
+        self.assertEqual(runtime.norm_eps, source.norm_eps)
+        self.assertEqual(runtime.embedding_init_range, source.embedding_init_range)
+        self.assertEqual(runtime.decoder_init_range, source.decoder_init_range)
+        self.assertEqual(runtime.classifier_init_range, source.classifier_init_range)
+        self.assertEqual(runtime.kernel_backend, source.kernel_backend)
+        self.assertEqual(runtime.ngpt, source.ngpt)
+        self.assertEqual(runtime.base_scale, source.base_scale)
+        self.assertEqual(runtime.max_length, 128)
+        self.assertEqual(runtime.pad_token_id, 7)
+        self.assertEqual(runtime.attn_backend, "sdpa")
+        self.assertEqual(runtime.vocab_size, 384)
+        self.assertEqual(runtime.num_labels, 5)
+        self.assertEqual(source.attn_backend, "flash_attn_varlen")
+
     def test_neobert_accepts_tensor_packed_seqlens(self):
         """Ensure tensor packed_seqlens metadata works in model forward."""
         config = NeoBERTConfig(

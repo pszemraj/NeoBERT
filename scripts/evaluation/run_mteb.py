@@ -180,22 +180,11 @@ def evaluate_mteb(cfg: Any) -> None:
     )
 
     # Instantiate model
-    model_config = NeoBERTConfig(
-        hidden_size=cfg.model.hidden_size,
-        num_hidden_layers=cfg.model.num_hidden_layers,
-        num_attention_heads=cfg.model.num_attention_heads,
-        intermediate_size=cfg.model.intermediate_size,
-        max_position_embeddings=cfg.model.max_position_embeddings,
-        vocab_size=cfg.model.vocab_size,  # Use checkpoint's vocab_size since we always load weights
-        rope=cfg.model.rope,
-        rms_norm=cfg.model.rms_norm,
-        hidden_act=cfg.model.hidden_act,
-        dropout_prob=cfg.model.dropout_prob,
-        norm_eps=cfg.model.norm_eps,
-        embedding_init_range=cfg.model.embedding_init_range,
-        decoder_init_range=cfg.model.decoder_init_range,
-        classifier_init_range=cfg.model.classifier_init_range,
+    model_config = NeoBERTConfig.from_model_config(
+        cfg.model,
+        max_length=cfg.model.max_position_embeddings,
         pad_token_id=tokenizer.pad_token_id,
+        attn_backend="sdpa",
     )
 
     model = NeoBERTForMTEB(

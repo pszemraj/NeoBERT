@@ -1131,58 +1131,27 @@ def trainer(cfg: Config) -> None:
             ignore_mismatched_sizes=False,
         )
     else:
-        # Convert config objects to dict for unpacking
-        if model_pretraining_config:
-            model_config_dict = (
-                model_pretraining_config.model.__dict__.copy()
-                if hasattr(model_pretraining_config.model, "__dict__")
-                else {}
-            )
-        else:
-            model_config_dict = cfg.model.__dict__.copy()
-
-        # Map dropout_prob to dropout and remove classifier_init_range from model config
-        if "dropout_prob" in model_config_dict:
-            model_config_dict["dropout"] = model_config_dict.pop("dropout_prob")
-        if "max_position_embeddings" in model_config_dict:
-            model_config_dict["max_length"] = model_config_dict.pop(
-                "max_position_embeddings"
-            )
-        if (
-            "layer_norm_eps" in model_config_dict
-            and "norm_eps" not in model_config_dict
-        ):
-            model_config_dict["norm_eps"] = model_config_dict.pop("layer_norm_eps")
-        if "classifier_init_range" in model_config_dict:
-            model_config_dict.pop("classifier_init_range")
-        if "allow_random_weights" in model_config_dict:
-            model_config_dict.pop("allow_random_weights")
-        if "pretrained_checkpoint_dir" in model_config_dict:
-            model_config_dict.pop("pretrained_checkpoint_dir")
-        if "pretrained_checkpoint" in model_config_dict:
-            model_config_dict.pop("pretrained_checkpoint")
-        if "name_or_path" in model_config_dict:
-            model_config_dict.pop("name_or_path")
-        if "name" in model_config_dict:
-            model_config_dict.pop("name")
-        model_config_dict.pop("from_hub", None)
-
-        # Use model config directly - don't merge with tokenizer config
-        # The tokenizer's vocab_size should match the model's anyway
-        combined_config = model_config_dict
-        combined_config.pop("xformers_attention", None)
-        combined_config.pop("flash_attention", None)
-        combined_config["attn_backend"] = "sdpa"
+        source_model_config = (
+            model_pretraining_config.model
+            if model_pretraining_config is not None
+            else cfg.model
+        )
+        model_vocab_size = source_model_config.vocab_size
 
         # If using random weights (for testing), round vocab_size for GPU efficiency
-        if cfg.glue.allow_random_weights and "vocab_size" in combined_config:
+        if cfg.glue.allow_random_weights:
             from neobert.config import round_up_to_multiple
 
-            # Round vocab_size for GPU efficiency when using random weights
-            combined_config["vocab_size"] = round_up_to_multiple(len(tokenizer), 128)
+            model_vocab_size = round_up_to_multiple(len(tokenizer), 128)
 
         model = NeoBERTForSequenceClassification(
-            NeoBERTConfig(**combined_config),
+            NeoBERTConfig.from_model_config(
+                source_model_config,
+                max_length=source_model_config.max_position_embeddings,
+                pad_token_id=tokenizer.pad_token_id,
+                attn_backend="sdpa",
+                vocab_size=model_vocab_size,
+            ),
             num_labels=num_labels,
             classifier_dropout=cfg.glue.classifier_dropout,
             classifier_init_range=cfg.glue.classifier_init_range,

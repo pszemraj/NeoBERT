@@ -6,7 +6,7 @@
 import logging
 import math
 import warnings
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from torch import nn
@@ -30,6 +30,9 @@ from neobert.modeling_utils import (
     packed_seqlens_to_tensor,
     swiglu_intermediate_size,
 )
+
+if TYPE_CHECKING:
+    from neobert.config import ModelConfig
 
 logger = logging.getLogger(__name__)
 PackedSeqLens = torch.Tensor | list[list[int]]
@@ -291,6 +294,57 @@ class NeoBERTConfig(PretrainedConfig):
         self.kernel_backend = canonicalize_kernel_backend(kernel_backend)
         self.base_scale = base_scale
         self.ngpt = ngpt
+
+    @classmethod
+    def from_model_config(
+        cls,
+        model_config: "ModelConfig",
+        *,
+        max_length: int,
+        pad_token_id: int,
+        attn_backend: str,
+        vocab_size: Optional[int] = None,
+        num_labels: Optional[int] = None,
+    ) -> "NeoBERTConfig":
+        """Construct a runtime model config from the typed project model config.
+
+        Sequence length, padding ID, and attention backend are required at each task
+        boundary because they depend on tokenizer and execution context.
+
+        :param ModelConfig model_config: Typed project model configuration.
+        :param int max_length: Task-specific maximum sequence length.
+        :param int pad_token_id: Task tokenizer padding token ID.
+        :param str attn_backend: Task-specific attention backend.
+        :param int | None vocab_size: Optional task-specific vocabulary override.
+        :param int | None num_labels: Optional classification label count.
+        :return NeoBERTConfig: Canonical runtime model configuration.
+        """
+        runtime_kwargs: dict[str, Any] = {
+            "classifier_init_range": model_config.classifier_init_range,
+        }
+        if num_labels is not None:
+            runtime_kwargs["num_labels"] = num_labels
+        return cls(
+            hidden_size=model_config.hidden_size,
+            num_hidden_layers=model_config.num_hidden_layers,
+            num_attention_heads=model_config.num_attention_heads,
+            intermediate_size=model_config.intermediate_size,
+            dropout=model_config.dropout_prob,
+            embedding_init_range=model_config.embedding_init_range,
+            decoder_init_range=model_config.decoder_init_range,
+            rms_norm=model_config.rms_norm,
+            rope=model_config.rope,
+            norm_eps=model_config.norm_eps,
+            hidden_act=model_config.hidden_act,
+            vocab_size=model_config.vocab_size if vocab_size is None else vocab_size,
+            pad_token_id=pad_token_id,
+            max_length=max_length,
+            attn_backend=attn_backend,
+            kernel_backend=model_config.kernel_backend,
+            base_scale=model_config.base_scale,
+            ngpt=model_config.ngpt,
+            **runtime_kwargs,
+        )
 
 
 class EncoderBlock(nn.Module):

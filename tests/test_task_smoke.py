@@ -13,17 +13,11 @@ def test_pretraining_config_to_lm_forward_smoke(tiny_pretrain_config_path) -> No
 
     cfg = ConfigLoader.load(str(tiny_pretrain_config_path))
 
-    model_cfg = NeoBERTConfig(
-        hidden_size=cfg.model.hidden_size,
-        num_hidden_layers=cfg.model.num_hidden_layers,
-        num_attention_heads=cfg.model.num_attention_heads,
-        intermediate_size=cfg.model.intermediate_size,
-        dropout=cfg.model.dropout_prob,
-        vocab_size=cfg.model.vocab_size,
+    model_cfg = NeoBERTConfig.from_model_config(
+        cfg.model,
         max_length=cfg.model.max_position_embeddings,
+        pad_token_id=cfg.model.pad_token_id,
         attn_backend=cfg.model.attn_backend,
-        ngpt=cfg.model.ngpt,
-        hidden_act=cfg.model.hidden_act,
     )
     model = NeoBERTLMHead(model_cfg)
 
@@ -43,18 +37,12 @@ def test_glue_config_to_classifier_logits_and_loss_smoke(tiny_glue_config_path) 
 
     cfg = ConfigLoader.load(str(tiny_glue_config_path))
 
-    model_cfg = NeoBERTConfig(
-        hidden_size=cfg.model.hidden_size,
-        num_hidden_layers=cfg.model.num_hidden_layers,
-        num_attention_heads=cfg.model.num_attention_heads,
-        intermediate_size=cfg.model.intermediate_size,
-        dropout=cfg.model.dropout_prob,
-        vocab_size=cfg.model.vocab_size,
+    model_cfg = NeoBERTConfig.from_model_config(
+        cfg.model,
         max_length=cfg.model.max_position_embeddings,
+        pad_token_id=cfg.model.pad_token_id,
         attn_backend=cfg.model.attn_backend,
-        ngpt=cfg.model.ngpt,
         num_labels=cfg.glue.num_labels,
-        hidden_act=cfg.model.hidden_act,
     )
     model = NeoBERTHFForSequenceClassification(model_cfg)
 

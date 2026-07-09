@@ -182,6 +182,7 @@ def test_build_neobert_uses_runtime_config_fields(
         norm_eps=1e-5,
         embedding_init_range=0.01,
         decoder_init_range=0.02,
+        classifier_init_range=0.03,
         kernel_backend="torch",
         ngpt=True,
         base_scale=0.25,
