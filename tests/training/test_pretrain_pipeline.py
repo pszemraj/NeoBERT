@@ -76,13 +76,15 @@ class TestPretrainPipeline:
     """Test pretraining pipeline functionality."""
 
     def test_pretraining_fail_fast_validation_paths(
-        self, tiny_pretrain_config_path: Path, temp_output_dir: str
+        self,
+        tiny_pretrain_config_path: Path,
+        tmp_path: Path,
     ):
         """Ensure invalid pretraining settings fail before expensive setup."""
 
         def _base_config() -> Config:
             cfg = ConfigLoader.load(str(tiny_pretrain_config_path))
-            cfg.trainer.output_dir = temp_output_dir
+            cfg.trainer.output_dir = str(tmp_path)
             return cfg
 
         fp16_cfg = _base_config()
@@ -119,11 +121,13 @@ class TestPretrainPipeline:
                 mocked_tokenizer.assert_not_called()
 
     def test_pretraining_one_step_local_smoke(
-        self, tiny_pretrain_config_path: Path, temp_output_dir: str
+        self,
+        tiny_pretrain_config_path: Path,
+        tmp_path: Path,
     ):
         """Run one pretraining update using only local deterministic fixtures."""
-        data_path = Path(temp_output_dir) / "dataset"
-        tokenizer_path = Path(temp_output_dir) / "tokenizer"
+        data_path = tmp_path / "dataset"
+        tokenizer_path = tmp_path / "tokenizer"
         DatasetDict(
             {
                 "train": Dataset.from_dict(
@@ -144,7 +148,7 @@ class TestPretrainPipeline:
         tokenizer.save_pretrained(tokenizer_path)
 
         config = ConfigLoader.load(str(tiny_pretrain_config_path))
-        config.trainer.output_dir = temp_output_dir
+        config.trainer.output_dir = str(tmp_path)
         config.trainer.max_steps = 1
         config.trainer.save_model = False
         config.trainer.save_strategy = "no"
@@ -174,7 +178,7 @@ class TestPretrainPipeline:
 
         trainer(config)
 
-        assert not (Path(temp_output_dir) / "checkpoints").exists()
+        assert not (tmp_path / "checkpoints").exists()
 
 
 class TestPretrainComponents:

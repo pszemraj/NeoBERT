@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Test contrastive training pipeline functionality."""
 
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -38,14 +37,16 @@ class TestContrastivePipeline:
         with pytest.raises(ValueError):
             get_bsz("INVALID_DATASET", target_batch_size=8)
 
-    def test_contrastive_pretrained_checkpoint_root_rejects_legacy_layout(self):
+    def test_contrastive_pretrained_checkpoint_root_rejects_legacy_layout(
+        self,
+        tmp_path: Path,
+    ):
         """Ensure legacy ``model_checkpoints`` roots fail fast for contrastive init."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            legacy_root = Path(tmpdir) / "model_checkpoints"
-            legacy_root.mkdir(parents=True, exist_ok=True)
+        legacy_root = tmp_path / "model_checkpoints"
+        legacy_root.mkdir(parents=True, exist_ok=True)
 
-            with pytest.raises(ValueError, match="model_checkpoints"):
-                _normalize_contrastive_pretrained_checkpoint_root(legacy_root)
+        with pytest.raises(ValueError, match="model_checkpoints"):
+            _normalize_contrastive_pretrained_checkpoint_root(legacy_root)
 
     @pytest.mark.parametrize(
         "max_steps, save_steps",
@@ -56,14 +57,14 @@ class TestContrastivePipeline:
     def test_contrastive_trainer_saves_under_checkpoints_root(
         self,
         tiny_contrastive_config_path: Path,
-        temp_output_dir: str,
+        tmp_path: Path,
         max_steps: int,
         save_steps: int,
     ):
         """Ensure contrastive saves portable weights under ``checkpoints/<step>/``."""
         config = ConfigLoader.load(str(tiny_contrastive_config_path))
-        config.dataset.path = temp_output_dir
-        config.trainer.output_dir = temp_output_dir
+        config.dataset.path = str(tmp_path)
+        config.trainer.output_dir = str(tmp_path)
         config.trainer.max_steps = max_steps
         config.trainer.save_steps = save_steps
         config.trainer.save_total_limit = 1
@@ -121,13 +122,13 @@ class TestContrastivePipeline:
 
         cached_loader.assert_called_once()
         assert cached_loader.call_args.kwargs["selected_names"] == ["ALLNLI"]
-        step_dir = Path(temp_output_dir) / "checkpoints" / str(max_steps)
+        step_dir = tmp_path / "checkpoints" / str(max_steps)
         assert step_dir.is_dir()
         assert (step_dir / "model.safetensors").is_file()
         assert (step_dir / "config.yaml").is_file()
         assert (step_dir / "optimizer_param_names.json").is_file()
         assert (step_dir / "tokenizer").is_dir()
-        assert not (Path(temp_output_dir) / "model_checkpoints").exists()
+        assert not (tmp_path / "model_checkpoints").exists()
 
     def test_contrastive_pooling_modes_respect_attention_mask(self):
         """Configured contrastive pooling should affect pooled embeddings."""
@@ -157,12 +158,14 @@ class TestContrastivePipeline:
         assert torch.allclose(loss_sum.grad, torch.tensor(1.0 / 3.0))
 
     def test_contrastive_dropout_guard_only_applies_to_simcse_branch(
-        self, tiny_contrastive_config_path: Path, temp_output_dir: str
+        self,
+        tiny_contrastive_config_path: Path,
+        tmp_path: Path,
     ):
         """Dropout zero is invalid only when pretraining SimCSE steps can run."""
         config = ConfigLoader.load(str(tiny_contrastive_config_path))
         config.dataset.path = ""
-        config.trainer.output_dir = temp_output_dir
+        config.trainer.output_dir = str(tmp_path)
         config.model.dropout_prob = 0.0
 
         config.contrastive.pretraining_prob = 0.1
@@ -174,11 +177,13 @@ class TestContrastivePipeline:
             trainer(config)
 
     def test_muonclip_trainer_passes_model_config(
-        self, tiny_contrastive_config_path: Path, temp_output_dir: str
+        self,
+        tiny_contrastive_config_path: Path,
+        tmp_path: Path,
     ):
         """Ensure MuonClip optimizer receives a model config in trainer."""
         config = ConfigLoader.load(str(tiny_contrastive_config_path))
-        config.dataset.path = temp_output_dir
+        config.dataset.path = str(tmp_path)
         config.optimizer.name = "muonclip"
         config.trainer.max_steps = 0
         config.wandb.mode = "disabled"

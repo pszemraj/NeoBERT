@@ -27,9 +27,3 @@ def tiny_glue_config_path(test_configs_dir: Path) -> Path:
 def tiny_contrastive_config_path(test_configs_dir: Path) -> Path:
     """Return the tiny contrastive config path."""
     return test_configs_dir / "contrastive" / "test_tiny_contrastive.yaml"
-
-
-@pytest.fixture
-def temp_output_dir(tmp_path: Path) -> str:
-    """Return a writable temporary output directory as a string path."""
-    return str(tmp_path)
