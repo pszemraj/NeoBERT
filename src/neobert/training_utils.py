@@ -802,6 +802,35 @@ def _copy_checkpoint_config_fields(
     return changed
 
 
+def _report_launch_controlled_config_drift(
+    dst_obj: Any,
+    src_obj: Any,
+    fields: tuple[str, ...],
+    *,
+    section: str,
+) -> list[str]:
+    """Report launch-config fields that differ from the checkpoint without overriding.
+
+    Used for resume fields the operator legitimately changes on a continuation
+    pass - a different or annealing corpus, or a longer context window. The
+    launch config's value is kept as-is; drift is only surfaced for logging so
+    the change is visible but not silently reverted.
+
+    :param Any dst_obj: Mutable runtime config section (left unchanged).
+    :param Any src_obj: Checkpoint config section.
+    :param tuple[str, ...] fields: Field names to compare.
+    :param str section: Human-readable section prefix.
+    :return list[str]: Drifted ``section.field`` names.
+    """
+    drifted: list[str] = []
+    for field_name in fields:
+        if not hasattr(dst_obj, field_name) or not hasattr(src_obj, field_name):
+            continue
+        if getattr(dst_obj, field_name) != getattr(src_obj, field_name):
+            drifted.append(f"{section}.{field_name}")
+    return drifted
+
+
 def sync_resume_source_of_truth(
     cfg: Any,
     resume_checkpoint_path: str | Path | None,
@@ -819,6 +848,17 @@ def sync_resume_source_of_truth(
     by the current launch config: those knobs shape runtime execution, not the
     optimizer/scheduler state being restored, and operators legitimately change
     them mid-run (for example rebalancing batch size after a hardware change).
+
+    Two continuation knobs are likewise launch-controlled (the launch config
+    wins, drift is warned but not reverted): the training corpus identity
+    (``dataset.name``/``config``/``path``/``cache_dir``/``text_column``), which
+    never touches checkpointed model or optimizer state, and - for RoPE models
+    only - the context window (``model.max_position_embeddings``,
+    ``tokenizer.max_length``, ``dataset.max_seq_length``), which RoPE makes
+    weight-compatible. This supports continued pretraining (annealing to a new
+    corpus, or extending context) without silently undoing the operator's
+    intent. Non-RoPE sequence length stays checkpoint-authoritative because it
+    sizes a learned positional table and would break the strict weight load.
 
     :param Any cfg: Mutable runtime config.
     :param str | Path | None resume_checkpoint_path: Resolved checkpoint step path.
@@ -842,31 +882,68 @@ def sync_resume_source_of_truth(
     checkpoint_cfg = ConfigLoader.load(str(checkpoint_config_path))
     changed: list[str] = []
 
+    # Sequence-length geometry (context window) is operator-controlled on resume
+    # only for RoPE models: RoPE has no learned positional-embedding table, so
+    # lengthening context on a continuation pass is weight-compatible and changes
+    # no checkpointed parameter. Non-RoPE models size a positional table by
+    # length, so a length change would break the strict weight load - keep it
+    # forced there.
+    rope_enabled = bool(
+        getattr(checkpoint_cfg.model, "rope", False)
+        and getattr(cfg.model, "rope", False)
+    )
+
+    model_forced = [
+        "hidden_size",
+        "num_hidden_layers",
+        "num_attention_heads",
+        "intermediate_size",
+        "vocab_size",
+        "rope",
+        "rms_norm",
+        "hidden_act",
+        "dropout_prob",
+        "norm_eps",
+        "embedding_init_range",
+        "decoder_init_range",
+        "classifier_init_range",
+        "attn_backend",
+        "kernel_backend",
+        "ngpt",
+        "base_scale",
+        "pad_token_id",
+    ]
+    tokenizer_forced = [
+        "name",
+        "path",
+        "padding",
+        "truncation",
+        "trust_remote_code",
+        "revision",
+        "allow_special_token_rewrite",
+    ]
+    dataset_forced = [
+        "trust_remote_code",
+        "streaming",
+        "validation_split",
+        "train_split",
+        "eval_split",
+        "eval_samples",
+        "shuffle_buffer_size",
+        "load_all_from_disk",
+        "min_length",
+        "alpha",
+    ]
+    if not rope_enabled:
+        model_forced.append("max_position_embeddings")
+        tokenizer_forced.append("max_length")
+        dataset_forced.append("max_seq_length")
+
     changed.extend(
         _copy_checkpoint_config_fields(
             cfg.model,
             checkpoint_cfg.model,
-            (
-                "hidden_size",
-                "num_hidden_layers",
-                "num_attention_heads",
-                "intermediate_size",
-                "max_position_embeddings",
-                "vocab_size",
-                "rope",
-                "rms_norm",
-                "hidden_act",
-                "dropout_prob",
-                "norm_eps",
-                "embedding_init_range",
-                "decoder_init_range",
-                "classifier_init_range",
-                "attn_backend",
-                "kernel_backend",
-                "ngpt",
-                "base_scale",
-                "pad_token_id",
-            ),
+            tuple(model_forced),
             section="model",
         )
     )
@@ -874,16 +951,7 @@ def sync_resume_source_of_truth(
         _copy_checkpoint_config_fields(
             cfg.tokenizer,
             checkpoint_cfg.tokenizer,
-            (
-                "name",
-                "path",
-                "max_length",
-                "padding",
-                "truncation",
-                "trust_remote_code",
-                "revision",
-                "allow_special_token_rewrite",
-            ),
+            tuple(tokenizer_forced),
             section="tokenizer",
         )
     )
@@ -891,24 +959,7 @@ def sync_resume_source_of_truth(
         _copy_checkpoint_config_fields(
             cfg.dataset,
             checkpoint_cfg.dataset,
-            (
-                "name",
-                "config",
-                "path",
-                "cache_dir",
-                "trust_remote_code",
-                "streaming",
-                "max_seq_length",
-                "text_column",
-                "validation_split",
-                "train_split",
-                "eval_split",
-                "eval_samples",
-                "shuffle_buffer_size",
-                "load_all_from_disk",
-                "min_length",
-                "alpha",
-            ),
+            tuple(dataset_forced),
             section="dataset",
         )
     )
@@ -942,6 +993,45 @@ def sync_resume_source_of_truth(
             )
         )
 
+    # Operator-controlled resume fields: the launch config wins so a deliberate
+    # continuation change is honored instead of silently reverted. Corpus
+    # identity never touches checkpointed model/optimizer state; sequence length
+    # is included only when RoPE makes it weight-compatible (see above). Drift is
+    # surfaced as a warning, not overridden.
+    operator_controlled: list[str] = list(
+        _report_launch_controlled_config_drift(
+            cfg.dataset,
+            checkpoint_cfg.dataset,
+            ("name", "config", "path", "cache_dir", "text_column"),
+            section="dataset",
+        )
+    )
+    if rope_enabled:
+        operator_controlled.extend(
+            _report_launch_controlled_config_drift(
+                cfg.model,
+                checkpoint_cfg.model,
+                ("max_position_embeddings",),
+                section="model",
+            )
+        )
+        operator_controlled.extend(
+            _report_launch_controlled_config_drift(
+                cfg.tokenizer,
+                checkpoint_cfg.tokenizer,
+                ("max_length",),
+                section="tokenizer",
+            )
+        )
+        operator_controlled.extend(
+            _report_launch_controlled_config_drift(
+                cfg.dataset,
+                checkpoint_cfg.dataset,
+                ("max_seq_length",),
+                section="dataset",
+            )
+        )
+
     checkpoint_tokenizer_dir = checkpoint_path / "tokenizer"
     if checkpoint_tokenizer_dir.is_dir():
         tokenizer_path = str(checkpoint_tokenizer_dir)
@@ -954,6 +1044,14 @@ def sync_resume_source_of_truth(
             "Resume config drift detected in %s; checkpoint values are the source "
             "of truth.",
             ", ".join(sorted(set(changed))),
+        )
+    if operator_controlled:
+        log.warning(
+            "Resume: keeping launch-config values for operator-controlled fields "
+            "(%s); the checkpoint's values are not restored. This is intended for "
+            "continued pretraining (a different/annealing corpus, or - for RoPE - "
+            "context extension).",
+            ", ".join(sorted(set(operator_controlled))),
         )
 
 

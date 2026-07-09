@@ -314,22 +314,62 @@ def test_sync_resume_source_of_truth_uses_checkpoint_config(
         log=logging.getLogger("test"),
     )
 
+    # Model shape/semantics, tokenizer identity, masking, and objective are
+    # checkpoint-authoritative (forced back).
     assert runtime_cfg.model.hidden_size == 128
     assert runtime_cfg.model.dropout_prob == 0.2
     assert runtime_cfg.tokenizer.path == str(tokenizer_dir)
-    assert runtime_cfg.tokenizer.max_length == 256
-    assert runtime_cfg.dataset.name == "checkpoint-dataset"
-    assert runtime_cfg.dataset.path == "checkpoint-data"
-    assert runtime_cfg.dataset.max_seq_length == 256
     assert runtime_cfg.datacollator.mlm_probability == 0.3
     assert runtime_cfg.datacollator.pack_sequences is True
     assert runtime_cfg.contrastive.pooling == "max"
     assert runtime_cfg.contrastive.pretraining_prob == 0.4
+    # Corpus identity is operator-controlled (launch config wins on resume).
+    assert runtime_cfg.dataset.name == "runtime-dataset"
+    assert runtime_cfg.dataset.path == "runtime-data"
+    # Both configs default to RoPE, so context length is operator-controlled too.
+    assert runtime_cfg.tokenizer.max_length == 128
+    assert runtime_cfg.dataset.max_seq_length == 128
     # Trainer runtime/performance knobs stay launch-controlled on resume.
     assert runtime_cfg.trainer.per_device_train_batch_size == 32
     assert runtime_cfg.trainer.gradient_accumulation_steps == 1
     assert runtime_cfg.trainer.gradient_checkpointing is False
     assert runtime_cfg.trainer.torch_compile is False
+
+
+def test_sync_resume_forces_sequence_length_for_non_rope(tmp_path: Path) -> None:
+    """Non-RoPE context length is checkpoint-authoritative (learned pos table).
+
+    Corpus identity stays operator-controlled regardless of RoPE, but sequence
+    length is forced back for non-RoPE checkpoints because changing it would
+    break the strict positional-embedding weight load.
+    """
+    checkpoint_dir = tmp_path / "checkpoints" / "10"
+    checkpoint_dir.mkdir(parents=True)
+    checkpoint_cfg = Config()
+    checkpoint_cfg.model.rope = False
+    checkpoint_cfg.model.max_position_embeddings = 256
+    checkpoint_cfg.tokenizer.max_length = 256
+    checkpoint_cfg.dataset.max_seq_length = 256
+    checkpoint_cfg.dataset.name = "checkpoint-dataset"
+    ConfigLoader.save(checkpoint_cfg, str(checkpoint_dir / "config.yaml"))
+
+    runtime_cfg = Config()
+    runtime_cfg.model.rope = False
+    runtime_cfg.model.max_position_embeddings = 512
+    runtime_cfg.tokenizer.max_length = 512
+    runtime_cfg.dataset.max_seq_length = 512
+    runtime_cfg.dataset.name = "runtime-dataset"
+
+    sync_resume_source_of_truth(
+        runtime_cfg, checkpoint_dir, task="pretraining", log=logging.getLogger("test")
+    )
+
+    # Non-RoPE: sequence length forced back to the checkpoint's.
+    assert runtime_cfg.model.max_position_embeddings == 256
+    assert runtime_cfg.tokenizer.max_length == 256
+    assert runtime_cfg.dataset.max_seq_length == 256
+    # Corpus identity is still operator-controlled.
+    assert runtime_cfg.dataset.name == "runtime-dataset"
 
 
 def test_sync_resume_source_of_truth_rejects_missing_config(tmp_path: Path) -> None:
