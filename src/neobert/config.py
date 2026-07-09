@@ -438,7 +438,7 @@ class Config:
     # MTEB-specific
     mteb_task_type: str = "all"  # all, classification, clustering, etc.
     mteb_batch_size: int = 32
-    mteb_pooling: str = "mean"  # mean, cls
+    mteb_pooling: str = "avg"  # avg (or mean), cls
     mteb_overwrite_results: bool = False
 
     # Model loading

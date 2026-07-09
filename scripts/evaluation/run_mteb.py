@@ -16,116 +16,17 @@ from neobert.checkpointing import (
     resolve_deepspeed_checkpoint_root_and_tag,
 )
 from neobert.config import ConfigLoader
+from neobert.mteb_tasks import (
+    MTEB_ALL_EXECUTION_TASKS,
+    MTEB_EXECUTION_TASKS_BY_TYPE,
+    expand_mteb_task_name,
+)
 from neobert.model import NeoBERTConfig, NeoBERTForMTEB
 from neobert.tokenizer import get_tokenizer
 
 logging.basicConfig(level=logging.INFO)
 
 logger = logging.getLogger("main")
-
-TASK_LIST_CLASSIFICATION = [
-    "AmazonCounterfactualClassification",
-    "AmazonPolarityClassification",
-    "AmazonReviewsClassification",
-    "Banking77Classification",
-    "EmotionClassification",
-    "ImdbClassification",
-    "MassiveIntentClassification",
-    "MassiveScenarioClassification",
-    "MTOPDomainClassification",
-    "MTOPIntentClassification",
-    "ToxicConversationsClassification",
-    "TweetSentimentExtractionClassification",
-]
-
-TASK_LIST_CLUSTERING = [
-    "ArxivClusteringP2P",
-    "ArxivClusteringS2S",
-    "BiorxivClusteringP2P",
-    "BiorxivClusteringS2S",
-    "MedrxivClusteringP2P",
-    "MedrxivClusteringS2S",
-    "RedditClustering",
-    "RedditClusteringP2P",
-    "StackExchangeClustering",
-    "StackExchangeClusteringP2P",
-    "TwentyNewsgroupsClustering",
-]
-
-TASK_LIST_PAIR_CLASSIFICATION = [
-    "SprintDuplicateQuestions",
-    "TwitterSemEval2015",
-    "TwitterURLCorpus",
-]
-
-TASK_LIST_RERANKING = [
-    "AskUbuntuDupQuestions",
-    "MindSmallReranking",
-    "SciDocsRR",
-    "StackOverflowDupQuestions",
-]
-
-TASK_LIST_RETRIEVAL = [
-    "MSMARCO",
-    "ArguAna",
-    "ClimateFEVER",
-    "CQADupstackAndroidRetrieval",
-    "CQADupstackEnglishRetrieval",
-    "CQADupstackGamingRetrieval",
-    "CQADupstackGisRetrieval",
-    "CQADupstackMathematicaRetrieval",
-    "CQADupstackPhysicsRetrieval",
-    "CQADupstackProgrammersRetrieval",
-    "CQADupstackStatsRetrieval",
-    "CQADupstackTexRetrieval",
-    "CQADupstackUnixRetrieval",
-    "CQADupstackWebmastersRetrieval",
-    "CQADupstackWordpressRetrieval",
-    "DBPedia",
-    "FEVER",
-    "FiQA2018",
-    "HotpotQA",
-    "NFCorpus",
-    "NQ",
-    "QuoraRetrieval",
-    "SCIDOCS",
-    "SciFact",
-    "Touche2020",
-    "TRECCOVID",
-]
-
-TASK_LIST_STS = [
-    "BIOSSES",
-    "SICK-R",
-    "STS12",
-    "STS13",
-    "STS14",
-    "STS15",
-    "STS16",
-    "STS17",
-    "STS22",
-    "STSBenchmark",
-    "SummEval",
-]
-
-TASK_LIST = (
-    TASK_LIST_CLASSIFICATION
-    + TASK_LIST_CLUSTERING
-    + TASK_LIST_PAIR_CLASSIFICATION
-    + TASK_LIST_RERANKING
-    + TASK_LIST_RETRIEVAL
-    + TASK_LIST_STS
-)
-
-TASK_TYPE = {
-    "classification": TASK_LIST_CLASSIFICATION,
-    "clustering": TASK_LIST_CLUSTERING,
-    "pair_classification": TASK_LIST_PAIR_CLASSIFICATION,
-    "reranking": TASK_LIST_RERANKING,
-    "retrieval": TASK_LIST_RETRIEVAL,
-    "sts": TASK_LIST_STS,
-    "all": TASK_LIST,
-}
 
 
 def _resolve_mteb_tasks(cfg: Any) -> list[str]:
@@ -135,7 +36,7 @@ def _resolve_mteb_tasks(cfg: Any) -> list[str]:
     1. ``cfg.task_types`` (CLI ``--task_types``), if provided.
     2. ``cfg.mteb_task_type`` category.
 
-    ``cfg.task_types`` entries can be either category aliases from ``TASK_TYPE``
+    ``cfg.task_types`` entries can be either category aliases from the registry
     (for example ``classification`` or ``sts``) or explicit task names.
 
     :param Any cfg: Configuration object.
@@ -145,16 +46,17 @@ def _resolve_mteb_tasks(cfg: Any) -> list[str]:
     requested = getattr(cfg, "task_types", None)
     if requested is None:
         mteb_task_type = str(getattr(cfg, "mteb_task_type", "all")).strip().lower()
-        if mteb_task_type not in TASK_TYPE:
-            raise ValueError(f"Task type must be one of {sorted(TASK_TYPE.keys())}.")
-        return list(TASK_TYPE[mteb_task_type])
+        if mteb_task_type not in MTEB_EXECUTION_TASKS_BY_TYPE:
+            raise ValueError(
+                f"Task type must be one of {sorted(MTEB_EXECUTION_TASKS_BY_TYPE)}."
+            )
+        return list(MTEB_EXECUTION_TASKS_BY_TYPE[mteb_task_type])
 
     if isinstance(requested, str):
         requested_tokens = [token.strip() for token in requested.split(",")]
     else:
         requested_tokens = [str(token).strip() for token in requested]
 
-    explicit_lookup = {task.lower(): task for task in TASK_LIST}
     selected: list[str] = []
     unknown: list[str] = []
     for token in requested_tokens:
@@ -162,14 +64,14 @@ def _resolve_mteb_tasks(cfg: Any) -> list[str]:
             continue
         lowered = token.lower()
         if lowered == "all":
-            selected.extend(TASK_LIST)
+            selected.extend(MTEB_ALL_EXECUTION_TASKS)
             continue
-        if lowered in TASK_TYPE:
-            selected.extend(TASK_TYPE[lowered])
+        if lowered in MTEB_EXECUTION_TASKS_BY_TYPE:
+            selected.extend(MTEB_EXECUTION_TASKS_BY_TYPE[lowered])
             continue
-        explicit_task = explicit_lookup.get(lowered)
-        if explicit_task is not None:
-            selected.append(explicit_task)
+        explicit_tasks = expand_mteb_task_name(token)
+        if explicit_tasks is not None:
+            selected.extend(explicit_tasks)
             continue
         unknown.append(token)
 
@@ -178,7 +80,7 @@ def _resolve_mteb_tasks(cfg: Any) -> list[str]:
             "Unknown --task_types entries: "
             + ", ".join(sorted(unknown))
             + ". Valid categories: "
-            + ", ".join(sorted(TASK_TYPE.keys()))
+            + ", ".join(sorted(MTEB_EXECUTION_TASKS_BY_TYPE))
         )
 
     # Stable dedupe to preserve user-specified order.
@@ -310,7 +212,7 @@ def evaluate_mteb(cfg: Any) -> None:
     """
     # Get MTEB-specific config (kept at top-level Config for now)
     mteb_batch_size = getattr(cfg, "mteb_batch_size", 32)
-    mteb_pooling = getattr(cfg, "mteb_pooling", "mean")
+    mteb_pooling = getattr(cfg, "mteb_pooling", "avg")
     mteb_overwrite_results = getattr(cfg, "mteb_overwrite_results", False)
     pretrained_checkpoint = getattr(cfg, "pretrained_checkpoint", "latest")
     pretrained_checkpoint_dir = Path(cfg.trainer.output_dir)

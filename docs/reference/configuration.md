@@ -445,7 +445,7 @@ Save cadence/retention knobs live under [Training Loop](#training-loop): `traine
 | ------------------------ | ------ | -------- | ------------------------------------- |
 | `mteb_task_type`         | `str`  | `"all"`  | MTEB subset selector.                 |
 | `mteb_batch_size`        | `int`  | `32`     | MTEB inference batch size.            |
-| `mteb_pooling`           | `str`  | `"mean"` | Pooling for embedding extraction.     |
+| `mteb_pooling`           | `str`  | `"avg"`  | Pooling for embedding extraction (`avg`/`mean` or `cls`). |
 | `mteb_overwrite_results` | `bool` | `false`  | Overwrite existing MTEB output files. |
 
 ---

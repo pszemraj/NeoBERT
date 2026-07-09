@@ -1408,6 +1408,16 @@ class TestModelForward(unittest.TestCase):
         self.assertEqual(embeddings.shape[0], 2)
         self.assertEqual(embeddings.shape[1], config.hidden_size)
 
+    def test_mteb_pooling_is_normalized_and_validated(self):
+        """Ensure mean pooling is canonicalized and unknown modes fail fast."""
+        from neobert.model.wrappers import normalize_mteb_pooling
+
+        self.assertEqual(normalize_mteb_pooling("mean"), "avg")
+        self.assertEqual(normalize_mteb_pooling(" AVG "), "avg")
+        self.assertEqual(normalize_mteb_pooling("cls"), "cls")
+        with self.assertRaisesRegex(ValueError, "Unsupported MTEB pooling"):
+            normalize_mteb_pooling("first")
+
     def test_mteb_encode_propagates_pin_memory_to_dataloader(self):
         """Ensure MTEB encode forwards the requested pin_memory setting."""
         from neobert.model import NeoBERTConfig, NeoBERTForMTEB

@@ -23,6 +23,24 @@ from .model import (
 )
 
 logger = logging.getLogger(__name__)
+MTEB_POOLING_ALIASES = {"avg": "avg", "mean": "avg", "cls": "cls"}
+
+
+def normalize_mteb_pooling(pooling: str) -> str:
+    """Normalize and validate an MTEB pooling strategy.
+
+    :param str pooling: Pooling name (``avg``/``mean`` or ``cls``).
+    :raises ValueError: If the pooling strategy is unsupported.
+    :return str: Canonical pooling name (``avg`` or ``cls``).
+    """
+    normalized = str(pooling).strip().lower()
+    try:
+        return MTEB_POOLING_ALIASES[normalized]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported MTEB pooling {pooling!r}; expected one of "
+            f"{sorted(MTEB_POOLING_ALIASES)}."
+        ) from exc
 
 
 class NeoBERTLMHead(NeoBERTPreTrainedModel):
@@ -125,7 +143,7 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
         :param PreTrainedTokenizerFast tokenizer: Tokenizer for text inputs.
         :param int max_length: Maximum sequence length.
         :param int batch_size: Encoding batch size.
-        :param str pooling: Pooling strategy (avg/cls).
+        :param str pooling: Pooling strategy (avg/mean or cls).
         :param Any kwargs: Unused extra arguments for compatibility.
         """
         del kwargs
@@ -137,7 +155,7 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.batch_size = batch_size
-        self.pooling = pooling
+        self.pooling = normalize_mteb_pooling(pooling)
 
     def encode_queries(self, queries: List[str], **kwargs: Any) -> np.ndarray:
         """Encode a list of queries.

@@ -4,110 +4,51 @@ import argparse
 import json
 from pathlib import Path
 
-import mteb
-
-### GLOBAL VARIABLES ###
-
-TASK_LIST_CLASSIFICATION = [
-    "AmazonCounterfactualClassification",
-    "AmazonPolarityClassification",
-    "AmazonReviewsClassification",
-    "Banking77Classification",
-    "EmotionClassification",
-    "ImdbClassification",
-    "MassiveIntentClassification",
-    "MassiveScenarioClassification",
-    "MTOPDomainClassification",
-    "MTOPIntentClassification",
-    "ToxicConversationsClassification",
-    "TweetSentimentExtractionClassification",
-]
-
-TASK_LIST_CLUSTERING = [
-    "ArxivClusteringP2P",
-    "ArxivClusteringS2S",
-    "BiorxivClusteringP2P",
-    "BiorxivClusteringS2S",
-    "MedrxivClusteringP2P",
-    "MedrxivClusteringS2S",
-    "RedditClustering",
-    "RedditClusteringP2P",
-    "StackExchangeClustering",
-    "StackExchangeClusteringP2P",
-    "TwentyNewsgroupsClustering",
-]
-
-TASK_LIST_PAIR_CLASSIFICATION = [
-    "SprintDuplicateQuestions",
-    "TwitterSemEval2015",
-    "TwitterURLCorpus",
-]
-
-TASK_LIST_RERANKING = [
-    "AskUbuntuDupQuestions",
-    "MindSmallReranking",
-    "SciDocsRR",
-    "StackOverflowDupQuestions",
-]
-
-TASK_LIST_RETRIEVAL = [
-    "ArguAna",
-    "ClimateFEVER",
-    "CQADupstackRetrieval",
-    "DBPedia",
-    "FEVER",
-    "FiQA2018",
-    "HotpotQA",
-    "MSMARCO",
-    "NFCorpus",
-    "NQ",
-    "QuoraRetrieval",
-    "SCIDOCS",
-    "SciFact",
-    "Touche2020",
-    "TRECCOVID",
-]
-
-TASK_LIST_STS = [
-    "BIOSSES",
-    "SICK-R",
-    "STS12",
-    "STS13",
-    "STS14",
-    "STS15",
-    "STS16",
-    "STS17",
-    "STS22",
-    "STSBenchmark",
-]
+from neobert.mteb_tasks import MTEB_TASK_GROUPS, MTEBTaskSpec
 
 
-TASK_LIST_SUMMARIZATION = [
-    "SummEval",
-]
+def _task_score(model_results: dict, task: MTEBTaskSpec) -> float | None:
+    """Return one task score, averaging expanded dataset variants when needed.
 
-TASK_LIST_EN = (
-    TASK_LIST_CLASSIFICATION
-    + TASK_LIST_CLUSTERING
-    + TASK_LIST_PAIR_CLASSIFICATION
-    + TASK_LIST_RERANKING
-    + TASK_LIST_RETRIEVAL
-    + TASK_LIST_STS
-    + TASK_LIST_SUMMARIZATION
-)
+    :param dict model_results: Result payloads keyed by concrete MTEB task name.
+    :param MTEBTaskSpec task: Task specification to aggregate.
+    :return float | None: Mean main score, or ``None`` when no result is present.
+    """
+    scores = []
+    for result_name in task.execution_names:
+        try:
+            score = model_results[result_name]["scores"]["test"][0]["main_score"]
+        except (KeyError, TypeError, IndexError):
+            continue
+        if score is not None:
+            scores.append(float(score))
+    return sum(scores) / len(scores) if scores else None
 
 
-TASK_LIST_NAMES = [
-    ("Class.", TASK_LIST_CLASSIFICATION, ["en", "en-en"]),
-    ("Clust.", TASK_LIST_CLUSTERING, ["en", "en-en"]),
-    ("PairClass.", TASK_LIST_PAIR_CLASSIFICATION, ["en", "en-en"]),
-    ("Rerank.", TASK_LIST_RERANKING, ["en", "en-en"]),
-    ("Retr.", TASK_LIST_RETRIEVAL, ["en", "en-en"]),
-    ("STS", TASK_LIST_STS, ["en", "en-en"]),
-    ("Summ.", TASK_LIST_SUMMARIZATION, ["en", "en-en"]),
-    # ("BitextMining", TASK_LIST_BITEXT, []),
-    ("Avg.", TASK_LIST_EN, ["en", "en-en"]),
-]
+def _average_categories(model_results: dict) -> dict[str, float]:
+    """Compute category and overall averages for one model.
+
+    :param dict model_results: Result payloads keyed by concrete MTEB task name.
+    :return dict[str, float]: Percentage scores keyed by reporting label.
+    """
+    category_scores: dict[str, float] = {}
+    all_task_scores = []
+    for group in MTEB_TASK_GROUPS:
+        scores = [
+            score
+            for task in group.tasks
+            if (score := _task_score(model_results, task)) is not None
+        ]
+        all_task_scores.extend(scores)
+        category_scores[group.label] = (
+            round(100 * sum(scores) / len(scores), 2) if scores else 0
+        )
+    category_scores["Avg."] = (
+        round(100 * sum(all_task_scores) / len(all_task_scores), 2)
+        if all_task_scores
+        else 0
+    )
+    return category_scores
 
 
 def compute_table() -> None:
@@ -170,36 +111,10 @@ def compute_table() -> None:
                             **{file_path.stem: results},
                         }
 
-    avg_results = {}
-
-    for model in all_results.keys():
-        avg_results[model] = {}
-        results = []
-        for task_type, task_list, _ in TASK_LIST_NAMES:
-            model_task_results = []
-            for task in task_list:
-                mteb_task = mteb.get_tasks(
-                    tasks=[
-                        task.replace("CQADupstackRetrieval", "CQADupstackTexRetrieval")
-                    ]
-                )
-                assert len(mteb_task) == 1, (
-                    f"Found {len(mteb_task)} for {task}. Expected 1."
-                )
-                test_result = all_results.get(model, {}).get(task, {})
-                try:
-                    model_task_results.append(
-                        test_result["scores"]["test"][0].get("main_score")
-                    )
-                except (KeyError, TypeError, IndexError):
-                    continue
-
-            if len(model_task_results) > 0:
-                avg_results[model][task_type] = round(
-                    100 * (sum(model_task_results) / len(model_task_results)), 2
-                )
-            else:
-                avg_results[model][task_type] = 0
+    avg_results = {
+        model: _average_categories(model_results)
+        for model, model_results in all_results.items()
+    }
 
     with result_file.open("w", encoding="utf-8") as f:
         json.dump(avg_results, f, indent=2)
