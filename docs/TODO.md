@@ -14,6 +14,10 @@ Deferred because it is an overhead-only win (identical FLOPs, fewer launches) th
 - stacking the split matrices in `_orthogonalize_fused_qkv_update` and applying `_normalize_muon_update` per matrix (all three share one shape, so the scale is common),
 - verifying against `tests/test_muonclip_unit.py` reference implementations and the manual FSDP2 golden tests (`tests/manual/test_muonclip_fsdp2_golden.py`), plus a wall-clock benchmark demonstrating the win in eager mode.
 
+### Split the nGPT fused FFN before orthogonalization
+
+`_uses_fused_qkv_muon_split` (`src/neobert/optimizer/muon_clip.py`) special-cases only `proj_type == "qkv"`, so the attention `qkv.weight` is split into Q/K/V and each is orthogonalized separately (the correctness fix from commit `08e668a`). The nGPT block's `c_fc` weight fuses the SwiGLU gate and up projections into one `(2*intermediate, hidden)` matrix (`NormEncoderBlock`, split only at forward time via `torch.chunk`), but it is never tagged, so Muon runs Newton-Schulz/Polar-Express over the whole fused matrix and mixes the two projections' singular subspaces - exactly the error the QKV split avoids, for the FFN instead. Dormant today: every shipped config sets `ngpt: false`, and no test exercises `ngpt=true` with MuonClip. Completing it requires tagging `c_fc.weight` with a fused-FFN `proj_type`, adding a 2-way split path (mirroring `_orthogonalize_fused_qkv_update`), and adding an `ngpt=true` + Muon golden test - there is currently no nGPT+Muon numerical reference to validate against, which is why this is deferred rather than done blind in a correctness branch.
+
 ## Resume
 
 ### Name-keyed optimizer-state transplant
@@ -36,3 +40,7 @@ Deferred because the correct boundary is the prepared dataloader, not the datase
 ### Optional snapshot cadence for retry resume
 
 `RetryingStreamingDataset.__iter__` (`src/neobert/streaming.py`) calls `dataset.state_dict()` after every yielded example to guarantee exactly-once retry recovery. The payload is small (HF serializes cursor counters, never shuffle-buffer contents), so this is currently cheap; if profiling of a deep `.map()`/`.filter()` pipeline ever shows the per-yield snapshot mattering, add an opt-in snapshot-every-N-examples knob. That trades the exactly-once guarantee for "may re-yield up to N-1 examples on retry," so it must stay opt-in and documented. Snapshot-on-failure is not an alternative: nested iterable state advances past the failed example before the exception surfaces.
+
+### Verify streaming reshuffle across epochs with persistent workers
+
+The trainer calls `train_dataset.set_epoch(...)` on the raw dataset object between epochs (`src/neobert/pretraining/trainer.py`), but the dataloader defaults to `num_workers: 16` and `persistent_workers: true`. Persistent workers are forked once and reused across `__iter__` calls with their own copy of the dataset, so a plain attribute mutation on the main-process dataset may not propagate into the workers - in which case epoch 2+ of a multi-epoch streaming run would silently reuse epoch 1's shuffle order instead of reshuffling. This is unverified (needs a real multi-worker + HF-streaming reproduction, which the sandbox blocks) and low-impact for the shipped single-epoch streaming configs, but it should be confirmed before any multi-epoch streaming run. If real, the fix is to propagate the epoch through the Accelerate-prepared dataloader (which forwards `set_epoch` to workers) rather than mutating the raw dataset, and to add a two-epoch order-difference regression.
