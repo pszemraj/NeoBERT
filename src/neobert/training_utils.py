@@ -985,8 +985,6 @@ def sync_resume_source_of_truth(
                 (
                     "temperature",
                     "pooling",
-                    "loss_type",
-                    "hard_negative_weight",
                     "pretraining_prob",
                 ),
                 section="contrastive",

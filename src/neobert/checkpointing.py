@@ -465,9 +465,6 @@ def load_step_checkpoint_state_dict(
 def resolve_checkpoint_retention_limit(cfg: Any) -> int:
     """Resolve effective checkpoint retention limit from trainer config.
 
-    ``trainer.save_total_limit`` is preferred. Deprecated ``trainer.max_ckpt``
-    is used only as a fallback when ``save_total_limit`` is unset.
-
     :param Any cfg: Runtime config object or ``cfg.trainer``.
     :return int: Maximum number of retained checkpoints (0 disables pruning).
     """
@@ -475,9 +472,6 @@ def resolve_checkpoint_retention_limit(cfg: Any) -> int:
     save_total_limit = getattr(trainer_cfg, "save_total_limit", None)
     if save_total_limit is not None:
         return max(0, int(save_total_limit))
-    max_ckpt = getattr(trainer_cfg, "max_ckpt", None)
-    if max_ckpt is not None:
-        return max(0, int(max_ckpt))
     return 0
 
 

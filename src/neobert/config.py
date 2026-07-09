@@ -157,35 +157,28 @@ class TokenizerConfig:
 
 # Single source of truth for Muon enum spellings; the optimizer-side
 # MuonClipConfig validates through these same helpers.
-_MUON_NORM_FACTOR_ALIASES = {
-    "legacy_compat": "neobert",
-    "original": "muon_reference",
-}
 _MUON_NORM_FACTORS = frozenset(
     {"neobert", "muon_reference", "spectral", "match_rms_adamw", "none"}
 )
-_MUON_PARAM_POLICY_ALIASES = {"transformer_only": "hidden_2d"}
+_MUON_ORTHOGONALIZATIONS = frozenset({"newton_schulz", "polar_express"})
 _MUON_PARAM_POLICIES = frozenset({"all_2d", "hidden_2d"})
 
 
 def _normalize_muon_choice(
     value: Any,
     *,
-    aliases: Dict[str, str],
     valid: frozenset,
     field_name: str,
 ) -> str:
     """Normalize a Muon enum-like config value and validate it.
 
     :param Any value: Raw configured value.
-    :param dict[str, str] aliases: Legacy spelling remaps applied after casing.
     :param frozenset valid: Canonical accepted values.
     :param str field_name: Field name used in error messages.
     :raises ValueError: If the normalized value is not a valid option.
     :return str: Canonical normalized value.
     """
     normalized = str(value).strip().replace("-", "_").lower()
-    normalized = aliases.get(normalized, normalized)
     if normalized not in valid:
         raise ValueError(
             f"Unsupported {field_name} '{value}'. "
@@ -203,9 +196,22 @@ def normalize_muon_norm_factor(value: Any) -> str:
     """
     return _normalize_muon_choice(
         value,
-        aliases=_MUON_NORM_FACTOR_ALIASES,
         valid=_MUON_NORM_FACTORS,
         field_name="norm_factor",
+    )
+
+
+def normalize_muon_orthogonalization(value: Any) -> str:
+    """Normalize a Muon ``orthogonalization`` value.
+
+    :param Any value: Raw configured value.
+    :raises ValueError: If the value is not a supported algorithm.
+    :return str: Canonical orthogonalization name.
+    """
+    return _normalize_muon_choice(
+        value,
+        valid=_MUON_ORTHOGONALIZATIONS,
+        field_name="orthogonalization",
     )
 
 
@@ -218,7 +224,6 @@ def normalize_muon_param_policy(value: Any) -> str:
     """
     return _normalize_muon_choice(
         value,
-        aliases=_MUON_PARAM_POLICY_ALIASES,
         valid=_MUON_PARAM_POLICIES,
         field_name="param_policy",
     )
@@ -243,27 +248,15 @@ class MuonConfig:
     orthogonalization: str = "polar_express"
     norm_factor: str = "neobert"
     param_policy: str = "hidden_2d"
-    algorithm: Optional[str] = None  # Alias for orthogonalization
-    polar_express: Optional[bool] = None  # Legacy toggle
     clipping_layers_mapping: Dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Warn on legacy alias usage and normalize enum-like fields."""
-        if self.algorithm is not None:
-            warnings.warn(
-                "MuonConfig.algorithm is deprecated; use orthogonalization instead.",
-                UserWarning,
-                stacklevel=2,
-            )
-
+        """Normalize enum-like fields."""
+        self.orthogonalization = normalize_muon_orthogonalization(
+            self.orthogonalization
+        )
         self.norm_factor = normalize_muon_norm_factor(self.norm_factor)
         self.param_policy = normalize_muon_param_policy(self.param_policy)
-        if self.polar_express is not None:
-            warnings.warn(
-                "MuonConfig.polar_express is deprecated; use orthogonalization instead.",
-                UserWarning,
-                stacklevel=2,
-            )
 
 
 @dataclass
@@ -332,19 +325,11 @@ class TrainerConfig:
     )
     save_model: bool = True
 
-    # For backwards compatibility with old configs
     disable_tqdm: bool = False
     dataloader_num_workers: int = 0
     use_cpu: bool = False
-    report_to: List[str] = field(
-        default_factory=list
-    )  # Deprecated: ignored, use wandb.enabled.
     tf32: bool = True
-    max_ckpt: Optional[int] = None  # Deprecated alias for save_total_limit
     log_weight_norms: bool = True
-    # Legacy batch size fields (use per_device versions instead)
-    train_batch_size: Optional[int] = None
-    eval_batch_size: Optional[int] = None
 
 
 @dataclass
@@ -406,8 +391,6 @@ class ContrastiveConfig:
 
     temperature: float = 0.05
     pooling: str = "avg"  # avg, cls, max
-    loss_type: str = "simcse"  # simcse, supcon
-    hard_negative_weight: float = 0.0
     pretraining_prob: float = 0.3
     pretrained_checkpoint_dir: Optional[str] = None
     pretrained_checkpoint: Optional[Union[str, int]] = None
@@ -1099,69 +1082,6 @@ class ConfigLoader:
                     "remove it from your config."
                 )
 
-            # trainer.report_to is not used by NeoBERT; keep wandb enabling explicit.
-            if "report_to" in trainer:
-                report_to = trainer.pop("report_to")
-                if report_to not in (None, [], ()):
-                    ConfigLoader._warn_legacy(
-                        "Config key 'trainer.report_to' is deprecated and ignored by "
-                        "NeoBERT. Set 'wandb.enabled: true' explicitly to enable W&B."
-                    )
-
-            # trainer.train_batch_size -> trainer.per_device_train_batch_size
-            if "train_batch_size" in trainer:
-                train_batch_size = trainer.pop("train_batch_size")
-                if train_batch_size is not None:
-                    if "per_device_train_batch_size" in trainer and trainer[
-                        "per_device_train_batch_size"
-                    ] not in (None, train_batch_size):
-                        raise ValueError(
-                            "Both 'trainer.train_batch_size' and "
-                            "'trainer.per_device_train_batch_size' are set with different values."
-                        )
-                    if trainer.get("per_device_train_batch_size") is None:
-                        trainer["per_device_train_batch_size"] = train_batch_size
-                    ConfigLoader._warn_legacy(
-                        "Config key 'trainer.train_batch_size' is deprecated; use "
-                        "'trainer.per_device_train_batch_size'."
-                    )
-
-            # trainer.eval_batch_size -> trainer.per_device_eval_batch_size
-            if "eval_batch_size" in trainer:
-                eval_batch_size = trainer.pop("eval_batch_size")
-                if eval_batch_size is not None:
-                    if "per_device_eval_batch_size" in trainer and trainer[
-                        "per_device_eval_batch_size"
-                    ] not in (None, eval_batch_size):
-                        raise ValueError(
-                            "Both 'trainer.eval_batch_size' and "
-                            "'trainer.per_device_eval_batch_size' are set with different values."
-                        )
-                    if trainer.get("per_device_eval_batch_size") is None:
-                        trainer["per_device_eval_batch_size"] = eval_batch_size
-                    ConfigLoader._warn_legacy(
-                        "Config key 'trainer.eval_batch_size' is deprecated; use "
-                        "'trainer.per_device_eval_batch_size'."
-                    )
-
-            # trainer.max_ckpt -> trainer.save_total_limit
-            if "max_ckpt" in trainer:
-                max_ckpt = trainer.pop("max_ckpt")
-                if max_ckpt is not None:
-                    if "save_total_limit" in trainer and trainer[
-                        "save_total_limit"
-                    ] not in (None, max_ckpt):
-                        raise ValueError(
-                            "Both 'trainer.max_ckpt' and 'trainer.save_total_limit' are set "
-                            "with different values."
-                        )
-                    if trainer.get("save_total_limit") is None:
-                        trainer["save_total_limit"] = max_ckpt
-                    ConfigLoader._warn_legacy(
-                        "Config key 'trainer.max_ckpt' is deprecated; use "
-                        "'trainer.save_total_limit'."
-                    )
-
         # dataset.tokenizer_name -> tokenizer.name
         dataset = normalized.get("dataset", {})
         if isinstance(dataset, dict):
@@ -1676,18 +1596,6 @@ class ConfigLoader:
                 "trainer.dataloader_num_workers must be >= 0, got "
                 f"{config.trainer.dataloader_num_workers}."
             )
-        if config.trainer.max_ckpt is not None:
-            if config.trainer.max_ckpt < 0:
-                errors.append(
-                    "trainer.max_ckpt must be >= 0 when set, got "
-                    f"{config.trainer.max_ckpt}."
-                )
-            warnings.warn(
-                "trainer.max_ckpt is deprecated; use trainer.save_total_limit.",
-                UserWarning,
-                stacklevel=2,
-            )
-
         if config.scheduler.warmup_steps < 0:
             errors.append(
                 f"scheduler.warmup_steps must be >= 0, got {config.scheduler.warmup_steps}."
@@ -1818,22 +1726,6 @@ class ConfigLoader:
                     UserWarning,
                     stacklevel=2,
                 )
-        if task == "contrastive":
-            if str(config.contrastive.loss_type).strip().lower() != "simcse":
-                warnings.warn(
-                    "contrastive.loss_type is currently informational and does not "
-                    "change runtime loss implementation; SupConLoss is used.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-            if float(config.contrastive.hard_negative_weight) != 0.0:
-                warnings.warn(
-                    "contrastive.hard_negative_weight is currently informational and "
-                    "not applied in loss computation.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-
         if errors:
             raise ValueError("Invalid configuration values:\n- " + "\n- ".join(errors))
 
@@ -1844,17 +1736,10 @@ class ConfigLoader:
         :param dict[str, Any] cfg_dict: Nested configuration mapping.
         :return Config: Fully-populated configuration instance.
         """
-        raw_cfg_dict = deepcopy(cfg_dict or {})
-        raw_model_dict = raw_cfg_dict.get("model")
-
         cfg_dict = ConfigLoader._normalize_legacy_keys(cfg_dict or {})
         ConfigLoader._validate_config_keys(cfg_dict)
 
         config = Config()
-
-        # Store legacy raw model dict before normalization for compatibility
-        # readers that still inspect original model-section keys.
-        config._raw_model_dict = deepcopy(raw_model_dict)
 
         # Update model config
         if "model" in cfg_dict:
@@ -1889,11 +1774,7 @@ class ConfigLoader:
                 if isinstance(muon_cfg_dict, MuonConfig):
                     config.optimizer.muon_config = muon_cfg_dict
                 elif isinstance(muon_cfg_dict, dict):
-                    muon_cfg = MuonConfig()
-                    for mk, mv in muon_cfg_dict.items():
-                        if hasattr(muon_cfg, mk):
-                            setattr(muon_cfg, mk, mv)
-                    config.optimizer.muon_config = muon_cfg
+                    config.optimizer.muon_config = MuonConfig(**muon_cfg_dict)
                 else:
                     raise TypeError(
                         "optimizer.muon_config must be a mapping or MuonConfig instance"
@@ -1957,65 +1838,9 @@ class ConfigLoader:
         return config
 
     @staticmethod
-    def preprocess_config(config: Config, resolve_vocab_size: bool = False) -> Config:
-        """Preprocess and validate config, resolving any dynamic values.
-
-        This should be called after config loading but before any downstream consumers.
-        Note: this mutates ``config`` in-place and may load tokenizers/datasets.
-
-        :param Config config: Configuration to preprocess.
-        :param bool resolve_vocab_size: Whether to resolve vocab sizes from a tokenizer.
-        :return Config: Preprocessed configuration.
-        """
-        if not resolve_vocab_size:
-            return config
-
-        # Resolve vocab_size for GPU efficiency (round up to a multiple of 128).
-        # This is opt-in via preprocess_config; disable resolve_vocab_size if you
-        # require exact tokenizer sizes for checkpoint interoperability.
-        use_cpu = getattr(config.trainer, "use_cpu", False)
-        if not use_cpu and hasattr(config.tokenizer, "name") and config.tokenizer.name:
-            # Import tokenizer here to avoid circular imports
-            from neobert.tokenizer import get_tokenizer
-
-            # Create tokenizer to determine actual vocab size
-            tokenizer_source = config.tokenizer.path or config.tokenizer.name
-            tokenizer = get_tokenizer(
-                pretrained_model_name_or_path=tokenizer_source,
-                max_length=config.tokenizer.max_length,
-                trust_remote_code=config.tokenizer.trust_remote_code,
-                revision=config.tokenizer.revision,
-                allow_special_token_rewrite=config.tokenizer.allow_special_token_rewrite,
-            )
-
-            actual_vocab_size = len(tokenizer)
-            rounded_vocab_size = round_up_to_multiple(actual_vocab_size, 128)
-
-            # Update all vocab_size references consistently
-            original_model_vocab_size = config.model.vocab_size
-
-            config.model.vocab_size = rounded_vocab_size
-            if hasattr(config.tokenizer, "vocab_size"):
-                config.tokenizer.vocab_size = rounded_vocab_size
-
-            # Log the change if significant
-            if actual_vocab_size != rounded_vocab_size:
-                import logging
-
-                logger = logging.getLogger(__name__)
-                logger.warning(
-                    "Config preprocessing: vocab_size "
-                    f"{actual_vocab_size} rounded to {rounded_vocab_size} for GPU "
-                    f"efficiency (original config: {original_model_vocab_size})"
-                )
-
-        return config
-
-    @staticmethod
     def load(
         config_file: Optional[Union[str, Path]] = None,
         overrides: Optional[Union[Dict[str, Any], List[str]]] = None,
-        preprocess: bool = False,
     ) -> Config:
         """Load configuration from file and apply overrides.
 
@@ -2023,7 +1848,6 @@ class ConfigLoader:
         :param dict[str, Any] | list[str] | None overrides: Optional overrides.
             - mapping form is merged into YAML before dataclass hydration.
             - list form accepts ``section.key=value`` and ``--section.key value``.
-        :param bool preprocess: Whether to resolve dynamic values (e.g., vocab size).
         :return Config: Loaded configuration.
         """
         config_dict = {}
@@ -2044,10 +1868,6 @@ class ConfigLoader:
         config = ConfigLoader.dict_to_config(config_dict)
         if isinstance(overrides, list) and overrides:
             ConfigLoader._apply_dot_overrides(config, overrides)
-
-        # Preprocess config to resolve dynamic values
-        if preprocess:
-            config = ConfigLoader.preprocess_config(config, resolve_vocab_size=True)
 
         return config
 
@@ -2445,8 +2265,5 @@ def load_config_from_args(
 
     config = ConfigLoader.dict_to_config(config_dict)
     config.config_path = args.config
-
-    # Preprocess config to resolve dynamic values
-    config = ConfigLoader.preprocess_config(config, resolve_vocab_size=False)
 
     return config

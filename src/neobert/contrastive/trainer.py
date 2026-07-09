@@ -507,35 +507,6 @@ def trainer(cfg: Config) -> None:
     pretrained_checkpoint = getattr(cfg.contrastive, "pretrained_checkpoint", None)
     allow_random_weights = bool(getattr(cfg.contrastive, "allow_random_weights", False))
     use_deepspeed = getattr(cfg, "use_deepspeed", False)
-    if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
-        if pretrained_checkpoint_dir is None:
-            pretrained_checkpoint_dir = cfg._raw_model_dict.get(
-                "pretrained_checkpoint_dir"
-            )
-            if pretrained_checkpoint_dir is not None:
-                logger.warning(
-                    "Using legacy model.pretrained_checkpoint_dir from _raw_model_dict; "
-                    "migrate to contrastive.pretrained_checkpoint_dir."
-                )
-        if pretrained_checkpoint is None:
-            pretrained_checkpoint = cfg._raw_model_dict.get("pretrained_checkpoint")
-            if pretrained_checkpoint is not None:
-                logger.warning(
-                    "Using legacy model.pretrained_checkpoint from _raw_model_dict; "
-                    "migrate to contrastive.pretrained_checkpoint."
-                )
-        if not allow_random_weights:
-            legacy_allow_random = cfg._raw_model_dict.get("allow_random_weights")
-            if legacy_allow_random is not None:
-                allow_random_weights = bool(legacy_allow_random)
-                logger.warning(
-                    "Using legacy model.allow_random_weights from _raw_model_dict; "
-                    "migrate to contrastive.allow_random_weights."
-                )
-        if "deepspeed" in cfg._raw_model_dict and not getattr(
-            cfg, "use_deepspeed", False
-        ):
-            use_deepspeed = cfg._raw_model_dict.get("deepspeed")
 
     resolved_pretrained_checkpoint_dir: Path | None = None
     resolved_pretrained_checkpoint_tag: str | None = None
@@ -741,9 +712,7 @@ def trainer(cfg: Config) -> None:
             f"{sorted(pretraining_column_names)}."
         )
         pretraining_collator = data_collator
-    target_bsz = (
-        cfg.trainer.per_device_train_batch_size or cfg.trainer.train_batch_size or 16
-    )
+    target_bsz = cfg.trainer.per_device_train_batch_size
     dataloader_kwargs, loader_perf_notes = _resolve_contrastive_dataloader_kwargs(
         cfg,
         device=accelerator.device,

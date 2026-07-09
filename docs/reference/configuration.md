@@ -253,7 +253,7 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 >
 > Gradient-accumulation, effective-batch, and norm-logging behavior is detailed in [Training Optimization](../guides/training-optimization.md#gradient-accumulation-and-logged-norms).
 
-### Control and Legacy Compatibility
+### Training Control
 
 | Key                              | Type          | Default   | Description                                               |
 | -------------------------------- | ------------- | --------- | --------------------------------------------------------- |
@@ -263,13 +263,9 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 | `trainer.eval_strategy`          | `str`         | `"steps"` | `steps` or `epoch`.                                       |
 | `trainer.save_strategy`          | `str`         | `"steps"` | `steps`, `epoch`, `best`, or `no`.                        |
 | `trainer.save_total_limit`       | `int \| None` | `3`       | Keep at most this many `checkpoints/<step>` directories.  |
-| `trainer.max_ckpt`               | `int \| None` | `null`    | Deprecated alias for `trainer.save_total_limit`.          |
 | `trainer.disable_tqdm`           | `bool`        | `false`   | Disable progress bars.                                    |
 | `trainer.dataloader_num_workers` | `int`         | `0`       | Contrastive-only dataloader worker override.              |
 | `trainer.use_cpu`                | `bool`        | `false`   | Force CPU execution.                                      |
-| `trainer.report_to`              | `list[str]`   | `[]`      | Deprecated and ignored. Use `wandb.enabled` explicitly.   |
-| `trainer.train_batch_size`       | `int \| None` | `null`    | Legacy batch-size alias.                                  |
-| `trainer.eval_batch_size`        | `int \| None` | `null`    | Legacy batch-size alias.                                  |
 | `trainer.early_stopping`         | `int`         | `0`       | Reserved in pretraining path.                             |
 | `trainer.metric_for_best_model`  | `str \| None` | `null`    | Reserved in pretraining path.                             |
 | `trainer.greater_is_better`      | `bool`        | `true`    | Reserved in pretraining path.                             |
@@ -327,12 +323,10 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 | `orthogonalization`            | `str`            | `"polar_express"` | Orthogonalization algorithm selector.                        |
 | `norm_factor`                  | `str`            | `"neobert"` | Post-orthogonalization normalization (`neobert`, `muon_reference`, `spectral`, `match_rms_adamw`, `none`). |
 | `param_policy`                 | `str`            | `"hidden_2d"` | Muon routing policy (`hidden_2d` is the shipped default and applies Muon only to hidden transformer matrices; `all_2d` remains available for explicit v0.1.3-scope compatibility tests). |
-| `algorithm`                    | `str \| None`    | `null`            | Deprecated alias of `orthogonalization`.                     |
-| `polar_express`                | `bool \| None`   | `null`            | Deprecated legacy toggle.                                    |
 | `clipping_layers_mapping`      | `dict[str, str]` | `{}`              | Projection-name overrides for non-standard attention blocks. |
 
 > [!NOTE]
-> The shipped defaults are `norm_factor=neobert` and `param_policy=hidden_2d`. Use `all_2d` explicitly when you want exact v0.1.3-style Muon scope for compatibility benchmarking. Legacy `norm_factor` values `legacy_compat` and `original` are accepted and normalized to `neobert` and `muon_reference` respectively.
+> The shipped defaults are `norm_factor=neobert` and `param_policy=hidden_2d`. Use `all_2d` explicitly when you want exact v0.1.3-style Muon scope for compatibility benchmarking.
 >
 > [Training Optimization](../guides/training-optimization.md) explains the shipped Muon defaults, normalization modes, fused-QKV handling, clipping, and distributed tradeoffs.
 >
@@ -432,8 +426,6 @@ Save cadence/retention knobs live under [Training Loop](#training-loop): `traine
 | --------------------------------------- | -------------------- | ---------- | --------------------------------------------------------------------------- |
 | `contrastive.temperature`               | `float`              | `0.05`     | Contrastive temperature.                                                    |
 | `contrastive.pooling`                   | `str`                | `"avg"`    | Pooling mode used by contrastive training: `avg`, `cls`, `max`.             |
-| `contrastive.loss_type`                 | `str`                | `"simcse"` | Loss variant: `simcse`, `supcon`.                                           |
-| `contrastive.hard_negative_weight`      | `float`              | `0.0`      | Additional hard-negative weighting.                                         |
 | `contrastive.pretraining_prob`          | `float`              | `0.3`      | Fraction of steps that draw the pretraining branch in contrastive training. |
 | `contrastive.pretrained_checkpoint_dir` | `str \| None`        | `null`     | Optional pretraining checkpoint root used to initialize contrastive runs.   |
 | `contrastive.pretrained_checkpoint`     | `str \| int \| None` | `null`     | Optional checkpoint tag/step selector for contrastive initialization.       |

@@ -20,7 +20,11 @@ from neobert.optimizer.parameter_groups import (
 )
 from torch.utils.hooks import RemovableHandle
 
-from neobert.config import normalize_muon_norm_factor, normalize_muon_param_policy
+from neobert.config import (
+    normalize_muon_norm_factor,
+    normalize_muon_orthogonalization,
+    normalize_muon_param_policy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,8 +92,6 @@ class MuonClipConfig:
     orthogonalization: str = "polar_express"
     norm_factor: str = "neobert"
     param_policy: str = "hidden_2d"
-    algorithm: Optional[str] = None  # Alias for orthogonalization
-    polar_express: Optional[bool] = None  # Legacy toggle
 
     def __post_init__(self) -> None:
         """Validate configuration.
@@ -122,19 +124,6 @@ class MuonClipConfig:
             raise ValueError(
                 "clipping_qk_chunk_size must be >= 1, got "
                 f"{self.clipping_qk_chunk_size}"
-            )
-
-        if self.algorithm is not None:
-            warnings.warn(
-                "MuonClipConfig.algorithm is deprecated; use orthogonalization instead.",
-                UserWarning,
-                stacklevel=2,
-            )
-        if self.polar_express is not None:
-            warnings.warn(
-                "MuonClipConfig.polar_express is deprecated; use orthogonalization instead.",
-                UserWarning,
-                stacklevel=2,
             )
 
         # Warnings for suboptimal settings
@@ -185,36 +174,11 @@ class MuonClipConfig:
             )
         _ = self.adam_betas[1]
 
-        # Resolve orthogonalization algorithm
-        algo_source = self.algorithm or self.orthogonalization
-        if self.polar_express is not None:
-            algo_source = "polar_express" if self.polar_express else "newton_schulz"
-
-        if not algo_source:
-            algo_source = "polar_express"
-
-        algo_normalized = str(algo_source).replace("-", "_").lower()
-        alias_map = {
-            "ns5": "newton_schulz",
-            "newton_schulz5": "newton_schulz",
-            "newton_schulz_5": "newton_schulz",
-            "polar": "polar_express",
-        }
-        algo = alias_map.get(algo_normalized, algo_normalized)
-
-        valid_algos = {"polar_express", "newton_schulz"}
-        if algo not in valid_algos:
-            raise ValueError(
-                f"Unsupported orthogonalization algorithm '{algo_source}'. "
-                f"Valid options: {', '.join(sorted(valid_algos))}"
-            )
-
-        self.orthogonalization = algo
+        self.orthogonalization = normalize_muon_orthogonalization(
+            self.orthogonalization
+        )
         self.norm_factor = normalize_muon_norm_factor(self.norm_factor)
         self.param_policy = normalize_muon_param_policy(self.param_policy)
-        self.algorithm = algo
-        # Reset explicit toggle to prevent downstream confusion
-        self.polar_express = None
 
 
 # Attention hooks

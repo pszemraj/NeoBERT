@@ -13,10 +13,6 @@ def test_prepare_wandb_config_task_scoping_matrix():
     cfg.glue.task_name = "sst2"
     cfg.mteb_batch_size = 64
     cfg.use_deepspeed = True
-    cfg.trainer.report_to = ["wandb"]
-    cfg.trainer.max_ckpt = 7
-    cfg.trainer.train_batch_size = 64
-    cfg.trainer.eval_batch_size = 64
     cfg.trainer.dataloader_num_workers = 4
     cfg.trainer.greater_is_better = False
     cfg.trainer.load_best_model_at_end = True
@@ -35,10 +31,6 @@ def test_prepare_wandb_config_task_scoping_matrix():
     assert "dataset" in payload
     assert "min_length" not in payload["dataset"]
     assert "alpha" not in payload["dataset"]
-    assert "report_to" not in payload["trainer"]
-    assert "max_ckpt" not in payload["trainer"]
-    assert "train_batch_size" not in payload["trainer"]
-    assert "eval_batch_size" not in payload["trainer"]
     assert "dataloader_num_workers" not in payload["trainer"]
     assert "greater_is_better" not in payload["trainer"]
     assert "load_best_model_at_end" not in payload["trainer"]
@@ -49,10 +41,6 @@ def test_prepare_wandb_config_task_scoping_matrix():
 
     cfg = Config()
     cfg.task = "glue"
-    cfg._raw_model_dict = {"hidden_size": 384, "hidden_act": "swiglu"}
-    payload = prepare_wandb_config(cfg)
-    assert "_raw_model_dict" in payload
-    assert payload["_raw_model_dict"] == cfg._raw_model_dict
     cfg.glue.task_name = "mnli"
     payload = prepare_wandb_config(cfg)
     assert payload["task"] == "glue"

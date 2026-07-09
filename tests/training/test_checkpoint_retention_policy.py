@@ -17,23 +17,17 @@ from neobert.config import Config
         "neobert.contrastive.trainer",
     ],
 )
-def test_resolve_checkpoint_retention_limit_prefers_save_total_limit(
+def test_resolve_checkpoint_retention_limit_uses_save_total_limit(
     module_path: str,
 ) -> None:
-    """save_total_limit should take precedence over legacy max_ckpt."""
+    """Retention should use the canonical save_total_limit field."""
     module = importlib.import_module(module_path)
 
     cfg = Config()
     cfg.trainer.save_total_limit = 1
-    cfg.trainer.max_ckpt = 7
     assert module._resolve_checkpoint_retention_limit(cfg) == 1
 
     cfg.trainer.save_total_limit = None
-    cfg.trainer.max_ckpt = 3
-    assert module._resolve_checkpoint_retention_limit(cfg) == 3
-
-    cfg.trainer.save_total_limit = None
-    cfg.trainer.max_ckpt = None
     assert module._resolve_checkpoint_retention_limit(cfg) == 0
 
 

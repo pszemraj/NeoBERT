@@ -60,7 +60,6 @@ _TASK_CONFIG_FIELDS: dict[str, tuple[str, ...]] = {
         "scheduler",
         "wandb",
         "glue",
-        "_raw_model_dict",
         "pretraining_metadata",
     ),
     "mteb": (
@@ -86,13 +85,6 @@ _NON_CONTRASTIVE_DATASET_EXCLUDE_FIELDS = {
     "force_redownload",
     "min_length",
     "alpha",
-}
-
-_LEGACY_TRAINER_EXCLUDE_FIELDS = {
-    "report_to",
-    "max_ckpt",
-    "train_batch_size",
-    "eval_batch_size",
 }
 
 _NON_CONTRASTIVE_TRAINER_EXCLUDE_FIELDS = {"dataloader_num_workers"}
@@ -199,8 +191,6 @@ def _task_filter_config(config_dict: Dict[str, Any]) -> Dict[str, Any]:
 
     trainer_cfg = filtered.get("trainer")
     if isinstance(trainer_cfg, dict):
-        for key in _LEGACY_TRAINER_EXCLUDE_FIELDS:
-            trainer_cfg.pop(key, None)
         if task != "contrastive":
             for key in _NON_CONTRASTIVE_TRAINER_EXCLUDE_FIELDS:
                 trainer_cfg.pop(key, None)
@@ -374,18 +364,7 @@ def prepare_wandb_config(cfg: Any) -> Dict[str, Any]:
     :param Any cfg: Configuration object (typically a dataclass).
     :return dict[str, Any]: Task-scoped dictionary ready for tracker ingestion.
     """
-    config_dict = _serialize_config(cfg)
-
-    # Preserve dynamically attached metadata only for GLUE-oriented runs.
-    task = str(config_dict.get("task", "pretraining")).strip().lower()
-    if (
-        task == "glue"
-        and hasattr(cfg, "_raw_model_dict")
-        and cfg._raw_model_dict is not None
-    ):
-        config_dict["_raw_model_dict"] = cfg._raw_model_dict
-
-    return _task_filter_config(config_dict)
+    return _task_filter_config(_serialize_config(cfg))
 
 
 def configure_tf32(

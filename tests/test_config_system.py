@@ -20,9 +20,7 @@ from neobert.config import (
     TokenizerConfig,
     TrainerConfig,
     load_config_from_args,
-    round_up_to_multiple,
 )
-from tests.tokenizer_utils import build_wordlevel_tokenizer
 
 
 class TestConfigSystem(unittest.TestCase):
@@ -52,7 +50,6 @@ class TestConfigSystem(unittest.TestCase):
         self.assertFalse(config.trainer.torch_compile)
         self.assertEqual(config.trainer.torch_compile_backend, "inductor")
         self.assertTrue(config.trainer.enforce_full_packed_batches)
-        self.assertIsNone(config.trainer.max_ckpt)
         self.assertEqual(config.dataset.min_length, 5)
         self.assertEqual(config.contrastive.pretraining_prob, 0.3)
 
@@ -522,27 +519,6 @@ optimizer:
         finally:
             os.unlink(path)
 
-    def test_preprocess_uses_tokenizer_path(self):
-        """Ensure tokenizer path is preferred when provided."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tokenizer = build_wordlevel_tokenizer(
-                vocab={"hello": 3},
-                include_sep=False,
-            )
-            tokenizer.save_pretrained(tmpdir)
-
-            config = Config()
-            config.trainer.use_cpu = False
-            config.tokenizer.name = "non-existent-tokenizer"
-            config.tokenizer.path = tmpdir
-            config.tokenizer.vocab_size = len(tokenizer)
-            config.model.vocab_size = len(tokenizer)
-
-            processed = ConfigLoader.preprocess_config(config, resolve_vocab_size=True)
-
-            expected_vocab_size = round_up_to_multiple(len(tokenizer), 128)
-            self.assertEqual(processed.model.vocab_size, expected_vocab_size)
-
     def test_config_loading_error_paths(self):
         """Ensure missing files and unknown keys fail with clear exceptions."""
         with self.assertRaises(FileNotFoundError):
@@ -744,22 +720,14 @@ optimizer:
                 )
                 self.assertEqual(found, expect_warning)
 
-    def test_legacy_fields_are_ignored_with_deprecation_warnings(self):
-        """Ensure deprecated fields are ignored while emitting clear warnings."""
+    def test_unsupported_scheduler_field_is_ignored_with_warning(self):
+        """Ensure unsupported scheduler fields are ignored with a clear warning."""
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            cfg_report = ConfigLoader.dict_to_config(
-                {"trainer": {"report_to": ["wandb"]}, "wandb": {"enabled": False}}
-            )
             cfg_scheduler = ConfigLoader.dict_to_config(
                 {"scheduler": {"name": "cosine", "num_cycles": 1.5}}
             )
-        self.assertEqual(cfg_report.trainer.report_to, [])
         self.assertEqual(cfg_scheduler.scheduler.name, "cosine")
-        self.assertTrue(
-            any("trainer.report_to" in str(w.message) for w in caught),
-            "Expected deprecation warning for trainer.report_to",
-        )
         self.assertTrue(
             any("scheduler.num_cycles" in str(w.message) for w in caught),
             "Expected deprecation warning for scheduler.num_cycles",
@@ -779,31 +747,6 @@ optimizer:
                     "glue": {"preprocessing_num_proc": -1},
                 }
             )
-
-    def test_legacy_trainer_aliases_map_to_canonical_fields(self):
-        """Ensure legacy trainer aliases map to canonical fields."""
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            cfg = ConfigLoader.dict_to_config(
-                {
-                    "trainer": {
-                        "train_batch_size": 8,
-                        "eval_batch_size": 12,
-                        "max_ckpt": 5,
-                    }
-                }
-            )
-        self.assertEqual(cfg.trainer.per_device_train_batch_size, 8)
-        self.assertEqual(cfg.trainer.per_device_eval_batch_size, 12)
-        self.assertEqual(cfg.trainer.save_total_limit, 5)
-        self.assertIsNone(cfg.trainer.max_ckpt)
-        self.assertTrue(
-            any("trainer.train_batch_size" in str(w.message) for w in caught)
-        )
-        self.assertTrue(
-            any("trainer.eval_batch_size" in str(w.message) for w in caught)
-        )
-        self.assertTrue(any("trainer.max_ckpt" in str(w.message) for w in caught))
 
     def test_glue_seq_length_syncs_tokenizer_max_length(self):
         """Ensure tokenizer.max_length is synced to glue.max_seq_length for GLUE."""

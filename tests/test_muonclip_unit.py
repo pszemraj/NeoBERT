@@ -371,20 +371,13 @@ class TestMuonClipConfig:
         with pytest.warns(UserWarning):
             MuonClipConfig(ns_steps=2)  # Too few iterations
 
-    def test_algorithm_aliases(self):
-        """Test algorithm selection helpers."""
-        with pytest.warns(UserWarning, match="MuonClipConfig.algorithm is deprecated"):
-            cfg = MuonClipConfig(algorithm="newton_schulz")
-        assert cfg.orthogonalization == "newton_schulz"
-
-        with pytest.warns(
-            UserWarning, match="MuonClipConfig.polar_express is deprecated"
-        ):
-            cfg = MuonClipConfig(polar_express=False)
-        assert cfg.orthogonalization == "newton_schulz"
-
+    def test_orthogonalization_selection(self):
+        """Test canonical orthogonalization selection."""
         cfg = MuonClipConfig(orthogonalization="polar_express")
         assert cfg.orthogonalization == "polar_express"
+
+        cfg = MuonClipConfig(orthogonalization="newton_schulz")
+        assert cfg.orthogonalization == "newton_schulz"
 
         with pytest.raises(ValueError):
             MuonClipConfig(orthogonalization="unsupported")
@@ -922,11 +915,6 @@ class TestMuonClipOptimizer:
         normalized = optimizer._normalize_muon_update(update, update.shape)
         expected_scale = max(1.0, 12 / 3) ** 0.5
         torch.testing.assert_close(normalized, update * expected_scale)
-
-    def test_norm_factor_aliases_normalize_to_canonical_names(self):
-        """Legacy strings should normalize to the current canonical names."""
-        assert MuonClipConfig(norm_factor="legacy_compat").norm_factor == "neobert"
-        assert MuonClipConfig(norm_factor="original").norm_factor == "muon_reference"
 
     def test_interleaved_qkv_scaling(self):
         """Ensure fused QKV scaling matches per-head interleaved layout."""

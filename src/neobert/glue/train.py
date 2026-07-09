@@ -886,36 +886,17 @@ def trainer(cfg: Config) -> None:
         output_dir.mkdir(parents=True, exist_ok=True)
     accelerator.wait_for_everyone()
 
-    # Check from_hub in raw model dict for GLUE tasks
-    from_hub = False
-    if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
-        from_hub = cfg._raw_model_dict.get("from_hub", False)
-    elif hasattr(cfg.model, "from_hub"):
-        from_hub = cfg.model.from_hub
+    from_hub = cfg.model.from_hub
 
     model_pretraining_config: Config | None = None
     if from_hub:
         tokenizer = _load_from_hub_tokenizer(cfg)
     else:
-        # For GLUE, we MUST have pretrained model info
-        # Check if we're allowing random weights for testing
-        allow_random_weights = cfg.glue.allow_random_weights
-        if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
-            allow_random_weights = cfg._raw_model_dict.get(
-                "allow_random_weights", allow_random_weights
-            )
-
-        if allow_random_weights:
+        if cfg.glue.allow_random_weights:
             # Skip pretrained config loading for testing
             pretrained_config_path = None
         elif cfg.glue.pretrained_model_path:
             pretrained_config_path = cfg.glue.pretrained_model_path
-        elif (
-            hasattr(cfg, "_raw_model_dict")
-            and cfg._raw_model_dict
-            and "pretrained_config_path" in cfg._raw_model_dict
-        ):
-            pretrained_config_path = cfg._raw_model_dict["pretrained_config_path"]
         else:
             raise ValueError(
                 "GLUE evaluation requires a pretrained model! "
@@ -1098,12 +1079,8 @@ def trainer(cfg: Config) -> None:
         return batch
 
     # Use per_device batch sizes consistently
-    train_batch_size = (
-        cfg.trainer.per_device_train_batch_size or cfg.trainer.train_batch_size or 16
-    )
-    eval_batch_size = (
-        cfg.trainer.per_device_eval_batch_size or cfg.trainer.eval_batch_size or 32
-    )
+    train_batch_size = cfg.trainer.per_device_train_batch_size
+    eval_batch_size = cfg.trainer.per_device_eval_batch_size
     glue_num_workers = max(0, int(getattr(cfg.glue, "num_workers", 0)))
     train_loader_kwargs = {
         "collate_fn": collate_fn,
@@ -1161,21 +1138,8 @@ def trainer(cfg: Config) -> None:
                 if hasattr(model_pretraining_config.model, "__dict__")
                 else {}
             )
-        elif hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
-            # Use raw model dict when allow_random_weights is true
-            model_config_dict = cfg._raw_model_dict.copy()
         else:
-            # Fallback to cfg.model attributes
-            model_config_dict = {
-                "hidden_size": getattr(cfg.model, "hidden_size", 768),
-                "num_hidden_layers": getattr(cfg.model, "num_hidden_layers", 12),
-                "num_attention_heads": getattr(cfg.model, "num_attention_heads", 12),
-                "intermediate_size": getattr(cfg.model, "intermediate_size", 3072),
-                "vocab_size": getattr(cfg.model, "vocab_size", 30522),
-                "hidden_act": getattr(cfg.model, "hidden_act", "gelu"),
-                "max_length": getattr(cfg.model, "max_position_embeddings", 512),
-                "norm_eps": getattr(cfg.model, "norm_eps", 1e-5),
-            }
+            model_config_dict = cfg.model.__dict__.copy()
 
         # Map dropout_prob to dropout and remove classifier_init_range from model config
         if "dropout_prob" in model_config_dict:
@@ -1201,6 +1165,7 @@ def trainer(cfg: Config) -> None:
             model_config_dict.pop("name_or_path")
         if "name" in model_config_dict:
             model_config_dict.pop("name")
+        model_config_dict.pop("from_hub", None)
 
         # Use model config directly - don't merge with tokenizer config
         # The tokenizer's vocab_size should match the model's anyway
@@ -1210,13 +1175,7 @@ def trainer(cfg: Config) -> None:
         combined_config["attn_backend"] = "sdpa"
 
         # If using random weights (for testing), round vocab_size for GPU efficiency
-        allow_random_weights = cfg.glue.allow_random_weights
-        if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
-            allow_random_weights = cfg._raw_model_dict.get(
-                "allow_random_weights", allow_random_weights
-            )
-
-        if allow_random_weights and "vocab_size" in combined_config:
+        if cfg.glue.allow_random_weights and "vocab_size" in combined_config:
             from neobert.config import round_up_to_multiple
 
             # Round vocab_size for GPU efficiency when using random weights
@@ -1254,24 +1213,9 @@ def trainer(cfg: Config) -> None:
         pretrained_checkpoint_dir = Path(transfer_checkpoint_dir)
 
     else:
-        # Get checkpoint info from raw model dict for GLUE
         logger.info("Looking for pretrained checkpoint info...")
-
-        # Prefer GLUEConfig for checkpoint info
         pretrained_checkpoint_dir_cfg = cfg.glue.pretrained_checkpoint_dir
         pretrained_checkpoint = cfg.glue.pretrained_checkpoint
-
-        # Fall back to raw model dict for legacy configs
-        if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
-            pretrained_checkpoint_dir_cfg = cfg._raw_model_dict.get(
-                "pretrained_checkpoint_dir", pretrained_checkpoint_dir_cfg
-            )
-            pretrained_checkpoint = cfg._raw_model_dict.get(
-                "pretrained_checkpoint", pretrained_checkpoint
-            )
-            allow_random_weights = cfg._raw_model_dict.get(
-                "allow_random_weights", allow_random_weights
-            )
 
         if pretrained_checkpoint_dir_cfg:
             pretrained_checkpoint_dir = Path(pretrained_checkpoint_dir_cfg)
@@ -1392,11 +1336,7 @@ def trainer(cfg: Config) -> None:
             f"Invalid eval_strategy: {eval_strategy}. Must be 'epoch' or 'steps'"
         )
 
-    # To keep the last n checkpoints before the best model and do k cycles before early stopping, we save the last k+n models
     early_stopping = getattr(cfg.trainer, "early_stopping", 0)
-    max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
-    if max_ckpt is not None and max_ckpt > 0 and early_stopping > 0:
-        cfg.trainer.max_ckpt = max_ckpt + early_stopping
     save_strategy = str(getattr(cfg.trainer, "save_strategy", "steps")).strip().lower()
     save_model = bool(getattr(cfg.trainer, "save_model", True))
     save_steps = getattr(cfg.trainer, "save_steps", None)

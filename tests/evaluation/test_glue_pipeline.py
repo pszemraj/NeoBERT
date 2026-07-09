@@ -160,7 +160,6 @@ class TestGLUETaskSpecific:
                 cfg = Config()
                 cfg.trainer.output_dir = tmpdir
                 cfg.trainer.save_total_limit = save_total_limit
-                cfg.trainer.max_ckpt = None
 
                 model = torch.nn.Linear(8, 2)
                 optimizer = torch.optim.AdamW(model.parameters())

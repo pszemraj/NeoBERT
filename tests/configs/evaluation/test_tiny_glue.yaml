@@ -32,7 +32,6 @@ trainer:
   eval_steps: 10
   save_steps: 20
   dataloader_num_workers: 0
-  report_to: []
   use_cpu: true
 
 glue:

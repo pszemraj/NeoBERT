@@ -49,36 +49,9 @@ def validate_glue_config(cfg: Any) -> tuple[str, ...]:
         allow_random = bool(getattr(glue_cfg, "allow_random_weights", False))
         checkpoint_dir = getattr(glue_cfg, "pretrained_checkpoint_dir", None)
         checkpoint = getattr(glue_cfg, "pretrained_checkpoint", None)
-        if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
-            raw_model = cfg._raw_model_dict
-            if checkpoint_dir is None and "pretrained_checkpoint_dir" in raw_model:
-                checkpoint_dir = raw_model.get("pretrained_checkpoint_dir")
-                warnings.append(
-                    "Using legacy _raw_model_dict.pretrained_checkpoint_dir; "
-                    "migrate to glue.pretrained_checkpoint_dir."
-                )
-            if checkpoint is None and "pretrained_checkpoint" in raw_model:
-                checkpoint = raw_model.get("pretrained_checkpoint")
-                warnings.append(
-                    "Using legacy _raw_model_dict.pretrained_checkpoint; "
-                    "migrate to glue.pretrained_checkpoint."
-                )
-            if (
-                not allow_random
-                and "allow_random_weights" in raw_model
-                and checkpoint_dir is None
-                and checkpoint is None
-            ):
-                allow_random = bool(raw_model.get("allow_random_weights", False))
-                warnings.append(
-                    "Using legacy _raw_model_dict.allow_random_weights; "
-                    "migrate to glue.allow_random_weights."
-                )
 
         model_cfg = getattr(cfg, "model", None)
         from_hub = bool(getattr(model_cfg, "from_hub", False))
-        if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
-            from_hub = bool(cfg._raw_model_dict.get("from_hub", from_hub))
 
         if not allow_random and not from_hub:
             if _is_missing(checkpoint_dir) or _is_missing(checkpoint):
