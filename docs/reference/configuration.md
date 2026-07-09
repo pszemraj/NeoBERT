@@ -100,7 +100,7 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 | `model.embedding_init_range`  | `float` | `0.02`               | Embedding init stddev.                            |
 | `model.decoder_init_range`    | `float` | `0.02`               | Decoder init stddev.                              |
 | `model.classifier_init_range` | `float` | `0.02`               | Classifier head init stddev.                      |
-| `model.from_hub`              | `bool`  | `false`              | Metadata flag for loading behavior.               |
+| `model.from_hub`              | `bool`  | `false`              | Load a Hub sequence classifier in the GLUE path.  |
 
 ---
 
@@ -111,7 +111,7 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 | `tokenizer.name`                        | `str`         | `"bert-base-uncased"` | Tokenizer name from HF hub.                                                           |
 | `tokenizer.path`                        | `str \| None` | `null`                | Local tokenizer path (takes precedence when provided).                                |
 | `tokenizer.max_length`                  | `int`         | `512`                 | Tokenizer max length used during preprocessing.                                       |
-| `tokenizer.padding`                     | `str`         | `"max_length"`        | Padding behavior passed to tokenization pipeline.                                     |
+| `tokenizer.padding`                     | `str`         | `"max_length"`        | Stored compatibility field; current tokenization is unpadded and collators add padding. |
 | `tokenizer.truncation`                  | `bool`        | `true`                | Truncate to max length during tokenization.                                           |
 | `tokenizer.vocab_size`                  | `int \| None` | `null`                | Runtime-synchronized to effective model vocab size.                                   |
 | `tokenizer.trust_remote_code`           | `bool`        | `false`               | Allow tokenizer remote code execution.                                                |
@@ -119,7 +119,7 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 | `tokenizer.allow_special_token_rewrite` | `bool`        | `false`               | Explicit opt-in for fallback special-token rewrite when tokenizer lacks `mask_token`. |
 
 > [!NOTE]
-> Trainer now pads tokenizer length with inert placeholder tokens to keep `len(tokenizer) == model.vocab_size`. If a tokenizer lacks `mask_token`, NeoBERT now requires explicit `tokenizer.allow_special_token_rewrite: true` before mutating special tokens.
+> Pretraining rounds tokenizer length up to a multiple of 128 and adds deterministic `<|neobert_extra_token_{id}|>` placeholders so `len(tokenizer) == model.vocab_size`. Export aligns the tokenizer to the checkpoint's explicit model vocabulary and rejects shrinking or partial insertion. If a tokenizer lacks `mask_token`, set `tokenizer.allow_special_token_rewrite: true` before NeoBERT mutates special tokens.
 
 ---
 
@@ -163,7 +163,7 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 
 | Key                          | Type    | Default | Description                                                           |
 | ---------------------------- | ------- | ------- | --------------------------------------------------------------------- |
-| `dataset.load_all_from_disk` | `bool`  | `false` | Load full dataset into memory.                                        |
+| `dataset.load_all_from_disk` | `bool`  | `false` | Reuse selected cached contrastive splits from `<dataset.path>/all/`.  |
 | `dataset.force_redownload`   | `bool`  | `false` | Force dataset redownload.                                             |
 | `dataset.min_length`         | `int`   | `5`     | Short-text-friendly default for optional length filtering helpers.    |
 | `dataset.alpha`              | `float` | `1.0`   | Contrastive dataset sampling exponent (`1.0` = proportional by size). |
@@ -218,19 +218,19 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 | Key                              | Type          | Default   | Description                                               |
 | -------------------------------- | ------------- | --------- | --------------------------------------------------------- |
 | `trainer.resume_from_checkpoint` | `str \| None` | `null`    | Resume checkpoint selector/path.                          |
-| `trainer.overwrite_output_dir`   | `bool`        | `true`    | Overwrite output directory behavior.                      |
-| `trainer.num_train_epochs`       | `int`         | `3`       | Epoch count fallback when steps are not the only limiter. |
-| `trainer.eval_strategy`          | `str`         | `"steps"` | `steps` or `epoch`.                                       |
-| `trainer.save_strategy`          | `str`         | `"steps"` | `steps`, `epoch`, `best`, or `no`.                        |
-| `trainer.save_total_limit`       | `int \| None` | `3`       | Keep at most this many `checkpoints/<step>` directories.  |
+| `trainer.overwrite_output_dir`   | `bool`        | `true`    | Stored compatibility field; current trainers do not consume it.      |
+| `trainer.num_train_epochs`       | `int`         | `3`       | GLUE epoch count when `trainer.max_steps <= 0`; other trainers ignore it. |
+| `trainer.eval_strategy`          | `str`         | `"steps"` | `steps` or `epoch` for pretraining/GLUE; contrastive has no eval loop. |
+| `trainer.save_strategy`          | `str`         | `"steps"` | Pretraining/contrastive: `steps` or `no`; GLUE also accepts `epoch` and `best`. |
+| `trainer.save_total_limit`       | `int \| None` | `3`       | Retained step checkpoints; `0` or `null` disables pruning.            |
 | `trainer.disable_tqdm`           | `bool`        | `false`   | Disable progress bars.                                    |
 | `trainer.dataloader_num_workers` | `int`         | `0`       | Contrastive-only dataloader worker override.              |
 | `trainer.use_cpu`                | `bool`        | `false`   | Force CPU execution.                                      |
-| `trainer.early_stopping`         | `int`         | `0`       | Reserved in pretraining path.                             |
-| `trainer.metric_for_best_model`  | `str \| None` | `null`    | Reserved in pretraining path.                             |
-| `trainer.greater_is_better`      | `bool`        | `true`    | Reserved in pretraining path.                             |
-| `trainer.load_best_model_at_end` | `bool`        | `false`   | Reserved in pretraining path.                             |
-| `trainer.save_model`             | `bool`        | `true`    | Reserved/compatibility field.                             |
+| `trainer.early_stopping`         | `int`         | `0`       | GLUE evaluation cycles without improvement before stopping; other trainers ignore it. |
+| `trainer.metric_for_best_model`  | `str \| None` | `null`    | Stored but not consumed by current trainer runtime.       |
+| `trainer.greater_is_better`      | `bool`        | `true`    | Stored but not consumed by current trainer runtime.       |
+| `trainer.load_best_model_at_end` | `bool`        | `false`   | Stored but not consumed by current trainer runtime.       |
+| `trainer.save_model`             | `bool`        | `true`    | Enable checkpoint writes in all trainers.                 |
 
 ---
 
@@ -240,14 +240,14 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 | -------------------------- | --------------- | ---------- | ---------------------------------------- |
 | `scheduler.name`           | `str`           | `"cosine"` | LR schedule family.                      |
 | `scheduler.warmup_steps`   | `int`           | `10000`    | Absolute warmup steps.                   |
-| `scheduler.total_steps`    | `int \| None`   | `null`     | Optional explicit total schedule length. |
+| `scheduler.total_steps`    | `int \| None`   | `null`     | Schedule phase length; does not cap training. |
 | `scheduler.decay_steps`    | `int \| None`   | `null`     | Absolute decay end step.                 |
 | `scheduler.warmup_percent` | `float \| None` | `null`     | Percentage override for warmup.          |
 | `scheduler.decay_percent`  | `float \| None` | `null`     | Percentage override for decay.           |
 | `scheduler.final_lr_ratio` | `float`         | `0.1`      | Final LR floor ratio.                    |
 
 > [!IMPORTANT]
-> `warmup_percent` overrides `warmup_steps`; `decay_percent` overrides `decay_steps`.
+> `trainer.max_steps` controls run duration. `scheduler.total_steps` controls percentage-based schedule phases; after decay ends, learning rate remains at `scheduler.final_lr_ratio`. `warmup_percent` overrides `warmup_steps`; `decay_percent` overrides `decay_steps`.
 
 ---
 
@@ -312,7 +312,7 @@ Save cadence/retention knobs live under [Training Loop](#training-loop): `traine
 
 | Key                     | Type  | Default    | Description                               |
 | ----------------------- | ----- | ---------- | ----------------------------------------- |
-| `pretrained_checkpoint` | `str` | `"latest"` | Checkpoint selector for downstream tasks. |
+| `pretrained_checkpoint` | `str` | `"latest"` | Top-level checkpoint selector used by MTEB. |
 
 Checkpoint layout, selectors, and resume behavior are described in [Training](../guides/training.md#checkpointing-and-resume). Downstream loading behavior is described in [Evaluation](../guides/evaluation.md) and [Export](../guides/export.md).
 
@@ -344,7 +344,7 @@ Checkpoint layout, selectors, and resume behavior are described in [Training](..
 | `seed`                   | `int`            | `0`     | Global random seed.                                                      |
 | `debug`                  | `bool`           | `false` | Extra debug logging/prints.                                              |
 | `use_deepspeed`          | `bool`           | `false` | Legacy hint for DeepSpeed-formatted contrastive checkpoint loading only; requires the optional `legacy-checkpoints` extra when conversion is needed. |
-| `accelerate_config_file` | `str \| None`    | `null`  | Accelerate launch config path.                                           |
+| `accelerate_config_file` | `str \| None`    | `null`  | Logged metadata; launcher/runtime does not consume this field.            |
 | `pretraining_metadata`   | `dict[str, Any]` | `{}`    | Metadata passed to downstream evaluations.                               |
 | `config_path`            | `str \| None`    | `null`  | Source config path metadata.                                             |
 
@@ -407,15 +407,15 @@ Checkpoint layout, selectors, and resume behavior are described in [Training](..
 | `scheduler.warmup_percent` and `scheduler.warmup_steps`                           | **PRECEDENCE**     | `warmup_percent` overrides absolute warmup steps.                                                                   |
 | `scheduler.decay_percent` and `scheduler.decay_steps`                             | **PRECEDENCE**     | `decay_percent` overrides absolute decay steps.                                                                     |
 | `trainer.mixed_precision=bf16` on a broken CUDA/PyTorch runtime                    | **ENVIRONMENT**    | NeoBERT does not override BLAS selection; use a known-good PyTorch build for the host or set `mixed_precision='no'`. |
-| `trainer.use_cpu=true` on a CUDA host                                              | **CPU TARGET**     | Runtime preserves the requested precision policy and forces `attn_backend='sdpa'` for explicit CPU runs.            |
-| GLUE task with `model.attn_backend=flash_attn_varlen`                              | **AUTO-ADJUST**    | GLUE classifier wrappers force `attn_backend='sdpa'`; packed flash attention is not part of the supported GLUE path. |
+| `trainer.use_cpu=true` on a CUDA host                                              | **CPU TARGET**     | Runtime preserves the requested precision policy and forces `model.attn_backend='sdpa'` for explicit CPU runs.      |
+| GLUE task with `model.attn_backend=flash_attn_varlen`                              | **AUTO-ADJUST**    | GLUE classifier wrappers force `model.attn_backend='sdpa'`; packed flash attention is not part of the supported GLUE path. |
 | `optimizer.name=muonclip` with FSDP v1                                             | **ERROR**          | MuonClip distributed mode requires FSDP2 (`fsdp_version=2`).                                                       |
 | Any DeepSpeed runtime                                                              | **ERROR**          | DeepSpeed execution is unsupported in this repo; use Accelerate FSDP v2 for distributed runs. Legacy DeepSpeed checkpoint conversion remains available separately. |
 | `trainer.mixed_precision='no'` with `model.attn_backend=flash_attn_varlen`         | **AUTO-ADJUST**    | Runtime switches attention backend to `sdpa` with a warning.                                                       |
 | `contrastive.pretraining_prob > 0` with `model.dropout_prob <= 0`                 | **ERROR**          | SimCSE-style anti-forgetting steps require dropout-created views.                                                   |
 | `datacollator.pack_sequences=true` with `model.attn_backend=sdpa`                 | **WARNING**        | Works, but slower than `flash_attn_varlen`; SDPA uses fallback path.                                                |
 | `dataset.path` and `dataset.name` both set                                        | **PRECEDENCE**     | Existing local `dataset.path` is used first; hub dataset acts as fallback.                                          |
-| Tokenizer/model vocab sizes                                                       | **IMPORTANT**      | Runtime now pads tokenizer with inert tokens so tokenizer length matches model vocab size.                          |
+| Tokenizer/model vocab sizes                                                       | **IMPORTANT**      | Runtime pads the tokenizer with inert tokens so tokenizer length matches model vocabulary size.                    |
 | `model.pad_token_id`                                                              | **IMPORTANT**      | Runtime syncs this from tokenizer before model init/checkpoint save.                                                |
 
 ---

@@ -10,7 +10,7 @@ NeoBERT is an encoder architecture for masked-language-model pretraining, embedd
 This repo adds:
 
 - configurable attention backends (`sdpa`, `flash_attn_varlen` for packed training),
-- optional Liger kernel dispatch (`kernel_backend: auto|liger|torch`),
+- optional Liger kernel dispatch (`model.kernel_backend: auto|liger|torch`),
 - safetensors-first checkpointing,
 - end-to-end training/eval/export scripts with config-driven workflows.
 
@@ -19,6 +19,8 @@ Pretraining supports masked-logits-only training and a full-logits ablation path
 Original paper: <https://arxiv.org/abs/2502.19587>
 
 ## Install
+
+NeoBERT requires Python 3.10 or newer and PyTorch 2.6 or newer.
 
 ```bash
 git clone https://github.com/pszemraj/NeoBERT.git
@@ -41,9 +43,8 @@ See [docs/guides/troubleshooting.md](docs/guides/troubleshooting.md) for environ
 ## Verify Setup
 
 ```bash
-# Tiny pretraining smoke test
-python scripts/pretraining/pretrain.py \
-  tests/configs/pretraining/test_tiny_pretrain.yaml
+# Deterministic one-step local pretraining smoke
+pytest -q tests/training/test_pretrain_pipeline.py::TestPretrainPipeline::test_pretraining_one_step_local_smoke
 
 # Full test suite
 pytest -q
@@ -69,7 +70,7 @@ Directory READMEs under `configs/`, `scripts/`, `tests/`, and `jobs/` focus on e
 ```bibtex
 @misc{breton2025neobertnextgenerationbert,
       title={NeoBERT: A Next-Generation BERT},
-      author={Lola Le Breton and Quentin Fournier and Mariam El Mezouar and Sarath Chandar},
+      author={Lola Le Breton and Quentin Fournier and Mariam El Mezouar and John X. Morris and Sarath Chandar},
       year={2025},
       eprint={2502.19587},
       archivePrefix={arXiv},

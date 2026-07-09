@@ -6,11 +6,11 @@ Field definitions and defaults are in [docs/reference/configuration.md](../docs/
 
 ## Layout
 
-- `configs/pretraining/` - production/experiment pretraining recipes.
-- `configs/glue/` - per-task GLUE recipes and generated sweep configs.
-- `configs/contrastive/` - contrastive fine-tuning recipes.
+- `configs/pretraining/` - runnable pretraining recipes; most use Hub datasets or tokenizers.
+- `configs/glue/` - checkpoint-specific templates plus generated configs under `generated/`; generate configs for the checkpoint you intend to evaluate.
+- `configs/contrastive/` - contrastive fine-tuning recipe that expects preprocessed data at `dataset.path`.
 
-Tiny smoke-test configs live under [Test Config Files](../tests/configs/README.md).
+Small test fixtures live under [Test Config Files](../tests/configs/README.md); they are not all standalone jobs.
 
 ## Related Docs
 

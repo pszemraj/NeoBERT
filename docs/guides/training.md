@@ -18,7 +18,7 @@ Contrastive dataset selection and cache-reuse rules are in the [Data Source refe
 
 ## Pretraining
 
-### Basic launch
+### Long-running template
 
 ```bash
 python scripts/pretraining/pretrain.py \
@@ -126,6 +126,8 @@ The top-level `model.safetensors` is the portable export/eval payload and intent
 
 A bare step selector such as `--trainer.resume_from_checkpoint 100` resolves to `<output_dir>/checkpoints/100`; `latest` scans the same checkpoint root, while absolute paths and existing output-relative paths remain available for explicit selection.
 
+Pretraining and contrastive runs save on `trainer.save_steps` ticks and always save the terminal step when `trainer.save_strategy: steps` and `trainer.save_model: true`. `trainer.save_total_limit: 0` or `null` disables pruning. GLUE applies its own `steps`, `epoch`, `best`, or `no` save strategy.
+
 ### Crash recovery
 
 Resume from the newest saved checkpoint:
@@ -161,7 +163,7 @@ python scripts/pretraining/preprocess.py \
   configs/pretraining/pretrain_neobert.yaml
 ```
 
-1. Standalone tokenizer helper:
+2. Standalone tokenizer helper:
 
 ```bash
 python scripts/pretraining/tokenize_dataset.py \

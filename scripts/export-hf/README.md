@@ -6,7 +6,7 @@ Scripts for exporting and validating NeoBERT checkpoints in HF format.
 
 - `export.py` - convert a training checkpoint to HF-compatible model folder
 - `validate.py` - run structural + forward-pass validation on exported folder
-- `mlm_predict.py` - quick local masked-token inference sanity check for exports
+- `mlm_predict.py` - masked-token inference for a local export or Hub model
 
 ## Related Docs
 

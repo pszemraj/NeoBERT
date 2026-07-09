@@ -90,7 +90,7 @@ Useful control:
 
 - `trainer.enforce_full_packed_batches: true` improves token-throughput stability by buffering undersized packed outputs, usually at some cost to step rate
 
-`attn_backend: sdpa` still works for packed runs but uses the slower segmented fallback path.
+`model.attn_backend: sdpa` still works for packed runs but uses the slower segmented fallback path.
 
 ## Dataloader and Streaming Throughput
 
@@ -110,7 +110,7 @@ For hub-backed streaming datasets:
 
 - Hugging Face iterable streams are detected as streaming datasets before DataLoader construction, adapted to PyTorch's iterable API when needed, and not given map-style options such as DataLoader-level `shuffle`,
 - NeoBERT retries transient read failures while inspecting schemas and during long-running stream iteration; only network-layer failures (request timeouts/connection errors, retryable HTTP statuses, socket errnos) classify as transient, so permanent errors such as auth/config failures fail fast instead of consuming the retry budget,
-- retry recovery resumes from the last yielded example when the underlying HF iterable dataset supports `state_dict()/load_state_dict()`, and the retry wrapper remains visible to checkpoint/save-state resume paths and streaming eval-budget checks,
+- retry recovery resumes from the last yielded example when the underlying HF iterable dataset supports `state_dict()/load_state_dict()`; the wrapper remains visible to streaming detection and eval-budget checks, but its raw cursor is not checkpointed because the prepared dataloader is the safe resume boundary,
 - shuffled streams lose the in-memory shuffle buffer on retry recovery because HF `state_dict()` does not serialize buffer contents: the cursor rewinds correctly, but up to `dataset.shuffle_buffer_size` buffered-but-unyielded examples are skipped and the buffer refills from new data. The wrapper logs a warning whenever such a lossy recovery happens; unshuffled streams recover exactly-once.
 
 ## Contrastive Objective Details

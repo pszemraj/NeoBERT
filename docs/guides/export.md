@@ -20,6 +20,8 @@ python scripts/export-hf/export.py \
   outputs/<run>/checkpoints/<step>
 ```
 
+Without `--output`, export writes `outputs/<run>/hf/<run>_<step>/`.
+
 Optional output override:
 
 ```bash
@@ -28,7 +30,7 @@ python scripts/export-hf/export.py \
   --output outputs/<run>/hf/my_export
 ```
 
-Optional legacy PyTorch checkpoint file:
+Optional `pytorch_model.bin` export:
 
 ```bash
 python scripts/export-hf/export.py \
@@ -63,20 +65,26 @@ Generated folder contains:
 python scripts/export-hf/validate.py outputs/<run>/hf/<export_name>
 ```
 
-Validator checks file presence, model/tokenizer loading, MLM forward pass, and basic output sanity. It now also checks attention-mask parity (no-mask vs all-ones and int/bool/additive equivalence) to catch exported-model mask regressions.
+Validator checks file presence, model/tokenizer loading, MLM forward pass, basic output sanity, and attention-mask parity across no-mask, all-ones, integer, boolean, and additive forms.
+
+Run a masked-token prediction against a local export or Hub model:
+
+```bash
+python scripts/export-hf/mlm_predict.py \
+  outputs/<run>/hf/<run>_<step> \
+  --text "NeoBERT is a [MASK] encoder."
+```
 
 ## Mapping Notes
 
-- Export supports `hidden_act: swiglu|gelu`.
-- `ngpt: true` checkpoints are not supported by HF export path.
+- Export supports `model.hidden_act: swiglu|gelu`.
 - Export expects unpacked SwiGLU weights (`w1/w2/w3`).
 - Export target LM head is biasless. If a checkpoint includes `decoder.bias`, export fails by default unless `--allow-decoder-bias-drop` is set.
 - Exported HF models use their standalone standard attention implementation; training-only attention backend settings are not serialized.
 
 ## Constraints
 
-- Packed inputs/metadata are training-only and not supported in exported HF model.
-- Exported model expects normal HF batches and attention masks.
+The [architecture support matrix](../reference/architecture.md#ngpt-mode) covers nGPT task limitations. Exported models use ordinary Hugging Face batches and attention masks; packed training metadata is not supported.
 
 ## Troubleshooting
 

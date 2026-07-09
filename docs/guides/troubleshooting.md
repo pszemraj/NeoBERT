@@ -18,10 +18,10 @@ Symptoms:
 
 Checklist:
 
-1. use `attn_backend: flash_attn_varlen` for packed runs,
+1. use `model.attn_backend: flash_attn_varlen` for packed runs,
 2. ensure flash-attn is installed,
-3. tune dataloader knobs (`dataset.num_workers`, `pin_memory`, `persistent_workers`, `prefetch_factor`); pinning-path behavior is described in [Training Optimization](training-optimization.md#dataloader-and-streaming-throughput),
-4. compare `tokens/sec` (not only `steps/sec`) when `enforce_full_packed_batches=true`.
+3. tune dataloader knobs (`dataset.num_workers`, `dataset.pin_memory`, `dataset.persistent_workers`, `dataset.prefetch_factor`); pinning-path behavior is described in [Training Optimization](training-optimization.md#dataloader-and-streaming-throughput),
+4. compare `tokens/sec` (not only `steps/sec`) when `trainer.enforce_full_packed_batches: true`.
 
 ### Pretraining OOM from logits memory
 
@@ -34,7 +34,7 @@ Checklist:
 
 1. keep `trainer.masked_logits_only_loss: true` (project default),
 2. keep `trainer.mixed_precision: bf16` (or `no` if bf16 unsupported),
-3. use `gradient_checkpointing: true` for additional memory headroom.
+3. use `trainer.gradient_checkpointing: true` for additional memory headroom.
 
 ### `bf16` CUDA GEMM/runtime failures
 
@@ -54,7 +54,7 @@ Actions:
 1. pin a known-good PyTorch build for the affected host/GPU combination,
 2. verify CUDA/driver/PyTorch compatibility and rebuild extension wheels after version changes,
 3. set `trainer.mixed_precision: no` if that environment cannot run bf16 reliably,
-4. if you disable bf16, keep `attn_backend: sdpa` for supported execution.
+4. if you disable bf16, keep `model.attn_backend: sdpa` for supported execution.
 
 ### MuonClip QK clipping rejected under FSDP2
 
@@ -90,13 +90,13 @@ Actions:
 ### Resume refuses to load optimizer state
 
 - `optimizer_param_names.json is missing`: the checkpoint predates the optimizer resume manifest, so parameter order and state semantics cannot be verified. Start a new run or continue from model weights only; this repo does not carry checkpoint back-compat before a stable release.
-- `outdated manifest schema`: the manifest was written before state-semantics tracking. Re-save the checkpoint with a current trainer or start fresh.
+- `outdated manifest schema`: the manifest was written before state-semantics tracking. Start a current run from the portable model weights or start fresh.
 - `Optimizer state semantics changed`: the optimizer's update rule changed since the checkpoint was written - an implementation change (for example a momentum-scale change), or for MuonClip a drifted update-rule selector (`norm_factor`, `param_policy`, `orthogonalization`, `nesterov`, `clipping`), including a changed repo default. Resuming a clipping run as Muon-only (or vice versa) trips the `clipping` selector. Re-pin the checkpoint's selectors explicitly in the launch config to continue, or start a new run.
 - `Optimizer parameter order changed`: the model's parameter registration order differs from the checkpoint; PyTorch optimizer state is positional, so a silent load would hand buffers to the wrong parameters.
 
-### Resume fails with `Unexpected key(s) in state_dict: "model.encoder.weight"`
+### Resume fails because the Accelerate state directory is missing
 
-- The checkpoint was written before Accelerate resume state moved into `<step>/accelerate/`: the portable `model.safetensors` (which duplicates tied tensors) overwrote Accelerate's model payload, and safetensors' strict loader rejects it for weight-tied models. Checkpoints written by a current trainer are not affected; for old ones, start a new run or continue from model weights only.
+- Full resume requires `<step>/accelerate/`. A checkpoint written before that layout may still contain portable `model.safetensors`, but it cannot restore optimizer, scheduler, random, or custom trainer state. Start a current run from the portable model weights or start fresh.
 
 ## Evaluation Issues
 
@@ -114,9 +114,9 @@ Actions:
 
 - Check checkpoint has `tokenizer/` directory with special tokens map and vocab files.
 
-### `ngpt` checkpoint export failure
+### `model.ngpt` checkpoint export failure
 
-- HF export path currently does not support `ngpt: true` checkpoints.
+- HF export does not support `model.ngpt: true` checkpoints; see [nGPT Mode](../reference/architecture.md#ngpt-mode).
 
 ### Packed input mismatch at inference
 

@@ -28,7 +28,7 @@ pytest -k compile -q
 
 ## Manual Validation Scripts
 
-`tests/manual/` contains opt-in validation/benchmark scripts and is excluded from default `pytest -q` discovery.
+`tests/manual/` contains opt-in distributed validation scripts and is excluded from default `pytest -q` discovery.
 
 Manual script commands are in [tests/manual/README.md](../../tests/manual/README.md).
 
@@ -36,21 +36,21 @@ Manual script commands are in [tests/manual/README.md](../../tests/manual/README
 
 - Prefer tiny configs in `tests/configs/`.
 - Keep tests deterministic and local (avoid network where possible).
-- Disable external logging for training tests (`wandb.mode: disabled`).
+- Disable external logging for training tests with `wandb.enabled: false`.
 - Guard GPU-only assertions with `torch.cuda.is_available()`.
 - For performance-sensitive paths (packing/compile), include regression tests for both correctness and expected control-flow behavior.
 
 ## Common Failures
 
-1. Import errors
+### Import errors
 
 - install editable package (`pip install -e .[dev]`).
 
-1. Device mismatches
+### Device mismatches
 
 - ensure tensors and models are on the same device in assertions.
 
-1. Slow tests
+### Slow tests
 
 - lower steps/batch sizes and use tiny configs.
 
