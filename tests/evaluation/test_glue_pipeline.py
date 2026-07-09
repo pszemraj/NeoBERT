@@ -120,9 +120,18 @@ class TestGLUETaskSpecific:
         assert torch.equal(out, binary_mask)
 
     def test_save_training_checkpoint_retention_behaviors(self):
-        """Ensure GLUE checkpoint retention handles keep-all and prune modes."""
+        """GLUE checkpoints handle retention and write the optimizer manifest.
+
+        The optimizer parameter-name manifest guards resume against positional
+        state corruption; GLUE saves lacked it (unlike pretraining/contrastive),
+        so this also pins that each kept checkpoint carries the manifest.
+        """
         from neobert.glue.train import save_training_checkpoint
         from neobert.checkpointing import MODEL_WEIGHTS_NAME
+        from neobert.training_utils import (
+            OPTIMIZER_PARAM_NAMES_MANIFEST,
+            attach_optimizer_param_names,
+        )
 
         class DummyAccelerator:
             is_main_process = True
@@ -156,14 +165,16 @@ class TestGLUETaskSpecific:
                 cfg.trainer.max_ckpt = None
 
                 model = torch.nn.Linear(8, 2)
+                optimizer = torch.optim.AdamW(model.parameters())
+                attach_optimizer_param_names(model, optimizer)
                 accelerator = DummyAccelerator()
 
                 with mock.patch("neobert.glue.train.logger.info"):
                     save_training_checkpoint(
-                        cfg, model, accelerator, completed_steps=10
+                        cfg, model, optimizer, accelerator, completed_steps=10
                     )
                     save_training_checkpoint(
-                        cfg, model, accelerator, completed_steps=20
+                        cfg, model, optimizer, accelerator, completed_steps=20
                     )
 
                 checkpoint_root = Path(tmpdir) / "checkpoints"
@@ -172,6 +183,7 @@ class TestGLUETaskSpecific:
                     assert step_dir.exists() is should_exist
                     if should_exist:
                         assert (step_dir / MODEL_WEIGHTS_NAME).exists()
+                        assert (step_dir / OPTIMIZER_PARAM_NAMES_MANIFEST).exists()
                 assert not (Path(tmpdir) / "model_checkpoints").exists()
 
     def test_glue_schedule_and_save_strategy_semantics(self):

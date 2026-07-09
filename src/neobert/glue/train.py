@@ -53,10 +53,13 @@ from neobert.training_utils import (
     _maybe_prepare_for_forward,
     _resolve_resume_checkpoint,
     _unwrap_optimizer,
+    attach_optimizer_param_names,
     create_accelerator,
+    save_optimizer_param_name_manifest,
     validate_distributed_runtime_policy,
     validate_muon_distributed_compatibility,
     validate_muon_runtime_topology,
+    validate_optimizer_param_name_manifest,
 )
 from neobert.utils import (
     additive_attention_mask,
@@ -753,6 +756,7 @@ def _resolve_glue_training_schedule(
 def save_training_checkpoint(
     cfg: Config,
     model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
     accelerator: Accelerator,
     completed_steps: int,
 ) -> None:
@@ -760,6 +764,8 @@ def save_training_checkpoint(
 
     :param Config cfg: Configuration object.
     :param torch.nn.Module model: Model to save.
+    :param torch.optim.Optimizer optimizer: Optimizer whose parameter-name
+        manifest guards resume against positional state corruption.
     :param Accelerator accelerator: Accelerator instance.
     :param int completed_steps: Current training step.
     """
@@ -771,6 +777,12 @@ def save_training_checkpoint(
     # Save resumable Accelerate state for true optimizer/scheduler resume.
     save_accelerate_state(accelerator, checkpoint_path)
     accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        # Guard resume against optimizer parameter-order drift, matching the
+        # pretraining and contrastive trainers (Accelerate restores optimizer
+        # state positionally, so a construction/refactor change silently
+        # corrupts it without this manifest).
+        save_optimizer_param_name_manifest(optimizer, checkpoint_path)
     save_portable_checkpoint_weights(model, accelerator, checkpoint_path)
     accelerator.wait_for_everyone()
 
@@ -1382,6 +1394,8 @@ def trainer(cfg: Config) -> None:
         train_dataloader,
         eval_dataloader,
     )
+    # Record parameter-group ordering for the resume manifest guard.
+    attach_optimizer_param_names(model, optimizer)
 
     validate_muon_runtime_topology(
         accelerator=accelerator,
@@ -1537,6 +1551,9 @@ def trainer(cfg: Config) -> None:
             )
 
         accelerator.print(f"Resuming GLUE run from checkpoint: {resume_checkpoint}")
+        # Fail fast on optimizer parameter-order drift before loading positional
+        # optimizer state (checkpoints predating the manifest are rejected).
+        validate_optimizer_param_name_manifest(optimizer, resume_checkpoint)
         accelerator.load_state(str(resolve_accelerate_state_dir(resume_checkpoint)))
         validate_muon_runtime_topology(
             accelerator=accelerator,
@@ -1899,7 +1916,7 @@ def trainer(cfg: Config) -> None:
                     # means keep all checkpoints while still saving.
                     if should_save and save_model:
                         save_training_checkpoint(
-                            cfg, model, accelerator, completed_steps
+                            cfg, model, optimizer, accelerator, completed_steps
                         )
 
             if completed_steps >= cfg.trainer.max_steps or early_stop:

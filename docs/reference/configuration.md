@@ -368,7 +368,7 @@ Save cadence/retention knobs live under [Training Loop](#training-loop): `traine
 | `pretrained_checkpoint` | `str` | `"latest"` | Checkpoint selector for downstream tasks. |
 
 > [!NOTE]
-> Pretraining, contrastive, and GLUE resumable state checkpoints are written under `output_dir/checkpoints/<step>/`. Pretraining and contrastive step directories include config/tokenizer metadata plus optimizer parameter-name manifests for faithful resume. GLUE transfer/loading helpers still accept legacy `output_dir/model_checkpoints/<step>/` layouts for older runs. Resume path resolution uses numeric step directories and picks the highest available step for `resume_from_checkpoint: latest`. DeepSpeed `latest` indirection files are optional legacy metadata and are only consulted by DeepSpeed conversion/loading helpers when present.
+> Pretraining, contrastive, and GLUE resumable state checkpoints are written under `output_dir/checkpoints/<step>/`. Pretraining and contrastive step directories include config/tokenizer metadata plus optimizer parameter-name manifests for faithful resume. GLUE step directories also write the optimizer parameter-name manifest (resume fails fast on parameter-order drift) but omit the config/tokenizer metadata; GLUE transfer/loading helpers still accept legacy `output_dir/model_checkpoints/<step>/` layouts for older runs. Resume path resolution uses numeric step directories and picks the highest available step for `resume_from_checkpoint: latest`. DeepSpeed `latest` indirection files are optional legacy metadata and are only consulted by DeepSpeed conversion/loading helpers when present.
 
 ---
 
