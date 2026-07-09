@@ -8,8 +8,20 @@ from unittest import mock
 
 import pytest
 import torch
+from datasets import Dataset, DatasetDict
 
 from neobert.config import Config, ConfigLoader
+from neobert.contrastive.datasets import get_bsz
+from neobert.contrastive.loss import SupConLoss
+from neobert.contrastive.trainer import (
+    _contrastive_loss_for_backward,
+    _load_contrastive_pretrained_backbone_weights,
+    _normalize_contrastive_pretrained_checkpoint_root,
+    _pool_sequence,
+    _resolve_contrastive_dataloader_kwargs,
+    _sync_contrastive_runtime_from_pretraining,
+    trainer,
+)
 from neobert.model import NeoBERT, NeoBERTConfig
 from neobert.model.wrappers import NeoBERTLMHead
 from tests.tokenizer_utils import build_wordlevel_tokenizer
@@ -20,29 +32,14 @@ class TestContrastivePipeline:
 
     def test_contrastive_dataset_classes(self):
         """Test contrastive dataset class functionality."""
-        try:
-            from neobert.contrastive.datasets import get_bsz
+        bsz = get_bsz("ALLNLI", target_batch_size=8)
+        assert bsz == 4
 
-            # Test batch size calculation
-            bsz = get_bsz("ALLNLI", target_batch_size=8)
-            assert bsz == 4  # 8 // 2 = 4 (ALLNLI has factor 2)
-
-            # Test invalid dataset name
-            with pytest.raises(ValueError):
-                get_bsz("INVALID_DATASET", target_batch_size=8)
-
-        except ImportError as e:
-            pytest.skip(f"Contrastive datasets module not available: {e}")
+        with pytest.raises(ValueError):
+            get_bsz("INVALID_DATASET", target_batch_size=8)
 
     def test_contrastive_pretrained_checkpoint_root_rejects_legacy_layout(self):
         """Ensure legacy ``model_checkpoints`` roots fail fast for contrastive init."""
-        try:
-            from neobert.contrastive.trainer import (
-                _normalize_contrastive_pretrained_checkpoint_root,
-            )
-        except ImportError as e:
-            pytest.skip(f"Contrastive trainer module not available: {e}")
-
         with tempfile.TemporaryDirectory() as tmpdir:
             legacy_root = Path(tmpdir) / "model_checkpoints"
             legacy_root.mkdir(parents=True, exist_ok=True)
@@ -79,13 +76,6 @@ class TestContrastivePipeline:
         config.wandb.mode = "disabled"
         config.wandb.enabled = False
         config.contrastive.pretraining_prob = 0.0
-
-        try:
-            from datasets import Dataset, DatasetDict
-
-            from neobert.contrastive.trainer import trainer
-        except ImportError as e:
-            pytest.skip(f"Contrastive trainer dependencies unavailable: {e}")
 
         dataset_dict = DatasetDict(
             {
@@ -141,11 +131,6 @@ class TestContrastivePipeline:
 
     def test_contrastive_pooling_modes_respect_attention_mask(self):
         """Configured contrastive pooling should affect pooled embeddings."""
-        try:
-            from neobert.contrastive.trainer import _pool_sequence
-        except ImportError as e:
-            pytest.skip(f"Contrastive trainer module not available: {e}")
-
         hidden = torch.tensor(
             [
                 [[1.0, 2.0], [5.0, 0.0], [9.0, 9.0]],
@@ -164,11 +149,6 @@ class TestContrastivePipeline:
 
     def test_contrastive_loss_backward_normalizes_summed_loss(self):
         """Summed contrastive CE should be mean-normalized before backward."""
-        try:
-            from neobert.contrastive.trainer import _contrastive_loss_for_backward
-        except ImportError as e:
-            pytest.skip(f"Contrastive trainer module not available: {e}")
-
         loss_sum = torch.tensor(6.0, requires_grad=True)
         loss = _contrastive_loss_for_backward(loss_sum, query_count=3)
         loss.backward()
@@ -184,11 +164,6 @@ class TestContrastivePipeline:
         config.dataset.path = ""
         config.trainer.output_dir = temp_output_dir
         config.model.dropout_prob = 0.0
-
-        try:
-            from neobert.contrastive.trainer import trainer
-        except ImportError as e:
-            pytest.skip(f"Contrastive trainer dependencies unavailable: {e}")
 
         config.contrastive.pretraining_prob = 0.1
         with pytest.raises(ValueError, match="pretraining_prob > 0"):
@@ -208,63 +183,46 @@ class TestContrastivePipeline:
         config.trainer.max_steps = 0
         config.wandb.mode = "disabled"
 
-        try:
-            from datasets import Dataset, DatasetDict
+        dataset_dict = DatasetDict({"ALLNLI": Dataset.from_dict({"dummy": ["x"]})})
+        pretraining_dataset = Dataset.from_dict({"dummy": ["x"]})
 
-            from neobert.contrastive.trainer import trainer
+        def _fake_load_from_disk(path: str):
+            return pretraining_dataset
 
-            dataset_dict = DatasetDict({"ALLNLI": Dataset.from_dict({"dummy": ["x"]})})
-            pretraining_dataset = Dataset.from_dict({"dummy": ["x"]})
+        captured = {}
 
-            def _fake_load_from_disk(path: str):
-                return pretraining_dataset
+        def _fake_get_optimizer(model, distributed_type, model_config=None, **kwargs):
+            captured["model_config"] = model_config
+            return torch.optim.Adam(model.parameters(), lr=1e-3)
 
-            captured = {}
-
-            def _fake_get_optimizer(
-                model, distributed_type, model_config=None, **kwargs
-            ):
-                captured["model_config"] = model_config
-                return torch.optim.Adam(model.parameters(), lr=1e-3)
-
-            with (
-                mock.patch(
-                    "neobert.contrastive.trainer.load_from_disk",
-                    side_effect=_fake_load_from_disk,
+        with (
+            mock.patch(
+                "neobert.contrastive.trainer.load_from_disk",
+                side_effect=_fake_load_from_disk,
+            ),
+            mock.patch(
+                "neobert.contrastive.trainer.load_cached_contrastive_datasets",
+                return_value=dataset_dict,
+            ),
+            mock.patch(
+                "neobert.contrastive.trainer.get_tokenizer",
+                return_value=build_wordlevel_tokenizer(
+                    vocab={"hello": 2},
+                    include_mask=False,
+                    include_sep=False,
                 ),
-                mock.patch(
-                    "neobert.contrastive.trainer.load_cached_contrastive_datasets",
-                    return_value=dataset_dict,
-                ),
-                mock.patch(
-                    "neobert.contrastive.trainer.get_tokenizer",
-                    return_value=build_wordlevel_tokenizer(
-                        vocab={"hello": 2},
-                        include_mask=False,
-                        include_sep=False,
-                    ),
-                ),
-                mock.patch(
-                    "neobert.contrastive.trainer.get_optimizer",
-                    side_effect=_fake_get_optimizer,
-                ),
-            ):
-                trainer(config)
+            ),
+            mock.patch(
+                "neobert.contrastive.trainer.get_optimizer",
+                side_effect=_fake_get_optimizer,
+            ),
+        ):
+            trainer(config)
 
-            assert captured.get("model_config") is not None
-
-        except ImportError as e:
-            pytest.skip(f"Contrastive trainer dependencies unavailable: {e}")
+        assert captured.get("model_config") is not None
 
     def test_contrastive_loader_kwargs_keep_cuda_pin_memory(self):
         """Contrastive dataloaders should preserve pinned staging on CUDA."""
-        try:
-            from neobert.contrastive.trainer import (
-                _resolve_contrastive_dataloader_kwargs,
-            )
-        except ImportError as e:
-            pytest.skip(f"Contrastive trainer module not available: {e}")
-
         cuda_cfg = Config()
         cuda_cfg.dataset.pin_memory = False
         cuda_cfg.trainer.dataloader_num_workers = 4
@@ -291,10 +249,6 @@ class TestContrastivePipeline:
 
     def test_contrastive_pretrained_backbone_loader_strips_lm_head_prefix(self):
         """LM-head checkpoints should load the exact encoder backbone for contrastive."""
-        from neobert.contrastive.trainer import (
-            _load_contrastive_pretrained_backbone_weights,
-        )
-
         cfg = NeoBERTConfig(
             hidden_size=32,
             num_hidden_layers=2,
@@ -317,10 +271,6 @@ class TestContrastivePipeline:
 
     def test_contrastive_pretrained_backbone_loader_rejects_mismatch(self):
         """Partial or shape-mismatched encoder checkpoints must fail loudly."""
-        from neobert.contrastive.trainer import (
-            _load_contrastive_pretrained_backbone_weights,
-        )
-
         cfg = NeoBERTConfig(
             hidden_size=32,
             num_hidden_layers=2,
@@ -339,10 +289,6 @@ class TestContrastivePipeline:
 
     def test_contrastive_runtime_sync_uses_checkpoint_metadata(self, tmp_path: Path):
         """Checkpoint metadata should drive encoder/tokenizer compatibility for init."""
-        from neobert.contrastive.trainer import (
-            _sync_contrastive_runtime_from_pretraining,
-        )
-
         cfg = Config()
         cfg.model.hidden_size = 128
         cfg.model.num_hidden_layers = 3
@@ -473,21 +419,15 @@ class TestContrastiveLoss:
     )
     def test_contrastive_loss_variants(self, temperature: float, num_views: int):
         """Test supervised/self-supervised SupCon loss variants with one matrix."""
-        try:
-            from neobert.contrastive.loss import SupConLoss
+        loss_fn = SupConLoss(temperature=temperature)
+        batch_size = 4
+        hidden_size = 16
+        features = torch.randn(batch_size, num_views, hidden_size)
 
-            loss_fn = SupConLoss(temperature=temperature)
-            batch_size = 4
-            hidden_size = 16
-            features = torch.randn(batch_size, num_views, hidden_size)
+        queries = features[:, 0, :]
+        corpus = features[:, 0 if num_views == 1 else 1, :]
+        loss = loss_fn(queries, corpus)
 
-            queries = features[:, 0, :]
-            corpus = features[:, 0 if num_views == 1 else 1, :]
-            loss = loss_fn(queries, corpus)
-
-            assert isinstance(loss, torch.Tensor)
-            assert not torch.isnan(loss)
-            assert loss.item() >= 0
-
-        except ImportError:
-            pytest.skip("SupConLoss not available")
+        assert isinstance(loss, torch.Tensor)
+        assert not torch.isnan(loss)
+        assert loss.item() >= 0
