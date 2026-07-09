@@ -69,7 +69,7 @@ class TestModelForward(unittest.TestCase):
         self.assertFalse(torch.isinf(outputs).any())
 
     def test_config_backend_validation_and_defaults(self):
-        """Ensure backend aliases, defaults, and invalid values are validated."""
+        """Ensure canonical backend names, defaults, and errors are validated."""
         config = NeoBERTConfig(
             hidden_size=32,
             num_hidden_layers=1,
@@ -77,12 +77,14 @@ class TestModelForward(unittest.TestCase):
             intermediate_size=64,
             vocab_size=128,
             max_length=16,
-            attn_backend="flash",
+            attn_backend="flash_attn_varlen",
             hidden_act="gelu",
         )
         self.assertEqual(config.attn_backend, "flash_attn_varlen")
         self.assertEqual(NeoBERTConfig().vocab_size, 30522)
 
+        with self.assertRaisesRegex(ValueError, "Unknown attn_backend"):
+            NeoBERTConfig(attn_backend="flash")
         with self.assertRaisesRegex(ValueError, "Unknown attn_backend"):
             NeoBERTConfig(attn_backend="bad_backend")
         with self.assertRaisesRegex(ValueError, "Unknown kernel_backend"):

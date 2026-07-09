@@ -57,14 +57,14 @@ def canonicalize_attn_backend(
 ) -> Literal["sdpa", "flash_attn_varlen"]:
     """Canonicalize the attention backend string without environment checks.
 
-    :param str requested: One of ``"sdpa"``, ``"flash_attn_varlen"``, ``"flash_attn"``, or ``"flash"``.
+    :param str requested: ``"sdpa"`` or ``"flash_attn_varlen"``.
     :return str: Canonical backend name.
     :raises ValueError: If *requested* is unknown.
     """
     normalized = str(requested).lower().strip()
     if normalized == "sdpa":
         return "sdpa"
-    if normalized in ("flash_attn_varlen", "flash_attn", "flash"):
+    if normalized == "flash_attn_varlen":
         return "flash_attn_varlen"
     raise ValueError(
         f"Unknown attn_backend '{requested}'. Expected: 'sdpa' or 'flash_attn_varlen'."
@@ -76,7 +76,7 @@ def resolve_attn_backend(
 ) -> Literal["sdpa", "flash_attn_varlen"]:
     """Resolve and validate the attention backend against installed packages.
 
-    :param str requested: One of ``"sdpa"`` or ``"flash_attn_varlen"`` (aliases accepted).
+    :param str requested: ``"sdpa"`` or ``"flash_attn_varlen"``.
     :return str: Resolved backend name.
     :raises ImportError: If flash-attn backend is requested but unavailable.
     """
