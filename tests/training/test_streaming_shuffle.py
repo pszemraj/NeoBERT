@@ -282,6 +282,50 @@ class _RetryableFlakyDataset(torch.utils.data.IterableDataset):
             yield value
 
 
+class _EpochReportingStreamingDataset(torch.utils.data.IterableDataset):
+    """Stateful stream that reports the epoch assigned inside a worker."""
+
+    def __init__(self) -> None:
+        """Initialize the stream at epoch zero."""
+        super().__init__()
+        self.epoch = 0
+        self._state = {"cursor": 0, "epoch": 0}
+        self._starting_state = dict(self._state)
+
+    def set_epoch(self, epoch: int) -> None:
+        """Set the epoch used by the next iterator.
+
+        :param int epoch: Epoch index.
+        """
+        self.epoch = int(epoch)
+
+    def state_dict(self) -> dict[str, int]:
+        """Return the active stream position.
+
+        :return dict[str, int]: Cursor and epoch state.
+        """
+        return dict(self._state)
+
+    def load_state_dict(self, state_dict: dict[str, int]) -> None:
+        """Set the next iterator's starting position.
+
+        :param dict[str, int] state_dict: Cursor and epoch state.
+        """
+        self._starting_state = dict(state_dict)
+
+    def __iter__(self):
+        """Yield the current epoch once.
+
+        :return collections.abc.Iterator[int]: Current epoch index.
+        """
+        cursor = 0
+        if self._starting_state.get("epoch") == self.epoch:
+            cursor = int(self._starting_state.get("cursor", 0))
+        if cursor == 0:
+            self._state = {"cursor": 1, "epoch": self.epoch}
+            yield self.epoch
+
+
 class _StatefulCursorStreamingDataset(torch.utils.data.IterableDataset):
     """Streaming stub whose dataset object owns the active cursor state."""
 
@@ -666,6 +710,26 @@ class TestStreamingRetryHelpers(unittest.TestCase):
 
         self.assertEqual(resumed_dataset.epoch, 7)
         self.assertEqual(list(resumed), [2, 3])
+
+    def test_retrying_streaming_dataset_shares_epoch_with_persistent_worker(self):
+        """Persistent workers must observe epoch changes made by the main process."""
+        wrapped = RetryingStreamingDataset(
+            _EpochReportingStreamingDataset(),
+            label="persistent-worker-test",
+            max_retries=1,
+            base_backoff_seconds=0.01,
+            max_backoff_seconds=0.01,
+        )
+        loader = torch.utils.data.DataLoader(
+            wrapped,
+            batch_size=None,
+            num_workers=1,
+            persistent_workers=True,
+        )
+
+        self.assertEqual(list(loader), [0])
+        wrapped.set_epoch(1)
+        self.assertEqual(list(loader), [1])
 
     def test_prepared_dataloader_advances_raw_cursor_past_trained_batch(self):
         """Raw dataset cursor is not a valid streaming-resume checkpoint boundary.

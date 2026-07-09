@@ -369,16 +369,35 @@ class RetryingStreamingDataset(torch.utils.data.IterableDataset):
         self.base_backoff_seconds = float(base_backoff_seconds)
         self.max_backoff_seconds = float(max_backoff_seconds)
         self.sleep_fn = sleep_fn
-        self._epoch = int(getattr(dataset, "epoch", 0))
+        self._epoch = torch.tensor(
+            int(getattr(dataset, "epoch", 0)), dtype=torch.int64
+        ).share_memory_()
+
+    def _current_epoch(self) -> int:
+        """Return the epoch stored in worker-shared memory.
+
+        :return int: Current dataset epoch.
+        """
+        return int(self._epoch.item())
+
+    def _set_shared_epoch(self, epoch: int) -> int:
+        """Update the worker-shared epoch in place.
+
+        :param int epoch: Epoch index to publish to persistent workers.
+        :return int: Normalized epoch index.
+        """
+        normalized_epoch = int(epoch)
+        self._epoch.fill_(normalized_epoch)
+        return normalized_epoch
 
     def set_epoch(self, epoch: int) -> None:
         """Set the current dataset epoch and propagate to the wrapped dataset.
 
         :param int epoch: Epoch index to use for subsequent iterations.
         """
-        self._epoch = int(epoch)
+        epoch = self._set_shared_epoch(epoch)
         if hasattr(self.dataset, "set_epoch"):
-            self.dataset.set_epoch(self._epoch)
+            self.dataset.set_epoch(epoch)
 
     def state_dict(self) -> dict[str, Any]:
         """Return checkpointable wrapper and dataset iteration state.
@@ -387,7 +406,7 @@ class RetryingStreamingDataset(torch.utils.data.IterableDataset):
         """
         return {
             _WRAPPER_STATE_VERSION_KEY: _WRAPPER_STATE_VERSION,
-            _WRAPPER_STATE_EPOCH_KEY: self._epoch,
+            _WRAPPER_STATE_EPOCH_KEY: self._current_epoch(),
             _WRAPPER_DATASET_STATE_KEY: self.dataset.state_dict(),
         }
 
@@ -403,7 +422,7 @@ class RetryingStreamingDataset(torch.utils.data.IterableDataset):
         :raises ValueError: If a wrapper payload carries an unsupported version.
         """
         dataset_state = state_dict
-        epoch = self._epoch
+        epoch = self._current_epoch()
         if isinstance(state_dict, Mapping):
             if _WRAPPER_DATASET_STATE_KEY in state_dict:
                 version = state_dict.get(_WRAPPER_STATE_VERSION_KEY)
@@ -421,10 +440,10 @@ class RetryingStreamingDataset(torch.utils.data.IterableDataset):
                 if raw_epoch is not None:
                     epoch = int(raw_epoch)
 
-        self._epoch = epoch
+        epoch = self._set_shared_epoch(epoch)
         self.dataset.load_state_dict(dataset_state)
         if hasattr(self.dataset, "set_epoch"):
-            self.dataset.set_epoch(self._epoch)
+            self.dataset.set_epoch(epoch)
 
     def __iter__(self) -> Iterator[Any]:
         """Iterate over the wrapped dataset with transient read recovery.
@@ -444,14 +463,15 @@ class RetryingStreamingDataset(torch.utils.data.IterableDataset):
         """
         retries = 0
         resume_state: Any | None = None
+        epoch = self._current_epoch()
         if hasattr(self.dataset, "set_epoch"):
-            self.dataset.set_epoch(self._epoch)
+            self.dataset.set_epoch(epoch)
 
         while True:
             if resume_state is not None:
                 self.dataset.load_state_dict(deepcopy(resume_state))
                 if hasattr(self.dataset, "set_epoch"):
-                    self.dataset.set_epoch(self._epoch)
+                    self.dataset.set_epoch(epoch)
             try:
                 # Snapshot before constructing/advancing the iterator so retries
                 # restart from the last known-good cursor, even if the dataset
@@ -488,7 +508,7 @@ class RetryingStreamingDataset(torch.utils.data.IterableDataset):
                     retries,
                     self.max_retries,
                     delay,
-                    self._epoch,
+                    epoch,
                     exc,
                 )
                 if streaming_state_restore_drops_shuffle_buffer(self.dataset):
