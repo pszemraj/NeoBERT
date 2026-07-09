@@ -22,9 +22,12 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 import transformers
 import yaml
-from neobert.checkpointing import load_deepspeed_fp32_state_dict
+from neobert.checkpointing import (
+    load_deepspeed_fp32_state_dict,
+    load_model_safetensors,
+)
 from neobert.modeling_utils import swiglu_intermediate_size
-from safetensors.torch import load_file, save_file
+from safetensors.torch import save_file
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 
@@ -125,10 +128,7 @@ def load_state_dict_from_checkpoint(checkpoint_path: Path) -> Dict[str, torch.Te
     """
     state_dict_path = checkpoint_path / "model.safetensors"
     if state_dict_path.exists():
-        state_dict = load_file(str(state_dict_path), device="cpu")
-        if not state_dict:
-            raise ValueError(f"Loaded state dict is empty from {state_dict_path}")
-        return state_dict
+        return load_model_safetensors(checkpoint_path, map_location="cpu")
 
     try:
         state_dict = load_deepspeed_fp32_state_dict(checkpoint_path)
@@ -371,7 +371,6 @@ def create_hf_config(
 
 def map_weights(
     state_dict: Dict[str, torch.Tensor],
-    model_config: Dict[str, Any],
     *,
     allow_decoder_bias_drop: bool = False,
 ) -> Dict[str, torch.Tensor]:
@@ -384,13 +383,11 @@ def map_weights(
     - Base model weights with "model." prefix for NeoBERTLMHead
     - Decoder weights at top level for LM head
     :param dict[str, torch.Tensor] state_dict: Training state dict.
-    :param dict[str, Any] model_config: Model config mapping.
     :param bool allow_decoder_bias_drop: Whether to allow dropping legacy decoder
         bias when exporting to the current biasless HF LM head.
     :return dict[str, torch.Tensor]: Remapped state dict.
     :raises ValueError: If legacy decoder bias is present and dropping is not allowed.
     """
-    _ = model_config
     mapped = {}
     legacy_bias_keys = [
         key for key in ("model.decoder.bias", "decoder.bias") if key in state_dict
@@ -581,7 +578,6 @@ def export_checkpoint(
     print("Converting and mapping model weights...")
     mapped_state_dict = map_weights(
         state_dict,
-        model_config,
         allow_decoder_bias_drop=allow_decoder_bias_drop,
     )
 
