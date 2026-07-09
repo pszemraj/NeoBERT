@@ -9,6 +9,7 @@ import torch
 
 from neobert.modeling_utils import (
     is_torch_compiling,
+    packed_seqlens_to_tensor,
     scaled_dot_product_attention_compat,
 )
 
@@ -145,31 +146,9 @@ def _normalize_packed_seqlens_tensor(
     :param int seq_len: Expected padded sequence length.
     :return torch.Tensor: ``int32`` tensor of shape ``[B, N]``.
     """
-    if torch.is_tensor(packed_seqlens):
-        tensor = packed_seqlens.detach()
-        if tensor.ndim == 1:
-            tensor = tensor.unsqueeze(1)
-        if tensor.ndim != 2:
-            raise ValueError(
-                "packed_seqlens tensor must be rank 1 or 2, got "
-                f"shape={tuple(tensor.shape)}"
-            )
-        tensor = tensor.to(torch.int32)
-    else:
-        normalized_rows: list[list[int]] = []
-        max_segments = 0
-        for row in packed_seqlens:
-            if row is None:
-                segs: list[int] = []
-            else:
-                segs = [int(x) for x in row if int(x) > 0]
-            normalized_rows.append(segs)
-            max_segments = max(max_segments, len(segs))
-        tensor = torch.zeros((len(normalized_rows), max_segments), dtype=torch.int32)
-        for idx, segs in enumerate(normalized_rows):
-            if not segs:
-                continue
-            tensor[idx, : len(segs)] = torch.tensor(segs, dtype=torch.int32)
+    tensor = packed_seqlens_to_tensor(packed_seqlens)
+    if tensor is None:
+        raise TypeError("packed_seqlens must not be None")
 
     if tensor.shape[0] != batch_size:
         raise ValueError(

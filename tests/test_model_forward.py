@@ -110,6 +110,22 @@ class TestModelForward(unittest.TestCase):
             out = model(x, pad_mask=None, packed_seqlens=packed)
         self.assertEqual(out.shape, (2, 8, 32))
 
+    def test_packed_seqlens_conversion_is_canonical(self):
+        """Ensure all packed-attention consumers share one metadata conversion."""
+        from neobert.modeling_utils import packed_seqlens_to_tensor
+
+        converted = packed_seqlens_to_tensor([[3, 0, 2], None, [4]])
+        torch.testing.assert_close(
+            converted,
+            torch.tensor([[3, 2], [0, 0], [4, 0]], dtype=torch.int32),
+        )
+
+        rank_one = packed_seqlens_to_tensor(torch.tensor([3, 2]))
+        self.assertEqual(rank_one.shape, (2, 1))
+        self.assertEqual(rank_one.dtype, torch.int32)
+        with self.assertRaisesRegex(TypeError, "Unsupported packed_seqlens type"):
+            packed_seqlens_to_tensor((3, 2))
+
     def test_flash_metadata_is_reused_across_layers(self):
         """Ensure flash packed metadata is prepared once and reused in all layers."""
         import neobert.model.model as model_module

@@ -25,7 +25,11 @@ from neobert.kernels.backend import (
     swiglu_forward,
 )
 from neobert.model.rotary import apply_rotary_emb, precompute_freqs_cis
-from neobert.modeling_utils import is_torch_compiling, swiglu_intermediate_size
+from neobert.modeling_utils import (
+    is_torch_compiling,
+    packed_seqlens_to_tensor,
+    swiglu_intermediate_size,
+)
 
 logger = logging.getLogger(__name__)
 PackedSeqLens = torch.Tensor | list[list[int]]
@@ -111,42 +115,9 @@ def _normalize_packed_seqlens(
     :param int | None seq_len: Optional sequence length for validation.
     :return torch.Tensor | None: Packed segment lengths tensor of shape ``[B, N]``.
     """
-    if packed_seqlens is None:
+    tensor = packed_seqlens_to_tensor(packed_seqlens)
+    if tensor is None:
         return None
-
-    if torch.is_tensor(packed_seqlens):
-        tensor = packed_seqlens.detach()
-        if tensor.ndim == 1:
-            tensor = tensor.unsqueeze(1)
-        if tensor.ndim != 2:
-            raise ValueError(
-                "packed_seqlens tensor must be rank 1 or 2, got "
-                f"shape={tuple(tensor.shape)}"
-            )
-        tensor = tensor.to(torch.int32)
-    elif isinstance(packed_seqlens, list):
-        normalized_rows: list[list[int]] = []
-        max_segments = 0
-        for row in packed_seqlens:
-            if row is None:
-                segs: list[int] = []
-            else:
-                segs = [int(x) for x in row if int(x) > 0]
-            normalized_rows.append(segs)
-            max_segments = max(max_segments, len(segs))
-
-        tensor = torch.zeros(
-            (len(normalized_rows), max_segments),
-            dtype=torch.int32,
-        )
-        for idx, segs in enumerate(normalized_rows):
-            if not segs:
-                continue
-            tensor[idx, : len(segs)] = torch.tensor(segs, dtype=torch.int32)
-    else:
-        raise TypeError(
-            f"Unsupported packed_seqlens type: {type(packed_seqlens).__name__}"
-        )
 
     if seq_len is not None:
         sums = tensor.clamp_min(0).sum(dim=1)

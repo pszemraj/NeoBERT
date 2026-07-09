@@ -56,6 +56,7 @@ from neobert.dataloader import get_dataloader
 from neobert.kernels.attention import resolve_runtime_attn_backend
 from neobert.kernels.backend import get_cross_entropy_loss, resolve_kernel_backend
 from neobert.model import NeoBERTConfig, NeoBERTLMHead
+from neobert.modeling_utils import packed_seqlens_to_tensor
 from neobert.optimizer import get_optimizer
 from neobert.pretraining.masked_objective import (
     MaskedObjectiveOut,
@@ -948,7 +949,7 @@ def _run_eval(
                     break
                 if manual_device_move:
                     batch = _move_batch_to_device(batch, accelerator.device)
-                packed_seqlens = _packed_seqlens_to_tensor(batch.get("packed_seqlens"))
+                packed_seqlens = packed_seqlens_to_tensor(batch.get("packed_seqlens"))
                 pad_mask = (
                     None
                     if packed_seqlens is not None
@@ -1011,44 +1012,6 @@ def _run_eval(
     finally:
         if was_training:
             model.train()
-
-
-def _packed_seqlens_to_tensor(
-    packed_seqlens: Any,
-) -> Optional[torch.Tensor]:
-    """Normalize packed sequence lengths to rank-2 int32 tensors.
-
-    :param Any packed_seqlens: Packed segment lengths tensor or list.
-    :return torch.Tensor | None: Packed segment lengths.
-    """
-    if packed_seqlens is None:
-        return None
-    if torch.is_tensor(packed_seqlens):
-        tensor = packed_seqlens.detach()
-        if tensor.ndim == 1:
-            tensor = tensor.unsqueeze(1)
-        if tensor.ndim != 2:
-            raise ValueError(
-                "packed_seqlens tensor must be rank 1 or 2, got "
-                f"shape={tuple(tensor.shape)}"
-            )
-        return tensor.to(torch.int32)
-
-    normalized_rows: list[list[int]] = []
-    max_segments = 0
-    for row in packed_seqlens:
-        if row is None:
-            segs: list[int] = []
-        else:
-            segs = [int(x) for x in row if int(x) > 0]
-        normalized_rows.append(segs)
-        max_segments = max(max_segments, len(segs))
-
-    tensor = torch.zeros((len(normalized_rows), max_segments), dtype=torch.int32)
-    for idx, segs in enumerate(normalized_rows):
-        if segs:
-            tensor[idx, : len(segs)] = torch.tensor(segs, dtype=torch.int32)
-    return tensor
 
 
 def _resolve_loader_perf_settings(
@@ -2620,7 +2583,7 @@ def trainer(cfg: Config) -> None:
 
             num_pred = (batch["labels"] != -100).sum()
             num_tokens = (batch["input_ids"] != model_config.pad_token_id).sum()
-            packed_seqlens = _packed_seqlens_to_tensor(batch.get("packed_seqlens"))
+            packed_seqlens = packed_seqlens_to_tensor(batch.get("packed_seqlens"))
             pad_mask = (
                 None
                 if packed_seqlens is not None

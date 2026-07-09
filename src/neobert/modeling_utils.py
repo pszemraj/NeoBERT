@@ -4,10 +4,50 @@ from __future__ import annotations
 
 import inspect
 import math
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 from torch.nn.functional import scaled_dot_product_attention
+
+
+def packed_seqlens_to_tensor(packed_seqlens: Any) -> Optional[torch.Tensor]:
+    """Convert packed segment lengths to a rank-2 int32 tensor.
+
+    Tensor inputs retain their device. List inputs are padded with zeros on CPU;
+    non-positive segment lengths are omitted.
+
+    :param Any packed_seqlens: Rank-1/rank-2 tensor, nested list, or ``None``.
+    :raises TypeError: If the input is neither a tensor nor a nested list.
+    :raises ValueError: If a tensor input is not rank 1 or 2.
+    :return torch.Tensor | None: Packed lengths shaped ``[batch, segments]``.
+    """
+    if packed_seqlens is None:
+        return None
+    if torch.is_tensor(packed_seqlens):
+        tensor = packed_seqlens.detach()
+        if tensor.ndim == 1:
+            tensor = tensor.unsqueeze(1)
+        if tensor.ndim != 2:
+            raise ValueError(
+                "packed_seqlens tensor must be rank 1 or 2, got "
+                f"shape={tuple(tensor.shape)}"
+            )
+        return tensor.to(torch.int32)
+    if not isinstance(packed_seqlens, list):
+        raise TypeError(
+            f"Unsupported packed_seqlens type: {type(packed_seqlens).__name__}"
+        )
+
+    rows = [
+        [] if row is None else [int(length) for length in row if int(length) > 0]
+        for row in packed_seqlens
+    ]
+    width = max((len(row) for row in rows), default=0)
+    tensor = torch.zeros((len(rows), width), dtype=torch.int32)
+    for index, row in enumerate(rows):
+        if row:
+            tensor[index, : len(row)] = torch.tensor(row, dtype=torch.int32)
+    return tensor
 
 
 def swiglu_intermediate_size(intermediate_size: int, multiple_of: int = 8) -> int:
