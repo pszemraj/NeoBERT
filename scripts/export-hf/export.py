@@ -27,6 +27,7 @@ from neobert.checkpointing import (
     load_model_safetensors,
 )
 from neobert.modeling_utils import swiglu_intermediate_size
+from neobert.tokenizer import align_tokenizer_vocab
 from safetensors.torch import save_file
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
@@ -92,28 +93,12 @@ def _align_tokenizer_vocab_for_export(
     :raises ValueError: If tokenizer length exceeds model vocab size.
     """
     current_size = len(tokenizer)
-    if current_size == target_vocab_size:
-        return 0
     if current_size > target_vocab_size:
         raise ValueError(
             "Tokenizer length exceeds model vocab_size in checkpoint: "
             f"len(tokenizer)={current_size} > vocab_size={target_vocab_size}."
         )
-
-    needed = target_vocab_size - current_size
-    extra_tokens = [
-        f"<|neobert_extra_token_{idx}|>"
-        for idx in range(current_size, current_size + needed)
-    ]
-    added = tokenizer.add_tokens(extra_tokens, special_tokens=False)
-    final_size = len(tokenizer)
-    if added != needed or final_size != target_vocab_size:
-        raise ValueError(
-            "Failed to align tokenizer vocabulary for export: "
-            f"needed={needed}, added={added}, final_size={final_size}, "
-            f"target={target_vocab_size}."
-        )
-    return added
+    return align_tokenizer_vocab(tokenizer, target_vocab_size)
 
 
 def load_state_dict_from_checkpoint(checkpoint_path: Path) -> Dict[str, torch.Tensor]:

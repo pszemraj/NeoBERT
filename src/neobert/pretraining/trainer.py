@@ -70,7 +70,11 @@ from neobert.streaming import (
     retry_streaming_operation,
     supports_streaming_iteration_resume,
 )
-from neobert.tokenizer import get_tokenizer, resolve_text_column
+from neobert.tokenizer import (
+    align_tokenizer_vocab,
+    get_tokenizer,
+    resolve_text_column,
+)
 from neobert.training_utils import (
     _maybe_compile_model,
     _maybe_prepare_for_forward,
@@ -525,41 +529,6 @@ def _move_batch_to_device(batch: BatchEncoding, device: torch.device) -> BatchEn
     return send_to_device(batch, device, non_blocking=True)
 
 
-def _pad_tokenizer_to_multiple(
-    tokenizer: PreTrainedTokenizerBase,
-    *,
-    multiple: int = 128,
-) -> tuple[int, int, int]:
-    """Pad tokenizer length to ``multiple`` by adding inert extra tokens.
-
-    The model uses rounded embedding sizes for tensor-core efficiency. Adding
-    explicit placeholder tokens keeps tokenizer/model vocab contracts aligned.
-
-    :param PreTrainedTokenizerBase tokenizer: Tokenizer to mutate.
-    :param int multiple: Target rounding multiple.
-    :return tuple[int, int, int]: ``(original_size, padded_size, added_count)``.
-    """
-    original_size = len(tokenizer)
-    padded_size = round_up_to_multiple(original_size, multiple)
-    if padded_size == original_size:
-        return original_size, padded_size, 0
-
-    needed = padded_size - original_size
-    extra_tokens = [
-        f"<|neobert_extra_token_{idx}|>"
-        for idx in range(original_size, original_size + needed)
-    ]
-    added = tokenizer.add_tokens(extra_tokens, special_tokens=False)
-    final_size = len(tokenizer)
-    if added != needed or final_size != padded_size:
-        raise RuntimeError(
-            "Failed to pad tokenizer vocabulary to requested multiple: "
-            f"needed={needed}, added={added}, final_size={final_size}, "
-            f"target={padded_size}."
-        )
-    return original_size, final_size, added
-
-
 def _sync_tokenizer_derived_config(
     cfg: Config,
     tokenizer: PreTrainedTokenizerBase,
@@ -570,10 +539,9 @@ def _sync_tokenizer_derived_config(
     :param PreTrainedTokenizerBase tokenizer: Active tokenizer instance.
     :return tuple[int, int, int]: ``(original_vocab_size, resolved_vocab_size, added)``.
     """
-    original_vocab_size, resolved_vocab_size, added_tokens = _pad_tokenizer_to_multiple(
-        tokenizer,
-        multiple=128,
-    )
+    original_vocab_size = len(tokenizer)
+    resolved_vocab_size = round_up_to_multiple(original_vocab_size, 128)
+    added_tokens = align_tokenizer_vocab(tokenizer, resolved_vocab_size)
 
     # This mutation is intentional and happens before model construction so all
     # ranks build the same tensor shapes; resolved values are persisted into

@@ -7,7 +7,12 @@ from typing import Any, Optional, Tuple
 
 from datasets import Dataset, Features, Sequence, Value
 from tokenizers.processors import TemplateProcessing
-from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers import (
+    AutoTokenizer,
+    PreTrainedTokenizer,
+    PreTrainedTokenizerBase,
+    PreTrainedTokenizerFast,
+)
 
 from neobert.streaming import (
     is_streaming_dataset,
@@ -16,6 +21,44 @@ from neobert.streaming import (
 )
 
 logger = logging.getLogger("neobert.tokenizer")
+
+
+def align_tokenizer_vocab(
+    tokenizer: PreTrainedTokenizerBase,
+    target_size: int,
+) -> int:
+    """Grow a tokenizer vocabulary to an exact target with inert placeholders.
+
+    Existing token IDs remain unchanged, and placeholder token names encode their
+    target IDs so saved tokenizer artifacts stay deterministic across training and
+    export.
+
+    :param PreTrainedTokenizerBase tokenizer: Tokenizer to mutate.
+    :param int target_size: Required exact tokenizer length.
+    :raises ValueError: If shrinking is requested or insertion misses the target.
+    :return int: Number of added placeholder tokens.
+    """
+    current_size = len(tokenizer)
+    if current_size == target_size:
+        return 0
+    if current_size > target_size:
+        raise ValueError(
+            "Cannot align tokenizer vocabulary to a smaller target: "
+            f"current_size={current_size}, target_size={target_size}."
+        )
+
+    needed = target_size - current_size
+    extra_tokens = [
+        f"<|neobert_extra_token_{idx}|>" for idx in range(current_size, target_size)
+    ]
+    added = tokenizer.add_tokens(extra_tokens, special_tokens=False)
+    final_size = len(tokenizer)
+    if added != needed or final_size != target_size:
+        raise ValueError(
+            f"Failed to align tokenizer vocabulary: needed={needed}, added={added}, "
+            f"final_size={final_size}, target={target_size}."
+        )
+    return added
 
 
 def get_tokenizer(
