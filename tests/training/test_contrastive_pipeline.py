@@ -410,24 +410,30 @@ class TestContrastivePipeline:
 class TestContrastiveLoss:
     """Test contrastive loss implementations."""
 
-    @pytest.mark.parametrize(
-        ("temperature", "num_views"),
-        [
-            (0.1, 1),
-            (0.05, 2),
-        ],
-    )
-    def test_contrastive_loss_variants(self, temperature: float, num_views: int):
-        """Test supervised/self-supervised SupCon loss variants with one matrix."""
-        loss_fn = SupConLoss(temperature=temperature)
-        batch_size = 4
-        hidden_size = 16
-        features = torch.randn(batch_size, num_views, hidden_size)
+    def test_contrastive_loss_matches_reference_logits(self):
+        """Loss should equal summed cross-entropy over cosine-similarity logits."""
+        queries = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        corpus = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        loss = SupConLoss(temperature=0.5)(queries, corpus)
 
-        queries = features[:, 0, :]
-        corpus = features[:, 0 if num_views == 1 else 1, :]
-        loss = loss_fn(queries, corpus)
+        expected_logits = torch.tensor([[2.0, 0.0], [0.0, 2.0]])
+        expected = torch.nn.functional.cross_entropy(
+            expected_logits, torch.arange(2), reduction="sum"
+        )
+        torch.testing.assert_close(loss, expected)
 
-        assert isinstance(loss, torch.Tensor)
-        assert not torch.isnan(loss)
-        assert loss.item() >= 0
+    def test_contrastive_loss_tensor_and_list_negatives_match(self):
+        """Tensor and list negative inputs should construct identical logits."""
+        queries = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        corpus = queries.clone()
+        negative_parts = [
+            torch.tensor([[-1.0, 0.0]]),
+            torch.tensor([[0.0, -1.0]]),
+        ]
+        loss_fn = SupConLoss(temperature=0.5)
+
+        tensor_loss = loss_fn(queries, corpus, torch.cat(negative_parts))
+        list_loss = loss_fn(queries, corpus, negative_parts)
+
+        torch.testing.assert_close(tensor_loss, list_loss)
+        assert tensor_loss > loss_fn(queries, corpus)
