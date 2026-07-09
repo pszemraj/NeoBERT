@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +45,25 @@ def tokenizer_vocab_hash(tokenizer: PreTrainedTokenizerBase) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def tokenizer_serialization_hash(tokenizer: PreTrainedTokenizerBase) -> str | None:
+    """Return a hash of a fast tokenizer's full serialization, or ``None``.
+
+    Fast tokenizers expose ``backend_tokenizer.to_str()``, which serializes the
+    complete tokenization behavior - vocabulary, BPE merges, normalizer,
+    pre-tokenizer, and post-processor - so hashing it captures segmentation
+    differences that a token-to-id vocabulary hash alone misses (for example a
+    changed merge table or ``add_prefix_space``). Slow tokenizers have no such
+    serialization; callers fall back to the vocab hash and explicit fields.
+
+    :param PreTrainedTokenizerBase tokenizer: Tokenizer to fingerprint.
+    :return str | None: SHA256 hex digest, or ``None`` for slow tokenizers.
+    """
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    if backend is None:
+        return None
+    return hashlib.sha256(backend.to_str().encode("utf-8")).hexdigest()
+
+
 def build_tokenization_manifest(
     tokenizer: PreTrainedTokenizerBase,
     *,
@@ -71,75 +89,38 @@ def build_tokenization_manifest(
     :param bool return_special_tokens_mask: Whether special-token masks are emitted.
     :return dict[str, Any]: Stable manifest payload.
     """
-    vocab_hash = tokenizer_vocab_hash(tokenizer)
-    # The tokenizer's ``name_or_path`` is deliberately excluded: it identifies
-    # where a tokenizer was loaded from, not how it tokenizes, so it does not
-    # belong in the tokenization contract. Including it also breaks checkpoint
-    # resume, where the tokenizer is reloaded from the checkpoint-local
-    # ``tokenizer/`` directory (a different path for the identical tokenizer);
-    # that would spuriously invalidate a valid cache and force full
-    # re-tokenization. The vocab hash, class, and special-token fields already
-    # identify the tokenization behavior.
+    # The contract records only what changes the produced token IDs, so a valid
+    # cache is never spuriously rejected and a mismatched one is never silently
+    # reused. It captures *how* the tokenizer tokenizes, not *where* it was
+    # loaded from (``name_or_path``) or its advertised default length
+    # (``model_max_length``, irrelevant when ``max_length`` is passed explicitly):
+    # those are excluded because they drift across checkpoint resume without
+    # affecting output. ``tokenizer_serialization_hash`` fingerprints the fast
+    # tokenizer's full serialization (vocab, merges, normalizer, pre-tokenizer),
+    # and ``truncation_side`` is recorded separately because it governs which
+    # tokens are dropped from long examples yet is a runtime attribute absent
+    # from that serialization. Padding side is intentionally omitted: tokenize()
+    # runs with ``padding=False`` (padding happens at collation), so it does not
+    # affect cached token IDs.
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "dataset_name": _jsonable(dataset_name),
         "dataset_config": _jsonable(dataset_config),
         "dataset_path": _jsonable(dataset_path),
         "column_name": _jsonable(column_name),
         "tokenizer_class": type(tokenizer).__name__,
-        "vocab_hash": vocab_hash,
+        "tokenizer_serialization_hash": tokenizer_serialization_hash(tokenizer),
+        "vocab_hash": tokenizer_vocab_hash(tokenizer),
         "vocab_size": int(len(tokenizer)),
         "special_tokens_map": _jsonable(dict(tokenizer.special_tokens_map)),
         "pad_token_id": _jsonable(tokenizer.pad_token_id),
         "mask_token_id": _jsonable(tokenizer.mask_token_id),
-        "model_max_length": _jsonable(getattr(tokenizer, "model_max_length", None)),
+        "truncation_side": _jsonable(getattr(tokenizer, "truncation_side", None)),
         "max_length": int(max_length),
         "truncation": bool(truncation),
         "add_special_tokens": bool(add_special_tokens),
         "return_special_tokens_mask": bool(return_special_tokens_mask),
     }
-
-
-def tokenization_manifest_fingerprint(manifest: dict[str, Any]) -> str:
-    """Return a stable hash for a complete tokenization manifest.
-
-    :param dict[str, Any] manifest: Tokenization manifest.
-    :return str: SHA256 hex digest.
-    """
-    payload = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def resolve_tokenized_cache_dir(
-    *,
-    requested_output_dir: str | Path | None,
-    dataset_name: Any,
-    manifest: dict[str, Any],
-    root: str | Path = "tokenized_data",
-) -> Path:
-    """Resolve the cache directory for a tokenized dataset.
-
-    Explicit paths are honored and guarded by manifest validation. Default paths
-    include tokenizer/tokenization fingerprints to avoid accidental reuse.
-
-    :param str | Path | None requested_output_dir: User-specified output path.
-    :param Any dataset_name: Dataset identifier for default path naming.
-    :param dict[str, Any] manifest: Tokenization manifest.
-    :param str | Path root: Root directory for default caches.
-    :return Path: Cache directory.
-    """
-    if requested_output_dir:
-        return Path(requested_output_dir)
-
-    dataset_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(dataset_name or "dataset"))
-    vocab_tag = str(manifest["vocab_hash"])[:12]
-    contract_tag = tokenization_manifest_fingerprint(manifest)[:10]
-    special_tag = "sp" if manifest["add_special_tokens"] else "nosp"
-    length_tag = f"L{manifest['max_length']}"
-    return (
-        Path(root)
-        / f"{dataset_key}__{vocab_tag}__{contract_tag}__{length_tag}__{special_tag}"
-    )
 
 
 def validate_tokenized_cache_manifest(
