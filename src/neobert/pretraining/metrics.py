@@ -58,6 +58,7 @@ class Metrics(defaultdict):
         "train/compute_accuracy",
         "train/batches",
         "train/batches_in_epoch",
+        "train/dataloader_batches_in_epoch",
         "train/samples",
         "train/masked_tokens",
         "train/epochs",

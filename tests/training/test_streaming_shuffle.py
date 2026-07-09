@@ -87,88 +87,65 @@ class TestStreamingShuffle(unittest.TestCase):
         self.assertIs(out, dataset)
         self.assertFalse(dataset.shuffle_called)
 
-    def test_prepare_resume_dataloader_streaming_skip_cases(self):
-        """Ensure streaming resume skips using the expected counter per case."""
+    class _DummyResumeDataloader:
+        def __init__(self) -> None:
+            self.set_epoch_called = False
 
-        class DummyDataloader:
-            def __init__(self) -> None:
-                self.set_epoch_called = False
+        def set_epoch(self, epoch: int) -> None:
+            self.set_epoch_called = True
 
-            def set_epoch(self, epoch: int) -> None:
-                self.set_epoch_called = True
+    class _DummyResumeAccelerator:
+        def __init__(self) -> None:
+            self.skip_called = False
+            self.last_skip = None
 
-            def __len__(self) -> int:
-                raise TypeError("no length")
+        def skip_first_batches(self, dataloader, num_batches: int):
+            self.skip_called = True
+            self.last_skip = num_batches
+            return dataloader
 
-        class DummyAccelerator:
-            def __init__(self) -> None:
-                self.skip_called = False
-                self.last_skip = None
+    def test_prepare_resume_dataloader_skips_raw_pulls_not_trained_batches(self):
+        """Resume skips raw dataloader pulls, not trained microbatches.
 
-            def skip_first_batches(self, dataloader, num_batches: int):
-                self.skip_called = True
-                self.last_skip = num_batches
-                return dataloader
-
-        cases = [
-            ("global_batches", {"train/epochs": 1, "train/batches": 5}, 5),
-            (
-                "epoch_local_batches",
-                {
-                    "train/epochs": 3,
-                    "train/batches": 105,  # Global batches across prior epochs.
-                    "train/batches_in_epoch": 7,  # Epoch-local resume position.
-                },
-                7,
-            ),
-        ]
-
-        for _name, metrics, expected_skip in cases:
-            dataloader = DummyDataloader()
-            accelerator = DummyAccelerator()
+        With packed collation an undersized batch is buffered (a raw dataloader
+        pull that advances no trained-batch counter), so the raw-pull count
+        exceeds the trained-batch count within an epoch. Resuming by the
+        trained-batch count would under-skip by the packing ratio and silently
+        replay already-trained data; the cursor must be the raw-pull counter.
+        """
+        for is_streaming in (True, False):
+            metrics = {
+                "train/epochs": 2,
+                "train/batches": 103,  # Global trained batches across epochs.
+                "train/batches_in_epoch": 3,  # Trained batches this epoch.
+                "train/dataloader_batches_in_epoch": 6,  # Raw pulls this epoch.
+            }
+            dataloader = self._DummyResumeDataloader()
+            accelerator = self._DummyResumeAccelerator()
             skipped = _prepare_resume_dataloader(
-                dataloader, metrics, accelerator, is_streaming=True
+                dataloader, metrics, accelerator, is_streaming=is_streaming
             )
             self.assertIs(skipped, dataloader)
             self.assertTrue(dataloader.set_epoch_called)
-            self.assertTrue(accelerator.skip_called)
-            self.assertEqual(accelerator.last_skip, expected_skip)
+            # Skips 6 raw pulls, not the 3 trained batches.
+            self.assertEqual(accelerator.last_skip, 6)
 
-    def test_prepare_resume_dataloader_uses_len_for_non_streaming(self):
-        """Ensure resume skip logic uses len and skip_first_batches when available."""
-
-        class DummyDataloader:
-            def __init__(self) -> None:
-                self.set_epoch_called = False
-
-            def set_epoch(self, epoch: int) -> None:
-                self.set_epoch_called = True
-
-            def __len__(self) -> int:
-                return 10
-
-        class DummyAccelerator:
-            def __init__(self) -> None:
-                self.skip_called = False
-                self.last_skip = None
-
-            def skip_first_batches(self, dataloader, num_batches: int):
-                self.skip_called = True
-                self.last_skip = num_batches
-                return dataloader
-
-        dataloader = DummyDataloader()
-        accelerator = DummyAccelerator()
-        metrics = {"train/epochs": 2, "train/batches": 17}
-
-        skipped = _prepare_resume_dataloader(
-            dataloader, metrics, accelerator, is_streaming=False
-        )
-
-        self.assertIs(skipped, dataloader)
-        self.assertTrue(dataloader.set_epoch_called)
-        self.assertTrue(accelerator.skip_called)
-        self.assertEqual(accelerator.last_skip, 7)
+    def test_prepare_resume_dataloader_no_raw_pulls_returns_none(self):
+        """No dataloader pulls this epoch (or a pre-counter checkpoint) skips nothing."""
+        for metrics in (
+            {"train/epochs": 0, "train/dataloader_batches_in_epoch": 0},
+            # Pre-counter checkpoint: raw-pull cursor absent -> restart the epoch.
+            {"train/epochs": 4, "train/batches": 200, "train/batches_in_epoch": 9},
+        ):
+            accelerator = self._DummyResumeAccelerator()
+            skipped = _prepare_resume_dataloader(
+                self._DummyResumeDataloader(),
+                metrics,
+                accelerator,
+                is_streaming=True,
+            )
+            self.assertIsNone(skipped)
+            self.assertFalse(accelerator.skip_called)
 
 
 class TestStreamingPercentSlice(unittest.TestCase):

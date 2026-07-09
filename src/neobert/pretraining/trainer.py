@@ -1500,58 +1500,30 @@ def _prepare_resume_dataloader(
     :param bool is_streaming: Whether the dataset is streaming.
     :return torch.utils.data.DataLoader | None: Skipped dataloader or ``None``.
     """
-    completed_batches = int(metrics.get("train/batches", 0))
-    if completed_batches <= 0:
+    # ``skip_first_batches`` skips *raw* dataloader iterations, so the resume
+    # cursor must be counted in raw pulls, not trained microbatches. With packed
+    # collation an undersized batch is buffered (a raw dataloader pull that
+    # advances no trained-batch counter), so resuming by the trained-batch count
+    # under-skips by the packing ratio and silently replays already-trained data.
+    # ``train/dataloader_batches_in_epoch`` counts raw pulls in the current epoch
+    # and resets at each epoch boundary, so it is the correct skip target for
+    # both streaming and map-style datasets. Checkpoints written before this
+    # counter existed skip nothing and restart the current epoch (safe: bounded
+    # re-training, never a silent partial replay).
+    resume_step = int(metrics.get("train/dataloader_batches_in_epoch", 0))
+    if resume_step <= 0:
         return None
-
-    loader_len: Optional[int] = None
-    if hasattr(train_dataloader, "__len__"):
-        try:
-            loader_len = len(train_dataloader)
-        except TypeError:
-            loader_len = None
 
     if hasattr(train_dataloader, "set_epoch"):
         train_dataloader.set_epoch(int(metrics.get("train/epochs", 0)))
 
-    if loader_len is not None:
-        if loader_len <= 0:
-            logger.warning(
-                "Resume requested but dataloader length is non-positive; "
-                "starting from the current epoch boundary."
-            )
-            return None
-        resume_step = completed_batches % loader_len
-        if is_streaming:
-            logger.info(
-                "Streaming resume: skipping "
-                f"{resume_step} batch(es) within current epoch "
-                f"(consumed={completed_batches}, loader_len={loader_len})."
-            )
-    else:
-        if not is_streaming:
-            logger.warning(
-                "Resume requested but dataloader has no length; "
-                "starting from the current epoch boundary."
-            )
-            return None
-        # Streaming fallback: when epoch has already been restored via
-        # ``set_epoch(train/epochs)``, global consumed-batch counts can over-skip.
-        # Prefer epoch-local progress when available from checkpointed metrics.
-        resume_step = int(metrics.get("train/batches_in_epoch", 0))
-        if resume_step <= 0:
-            # Backward-compatible fallback for older checkpoints.
-            resume_step = completed_batches
-        logger.warning(
-            "Streaming resume with unknown dataloader length: skipping "
-            f"{resume_step} batch(es) from current epoch "
-            f"(completed_batches={completed_batches}, "
-            f"batches_in_epoch={int(metrics.get('train/batches_in_epoch', 0))})."
-        )
-
-    if resume_step == 0:
-        return None
-
+    logger.info(
+        "Resume (%s): skipping %d dataloader batch(es) already pulled in the "
+        "current epoch (epoch=%d).",
+        "streaming" if is_streaming else "map-style",
+        resume_step,
+        int(metrics.get("train/epochs", 0)),
+    )
     return accelerator.skip_first_batches(train_dataloader, resume_step)
 
 
@@ -1726,9 +1698,14 @@ def trainer(cfg: Config) -> None:
     log_train_accuracy = bool(getattr(cfg.trainer, "log_train_accuracy", False))
     log_grad_norm = bool(getattr(cfg.trainer, "log_grad_norm", False))
     metrics["train/compute_accuracy"] = int(log_train_accuracy)
-    # Internal resume cursor only (checkpointed via register_for_checkpointing);
+    # Internal resume cursors only (checkpointed via register_for_checkpointing);
     # excluded from tracker payloads and console metrics.
+    # ``train/batches_in_epoch`` counts trained microbatches; the raw-pull cursor
+    # below is what resume skipping uses (see ``_prepare_resume_dataloader``).
     metrics["train/batches_in_epoch"] = int(metrics.get("train/batches_in_epoch", 0))
+    metrics["train/dataloader_batches_in_epoch"] = int(
+        metrics.get("train/dataloader_batches_in_epoch", 0)
+    )
 
     is_streaming = cfg.dataset.streaming
     (
@@ -2484,6 +2461,9 @@ def trainer(cfg: Config) -> None:
         saw_batch_this_epoch = False
         for batch in dataloader:
             saw_batch_this_epoch = True
+            # Count every raw dataloader pull (including ones buffered below) so
+            # resume skips the true consumed position, not the trained-batch count.
+            metrics["train/dataloader_batches_in_epoch"] += 1
             # Pack or truncate to target per-step batch size. Packed mode can emit
             # variable batch dimensions, so we buffer/merge there too now that
             # packed_seqlens uses fixed-width tensor metadata.
@@ -2863,6 +2843,7 @@ def trainer(cfg: Config) -> None:
         # Update the number of epochs
         metrics["train/epochs"] += 1
         metrics["train/batches_in_epoch"] = 0
+        metrics["train/dataloader_batches_in_epoch"] = 0
         skipped_train_dataloader = None
 
         # For streaming datasets, update the epoch to ensure different shuffling
