@@ -63,6 +63,18 @@ python scripts/evaluation/run_mteb.py \
 
 `scripts/evaluation/pseudo_perplexity.py` can load NeoBERT checkpoints from the current portable step layout (`checkpoints/<step>/model.safetensors`) and falls back to legacy DeepSpeed ZeRO conversion only when portable weights are absent. That legacy fallback requires the optional `neobert[legacy-checkpoints]` extra. When `checkpoint_path` points at a checkpoint root, `--checkpoint latest` first honors a legacy DeepSpeed `latest` file when present; otherwise it resolves to the newest loadable numbered step. If `checkpoint_path` already points at a specific step directory, pass the matching `--checkpoint` tag; explicit missing non-`latest` tags fail fast instead of silently loading the direct path.
 
+Select exactly one model source: use `--hub_model <model-id>` for a Hub masked LM, or use `--config_path <training-config> --checkpoint_path <run-or-checkpoint-path>` for a NeoBERT checkpoint. Hub models retain their learned position embeddings and reject `--max_length` values beyond the model's configured position limit.
+
+The default dataset is `wikipedia` (`20220301.en`, `train`). Override it with `--dataset_name`, `--dataset_config`, and `--dataset_split`, or pass `--data_path` for a dataset saved with `Dataset.save_to_disk()`. The utility applies one inclusive `--min_chars`/`--max_chars` filter, then deterministic shuffling and optional `--num_dataset_shards`/`--dataset_shard_index` sharding.
+
+```bash
+python scripts/evaluation/pseudo_perplexity.py \
+  --config_path configs/pretraining/pretrain_neobert.yaml \
+  --checkpoint_path outputs/my-run \
+  --checkpoint latest \
+  --max_length 512
+```
+
 ## Common Evaluation Pitfalls
 
 1. Wrong checkpoint path
