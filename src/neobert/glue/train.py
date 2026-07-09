@@ -3,10 +3,8 @@
 import json
 import logging
 import math
-import os
 import random
 import re
-import warnings
 from contextlib import nullcontext
 from copy import deepcopy
 from functools import partial
@@ -46,8 +44,13 @@ from neobert.tokenizer import get_tokenizer
 
 from neobert.config import Config, ConfigLoader, resolve_mixed_precision
 from neobert.glue.process import process_function
+from neobert.glue.tasks import (
+    compute_official_glue_score,
+    get_checkpoint_selection_score,
+    get_glue_task_spec,
+)
 from neobert.optimizer import get_optimizer
-from neobert.scheduler import get_scheduler
+from neobert.scheduler import get_scheduler, resolve_scheduler_steps
 from neobert.training_utils import (
     _maybe_compile_model,
     _maybe_prepare_for_forward,
@@ -71,42 +74,6 @@ from neobert.glue.validation import GlueValidationError, validate_glue_config
 
 logger = get_logger(__name__)
 _bootstrap_logger = logging.getLogger(__name__)
-
-TASK_TO_METRIC = {
-    "stsb": "eval_pearson",
-    "cola": "eval_matthews_correlation",
-    "qqp": "eval_f1",
-    "sst2": "eval_accuracy",
-    "mnli": "eval_accuracy",
-    "mrpc": "eval_accuracy",
-    "qnli": "eval_accuracy",
-    "rte": "eval_accuracy",
-    "wnli": "eval_accuracy",
-    "snli": "eval_accuracy",
-    "allnli": "eval_accuracy",
-}
-
-# Official GLUE scoring rules (average across metrics when multiple are reported)
-GLUE_SCORE_SPECS = {
-    "cola": ("matthews_correlation",),
-    "sst2": ("accuracy",),
-    "mrpc": ("accuracy", "f1"),
-    "stsb": ("pearson", "spearmanr"),
-    "qqp": ("accuracy", "f1"),
-    "mnli": ("accuracy", "accuracy_mm"),
-    "qnli": ("accuracy",),
-    "rte": ("accuracy",),
-    "wnli": ("accuracy",),
-}
-
-TASK_TO_TRANSFER_FROM = {
-    "mnli": "snli",
-    "qnli": "mnli",
-    "wnli": "allnli",
-    "stsb": "mnli",
-    "mrpc": "mnli",
-    "rte": "mnli",
-}
 
 _STEP_RE = re.compile(r"(?:^|/)(?:step|checkpoint)_(\d+)(?:$|/)")
 _EPOCH_RE = re.compile(r"(?:^|/)(?:epoch)_(\d+)(?:$|/)")
@@ -185,52 +152,6 @@ def _configure_wandb_metrics(accelerator: Accelerator) -> None:
         break
 
 
-def _normalize_metrics_for_scoring(raw_metrics: dict) -> dict[str, float]:
-    """Normalize metric keys for GLUE score calculation.
-
-    :param dict raw_metrics: Raw metric mapping from evaluation.
-    :return dict[str, float]: Normalized metric mapping.
-    """
-    normalized: dict[str, float] = {}
-    for key, value in (raw_metrics or {}).items():
-        if not isinstance(key, str) or not isinstance(value, (int, float)):
-            continue
-        metric_key = key[len("eval_") :] if key.startswith("eval_") else key
-        normalized[metric_key] = float(value)
-    return normalized
-
-
-def compute_glue_score(task: str, metrics: dict[str, float]) -> float | None:
-    """Return official GLUE score (averaged where required) for a task.
-
-    :param str task: GLUE task name.
-    :param dict[str, float] metrics: Evaluation metrics for the task.
-    :return float | None: Official GLUE score, if available.
-    """
-
-    metric_keys = GLUE_SCORE_SPECS.get(task)
-    if not metric_keys:
-        return None
-
-    normalized = _normalize_metrics_for_scoring(metrics)
-    values = []
-    for key in metric_keys:
-        if key in normalized:
-            values.append(normalized[key])
-            continue
-        if task == "mnli" and key == "accuracy_mm":
-            for alias in ("accuracy_mismatched", "mnli_mm", "accuracy-mm"):
-                if alias in normalized:
-                    values.append(normalized[alias])
-                    break
-
-    if not values:
-        combined = normalized.get("combined_score")
-        return float(combined) if combined is not None else None
-
-    return float(sum(values) / len(values))
-
-
 def _resolve_glue_task(cfg: Any) -> str:
     """Resolve the active GLUE task name from config.
 
@@ -268,27 +189,24 @@ def _resolve_glue_runtime_policy(cfg: Config) -> tuple[str, str]:
     return mixed_precision, "sdpa"
 
 
-def _load_glue_metric(glue_task: str, meta_task: str, experiment_id: str) -> Any:
+def _load_glue_metric(glue_task: str, experiment_id: str) -> Any:
     """Load an evaluate metric object for a GLUE-like task identifier.
 
     :param str glue_task: Task name (for example ``cola`` or ``mnli``).
-    :param str meta_task: Metric namespace (typically ``glue``).
     :param str experiment_id: Evaluate experiment id.
     :return Any: Instantiated evaluate metric object.
     """
-    if glue_task in ("multirc", "record"):
-        return evaluate.load("accuracy", experiment_id=experiment_id)
     if glue_task == "snli":
-        return evaluate.load(meta_task, "mnli", experiment_id=experiment_id)
+        return evaluate.load("glue", "mnli", experiment_id=experiment_id)
     if glue_task == "allnli":
-        return evaluate.load(meta_task, "wnli", experiment_id=experiment_id)
-    return evaluate.load(meta_task, glue_task, experiment_id=experiment_id)
+        return evaluate.load("glue", "wnli", experiment_id=experiment_id)
+    return evaluate.load("glue", glue_task, experiment_id=experiment_id)
 
 
 def _load_from_hub_tokenizer(cfg: Config) -> PreTrainedTokenizerBase:
     """Load tokenizer for hub sequence-classification models.
 
-    GLUE/SuperGLUE fine-tuning does not require MLM masking semantics, so hub
+    GLUE fine-tuning does not require MLM masking semantics, so hub
     tokenizers without a mask token should be accepted as-is.
 
     :param Config cfg: Runtime config.
@@ -557,16 +475,16 @@ def get_best_checkpoint_path(
         # Read the eval accuracy from the JSON file
         with json_path.open("r", encoding="utf-8") as f:
             results = json.load(f)
-            eval_accuracy = compute_glue_score(task, results) or results.get(
-                TASK_TO_METRIC.get(task, ""), 0
-            )
+            selection_score = get_checkpoint_selection_score(task, results)
+            if selection_score is None:
+                continue
 
             # Extract step number from the file name (e.g., all_results_step_{i}.json)
             step_number = int(json_path.stem.split("_")[3])
 
             # Update if a higher eval_accuracy is found
-            if eval_accuracy > best_accuracy:
-                best_accuracy = eval_accuracy
+            if selection_score > best_accuracy:
+                best_accuracy = selection_score
 
                 checkpoint = step_number
                 checkpoint_candidates = [
@@ -753,6 +671,28 @@ def _resolve_glue_training_schedule(
     return updates_per_epoch, max_steps, num_train_epochs
 
 
+def _resolve_glue_scheduler_steps(cfg: Config) -> tuple[int, int, int]:
+    """Resolve GLUE scheduler phases through the shared scheduler contract.
+
+    ``scheduler.total_steps`` controls percentage-based phase resolution without
+    changing the trainer's stopping point. This matches pretraining and
+    contrastive scheduling semantics.
+
+    :param Config cfg: Runtime training config with a resolved trainer max step.
+    :return tuple[int, int, int]: Warmup, decay-end, and constant-phase steps.
+    """
+    _, warmup_steps, decay_steps, constant_steps = resolve_scheduler_steps(
+        trainer_max_steps=cfg.trainer.max_steps,
+        total_steps=cfg.scheduler.total_steps,
+        warmup_steps=cfg.scheduler.warmup_steps,
+        warmup_percent=cfg.scheduler.warmup_percent,
+        decay_steps=cfg.scheduler.decay_steps,
+        decay_percent=cfg.scheduler.decay_percent,
+        constant_steps=0,
+    )
+    return warmup_steps, decay_steps, constant_steps
+
+
 def save_training_checkpoint(
     cfg: Config,
     model: torch.nn.Module,
@@ -884,15 +824,13 @@ def _sync_runtime_cfg_from_pretraining(
 
 
 def trainer(cfg: Config) -> None:
-    """Run GLUE/SuperGLUE fine-tuning loop.
+    """Run GLUE and supported NLI fine-tuning loops.
 
     :param Config cfg: Training configuration.
     """
     canonical_cfg = deepcopy(cfg)
 
-    # Extract task and meta_task from config
     glue_task = _resolve_glue_task(canonical_cfg)
-    meta_task = "glue"  # Default for GLUE tasks
     experiment_id = getattr(canonical_cfg, "id", "0")
 
     # Use a mutable runtime copy so canonical config remains task-stable
@@ -900,7 +838,6 @@ def trainer(cfg: Config) -> None:
 
     # Update cfg to have these as direct attributes for compatibility
     cfg.glue.task_name = glue_task
-    cfg.meta_task = meta_task
     cfg.id = experiment_id
     cfg.mode = getattr(cfg, "mode", "eval")  # Default to eval mode
     cfg.num_labels = cfg.glue.num_labels if hasattr(cfg, "glue") else 2
@@ -1014,10 +951,12 @@ def trainer(cfg: Config) -> None:
 
     # Validate configuration after resolving effective model/tokenizer settings.
     try:
-        validate_glue_config(cfg)
+        validation_warnings = validate_glue_config(cfg)
     except GlueValidationError as e:
         logger.error(f"Configuration validation failed: {e}")
         raise
+    for warning in validation_warnings:
+        logger.warning(warning)
 
     tracker_config_dict = prepare_wandb_config(cfg)
     if accelerator.is_main_process:
@@ -1048,14 +987,12 @@ def trainer(cfg: Config) -> None:
     accelerator.print("Loading metric...")
     # Keep train/eval metric state separate so eval.compute() does not reset
     # the running train metric window and vice versa.
-    train_metric_tracker = _load_glue_metric(glue_task, cfg.meta_task, cfg.id)
-    eval_metric_tracker = _load_glue_metric(glue_task, cfg.meta_task, cfg.id)
+    train_metric_tracker = _load_glue_metric(glue_task, cfg.id)
+    eval_metric_tracker = _load_glue_metric(glue_task, cfg.id)
 
     # Load additional metric for the mismatched validation set of mnli
     if glue_task == "mnli":
-        mm_metric = evaluate.load(
-            cfg.meta_task, "mnli_mismatched", experiment_id=cfg.id
-        )
+        mm_metric = evaluate.load("glue", "mnli_mismatched", experiment_id=cfg.id)
 
     # Loading the dataset
     accelerator.print("Loading dataset...")
@@ -1082,13 +1019,8 @@ def trainer(cfg: Config) -> None:
             desc="Collapsing classes into entailment and not entailment.",
         )
 
-    elif cfg.meta_task == "glue":
-        raw_datasets = load_dataset("glue", glue_task)
     else:
-        raw_datasets = load_dataset(
-            "json",
-            data_dir=Path(os.environ["HF_DATASETS_CACHE"]) / "super_glue" / glue_task,
-        )
+        raw_datasets = load_dataset("glue", glue_task)
 
     # Preprocessing the datasets
     mapping = partial(process_function, tokenizer=tokenizer, cfg=cfg)
@@ -1302,7 +1234,7 @@ def trainer(cfg: Config) -> None:
     allow_random_weights = cfg.glue.allow_random_weights
 
     if cfg.glue.transfer_from_task:
-        task_to_transfer_from = TASK_TO_TRANSFER_FROM.get(glue_task, None)
+        task_to_transfer_from = get_glue_task_spec(glue_task).transfer_from
         if not task_to_transfer_from:
             raise ValueError(f"Task to transfer from for {glue_task} is not set.")
         transfer_checkpoint_dir, checkpoint_list = get_best_checkpoint_path(
@@ -1422,43 +1354,15 @@ def trainer(cfg: Config) -> None:
             "preparation; check num_train_epochs/max_steps config."
         )
 
-    if cfg.scheduler.warmup_percent is not None:
-        if cfg.scheduler.warmup_steps is not None:
-            warnings.warn(
-                "Overriding warmup_steps based on scheduler.warmup_percent.",
-                UserWarning,
-                stacklevel=2,
-            )
-        cfg.scheduler.warmup_steps = math.ceil(
-            cfg.trainer.max_steps / 100 * cfg.scheduler.warmup_percent
-        )
-    if cfg.scheduler.decay_percent is not None:
-        if cfg.scheduler.decay_steps is not None:
-            warnings.warn(
-                "Overriding decay_steps based on scheduler.decay_percent.",
-                UserWarning,
-                stacklevel=2,
-            )
-        cfg.scheduler.decay_steps = math.ceil(
-            cfg.trainer.max_steps / 100 * cfg.scheduler.decay_percent
-        )
-    elif cfg.scheduler.decay_steps is None:
-        cfg.scheduler.decay_steps = cfg.trainer.max_steps
-
-    scheduler_params = (
-        cfg.scheduler.__dict__.copy()
-        if hasattr(cfg.scheduler, "__dict__")
-        else cfg.scheduler.copy()
-    )
-    if "name" in scheduler_params:
-        scheduler_params["decay"] = scheduler_params.pop("name")
-    if "final_lr_ratio" in scheduler_params:
-        scheduler_params["final_ratio"] = scheduler_params.pop("final_lr_ratio")
-
+    warmup_steps, decay_steps, constant_steps = _resolve_glue_scheduler_steps(cfg)
     scheduler = get_scheduler(
         optimizer=optimizer,
         lr=cfg.optimizer.lr,
-        **scheduler_params,
+        decay=cfg.scheduler.name,
+        warmup_steps=warmup_steps,
+        decay_steps=decay_steps,
+        final_ratio=cfg.scheduler.final_lr_ratio,
+        constant_steps=constant_steps,
     )
     scheduler = accelerator.prepare(scheduler)
     lr = cfg.optimizer.lr
@@ -1809,11 +1713,15 @@ def trainer(cfg: Config) -> None:
                         for key, value in val_metrics.items():
                             log_payload[f"val/{key}"] = value
 
-                        score_for_early_stop = compute_glue_score(
+                        official_score = compute_official_glue_score(
                             glue_task, val_metrics
                         )
-                        if score_for_early_stop is not None:
-                            log_payload["val/score"] = score_for_early_stop
+                        if official_score is not None:
+                            log_payload["val/score"] = official_score
+
+                        score_for_early_stop = get_checkpoint_selection_score(
+                            glue_task, val_metrics
+                        )
 
                         log_payload = {
                             k: _to_serializable(v) for k, v in log_payload.items()
@@ -1843,10 +1751,8 @@ def trainer(cfg: Config) -> None:
                         last_val_metrics.update(
                             {k: _to_serializable(v) for k, v in val_metrics.items()}
                         )
-                        if score_for_early_stop is not None:
-                            last_val_metrics["score"] = _to_serializable(
-                                score_for_early_stop
-                            )
+                        if official_score is not None:
+                            last_val_metrics["score"] = _to_serializable(official_score)
 
                         all_results = {
                             f"eval_{k}": _to_serializable(v)
@@ -1877,12 +1783,13 @@ def trainer(cfg: Config) -> None:
                                 json.dump(all_results, f, indent=2)
                         accelerator.wait_for_everyone()
 
-                        fallback_metric = next(iter(val_metrics.values()), 0.0)
-                        curr_accuracy = (
-                            score_for_early_stop
-                            if score_for_early_stop is not None
-                            else fallback_metric
-                        )
+                        if score_for_early_stop is None:
+                            raise RuntimeError(
+                                f"Evaluation for {glue_task} did not return required "
+                                f"checkpoint metric "
+                                f"{get_glue_task_spec(glue_task).checkpoint_metric!r}."
+                            )
+                        curr_accuracy = score_for_early_stop
                         metric_improved_this_eval = curr_accuracy > prev_accuracy
 
                         # Update early stopping counter

@@ -12,79 +12,12 @@ from typing import Dict, Iterable, Optional
 
 import yaml
 
+from neobert.glue.tasks import GLUE_TASK_SPECS
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "configs" / "glue" / "generated"
 DEFAULT_RESULTS_ROOT = Path("outputs/glue")
 DEFAULT_WANDB_PROJECT = "neobert-glue"
-
-
-# Task-specific overrides relative to the shared GLUE configuration
-TASK_SETTINGS: Dict[str, Dict[str, Dict[str, object]]] = {
-    "cola": {
-        "glue": {"num_labels": 2, "max_seq_length": 512},
-        "trainer": {
-            "metric_for_best_model": "eval_matthews_correlation",
-            "eval_steps": 200,
-            "logging_steps": 50,
-        },
-    },
-    "sst2": {
-        "glue": {"num_labels": 2, "max_seq_length": 512},
-        "trainer": {
-            "metric_for_best_model": "eval_accuracy",
-            "eval_steps": 500,
-        },
-    },
-    "mrpc": {
-        "glue": {"num_labels": 2, "max_seq_length": 512},
-        "trainer": {
-            "metric_for_best_model": "eval_f1",
-            "eval_steps": 100,
-        },
-    },
-    "stsb": {
-        "glue": {"num_labels": 1, "max_seq_length": 512},
-        "trainer": {
-            "metric_for_best_model": "eval_pearson",
-            "eval_steps": 150,
-        },
-    },
-    "qqp": {
-        "glue": {"num_labels": 2, "max_seq_length": 512},
-        "trainer": {
-            "metric_for_best_model": "eval_f1",
-            "eval_steps": 1000,
-        },
-    },
-    "mnli": {
-        "glue": {"num_labels": 3, "max_seq_length": 512},
-        "trainer": {
-            "metric_for_best_model": "eval_accuracy",
-            "eval_steps": 1000,
-        },
-    },
-    "qnli": {
-        "glue": {"num_labels": 2, "max_seq_length": 512},
-        "trainer": {
-            "metric_for_best_model": "eval_accuracy",
-            "eval_steps": 500,
-        },
-    },
-    "rte": {
-        "glue": {"num_labels": 2, "max_seq_length": 512},
-        "trainer": {
-            "metric_for_best_model": "eval_accuracy",
-            "eval_steps": 50,
-        },
-    },
-    "wnli": {
-        "glue": {"num_labels": 2, "max_seq_length": 512},
-        "trainer": {
-            "metric_for_best_model": "eval_accuracy",
-            "eval_steps": 20,
-        },
-    },
-}
 
 
 BASE_TRAINER = {
@@ -389,14 +322,21 @@ def build_configs(args: BuildArgs) -> Dict[str, Dict[str, object]]:
 
     configs: Dict[str, Dict[str, object]] = {}
     for task in args.tasks:
-        settings = TASK_SETTINGS[task]
+        spec = GLUE_TASK_SPECS[task]
+        trainer_overrides: Dict[str, object] = {
+            "metric_for_best_model": f"eval_{spec.checkpoint_metric}",
+            "eval_steps": spec.config_eval_steps,
+        }
+        if spec.config_logging_steps is not None:
+            trainer_overrides["logging_steps"] = spec.config_logging_steps
 
-        trainer_cfg = build_trainer_section(
-            output_dir_root, task, settings.get("trainer", {})
-        )
+        trainer_cfg = build_trainer_section(output_dir_root, task, trainer_overrides)
 
-        glue_cfg = {"task_name": task}
-        glue_cfg.update(settings.get("glue", {}))
+        glue_cfg = {
+            "task_name": task,
+            "num_labels": spec.num_labels,
+            "max_seq_length": 512,
+        }
         glue_cfg.update(glue_pretrain_section)
 
         config_dict: Dict[str, object] = {
@@ -504,8 +444,8 @@ def parse_args() -> argparse.Namespace:
         "--tasks",
         type=str,
         nargs="*",
-        default=sorted(TASK_SETTINGS.keys()),
-        choices=sorted(TASK_SETTINGS.keys()),
+        default=sorted(GLUE_TASK_SPECS),
+        choices=sorted(GLUE_TASK_SPECS),
         help="Subset of GLUE tasks to generate (default: all)",
     )
     parser.add_argument(
@@ -564,7 +504,7 @@ def main() -> None:
         entry = override
         if ":" in override:
             prefix, rest = override.split(":", 1)
-            if prefix in TASK_SETTINGS:
+            if prefix in GLUE_TASK_SPECS:
                 target = task_overrides.setdefault(prefix, {})  # type: ignore[assignment]
                 entry = rest
         parsed = parse_overrides([entry])

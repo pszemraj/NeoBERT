@@ -1,6 +1,6 @@
 """Learning-rate scheduler factory for training runs."""
 
-from typing import Any, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
@@ -14,7 +14,6 @@ def get_scheduler(
     decay_steps: int,
     final_ratio: float = 0.1,
     constant_steps: int = 0,
-    **kwargs: Any,
 ) -> SequentialLR:
     """Create a chained warmup/decay scheduler.
 
@@ -25,7 +24,6 @@ def get_scheduler(
     :param int decay_steps: Final step index where decay should finish.
     :param float final_ratio: Final LR multiplier after decay.
     :param int constant_steps: Optional plateau steps after warmup.
-    :param Any kwargs: Unused extra scheduler arguments.
     :return SequentialLR: Configured scheduler.
     """
 

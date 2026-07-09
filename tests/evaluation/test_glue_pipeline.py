@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
+import pytest
 import torch
 from torch.utils.data import DataLoader, Dataset
 
@@ -46,10 +47,7 @@ class TestGLUETaskSpecific:
         collator_ctor.assert_called_once_with(tokenizer, pad_to_multiple_of=16)
 
         with mock.patch("neobert.glue.train.evaluate.load") as load_fn:
-            _load_glue_metric("multirc", "glue", "exp")
-        load_fn.assert_called_once_with("accuracy", experiment_id="exp")
-        with mock.patch("neobert.glue.train.evaluate.load") as load_fn:
-            _load_glue_metric("snli", "glue", "exp")
+            _load_glue_metric("snli", "exp")
         load_fn.assert_called_once_with("glue", "mnli", experiment_id="exp")
 
         created = []
@@ -61,8 +59,8 @@ class TestGLUETaskSpecific:
             return metric
 
         with mock.patch("neobert.glue.train.evaluate.load", side_effect=_fake_load):
-            train_tracker = _load_glue_metric("cola", "glue", "exp")
-            eval_tracker = _load_glue_metric("cola", "glue", "exp")
+            train_tracker = _load_glue_metric("cola", "exp")
+            eval_tracker = _load_glue_metric("cola", "exp")
         assert len(created) == 2
         assert train_tracker is created[0]
         assert eval_tracker is created[1]
@@ -213,6 +211,18 @@ class TestGLUETaskSpecific:
         assert max_steps == 11
         assert epochs == 3
 
+        from neobert.glue.train import _resolve_glue_scheduler_steps
+
+        cfg.scheduler.total_steps = 80
+        cfg.scheduler.warmup_percent = 10
+        cfg.scheduler.decay_percent = 75
+        cfg.scheduler.warmup_steps = 999
+        cfg.scheduler.decay_steps = 999
+        warmup, decay, constant = _resolve_glue_scheduler_steps(cfg)
+        assert (warmup, decay, constant) == (8, 60, 0)
+        assert cfg.scheduler.warmup_steps == 999
+        assert cfg.scheduler.decay_steps == 999
+
         assert _should_save_glue_checkpoint(
             save_strategy="steps",
             completed_steps=10,
@@ -251,6 +261,7 @@ class TestGLUETaskSpecific:
         from neobert.glue.validation import validate_glue_config
 
         cfg = Config()
+        cfg.task = "glue"
         cfg.glue.task_name = "sst2"
         cfg.model.from_hub = True
         cfg.glue.pretrained_checkpoint_dir = None
@@ -259,6 +270,7 @@ class TestGLUETaskSpecific:
 
         with tempfile.TemporaryDirectory() as checkpoint_dir:
             cfg = Config()
+            cfg.task = "glue"
             cfg.glue.task_name = "sst2"
             cfg.model.from_hub = False
             cfg.glue.allow_random_weights = False
@@ -266,6 +278,49 @@ class TestGLUETaskSpecific:
             cfg.glue.pretrained_checkpoint = 0
 
             validate_glue_config(cfg)
+
+    def test_validate_glue_config_is_side_effect_free(self, tmp_path):
+        """Ensure validation rejects bad labels without mutating config or paths."""
+        from neobert.glue.validation import GlueValidationError, validate_glue_config
+
+        cfg = Config()
+        cfg.task = "glue"
+        cfg.model.from_hub = True
+        cfg.glue.task_name = "sst2"
+        cfg.glue.num_labels = 3
+        cfg.trainer.output_dir = str(tmp_path / "not-created")
+
+        with pytest.raises(GlueValidationError, match="expects glue.num_labels=2"):
+            validate_glue_config(cfg)
+
+        assert cfg.glue.num_labels == 3
+        assert not (tmp_path / "not-created").exists()
+
+    def test_task_registry_separates_selection_and_official_scores(self):
+        """Ensure checkpoint selection never masquerades as an official GLUE score."""
+        from neobert.glue.tasks import (
+            compute_official_glue_score,
+            get_checkpoint_selection_score,
+            get_glue_task_spec,
+        )
+
+        mrpc = get_glue_task_spec("mrpc")
+        assert mrpc.num_labels == 2
+        assert mrpc.sentence_keys == ("sentence1", "sentence2")
+        assert mrpc.checkpoint_metric == "f1"
+        assert (
+            get_checkpoint_selection_score(
+                "mrpc", {"eval_accuracy": 0.9, "eval_f1": 0.8}
+            )
+            == 0.8
+        )
+        assert compute_official_glue_score(
+            "mrpc", {"eval_accuracy": 0.9, "eval_f1": 0.8}
+        ) == pytest.approx(0.85)
+        assert compute_official_glue_score("mrpc", {"eval_f1": 0.8}) is None
+        assert compute_official_glue_score(
+            "mnli", {"accuracy": 0.8, "accuracy_mismatched": 0.6}
+        ) == pytest.approx(0.7)
 
     def test_sync_runtime_cfg_from_pretraining_uses_pretrained_values(self):
         """Ensure runtime GLUE config mirrors loaded pretraining architecture/tokenizer."""

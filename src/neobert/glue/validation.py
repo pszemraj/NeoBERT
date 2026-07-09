@@ -1,40 +1,31 @@
-"""Validation helpers for GLUE fine-tuning."""
+"""Side-effect-free validation helpers for GLUE fine-tuning."""
 
-import logging
 from pathlib import Path
 from typing import Any
 
-from neobert.config import resolve_mixed_precision
-
-logger = logging.getLogger(__name__)
+from neobert.glue.tasks import SUPPORTED_GLUE_TASK_SPECS, get_glue_task_spec
 
 
 class GlueValidationError(Exception):
     """Raised when a GLUE configuration is invalid."""
 
 
-def validate_glue_config(cfg: Any) -> None:
+def validate_glue_config(cfg: Any) -> tuple[str, ...]:
     """Validate GLUE configuration before training.
 
     :param Any cfg: Configuration object.
     :raises GlueValidationError: If configuration is invalid.
+    :return tuple[str, ...]: Non-fatal validation warnings.
     """
-    errors = []
-
-    valid_tasks = [
-        "cola",
-        "sst2",
-        "mrpc",
-        "stsb",
-        "qqp",
-        "mnli",
-        "qnli",
-        "rte",
-        "wnli",
-        "snli",
-        "allnli",
-    ]
+    errors: list[str] = []
+    warnings: list[str] = []
+    valid_tasks = tuple(sorted(SUPPORTED_GLUE_TASK_SPECS))
     task = cfg.glue.task_name if hasattr(cfg, "glue") else getattr(cfg, "task", None)
+
+    if getattr(cfg, "task", None) != "glue":
+        errors.append(
+            f"Top-level task must be 'glue', got {getattr(cfg, 'task', None)!r}"
+        )
 
     if not task:
         errors.append("Task name is required")
@@ -62,13 +53,13 @@ def validate_glue_config(cfg: Any) -> None:
             raw_model = cfg._raw_model_dict
             if checkpoint_dir is None and "pretrained_checkpoint_dir" in raw_model:
                 checkpoint_dir = raw_model.get("pretrained_checkpoint_dir")
-                logger.warning(
+                warnings.append(
                     "Using legacy _raw_model_dict.pretrained_checkpoint_dir; "
                     "migrate to glue.pretrained_checkpoint_dir."
                 )
             if checkpoint is None and "pretrained_checkpoint" in raw_model:
                 checkpoint = raw_model.get("pretrained_checkpoint")
-                logger.warning(
+                warnings.append(
                     "Using legacy _raw_model_dict.pretrained_checkpoint; "
                     "migrate to glue.pretrained_checkpoint."
                 )
@@ -79,7 +70,7 @@ def validate_glue_config(cfg: Any) -> None:
                 and checkpoint is None
             ):
                 allow_random = bool(raw_model.get("allow_random_weights", False))
-                logger.warning(
+                warnings.append(
                     "Using legacy _raw_model_dict.allow_random_weights; "
                     "migrate to glue.allow_random_weights."
                 )
@@ -124,22 +115,6 @@ def validate_glue_config(cfg: Any) -> None:
             if cfg.trainer.per_device_eval_batch_size < 1:
                 errors.append("per_device_eval_batch_size must be at least 1")
 
-        if hasattr(cfg.trainer, "output_dir"):
-            output_dir = Path(cfg.trainer.output_dir)
-            try:
-                output_dir.mkdir(parents=True, exist_ok=True)
-            except Exception as exc:
-                errors.append(f"Cannot create output directory {output_dir}: {exc}")
-
-        if hasattr(cfg.trainer, "mixed_precision"):
-            try:
-                cfg.trainer.mixed_precision = resolve_mixed_precision(
-                    cfg.trainer.mixed_precision,
-                    task="glue",
-                )
-            except ValueError as exc:
-                errors.append(str(exc))
-
     if hasattr(cfg, "optimizer"):
         if hasattr(cfg.optimizer, "lr") and cfg.optimizer.lr <= 0:
             errors.append(f"Learning rate must be positive, got {cfg.optimizer.lr}")
@@ -157,7 +132,7 @@ def validate_glue_config(cfg: Any) -> None:
                 cfg.scheduler.warmup_percent is not None
                 and cfg.scheduler.warmup_steps is not None
             ):
-                logger.warning(
+                warnings.append(
                     "Both warmup_percent and warmup_steps specified. "
                     "warmup_percent will take precedence."
                 )
@@ -169,36 +144,19 @@ def validate_glue_config(cfg: Any) -> None:
                     f"max_seq_length must be positive, got {cfg.glue.max_seq_length}"
                 )
             elif cfg.glue.max_seq_length > 512:
-                logger.warning(
+                warnings.append(
                     f"max_seq_length={cfg.glue.max_seq_length} > 512 may cause issues "
                     "with some models"
                 )
 
-        expected_labels = {
-            "cola": 2,
-            "sst2": 2,
-            "mrpc": 2,
-            "qqp": 2,
-            "mnli": 3,
-            "qnli": 2,
-            "rte": 2,
-            "wnli": 2,
-            "stsb": 1,
-            "snli": 3,
-            "allnli": 2,
-        }
-
-        if task in expected_labels:
-            expected = expected_labels[task]
+        if task in SUPPORTED_GLUE_TASK_SPECS:
+            expected = get_glue_task_spec(task).num_labels
             if hasattr(cfg.glue, "num_labels"):
                 if cfg.glue.num_labels != expected:
-                    logger.warning(
-                        f"Task {task} expects {expected} labels but got "
-                        f"{cfg.glue.num_labels}. Auto-correcting to {expected}."
+                    errors.append(
+                        f"Task {task} expects glue.num_labels={expected}, got "
+                        f"{cfg.glue.num_labels}."
                     )
-                    cfg.glue.num_labels = expected
-            else:
-                cfg.glue.num_labels = expected
 
     if errors:
         error_msg = "Configuration validation failed:\n" + "\n".join(
@@ -206,4 +164,4 @@ def validate_glue_config(cfg: Any) -> None:
         )
         raise GlueValidationError(error_msg)
 
-    logger.info("✓ Configuration validation passed")
+    return tuple(warnings)
