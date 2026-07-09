@@ -905,8 +905,6 @@ def sync_resume_source_of_truth(
                 "eval_split",
                 "eval_samples",
                 "shuffle_buffer_size",
-                "pre_tokenize",
-                "pre_tokenize_output",
                 "load_all_from_disk",
                 "min_length",
                 "alpha",

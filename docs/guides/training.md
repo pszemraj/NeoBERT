@@ -196,12 +196,12 @@ Notes:
 
 - resume and export both operate from `<output_dir>/checkpoints/`.
 - pretraining resume with `dataset.streaming: true` uses best-effort stream advancement based on saved batch counters (the raw dataset cursor is not checkpointed; see the resume section above).
-- for exact deterministic continuation, prefer pre-tokenized `dataset.streaming: false` runs.
+- for exact deterministic continuation, prefer non-streaming (`dataset.streaming: false`) runs, whose map-style datasets support exact index-based resume.
 - deferred: exact streaming resume via a stateful-dataloader boundary, and a name-keyed optimizer-state transplant for resume across intentional parameter-registration refactors, are tracked in [Deferred Work](../TODO.md).
 
 ## Pre-tokenized Datasets
 
-Pre-tokenized caches include `tokenization_manifest.json`, which records the tokenizer vocab hash, special-token map, text columns, max length, truncation, and special-token settings. Existing caches without a manifest, or with a manifest that does not match the current tokenization contract, are rejected instead of being reused silently. The contract is path-independent: it captures how the tokenizer tokenizes, not where it was loaded from, so it deliberately excludes the tokenizer's `name_or_path`. This keeps caches valid across checkpoint resume, where the tokenizer is reloaded from the checkpoint-local `tokenizer/` directory (a different path for the identical tokenizer) and a path-dependent contract would otherwise reject an explicit cache or force full re-tokenization of a default one.
+Non-streaming datasets are tokenized through `Dataset.map`, whose results HuggingFace caches automatically (keyed on a fingerprint of the tokenize function and tokenizer state), so repeated runs reuse tokenized data without a bespoke cache. To materialize a tokenized dataset on disk ahead of time — for a shared location, a faster device, or to inspect it — run one of the helpers below and point `dataset.path` at the output.
 
 Two common paths:
 

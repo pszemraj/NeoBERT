@@ -66,12 +66,6 @@ from neobert.streaming import (
     retry_streaming_operation,
     supports_streaming_iteration_resume,
 )
-from neobert.tokenization_cache import (
-    build_tokenization_manifest,
-    resolve_tokenized_cache_dir,
-    validate_tokenized_cache_manifest,
-    write_tokenized_cache_manifest,
-)
 from neobert.tokenizer import get_tokenizer, resolve_text_column
 from neobert.training_utils import (
     _compute_l2_norm_for_logging,
@@ -1894,113 +1888,45 @@ def trainer(cfg: Config) -> None:
         accelerator.print("Dataset is not tokenized. Tokenizing now...")
         from neobert.tokenizer import tokenize
 
-        # For non-streaming datasets, check if pre-tokenization is requested
-        if not is_streaming and cfg.dataset.pre_tokenize:
-            text_column = resolve_text_column(
-                train_dataset,
-                is_streaming=False,
-                preferred=cfg.dataset.text_column,
+        # Non-streaming datasets tokenize through ``Dataset.map`` below, whose
+        # results HuggingFace caches automatically (keyed on a fingerprint of the
+        # tokenize function and tokenizer state), so a separate on-disk
+        # pre-tokenization cache is redundant and only adds a hand-maintained
+        # tokenization-contract manifest that is easy to get wrong.
+        text_column = resolve_text_column(
+            train_dataset,
+            is_streaming,
+            preferred=cfg.dataset.text_column,
+            streaming_read_retries=streaming_read_retries,
+            streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+            streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+        )
+        tokenize_num_proc = (
+            None
+            if is_streaming
+            else _resolve_tokenize_num_proc(
+                cfg.dataset.num_proc,
+                accelerator.num_processes,
+                accelerator.is_main_process,
             )
-            tokenization_manifest = build_tokenization_manifest(
+        )
+
+        # Tokenize dataset
+        with accelerator.main_process_first():
+            train_dataset = tokenize(
+                train_dataset,
                 tokenizer,
-                dataset_name=cfg.dataset.name,
-                dataset_config=cfg.dataset.config,
-                dataset_path=cfg.dataset.path,
                 column_name=text_column,
                 max_length=tokenize_max_length,
+                remove_columns=True,
                 truncation=cfg.tokenizer.truncation,
+                num_proc=tokenize_num_proc,
                 add_special_tokens=add_special_tokens,
                 return_special_tokens_mask=return_special_tokens_mask,
-            )
-            output_dir = resolve_tokenized_cache_dir(
-                requested_output_dir=cfg.dataset.pre_tokenize_output,
-                dataset_name=cfg.dataset.name,
-                manifest=tokenization_manifest,
-            )
-
-            output_dir.mkdir(parents=True, exist_ok=True)
-            success_flag = output_dir / ".tokenize_complete"
-            failure_flag = output_dir / ".tokenize_failed"
-            if success_flag.exists():
-                validate_tokenized_cache_manifest(output_dir, tokenization_manifest)
-
-            accelerator.print(f"Pre-tokenizing dataset to: {output_dir}")
-
-            if accelerator.is_main_process and not success_flag.exists():
-                if failure_flag.exists():
-                    failure_flag.unlink()
-                try:
-                    tokenized_dataset = tokenize(
-                        train_dataset,
-                        tokenizer,
-                        column_name=text_column,
-                        max_length=tokenize_max_length,
-                        remove_columns=True,
-                        truncation=cfg.tokenizer.truncation,
-                        num_proc=cfg.dataset.num_proc,
-                        add_special_tokens=add_special_tokens,
-                        return_special_tokens_mask=return_special_tokens_mask,
-                        streaming_read_retries=streaming_read_retries,
-                        streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
-                        streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
-                    )
-                    tokenized_dataset.save_to_disk(output_dir)
-                    write_tokenized_cache_manifest(output_dir, tokenization_manifest)
-                except Exception as exc:
-                    failure_flag.write_text(str(exc))
-                else:
-                    success_flag.write_text("ok")
-
-            accelerator.wait_for_everyone()
-            if not success_flag.exists():
-                err_msg = (
-                    failure_flag.read_text()
-                    if failure_flag.exists()
-                    else "Pre-tokenization failed; see main process logs."
-                )
-                raise RuntimeError(f"Tokenization failed: {err_msg}")
-
-            validate_tokenized_cache_manifest(output_dir, tokenization_manifest)
-            accelerator.print(f"Pre-tokenization complete. Loading from: {output_dir}")
-            # Load the pre-tokenized dataset
-            train_dataset = load_from_disk(output_dir)
-            train_dataset = _select_train_split(train_dataset, cfg.dataset.train_split)
-        else:
-            # Determine text column
-            text_column = resolve_text_column(
-                train_dataset,
-                is_streaming,
-                preferred=cfg.dataset.text_column,
                 streaming_read_retries=streaming_read_retries,
                 streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
                 streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
             )
-            tokenize_num_proc = (
-                None
-                if is_streaming
-                else _resolve_tokenize_num_proc(
-                    cfg.dataset.num_proc,
-                    accelerator.num_processes,
-                    accelerator.is_main_process,
-                )
-            )
-
-            # Tokenize dataset
-            with accelerator.main_process_first():
-                train_dataset = tokenize(
-                    train_dataset,
-                    tokenizer,
-                    column_name=text_column,
-                    max_length=tokenize_max_length,
-                    remove_columns=True,
-                    truncation=cfg.tokenizer.truncation,
-                    num_proc=tokenize_num_proc,
-                    add_special_tokens=add_special_tokens,
-                    return_special_tokens_mask=return_special_tokens_mask,
-                    streaming_read_retries=streaming_read_retries,
-                    streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
-                    streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
-                )
         if is_streaming:
             accelerator.print("Tokenization setup complete for streaming dataset.")
         else:

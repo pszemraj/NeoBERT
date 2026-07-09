@@ -84,7 +84,7 @@ Actions:
 - For large consumed-step counts, startup can take a while due to stream advancement.
 - With shuffled streams, exact sample continuity is not guaranteed.
 - Transient-read retry recovery on shuffled streams can skip buffered examples and logs a warning when it happens; see [streaming recovery semantics](training-optimization.md#dataloader-and-streaming-throughput).
-- If you need deterministic continuation, pre-tokenize to disk and run with `dataset.streaming: false`.
+- If you need deterministic continuation, run with `dataset.streaming: false`; map-style datasets support exact index-based resume.
 
 ### Streaming eval budget error
 

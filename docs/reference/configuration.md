@@ -196,8 +196,6 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 | `dataset.streaming_read_retry_max_backoff_seconds` | `float` | `60.0` | Maximum capped backoff delay for transient streaming read retries. |
 | `dataset.num_proc`            | `int`         | `4`     | Multiprocessing workers for tokenization map.               |
 | `dataset.shuffle_buffer_size` | `int`         | `10000` | Streaming shuffle buffer.                                   |
-| `dataset.pre_tokenize`        | `bool`        | `false` | Pre-tokenize non-streaming datasets and persist results.    |
-| `dataset.pre_tokenize_output` | `str \| None` | `null`  | Output path for pre-tokenized datasets; cache reuse requires a matching `tokenization_manifest.json`. |
 | `dataset.cache_dir`           | `str \| None` | `null`  | HF datasets cache directory.                                |
 | `dataset.trust_remote_code`   | `bool`        | `false` | Allow remote dataset code execution.                        |
 
@@ -459,7 +457,7 @@ Save cadence/retention knobs live under [Training Loop](#training-loop): `traine
 | `trainer.resume_from_checkpoint` with `dataset.streaming=true`                    | **BEST-EFFORT**    | Streaming resume restores state and advances stream by consumed batches; exact sample continuity is not guaranteed. |
 | `trainer.resume_from_checkpoint` with checkpoint `config.yaml` drift              | **CHECKPOINT WINS** | Resume loads checkpoint model/tokenizer/data objective fields before constructing runtime objects; missing checkpoint config fails fast. |
 | `trainer.resume_from_checkpoint` with optimizer parameter-order drift             | **ERROR**          | Resume validates `optimizer_param_names.json` before loading optimizer state to avoid positional momentum/buffer corruption. |
-| Reusing pre-tokenized caches                                                     | **MANIFEST CHECK** | Caches without a matching `tokenization_manifest.json` are rejected; delete/regenerate the cache or choose a new output path. |
+| Reusing cached contrastive splits                                                | **MANIFEST CHECK** | Cached contrastive splits without a matching `tokenization_manifest.json` are rejected; regenerate the cache with `scripts/contrastive/preprocess.py`. |
 | Streaming eval with neither `trainer.eval_max_batches` nor `dataset.eval_samples` | **ERROR**          | Set an explicit eval budget for reproducible streaming metrics.                                                     |
 | `dataset.validation_split` with `dataset.streaming=true`                          | **WARNING / SKIP** | Validation split creation is skipped for streaming datasets.                                                        |
 | `scheduler.warmup_percent` and `scheduler.warmup_steps`                           | **PRECEDENCE**     | `warmup_percent` overrides absolute warmup steps.                                                                   |
