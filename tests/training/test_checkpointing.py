@@ -295,6 +295,16 @@ def test_resolve_step_checkpoint_selector_accepts_direct_step_dir_for_latest() -
     assert resolved == "123"
 
 
+def test_resolve_step_checkpoint_selector_rejects_missing_latest() -> None:
+    """A missing latest checkpoint should fail during selection, not loading."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint_root = Path(tmpdir)
+        (checkpoint_root / "100").mkdir()
+
+        with pytest.raises(FileNotFoundError, match="No loadable numbered checkpoints"):
+            resolve_step_checkpoint_selector(checkpoint_root, "latest")
+
+
 def test_resolve_step_checkpoint_dir_rejects_mismatched_direct_portable_weights() -> (
     None
 ):

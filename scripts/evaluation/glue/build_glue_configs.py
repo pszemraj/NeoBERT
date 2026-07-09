@@ -12,6 +12,7 @@ from typing import Dict, Iterable, Optional
 
 import yaml
 
+from neobert.checkpointing import resolve_step_checkpoint_selector
 from neobert.glue.tasks import GLUE_TASK_SPECS
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -142,28 +143,6 @@ def relpath(path: Path, base: Path) -> str:
         return resolved.relative_to(base).as_posix()
     except ValueError:
         return Path(path).resolve().as_posix()
-
-
-def find_checkpoint_step(checkpoint_dir: Path, requested_step: Optional[str]) -> str:
-    """Resolve the checkpoint step.
-
-    :param Path checkpoint_dir: Directory containing model checkpoints.
-    :param str | None requested_step: Requested step or "latest".
-    :return str: Resolved checkpoint step.
-    """
-
-    if requested_step and requested_step != "latest":
-        return requested_step
-
-    checkpoint_root = checkpoint_dir / "checkpoints"
-    candidates = [
-        p.name for p in checkpoint_root.glob("*") if p.is_dir() and p.name.isdigit()
-    ]
-    if not candidates:
-        raise FileNotFoundError(
-            f"No numbered checkpoints found under: {checkpoint_root}"
-        )
-    return max(candidates, key=lambda name: int(name))
 
 
 def load_pretraining_config(config_path: Path) -> Dict[str, object]:
@@ -470,7 +449,10 @@ def main() -> None:
     if not checkpoint_dir.exists():
         raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_dir}")
 
-    checkpoint_step = find_checkpoint_step(checkpoint_dir, args.checkpoint_step)
+    checkpoint_step = resolve_step_checkpoint_selector(
+        checkpoint_dir / "checkpoints",
+        args.checkpoint_step or "latest",
+    )
 
     pretrain_config_path = (
         args.pretrain_config.resolve()

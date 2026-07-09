@@ -362,6 +362,7 @@ def resolve_step_checkpoint_selector(
     :param str | int checkpoint: Requested checkpoint selector.
     :return str: Concrete checkpoint tag to load.
     :raises ValueError: If a DeepSpeed ``latest`` file is empty.
+    :raises FileNotFoundError: If ``latest`` cannot resolve a loadable checkpoint.
     """
     checkpoint_root = Path(checkpoint_root)
     requested_tag = str(checkpoint).strip()
@@ -391,7 +392,9 @@ def resolve_step_checkpoint_selector(
     for tag in candidates:
         if _is_loadable_step_checkpoint(checkpoint_root, tag):
             return tag
-    return requested_tag
+    raise FileNotFoundError(
+        f"No loadable numbered checkpoints found under {checkpoint_root}"
+    )
 
 
 def resolve_step_checkpoint_dir(

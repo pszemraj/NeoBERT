@@ -10,10 +10,8 @@ import torch
 from mteb import MTEB
 
 from neobert.checkpointing import (
-    MODEL_WEIGHTS_NAME,
-    load_deepspeed_fp32_state_dict,
-    load_model_safetensors,
-    resolve_deepspeed_checkpoint_root_and_tag,
+    load_step_checkpoint_state_dict,
+    resolve_step_checkpoint_selector,
 )
 from neobert.config import ConfigLoader
 from neobert.mteb_tasks import (
@@ -148,63 +146,6 @@ def _load_mteb_encoder_weights(
         )
 
 
-def _is_loadable_mteb_step(checkpoint_root: Path, step: int) -> bool:
-    """Return whether a checkpoint step is loadable for MTEB evaluation.
-
-    A step is considered loadable when either a portable safetensors weight file
-    exists at ``checkpoints/<step>/model.safetensors`` or DeepSpeed ZeRO shards
-    can be resolved for the same step.
-
-    :param Path checkpoint_root: ``checkpoints`` root directory.
-    :param int step: Numeric checkpoint step.
-    :return bool: True if MTEB can load weights from this step.
-    """
-    step_dir = checkpoint_root / str(step)
-    if (step_dir / MODEL_WEIGHTS_NAME).exists():
-        return True
-    try:
-        resolve_deepspeed_checkpoint_root_and_tag(checkpoint_root, tag=str(step))
-    except (FileNotFoundError, ValueError):
-        return False
-    return True
-
-
-def _resolve_mteb_checkpoint_step(
-    checkpoint_root: Path,
-    requested: str | int,
-) -> str:
-    """Resolve a concrete checkpoint step/tag for MTEB loading.
-
-    :param Path checkpoint_root: ``checkpoints`` root directory.
-    :param str | int requested: Requested checkpoint selector or ``latest``.
-    :raises ValueError: If no loadable checkpoint step exists.
-    :return str: Concrete checkpoint step/tag.
-    """
-    requested_text = str(requested).strip()
-    if requested_text.lower() != "latest":
-        return requested_text
-
-    candidates = sorted(
-        (
-            int(path.name)
-            for path in checkpoint_root.iterdir()
-            if path.is_dir() and path.name.isdigit()
-        ),
-        reverse=True,
-    )
-    if not candidates:
-        raise ValueError(f"Unable to find numbered checkpoints under {checkpoint_root}")
-
-    for step in candidates:
-        if _is_loadable_mteb_step(checkpoint_root, step):
-            return str(step)
-
-    raise ValueError(
-        "Unable to find a loadable checkpoint under "
-        f"{checkpoint_root}. Checked steps: {', '.join(str(step) for step in candidates)}."
-    )
-
-
 def evaluate_mteb(cfg: Any) -> None:
     """Evaluate a model on the MTEB benchmark.
 
@@ -216,12 +157,11 @@ def evaluate_mteb(cfg: Any) -> None:
     mteb_overwrite_results = getattr(cfg, "mteb_overwrite_results", False)
     pretrained_checkpoint = getattr(cfg, "pretrained_checkpoint", "latest")
     pretrained_checkpoint_dir = Path(cfg.trainer.output_dir)
-    use_deepspeed = getattr(cfg, "use_deepspeed", False)
     selected_tasks = _resolve_mteb_tasks(cfg)
 
     # Get checkpoint number
     checkpoint_root = pretrained_checkpoint_dir / "checkpoints"
-    ckpt = _resolve_mteb_checkpoint_step(checkpoint_root, pretrained_checkpoint)
+    ckpt = resolve_step_checkpoint_selector(checkpoint_root, pretrained_checkpoint)
 
     # Define path to store results
     output_folder = (
@@ -267,43 +207,16 @@ def evaluate_mteb(cfg: Any) -> None:
     )
 
     # Load pretrained weights
-    checkpoint_step_dir = checkpoint_root / str(ckpt)
-    checkpoint_path = checkpoint_step_dir / MODEL_WEIGHTS_NAME
-    if use_deepspeed:
-        state_dict = load_deepspeed_fp32_state_dict(
-            checkpoint_root,
-            tag=str(ckpt),
-        )
-        _load_mteb_encoder_weights(
-            model,
-            state_dict,
-            source=f"DeepSpeed checkpoint tag={ckpt}",
-        )
-    else:
-        if checkpoint_path.exists():
-            state_dict = load_model_safetensors(
-                checkpoint_step_dir,
-                map_location=device,
-            )
-            _load_mteb_encoder_weights(
-                model,
-                state_dict,
-                source=f"safetensors checkpoint {checkpoint_path}",
-            )
-        else:
-            logger.warning(
-                f"{MODEL_WEIGHTS_NAME} not found at {checkpoint_path}; "
-                "falling back to DeepSpeed fp32 shard conversion."
-            )
-            state_dict = load_deepspeed_fp32_state_dict(
-                checkpoint_root,
-                tag=str(ckpt),
-            )
-            _load_mteb_encoder_weights(
-                model,
-                state_dict,
-                source=f"DeepSpeed fallback tag={ckpt}",
-            )
+    state_dict = load_step_checkpoint_state_dict(
+        checkpoint_root,
+        ckpt,
+        map_location=device,
+    )
+    _load_mteb_encoder_weights(
+        model,
+        state_dict,
+        source=f"checkpoint step {ckpt}",
+    )
 
     model.to(device)
     model.eval()
