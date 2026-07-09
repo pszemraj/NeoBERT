@@ -111,7 +111,8 @@ class TestStreamingShuffle(unittest.TestCase):
         pull that advances no trained-batch counter), so the raw-pull count
         exceeds the trained-batch count within an epoch. Resuming by the
         trained-batch count would under-skip by the packing ratio and silently
-        replay already-trained data; the cursor must be the raw-pull counter.
+        replay already-trained data; the cursor must be the raw-pull counter,
+        paired with the separately checkpointed packed-fragment buffer.
         """
         for is_streaming in (True, False):
             metrics = {

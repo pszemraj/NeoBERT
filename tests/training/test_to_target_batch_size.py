@@ -6,6 +6,7 @@ import unittest
 import torch
 
 from neobert.pretraining.trainer import (
+    _CheckpointableBatchBuffer,
     _append_to_stored_batch,
     _has_stored_batch,
     to_target_batch_size,
@@ -175,6 +176,80 @@ class TestPackedFragmentBuffering(unittest.TestCase):
         self.assertEqual(out["packed_seqlens"].shape[0], 4)
         self.assertIsNotNone(stored["input_ids"])
         self.assertEqual(stored["input_ids"].shape[0], 1)
+
+
+class TestCheckpointableBatchBuffer(unittest.TestCase):
+    """Validate packed fragment checkpoint and rank restore semantics."""
+
+    def test_round_trip_preserves_untrained_fragments(self):
+        """Checkpoint round trips retain tensor and list fragments on CPU."""
+        buffer = _CheckpointableBatchBuffer(num_processes=1, process_index=0)
+        buffer["input_ids"] = torch.tensor([[10, 11], [12, 13]])
+        buffer["packed_seqlens"] = torch.tensor([[2, 0], [1, 1]], dtype=torch.int32)
+        buffer["tags"] = ["left", "right"]
+
+        state = buffer.state_dict()
+        buffer["input_ids"].zero_()
+        buffer["tags"].append("mutated")
+
+        resumed = _CheckpointableBatchBuffer(num_processes=1, process_index=0)
+        resumed.load_state_dict(state)
+
+        self.assertTrue(
+            torch.equal(resumed["input_ids"], torch.tensor([[10, 11], [12, 13]]))
+        )
+        self.assertEqual(resumed["input_ids"].device.type, "cpu")
+        self.assertEqual(resumed["tags"], ["left", "right"])
+
+    def test_restore_selects_current_rank_buffer(self):
+        """Each process restores only its own gathered fragments."""
+        state = {
+            "batch_buffer_version": 1,
+            "world_size": 2,
+            "rank_buffers": [
+                {"input_ids": torch.tensor([[0]])},
+                {"input_ids": torch.tensor([[1]])},
+            ],
+        }
+        resumed = _CheckpointableBatchBuffer(num_processes=2, process_index=1)
+
+        resumed.load_state_dict(state)
+
+        self.assertEqual(resumed["input_ids"].item(), 1)
+
+    def test_restore_rejects_world_size_change(self):
+        """Rank-local fragments cannot be remapped across topology changes."""
+        state = _CheckpointableBatchBuffer(
+            num_processes=1, process_index=0
+        ).state_dict()
+        resumed = _CheckpointableBatchBuffer(num_processes=2, process_index=0)
+
+        with self.assertRaisesRegex(ValueError, "different world size"):
+            resumed.load_state_dict(state)
+
+
+def test_checkpointable_batch_buffer_accelerate_round_trip(tmp_path):
+    """Accelerate save/load restores buffered samples through custom state."""
+    from accelerate import Accelerator
+
+    accelerator = Accelerator(cpu=True)
+    buffer = _CheckpointableBatchBuffer(
+        num_processes=accelerator.num_processes,
+        process_index=accelerator.process_index,
+    )
+    accelerator.register_for_checkpointing(buffer)
+    buffer["input_ids"] = torch.tensor([[21, 22]])
+    buffer["packed_seqlens"] = torch.tensor([[2, 0]], dtype=torch.int32)
+
+    accelerator.save_state(str(tmp_path))
+    buffer["input_ids"] = None
+    buffer["packed_seqlens"] = None
+    accelerator.load_state(str(tmp_path))
+
+    assert torch.equal(buffer["input_ids"], torch.tensor([[21, 22]]))
+    assert torch.equal(
+        buffer["packed_seqlens"], torch.tensor([[2, 0]], dtype=torch.int32)
+    )
 
 
 class TestToTargetBatchSizeCPU(unittest.TestCase):

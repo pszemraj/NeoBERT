@@ -6,7 +6,9 @@ import logging
 import math
 import os
 import re
+from collections.abc import Mapping
 from contextlib import contextmanager
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional, Tuple
 
@@ -19,6 +21,7 @@ from accelerate.utils import (
     DistributedDataParallelKwargs,
     DistributedType,
     ProjectConfiguration,
+    gather_object,
     send_to_device,
     set_seed,
 )
@@ -99,6 +102,11 @@ from neobert.pretraining.metrics import Metrics, format_metrics
 
 # Set up logger
 logger = logging.getLogger(__name__)
+
+_BATCH_BUFFER_STATE_VERSION = 1
+_BATCH_BUFFER_STATE_VERSION_KEY = "batch_buffer_version"
+_BATCH_BUFFER_STATE_WORLD_SIZE_KEY = "world_size"
+_BATCH_BUFFER_STATE_RANKS_KEY = "rank_buffers"
 
 
 def _resolve_masked_logits_only_loss(value: Any) -> bool:
@@ -1179,6 +1187,126 @@ def _clear_stored_batch(stored_batch: BatchEncoding) -> None:
         stored_batch[key] = None
 
 
+def _clone_checkpoint_value_to_cpu(value: Any) -> Any:
+    """Clone a checkpoint value while moving tensors to CPU.
+
+    :param Any value: Buffered batch value to clone.
+    :return Any: Detached CPU-safe copy.
+    """
+    if torch.is_tensor(value):
+        return value.detach().cpu().clone()
+    if isinstance(value, Mapping):
+        return {
+            key: _clone_checkpoint_value_to_cpu(inner) for key, inner in value.items()
+        }
+    if isinstance(value, list):
+        return [_clone_checkpoint_value_to_cpu(inner) for inner in value]
+    if isinstance(value, tuple):
+        return tuple(_clone_checkpoint_value_to_cpu(inner) for inner in value)
+    return deepcopy(value)
+
+
+class _CheckpointableBatchBuffer(dict[str, Any]):
+    """Rank-local batch fragments serialized through Accelerate checkpoints."""
+
+    def __init__(self, *, num_processes: int, process_index: int) -> None:
+        """Initialize an empty rank-local fragment buffer.
+
+        :param int num_processes: Distributed world size.
+        :param int process_index: Current global process index.
+        :raises ValueError: If the process topology is invalid.
+        """
+        num_processes = int(num_processes)
+        process_index = int(process_index)
+        if num_processes <= 0:
+            raise ValueError(f"num_processes must be positive, got {num_processes}.")
+        if process_index < 0 or process_index >= num_processes:
+            raise ValueError(
+                f"process_index must be in [0, {num_processes}), got {process_index}."
+            )
+        super().__init__(
+            input_ids=None,
+            attention_mask=None,
+            labels=None,
+            packed_seqlens=None,
+        )
+        self._num_processes = num_processes
+        self._process_index = process_index
+
+    def state_dict(self) -> dict[str, Any]:
+        """Gather and return every rank's CPU fragment buffer.
+
+        Accelerate writes registered custom state only from the main process, so
+        every rank contributes its local fragments before that single payload is
+        persisted.
+
+        :return dict[str, Any]: Versioned rank-indexed buffer state.
+        """
+        local_state = {
+            key: _clone_checkpoint_value_to_cpu(value) for key, value in self.items()
+        }
+        rank_buffers = (
+            gather_object([local_state]) if self._num_processes > 1 else [local_state]
+        )
+        if (
+            not isinstance(rank_buffers, list)
+            or len(rank_buffers) != self._num_processes
+        ):
+            raise RuntimeError(
+                "Failed to gather one packed batch buffer per process: "
+                f"expected {self._num_processes}, got "
+                f"{len(rank_buffers) if isinstance(rank_buffers, list) else type(rank_buffers).__name__}."
+            )
+        return {
+            _BATCH_BUFFER_STATE_VERSION_KEY: _BATCH_BUFFER_STATE_VERSION,
+            _BATCH_BUFFER_STATE_WORLD_SIZE_KEY: self._num_processes,
+            _BATCH_BUFFER_STATE_RANKS_KEY: rank_buffers,
+        }
+
+    def load_state_dict(self, state_dict: Mapping[str, Any]) -> None:
+        """Restore the buffered fragments belonging to this rank.
+
+        :param Mapping[str, Any] state_dict: Versioned rank-indexed buffer state.
+        :raises ValueError: If the payload version or distributed topology differs.
+        """
+        if not isinstance(state_dict, Mapping):
+            raise ValueError("Batch buffer checkpoint state must be a mapping.")
+        version = state_dict.get(_BATCH_BUFFER_STATE_VERSION_KEY)
+        if version != _BATCH_BUFFER_STATE_VERSION:
+            raise ValueError(
+                "Unsupported batch buffer checkpoint version "
+                f"{version!r}; expected {_BATCH_BUFFER_STATE_VERSION}."
+            )
+        checkpoint_world_size = int(
+            state_dict.get(_BATCH_BUFFER_STATE_WORLD_SIZE_KEY, 0)
+        )
+        if checkpoint_world_size != self._num_processes:
+            raise ValueError(
+                "Cannot restore rank-local batch buffers with a different world "
+                f"size: checkpoint={checkpoint_world_size}, runtime={self._num_processes}."
+            )
+        rank_buffers = state_dict.get(_BATCH_BUFFER_STATE_RANKS_KEY)
+        if (
+            not isinstance(rank_buffers, list)
+            or len(rank_buffers) != self._num_processes
+        ):
+            raise ValueError(
+                "Batch buffer checkpoint must contain exactly one mapping per rank."
+            )
+        rank_state = rank_buffers[self._process_index]
+        if not isinstance(rank_state, Mapping):
+            raise ValueError(
+                f"Batch buffer state for rank {self._process_index} is not a mapping."
+            )
+        self.clear()
+        self.update(
+            {
+                str(key): _clone_checkpoint_value_to_cpu(value)
+                for key, value in rank_state.items()
+            }
+        )
+
+
 def _append_to_stored_batch(
     stored_batch: BatchEncoding, batch: BatchEncoding
 ) -> BatchEncoding:
@@ -1507,9 +1635,10 @@ def _prepare_resume_dataloader(
     # under-skips by the packing ratio and silently replays already-trained data.
     # ``train/dataloader_batches_in_epoch`` counts raw pulls in the current epoch
     # and resets at each epoch boundary, so it is the correct skip target for
-    # both streaming and map-style datasets. Checkpoints written before this
-    # counter existed skip nothing and restart the current epoch (safe: bounded
-    # re-training, never a silent partial replay).
+    # both streaming and map-style datasets. The checkpointed rank-local batch
+    # buffer preserves untrained fragments from those skipped pulls. Checkpoints
+    # written before this counter existed skip nothing and restart the current
+    # epoch (safe: bounded re-training, never a silent partial replay).
     resume_step = int(metrics.get("train/dataloader_batches_in_epoch", 0))
     if resume_step <= 0:
         return None
@@ -1690,7 +1819,11 @@ def trainer(cfg: Config) -> None:
 
     # Local and global counters
     metrics = Metrics()
-    accelerator.register_for_checkpointing(metrics)
+    stored_batch = _CheckpointableBatchBuffer(
+        num_processes=accelerator.num_processes,
+        process_index=accelerator.process_index,
+    )
+    accelerator.register_for_checkpointing(metrics, stored_batch)
     log_interval = max(1, cfg.trainer.logging_steps)
     enforce_full_packed_batches = bool(
         getattr(cfg.trainer, "enforce_full_packed_batches", True)
@@ -2444,12 +2577,6 @@ def trainer(cfg: Config) -> None:
     )
     local_loss_path_other = torch.zeros((), device=accelerator.device, dtype=torch.long)
     logged_masked_loss_path = False
-    stored_batch = {
-        "input_ids": None,
-        "attention_mask": None,
-        "labels": None,
-        "packed_seqlens": None,
-    }
     warned_low_token_scale = False
     while cfg.trainer.max_steps > metrics["train/steps"]:
         # Use skipped_train_dataloader the first epoch after resuming

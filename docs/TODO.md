@@ -33,7 +33,7 @@ Trainer-level streaming resume is approximate (skip-based): on resume it re-adva
 Deferred because the correct boundary is the prepared dataloader, not the dataset, and wiring that up is a focused piece of work of its own. Completing it requires:
 
 - enabling Accelerate's `use_stateful_dataloader` (backed by torchdata `StatefulDataLoader`) via `DataLoaderConfiguration`, so the prepared loader accounts for its own prefetch/lookahead state,
-- checkpointing the prepared/stateful dataloader's `state_dict()` (plus the trainer's `stored_batch` packed-fragment buffer, which holds buffered-but-untrained examples across steps) rather than the raw dataset,
+- checkpointing the prepared/stateful dataloader's `state_dict()` rather than the raw dataset while continuing to restore the trainer's existing rank-local `stored_batch` packed-fragment buffer,
 - an integration regression through `accelerator.prepare_data_loader()`: consume one yielded batch, save, rebuild, load, and assert resume yields the next untrained batch (not the batch after the loader's lookahead),
 - confirming behavior under both `num_workers=0` and `num_workers>0`, and with an active HF shuffle buffer (whose contents are not serialized).
 
