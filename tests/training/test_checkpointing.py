@@ -21,7 +21,6 @@ from neobert.checkpointing import (
     resolve_step_checkpoint_dir,
     resolve_step_checkpoint_selector,
     save_accelerate_state,
-    save_model_safetensors,
     save_state_dict_safetensors,
 )
 from neobert.model import NeoBERTConfig, NeoBERTLMHead
@@ -111,29 +110,6 @@ def test_resolve_accelerate_state_dir_falls_back_to_step_root(
     assert resolve_accelerate_state_dir(tmp_path) == tmp_path
     (tmp_path / ACCELERATE_STATE_DIR).mkdir()
     assert resolve_accelerate_state_dir(tmp_path) == tmp_path / ACCELERATE_STATE_DIR
-
-
-def test_save_and_load_model_safetensors_roundtrip() -> None:
-    """Ensure safetensors checkpoints load back into the same model class."""
-    model = _make_small_lm()
-    reference_state = model.state_dict()
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        checkpoint_dir = Path(tmpdir)
-        path = save_model_safetensors(model, checkpoint_dir)
-        assert path.name == MODEL_WEIGHTS_NAME
-        assert path.exists()
-
-        loaded_state = load_model_safetensors(checkpoint_dir, map_location="cpu")
-        restored = _make_small_lm()
-        missing, unexpected = restored.load_state_dict(loaded_state, strict=True)
-
-    assert missing == []
-    assert unexpected == []
-    torch.testing.assert_close(
-        reference_state["model.encoder.weight"],
-        restored.state_dict()["model.encoder.weight"],
-    )
 
 
 def test_save_state_dict_safetensors_roundtrip() -> None:

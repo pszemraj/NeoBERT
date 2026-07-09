@@ -71,7 +71,6 @@ from neobert.streaming import (
 )
 from neobert.tokenizer import get_tokenizer, resolve_text_column
 from neobert.training_utils import (
-    _compute_l2_norm_for_logging,
     _maybe_compile_model,
     _maybe_prepare_for_forward,
     _pin_cpu_tensors,
@@ -1163,19 +1162,6 @@ def _gradient_token_scale(
     scale = (token_floor_f / clamped_tokens).to(tokens_global.device)
     clamped = tokens_global < token_floor
     return scale, clamped
-
-
-def _compute_weight_norm_for_logging(
-    model: torch.nn.Module,
-    accelerator: Accelerator,
-) -> Optional[float]:
-    """Compute model weight norm for logging.
-
-    :param torch.nn.Module model: Training model (possibly wrapped).
-    :param Accelerator accelerator: Active accelerator runtime.
-    :return float | None: L2 weight norm or ``None`` when unavailable.
-    """
-    return _compute_l2_norm_for_logging(model.parameters(), accelerator)
 
 
 def _clear_stored_batch(stored_batch: BatchEncoding) -> None:

@@ -144,27 +144,6 @@ def save_state_dict_safetensors(
     return weights_path
 
 
-def save_model_safetensors(
-    model: nn.Module,
-    checkpoint_dir: str | Path,
-    *,
-    metadata: Mapping[str, str] | None = None,
-) -> Path:
-    """Save model weights to ``model.safetensors``.
-
-    :param nn.Module model: Model to serialize.
-    :param str | Path checkpoint_dir: Target checkpoint directory.
-    :param Mapping[str, str] | None metadata: Optional safetensors metadata.
-    :return Path: Path to the saved safetensors file.
-    :raises ValueError: If runtime wrapper prefixes collapse multiple keys.
-    """
-    return save_state_dict_safetensors(
-        model_state_dict_for_safetensors(model),
-        checkpoint_dir,
-        metadata=metadata,
-    )
-
-
 def _is_deepspeed_tag_dir(path: Path) -> bool:
     """Return whether a path looks like a DeepSpeed ZeRO tag directory.
 

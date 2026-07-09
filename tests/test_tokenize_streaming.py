@@ -197,6 +197,11 @@ class TestStreamingTokenize(unittest.TestCase):
             with self.assertRaises(ValueError):
                 get_tokenizer("dummy-tokenizer", max_length=32)
 
+    def test_get_tokenizer_rejects_vocab_size(self):
+        """Ensure vocabulary sizing remains a model-resize responsibility."""
+        with self.assertRaisesRegex(TypeError, "does not accept 'vocab_size'"):
+            get_tokenizer("dummy-tokenizer", vocab_size=32)
+
     def test_get_tokenizer_allows_missing_mask_when_mlm_enforcement_disabled(self):
         """Ensure non-MLM flows can keep tokenizer special tokens unchanged."""
         base = build_wordlevel_tokenizer(

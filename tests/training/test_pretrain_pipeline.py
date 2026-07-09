@@ -17,7 +17,6 @@ from neobert.config import Config, ConfigLoader
 from neobert.dataloader import get_dataloader
 from neobert.pretraining.masked_objective import MaskedObjectiveOut
 from neobert.pretraining.trainer import (
-    _compute_weight_norm_for_logging,
     _gather_decoder_weight_for_masked_objective,
     _infer_eval_split_name,
     _requires_streaming_eval_budget,
@@ -548,18 +547,6 @@ class TestPretrainComponents:
         )
         assert not backward_done
         assert accelerator.backward_calls == 0
-
-    def test_compute_weight_norm_for_logging_uses_model_parameters(self):
-        """Weight-norm logging should operate directly on current model params."""
-        model = torch.nn.Linear(3, 2, bias=True)
-        expected = (sum([p.norm(2) ** 2 for p in model.parameters()]) ** 0.5).item()
-
-        class _AcceleratorStub:
-            distributed_type = DistributedType.NO
-
-        norm = _compute_weight_norm_for_logging(model, _AcceleratorStub())
-        assert norm is not None
-        assert round(abs(norm - expected), 6) == 0
 
     def test_resolve_loader_perf_settings_cuda_and_cpu(self):
         """Ensure loader perf settings differ appropriately across CUDA and CPU."""

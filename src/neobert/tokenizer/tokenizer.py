@@ -22,7 +22,6 @@ def get_tokenizer(
     pretrained_model_name_or_path: str = "meta-llama/Llama-2-7b-hf",
     max_length: int = 4096,
     token: Optional[str] = None,
-    vocab_size: Optional[int] = None,
     use_fast: bool = True,
     trust_remote_code: bool = False,
     revision: Optional[str] = None,
@@ -35,7 +34,6 @@ def get_tokenizer(
     :param str pretrained_model_name_or_path: Tokenizer model name or path.
     :param int max_length: Maximum sequence length.
     :param str | None token: Optional auth token for gated models.
-    :param int | None vocab_size: Deprecated; tokenizer vocab size is derived from the model.
     :param bool use_fast: Whether to require a fast tokenizer backend.
     :param bool trust_remote_code: Allow remote tokenizer code execution.
     :param str | None revision: Optional tokenizer revision/commit.
@@ -44,12 +42,8 @@ def get_tokenizer(
     :param Any kwargs: Additional kwargs forwarded to ``from_pretrained``.
     :return PreTrainedTokenizer: Configured tokenizer instance.
     """
-    if vocab_size is not None:
-        logger.warning(
-            "get_tokenizer(): 'vocab_size' is deprecated and ignored; "
-            "resize model embeddings instead."
-        )
-    kwargs.pop("vocab_size", None)
+    if "vocab_size" in kwargs:
+        raise TypeError("get_tokenizer() does not accept 'vocab_size'.")
     kwargs.setdefault("use_fast", use_fast)
     kwargs.setdefault("trust_remote_code", trust_remote_code)
     if revision is not None:

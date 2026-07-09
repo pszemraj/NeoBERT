@@ -81,7 +81,6 @@ class Metrics(defaultdict):
             self[key] = 0.0
         self["train/compute_accuracy"] = 1
         self._last_log_time: float | None = None
-        self._last_log_step: int | None = None
 
     def state_dict(self) -> Dict[str, Any]:
         """Return a serializable copy of the metrics.
@@ -98,7 +97,6 @@ class Metrics(defaultdict):
         for k, v in state_dict.items():
             self[k] = v
         self._last_log_time = None
-        self._last_log_step = None
 
     def log(
         self,
@@ -205,7 +203,6 @@ class Metrics(defaultdict):
             if fields:
                 console_fn(" | ".join(fields))
         self._last_log_time = now
-        self._last_log_step = current_step
 
         # Reset the local counters
         for key in self.LOCAL_COUNT_KEYS:
