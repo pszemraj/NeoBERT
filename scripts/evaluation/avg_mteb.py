@@ -54,17 +54,16 @@ def _average_categories(model_results: dict) -> dict[str, float]:
 def compute_table() -> None:
     """Compute and write average MTEB score tables."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--result_folder", dest="result_folder", type=str)
-    parser.add_argument("--model_name", dest="model_name", type=str)
+    parser.add_argument("--result_folder", required=True, type=Path)
+    parser.add_argument("--model_name", required=True)
     args = parser.parse_args()
 
     all_results = {}
 
-    result_dir = Path(args.result_folder)
+    result_dir = args.result_folder
     result_file = result_dir / f"{args.model_name}_avg_table.json"
 
     if result_file.exists():
-        UserWarning("Overwriting existing result file.")
         result_file.unlink()
 
     def explore(path: Path) -> list[Path]:
@@ -76,8 +75,6 @@ def compute_table() -> None:
         paths = []
         file_level = False
         files = list(path.iterdir())
-        if not files:
-            UserWarning(f"Empty folder path: {path}.")
         for file in files:
             if file.is_dir():
                 paths.extend(explore(file))
@@ -103,13 +100,9 @@ def compute_table() -> None:
                 if not file_path.name.endswith(".json"):
                     print(f"Skipping non-json {file_path.name}")
                     continue
-                else:
-                    with file_path.open("r", encoding="utf-8") as f:
-                        results = json.load(f)
-                        all_results[model_name] = {
-                            **all_results[model_name],
-                            **{file_path.stem: results},
-                        }
+                with file_path.open("r", encoding="utf-8") as f:
+                    results = json.load(f)
+                    all_results[model_name][file_path.stem] = results
 
     avg_results = {
         model: _average_categories(model_results)
