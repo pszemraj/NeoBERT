@@ -30,6 +30,7 @@ def load_validated_glue_config(
     with warnings.catch_warnings(record=True) as captured:
         warnings.simplefilter("always")
         cfg = ConfigLoader.load(config_path)
+    config_warnings = [str(item.message) for item in captured]
 
     if task_name:
         cfg.glue.task_name = task_name
@@ -39,15 +40,37 @@ def load_validated_glue_config(
     if output_dir:
         cfg.trainer.output_dir = output_dir
 
-    glue_warnings = validate_glue_config(cfg)
-    config_warnings = tuple(str(item.message) for item in captured)
-    return cfg, config_warnings + glue_warnings
+    effective_model_config: Any | None = None
+    if not cfg.model.from_hub:
+        if cfg.glue.allow_random_weights:
+            effective_model_config = cfg.model
+        elif cfg.glue.pretrained_model_path:
+            pretrained_config_path = Path(cfg.glue.pretrained_model_path)
+            if pretrained_config_path.is_file():
+                with warnings.catch_warnings(record=True) as pretrained_warnings:
+                    warnings.simplefilter("always")
+                    pretrained_cfg = ConfigLoader.load(pretrained_config_path)
+                config_warnings.extend(
+                    str(item.message) for item in pretrained_warnings
+                )
+                effective_model_config = pretrained_cfg.model
+
+    glue_warnings = validate_glue_config(
+        cfg,
+        effective_model_config=effective_model_config,
+    )
+    return cfg, tuple(config_warnings) + glue_warnings
 
 
-def validate_glue_config(cfg: Any) -> tuple[str, ...]:
+def validate_glue_config(
+    cfg: Any,
+    *,
+    effective_model_config: Any | None = None,
+) -> tuple[str, ...]:
     """Validate GLUE configuration before training.
 
     :param Any cfg: Configuration object.
+    :param Any | None effective_model_config: Resolved model architecture, when known.
     :raises GlueValidationError: If configuration is invalid.
     :return tuple[str, ...]: Non-fatal validation warnings.
     """
@@ -174,6 +197,18 @@ def validate_glue_config(cfg: Any) -> tuple[str, ...]:
                         f"Task {task} expects glue.num_labels={expected}, got "
                         f"{cfg.glue.num_labels}."
                     )
+
+        if (
+            effective_model_config is not None
+            and not bool(getattr(effective_model_config, "rope", False))
+            and cfg.glue.max_seq_length
+            > int(getattr(effective_model_config, "max_position_embeddings", 0))
+        ):
+            errors.append(
+                "glue.max_seq_length exceeds the checkpoint's learned position "
+                f"table: {cfg.glue.max_seq_length} > "
+                f"{effective_model_config.max_position_embeddings}."
+            )
 
     if errors:
         error_msg = "Configuration validation failed:\n" + "\n".join(

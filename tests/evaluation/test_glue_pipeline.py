@@ -381,8 +381,62 @@ class TestGLUETaskSpecific:
         assert cfg.model.hidden_size == 256
         assert cfg.model.norm_eps == 2e-5
         assert cfg.model.attn_backend == "sdpa"
-        assert cfg.tokenizer.max_length == 512
+        assert cfg.tokenizer.max_length == 128
         assert cfg.tokenizer.revision == "checkpoint-rev"
+
+    def test_glue_preprocessing_uses_task_context_length(self):
+        """Ensure checkpoint tokenizer defaults cannot override GLUE tokenization."""
+        from neobert.glue.process import process_function
+
+        cfg = Config()
+        cfg.task = "glue"
+        cfg.mode = "train"
+        cfg.glue.task_name = "sst2"
+        cfg.glue.max_seq_length = 96
+        cfg.tokenizer.max_length = 512
+        tokenizer = mock.MagicMock(return_value={"input_ids": [[1, 2]]})
+
+        result = process_function(
+            {"sentence": ["example"], "label": [1]}, cfg, tokenizer
+        )
+
+        assert result["labels"] == [1]
+        assert tokenizer.call_args.kwargs["max_length"] == 96
+
+    def test_glue_preflight_rejects_oversized_learned_position_context(self, tmp_path):
+        """Ensure dry validation uses checkpoint architecture for context limits."""
+        from neobert.glue.validation import (
+            GlueValidationError,
+            load_validated_glue_config,
+        )
+
+        pretrained_cfg = Config()
+        pretrained_cfg.model.rope = False
+        pretrained_cfg.model.max_position_embeddings = 128
+        pretrained_cfg.dataset.max_seq_length = 128
+        pretrained_cfg.tokenizer.max_length = 128
+        pretrained_path = tmp_path / "pretraining.yaml"
+        ConfigLoader.save(pretrained_cfg, pretrained_path)
+
+        checkpoint_root = tmp_path / "checkpoints"
+        checkpoint_root.mkdir()
+        cfg = Config()
+        cfg.task = "glue"
+        cfg.glue.task_name = "sst2"
+        cfg.glue.max_seq_length = 256
+        cfg.glue.pretrained_model_path = str(pretrained_path)
+        cfg.glue.pretrained_checkpoint_dir = str(checkpoint_root)
+        cfg.glue.pretrained_checkpoint = 10
+        config_path = tmp_path / "glue.yaml"
+        ConfigLoader.save(cfg, config_path)
+
+        with pytest.raises(GlueValidationError, match="learned position table"):
+            load_validated_glue_config(config_path)
+
+        pretrained_cfg.model.rope = True
+        ConfigLoader.save(pretrained_cfg, pretrained_path)
+        loaded, _ = load_validated_glue_config(config_path)
+        assert loaded.glue.max_seq_length == 256
 
     def test_get_evaluation_regression_keeps_vector_shapes(self):
         """Ensure STS-B style regression keeps predictions/labels 1D for batch=1."""

@@ -32,7 +32,7 @@ def process_function(
     result = tokenizer(
         *get_sentences(examples, task),
         padding=False,
-        max_length=int(cfg.tokenizer.max_length),
+        max_length=int(cfg.glue.max_seq_length),
         truncation=bool(getattr(cfg.tokenizer, "truncation", True)),
     )
     if cfg.mode in {"train", "eval"}:

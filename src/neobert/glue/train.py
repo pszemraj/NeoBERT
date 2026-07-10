@@ -807,7 +807,6 @@ def _sync_runtime_cfg_from_pretraining(
     tokenizer_keys = (
         "name",
         "path",
-        "max_length",
         "truncation",
         "trust_remote_code",
         "revision",
@@ -823,6 +822,7 @@ def _sync_runtime_cfg_from_pretraining(
         if getattr(cfg.tokenizer, key) != pretraining_value:
             tokenizer_mismatches.append(key)
         setattr(cfg.tokenizer, key, pretraining_value)
+    cfg.tokenizer.max_length = cfg.glue.max_seq_length
     if tokenizer_mismatches:
         logging.getLogger(__name__).warning(
             "GLUE tokenizer config differs from pretrained checkpoint config for %s; "
@@ -848,8 +848,6 @@ def trainer(cfg: Config) -> None:
     cfg.glue.task_name = glue_task
     cfg.id = experiment_id
     cfg.mode = getattr(cfg, "mode", "eval")  # Default to eval mode
-    cfg.num_labels = cfg.glue.num_labels if hasattr(cfg, "glue") else 2
-    cfg.max_seq_len = cfg.glue.max_seq_length if hasattr(cfg, "glue") else 128
 
     # Fail before creating an Accelerator or mutating the output directory.
     for warning in validate_glue_config(cfg):
@@ -923,7 +921,7 @@ def trainer(cfg: Config) -> None:
             )
             tokenizer = get_tokenizer(
                 pretrained_model_name_or_path=tokenizer_source,
-                max_length=model_pretraining_config.tokenizer.max_length,
+                max_length=cfg.glue.max_seq_length,
                 trust_remote_code=model_pretraining_config.tokenizer.trust_remote_code,
                 revision=model_pretraining_config.tokenizer.revision,
                 allow_special_token_rewrite=model_pretraining_config.tokenizer.allow_special_token_rewrite,
@@ -932,7 +930,7 @@ def trainer(cfg: Config) -> None:
             # Use default tokenizer for random weights test
             tokenizer = get_tokenizer(
                 pretrained_model_name_or_path="bert-base-uncased",
-                max_length=128,
+                max_length=cfg.glue.max_seq_length,
                 trust_remote_code=cfg.tokenizer.trust_remote_code,
                 revision=cfg.tokenizer.revision,
                 allow_special_token_rewrite=cfg.tokenizer.allow_special_token_rewrite,
@@ -943,7 +941,10 @@ def trainer(cfg: Config) -> None:
 
     # Validate configuration after resolving effective model/tokenizer settings.
     try:
-        validation_warnings = validate_glue_config(cfg)
+        validation_warnings = validate_glue_config(
+            cfg,
+            effective_model_config=None if from_hub else cfg.model,
+        )
     except GlueValidationError as e:
         logger.error(f"Configuration validation failed: {e}")
         raise
