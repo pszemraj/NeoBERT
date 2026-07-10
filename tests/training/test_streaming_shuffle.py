@@ -6,9 +6,12 @@ from unittest.mock import MagicMock, patch
 
 import requests
 import torch
+from accelerate import Accelerator
+from torch.utils.data import DataLoader, TensorDataset
 
 from neobert.config import Config
 from neobert.pretraining.trainer import (
+    _build_pretraining_dataloader_config,
     _maybe_wrap_streaming_dataset_for_retries,
     _maybe_shuffle_streaming_dataset,
     _load_streaming_split,
@@ -88,11 +91,19 @@ class TestStreamingShuffle(unittest.TestCase):
         self.assertFalse(dataset.shuffle_called)
 
     class _DummyResumeDataloader:
-        def __init__(self) -> None:
+        def __init__(self, length: int | None = None) -> None:
             self.set_epoch_called = False
+            self.epoch = None
+            self.length = length
 
         def set_epoch(self, epoch: int) -> None:
             self.set_epoch_called = True
+            self.epoch = epoch
+
+        def __len__(self) -> int:
+            if self.length is None:
+                raise TypeError
+            return self.length
 
     class _DummyResumeAccelerator:
         def __init__(self) -> None:
@@ -130,6 +141,89 @@ class TestStreamingShuffle(unittest.TestCase):
             self.assertTrue(dataloader.set_epoch_called)
             # Skips 6 raw pulls, not the 3 trained batches.
             self.assertEqual(accelerator.last_skip, 6)
+
+    def test_prepare_resume_dataloader_advances_completed_epoch(self):
+        """A cursor at the finite-loader boundary resumes from the next epoch."""
+        metrics = {
+            "train/epochs": 2,
+            "train/batches_in_epoch": 4,
+            "train/dataloader_batches_in_epoch": 6,
+        }
+        dataloader = self._DummyResumeDataloader(length=6)
+        accelerator = self._DummyResumeAccelerator()
+
+        skipped = _prepare_resume_dataloader(
+            dataloader, metrics, accelerator, is_streaming=False
+        )
+
+        self.assertIsNone(skipped)
+        self.assertFalse(accelerator.skip_called)
+        self.assertEqual(dataloader.epoch, 3)
+        self.assertEqual(metrics["train/epochs"], 3)
+        self.assertEqual(metrics["train/batches_in_epoch"], 0)
+        self.assertEqual(metrics["train/dataloader_batches_in_epoch"], 0)
+
+    def test_prepare_resume_dataloader_rejects_cursor_past_epoch(self):
+        """A cursor beyond the finite-loader boundary is incompatible state."""
+        metrics = {
+            "train/epochs": 2,
+            "train/dataloader_batches_in_epoch": 7,
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "cursor=7, length=6"):
+            _prepare_resume_dataloader(
+                self._DummyResumeDataloader(length=6),
+                metrics,
+                self._DummyResumeAccelerator(),
+                is_streaming=False,
+            )
+
+    def test_seedable_sampler_reconstructs_map_style_resume_order(self):
+        """Map-style resume yields the uninterrupted sample-ID suffix."""
+        cfg = Config()
+        cfg.seed = 314
+        cfg.datacollator.pack_sequences = False
+        accelerator = Accelerator(
+            cpu=True,
+            dataloader_config=_build_pretraining_dataloader_config(cfg),
+        )
+
+        def _prepared_loader():
+            dataset = TensorDataset(torch.arange(32))
+            return accelerator.prepare(DataLoader(dataset, batch_size=4, shuffle=True))
+
+        uninterrupted_loader = _prepared_loader()
+        uninterrupted_loader.set_epoch(3)
+        uninterrupted = [batch[0].clone() for batch in uninterrupted_loader]
+
+        metrics = {
+            "train/epochs": 3,
+            "train/dataloader_batches_in_epoch": 2,
+        }
+        resumed_loader = _prepared_loader()
+        resumed = _prepare_resume_dataloader(
+            resumed_loader,
+            metrics,
+            accelerator,
+            is_streaming=False,
+        )
+
+        self.assertIsNotNone(resumed)
+        actual = [batch[0] for batch in resumed]
+        self.assertEqual(len(actual), len(uninterrupted[2:]))
+        for actual_batch, expected_batch in zip(actual, uninterrupted[2:]):
+            torch.testing.assert_close(actual_batch, expected_batch)
+
+    def test_pretraining_dataloader_config_is_seeded_in_all_modes(self):
+        """Packed dispatch settings do not disable deterministic sampling."""
+        cfg = Config()
+        cfg.seed = 2718
+        for packed, expected_dispatch in ((False, None), (True, False)):
+            cfg.datacollator.pack_sequences = packed
+            dataloader_config = _build_pretraining_dataloader_config(cfg)
+            self.assertTrue(dataloader_config.use_seedable_sampler)
+            self.assertEqual(dataloader_config.data_seed, 2718)
+            self.assertEqual(dataloader_config.dispatch_batches, expected_dispatch)
 
     def test_prepare_resume_dataloader_no_raw_pulls_returns_none(self):
         """No dataloader pulls this epoch (or a pre-counter checkpoint) skips nothing."""

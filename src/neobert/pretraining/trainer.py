@@ -1544,17 +1544,46 @@ def _prepare_resume_dataloader(
     if resume_step <= 0:
         return None
 
+    resume_epoch = int(metrics.get("train/epochs", 0))
+    dataloader_length = _safe_len(train_dataloader)
+    if dataloader_length is not None:
+        if resume_step > dataloader_length:
+            raise RuntimeError(
+                "Resume dataloader cursor exceeds the current epoch length: "
+                f"cursor={resume_step}, length={dataloader_length}. The checkpoint "
+                "and current data geometry are incompatible."
+            )
+        if resume_step == dataloader_length:
+            next_epoch = resume_epoch + 1
+            metrics["train/epochs"] = next_epoch
+            metrics["train/batches_in_epoch"] = 0
+            metrics["train/dataloader_batches_in_epoch"] = 0
+            if hasattr(train_dataloader, "set_epoch"):
+                train_dataloader.set_epoch(next_epoch)
+            logger.info(
+                "Resume: the saved dataloader cursor is at the epoch boundary; "
+                "continuing from epoch %d without constructing an empty skipped loader.",
+                next_epoch,
+            )
+            return None
+
     if hasattr(train_dataloader, "set_epoch"):
-        train_dataloader.set_epoch(int(metrics.get("train/epochs", 0)))
+        train_dataloader.set_epoch(resume_epoch)
 
     logger.info(
         "Resume (%s): skipping %d dataloader batch(es) already pulled in the "
         "current epoch (epoch=%d).",
         "streaming" if is_streaming else "map-style",
         resume_step,
-        int(metrics.get("train/epochs", 0)),
+        resume_epoch,
     )
-    return accelerator.skip_first_batches(train_dataloader, resume_step)
+    skipped_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
+    # ``skip_first_batches`` constructs a new DataLoaderShard whose iteration
+    # starts at zero. Set the epoch on that new wrapper as well, otherwise its
+    # first ``__iter__`` resets the seedable sampler back to epoch zero.
+    if hasattr(skipped_dataloader, "set_epoch"):
+        skipped_dataloader.set_epoch(resume_epoch)
+    return skipped_dataloader
 
 
 def _safe_len(dataloader: torch.utils.data.DataLoader) -> Optional[int]:
@@ -1569,6 +1598,20 @@ def _safe_len(dataloader: torch.utils.data.DataLoader) -> Optional[int]:
         return len(dataloader)
     except TypeError:
         return None
+
+
+def _build_pretraining_dataloader_config(cfg: Config) -> DataLoaderConfiguration:
+    """Build deterministic Accelerate dataloader settings for pretraining.
+
+    :param Config cfg: Training configuration.
+    :return DataLoaderConfiguration: Dataloader configuration.
+    """
+    packed = bool(cfg.datacollator.pack_sequences)
+    return DataLoaderConfiguration(
+        dispatch_batches=False if packed else None,
+        use_seedable_sampler=True,
+        data_seed=int(cfg.seed),
+    )
 
 
 def trainer(cfg: Config) -> None:
@@ -1606,9 +1649,8 @@ def trainer(cfg: Config) -> None:
     # Keep manual placement for packed mode only; in non-packed mode we use
     # Accelerate's device placement for better overlap.
     disable_dispatch = bool(cfg.datacollator.pack_sequences)
-    dataloader_config = None
+    dataloader_config = _build_pretraining_dataloader_config(cfg)
     if disable_dispatch:
-        dataloader_config = DataLoaderConfiguration(dispatch_batches=False)
         logger.info("Disabling Accelerate dispatch_batches for packed-sequence mode.")
 
     mixed_precision = resolve_mixed_precision(
@@ -2827,6 +2869,20 @@ def trainer(cfg: Config) -> None:
                 if metrics["train/steps"] >= cfg.trainer.max_steps:
                     pbar.close()
                     return
+
+        if not saw_batch_this_epoch and skipped_train_dataloader is not None:
+            metrics["train/epochs"] += 1
+            metrics["train/batches_in_epoch"] = 0
+            metrics["train/dataloader_batches_in_epoch"] = 0
+            skipped_train_dataloader = None
+            if is_streaming and hasattr(train_dataset, "set_epoch"):
+                train_dataset.set_epoch(metrics["train/epochs"])
+            logger.warning(
+                "Resume skipping exhausted the saved epoch before yielding a batch; "
+                "continuing from epoch %d.",
+                metrics["train/epochs"],
+            )
+            continue
 
         if not saw_batch_this_epoch:
             raise RuntimeError(
