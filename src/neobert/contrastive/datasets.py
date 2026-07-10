@@ -41,6 +41,7 @@ DATASET_TO_BSZ = {
 }
 
 _SHARED_DATASET_DEFAULT_NAME = "refinedweb"
+_CONTRASTIVE_COLUMNS = frozenset({"query", "corpus", "negative"})
 _CONTRASTIVE_DATASET_HF_IDS: dict[str, tuple[str, ...]] = {
     "ALLNLI": ("sentence-transformers/all-nli",),
     "AMAZONQA": ("embedding-data/Amazon-QA",),
@@ -60,6 +61,25 @@ _CONTRASTIVE_DATASET_HF_IDS: dict[str, tuple[str, ...]] = {
     "TRIVIAQA": ("sentence-transformers/trivia-qa-triplet",),
     "WIKIHOW": ("sentence-transformers/wikihow",),
 }
+
+
+def _default_num_proc() -> int:
+    """Return the CPU affinity count used for dataset transforms.
+
+    :return int: Number of CPUs available to the current process.
+    """
+    return len(os.sched_getaffinity(0))
+
+
+def _non_contrastive_columns(dataset: Dataset) -> list[str]:
+    """Return dataset columns outside the normalized contrastive schema.
+
+    :param Dataset dataset: Dataset whose columns should be inspected.
+    :return list[str]: Columns to remove after normalization.
+    """
+    return [
+        column for column in dataset.column_names if column not in _CONTRASTIVE_COLUMNS
+    ]
 
 
 def get_bsz(dataset_name: str, target_batch_size: int) -> int:
@@ -246,6 +266,7 @@ def build_contrastive_tokenization_manifest(
     column_names: Sequence[str],
     max_length: int,
     truncation: bool,
+    token_columns: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Build the tokenization manifest for one cached contrastive split.
 
@@ -254,15 +275,18 @@ def build_contrastive_tokenization_manifest(
     :param Sequence[str] column_names: Cached dataset columns.
     :param int max_length: Tokenization maximum length.
     :param bool truncation: Whether tokenization truncates long examples.
+    :param Sequence[str] | None token_columns: Pre-resolved logical token columns.
     :return dict[str, Any]: Expected tokenization manifest.
     """
-    token_columns = resolve_contrastive_token_columns(column_names)
+    resolved_columns = tuple(
+        token_columns or resolve_contrastive_token_columns(column_names)
+    )
     return build_tokenization_manifest(
         tokenizer,
         dataset_name=dataset_name,
         dataset_config=None,
         dataset_path=None,
-        column_name=token_columns,
+        column_name=resolved_columns,
         max_length=max_length,
         truncation=truncation,
         add_special_tokens=True,
@@ -383,19 +407,12 @@ class ALLNLI(AbsDataset):
 
     name = "ALLNLI"
 
-    def __init__(self, dataset: Optional[Dataset] = None):
-        """Initialize the ALLNLI wrapper.
-
-        :param Dataset | None dataset: Optional pre-loaded dataset.
-        """
-        super().__init__(dataset=dataset)
-
     def from_hub(self) -> Dataset:
         """Load and normalize the ALLNLI triplet split.
 
         :return Dataset: Normalized ALLNLI dataset.
         """
-        num_proc = len(os.sched_getaffinity(0))
+        num_proc = _default_num_proc()
         dataset = load_dataset(
             "sentence-transformers/all-nli",
             name="triplet",
@@ -414,19 +431,12 @@ class AMAZONQA(AbsDataset):
 
     name = "AMAZONQA"
 
-    def __init__(self, dataset: Optional[Dataset] = None):
-        """Initialize the AmazonQA wrapper.
-
-        :param Dataset | None dataset: Optional pre-loaded dataset.
-        """
-        super().__init__(dataset=dataset)
-
     def from_hub(self) -> Dataset:
         """Load and normalize the AmazonQA training split.
 
         :return Dataset: Normalized AmazonQA dataset.
         """
-        num_proc = len(os.sched_getaffinity(0))
+        num_proc = _default_num_proc()
         dataset = load_dataset(
             "embedding-data/Amazon-QA", split="train", num_proc=num_proc
         )
@@ -444,11 +454,7 @@ class AMAZONQA(AbsDataset):
             unwrap_corpus_column,
             batched=True,
             num_proc=num_proc,
-            remove_columns=[
-                col
-                for col in dataset.column_names
-                if col not in ["query", "corpus", "negative"]
-            ],
+            remove_columns=_non_contrastive_columns(dataset),
         )
 
         return dataset
@@ -459,19 +465,12 @@ class CONCURRENTQA(AbsDataset):
 
     name = "CONCURRENTQA"
 
-    def __init__(self, dataset: Optional[Dataset] = None):
-        """Initialize the ConcurrentQA wrapper.
-
-        :param Dataset | None dataset: Optional pre-loaded dataset.
-        """
-        super().__init__(dataset=dataset)
-
     def from_hub(self) -> Dataset:
         """Load and normalize the ConcurrentQA retrieval split.
 
         :return Dataset: Normalized ConcurrentQA dataset.
         """
-        num_proc = len(os.sched_getaffinity(0))
+        num_proc = _default_num_proc()
         dataset = load_dataset(
             "stanfordnlp/concurrentqa-retrieval", split="train", num_proc=num_proc
         )
@@ -492,11 +491,7 @@ class CONCURRENTQA(AbsDataset):
             process,
             batched=True,
             num_proc=num_proc,
-            remove_columns=[
-                col
-                for col in dataset.column_names
-                if col not in ["query", "corpus", "negative"]
-            ],
+            remove_columns=_non_contrastive_columns(dataset),
         )
 
         return dataset
@@ -506,13 +501,6 @@ class FEVER(AbsDataset):
     """FEVER dataset wrapper."""
 
     name = "FEVER"
-
-    def __init__(self, dataset: Optional[Dataset] = None):
-        """Initialize the FEVER wrapper.
-
-        :param Dataset | None dataset: Optional pre-loaded dataset.
-        """
-        super().__init__(dataset=dataset)
 
     def from_hub(self) -> Dataset:
         """Load and normalize the FEVER training split.
@@ -562,19 +550,12 @@ class GITHUBISSUE(AbsDataset):
 
     name = "GITHUBISSUE"
 
-    def __init__(self, dataset: Optional[Dataset] = None):
-        """Initialize the GitHub Issue wrapper.
-
-        :param Dataset | None dataset: Optional pre-loaded dataset.
-        """
-        super().__init__(dataset=dataset)
-
     def from_hub(self) -> Dataset:
         """Load and normalize the GitHub issue similarity split.
 
         :return Dataset: Normalized GitHub issue dataset.
         """
-        num_proc = len(os.sched_getaffinity(0))
+        num_proc = _default_num_proc()
         dataset = load_dataset(
             "WhereIsAI/github-issue-similarity",
             "positive",
@@ -593,19 +574,12 @@ class GOOAQ(AbsDataset):
 
     name = "GOOAQ"
 
-    def __init__(self, dataset: Optional[Dataset] = None):
-        """Initialize the GOOAQ wrapper.
-
-        :param Dataset | None dataset: Optional pre-loaded dataset.
-        """
-        super().__init__(dataset=dataset)
-
     def from_hub(self) -> Dataset:
         """Load and normalize the GOOAQ hard-negative split.
 
         :return Dataset: Normalized GOOAQ dataset.
         """
-        num_proc = len(os.sched_getaffinity(0))
+        num_proc = _default_num_proc()
         dataset = load_dataset(
             "tomaarsen/gooaq-hard-negatives",
             name="triplet-5",
@@ -632,11 +606,7 @@ class GOOAQ(AbsDataset):
             aggregate_negatives,
             batched=True,
             num_proc=num_proc,
-            remove_columns=[
-                col
-                for col in dataset.column_names
-                if col not in ["query", "corpus", "negative"]
-            ],
+            remove_columns=_non_contrastive_columns(dataset),
         )
 
         return dataset
@@ -646,13 +616,6 @@ class MSMARCO(AbsDataset):
     """MS MARCO dataset wrapper."""
 
     name = "MSMARCO"
-
-    def __init__(self, dataset: Optional[Dataset] = None):
-        """Initialize the MS MARCO wrapper.
-
-        :param Dataset | None dataset: Optional pre-loaded dataset.
-        """
-        super().__init__(dataset=dataset)
 
     def from_hub(self) -> Dataset:
         """Load and normalize the MS MARCO training split.
@@ -701,19 +664,12 @@ class PAQ(AbsDataset):
 
     name = "PAQ"
 
-    def __init__(self, dataset: Optional[Dataset] = None):
-        """Initialize the PAQ wrapper.
-
-        :param Dataset | None dataset: Optional pre-loaded dataset.
-        """
-        super().__init__(dataset=dataset)
-
     def from_hub(self) -> Dataset:
         """Load and normalize the PAQ training split.
 
         :return Dataset: Normalized PAQ dataset.
         """
-        num_proc = len(os.sched_getaffinity(0))
+        num_proc = _default_num_proc()
         dataset = load_dataset(
             "embedding-data/PAQ_pairs", split="train", num_proc=num_proc
         )
@@ -732,11 +688,7 @@ class PAQ(AbsDataset):
             split_set_column,
             batched=True,
             num_proc=num_proc,
-            remove_columns=[
-                col
-                for col in dataset.column_names
-                if col not in ["query", "corpus", "negative"]
-            ],
+            remove_columns=_non_contrastive_columns(dataset),
         )
 
         return dataset
@@ -747,19 +699,12 @@ class PUBMEDQA(AbsDataset):
 
     name = "PUBMEDQA"
 
-    def __init__(self, dataset: Optional[Dataset] = None):
-        """Initialize the PubMedQA wrapper.
-
-        :param Dataset | None dataset: Optional pre-loaded dataset.
-        """
-        super().__init__(dataset=dataset)
-
     def from_hub(self) -> Dataset:
         """Load and normalize the PubMedQA triplet split.
 
         :return Dataset: Normalized PubMedQA dataset.
         """
-        num_proc = len(os.sched_getaffinity(0))
+        num_proc = _default_num_proc()
         dataset = load_dataset(
             "sentence-transformers/pubmedqa",
             name="triplet-20",
@@ -786,11 +731,7 @@ class PUBMEDQA(AbsDataset):
             aggregate_negatives,
             batched=True,
             num_proc=num_proc,
-            remove_columns=[
-                col
-                for col in dataset.column_names
-                if col not in ["query", "corpus", "negative"]
-            ],
+            remove_columns=_non_contrastive_columns(dataset),
         )
 
         return dataset
@@ -801,19 +742,12 @@ class QQP(AbsDataset):
 
     name = "QQP"
 
-    def __init__(self, dataset: Optional[Dataset] = None):
-        """Initialize the QQP wrapper.
-
-        :param Dataset | None dataset: Optional pre-loaded dataset.
-        """
-        super().__init__(dataset=dataset)
-
     def from_hub(self) -> Dataset:
         """Load and normalize the QQP triplet split.
 
         :return Dataset: Normalized QQP dataset.
         """
-        num_proc = len(os.sched_getaffinity(0))
+        num_proc = _default_num_proc()
         dataset = load_dataset(
             "embedding-data/QQP_triplets", split="train", num_proc=num_proc
         )
@@ -833,11 +767,7 @@ class QQP(AbsDataset):
             split_set_column,
             batched=True,
             num_proc=num_proc,
-            remove_columns=[
-                col
-                for col in dataset.column_names
-                if col not in ["query", "corpus", "negative"]
-            ],
+            remove_columns=_non_contrastive_columns(dataset),
         )
 
         return dataset
@@ -848,19 +778,12 @@ class SENTENCECOMP(AbsDataset):
 
     name = "SENTENCECOMP"
 
-    def __init__(self, dataset: Optional[Dataset] = None):
-        """Initialize the sentence compression wrapper.
-
-        :param Dataset | None dataset: Optional pre-loaded dataset.
-        """
-        super().__init__(dataset=dataset)
-
     def from_hub(self) -> Dataset:
         """Load and normalize the sentence compression split.
 
         :return Dataset: Normalized sentence compression dataset.
         """
-        num_proc = len(os.sched_getaffinity(0))
+        num_proc = _default_num_proc()
         dataset = load_dataset(
             "embedding-data/sentence-compression", split="train", num_proc=num_proc
         )
@@ -879,11 +802,7 @@ class SENTENCECOMP(AbsDataset):
             split_set_column,
             batched=True,
             num_proc=num_proc,
-            remove_columns=[
-                col
-                for col in dataset.column_names
-                if col not in ["query", "corpus", "negative"]
-            ],
+            remove_columns=_non_contrastive_columns(dataset),
         )
 
         return dataset
@@ -894,19 +813,12 @@ class STACKEXCHANGE(AbsDataset):
 
     name = "STACKEXCHANGE"
 
-    def __init__(self, dataset: Optional[Dataset] = None):
-        """Initialize the StackExchange wrapper.
-
-        :param Dataset | None dataset: Optional pre-loaded dataset.
-        """
-        super().__init__(dataset=dataset)
-
     def from_hub(self) -> Dataset:
         """Load and normalize StackExchange duplicate-question pairs.
 
         :return Dataset: Normalized StackExchange dataset.
         """
-        num_proc = len(os.sched_getaffinity(0))
+        num_proc = _default_num_proc()
 
         dataset_body = load_dataset(
             "sentence-transformers/stackexchange-duplicates",
@@ -937,19 +849,12 @@ class STACKOVERFLOW(AbsDataset):
 
     name = "STACKOVERFLOW"
 
-    def __init__(self, dataset: Optional[Dataset] = None):
-        """Initialize the StackOverflow wrapper.
-
-        :param Dataset | None dataset: Optional pre-loaded dataset.
-        """
-        super().__init__(dataset=dataset)
-
     def from_hub(self) -> Dataset:
         """Load and normalize StackOverflow duplicate-question pairs.
 
         :return Dataset: Normalized StackOverflow dataset.
         """
-        num_proc = len(os.sched_getaffinity(0))
+        num_proc = _default_num_proc()
         dataset = load_dataset(
             "mteb/stackoverflowdupquestions-reranking", split="train", num_proc=num_proc
         )
@@ -967,11 +872,7 @@ class STACKOVERFLOW(AbsDataset):
             split_set_column,
             batched=True,
             num_proc=num_proc,
-            remove_columns=[
-                col
-                for col in dataset.column_names
-                if col not in ["query", "corpus", "negative"]
-            ],
+            remove_columns=_non_contrastive_columns(dataset),
         )
 
         return dataset
@@ -982,19 +883,12 @@ class STS12(AbsDataset):
 
     name = "STS12"
 
-    def __init__(self, dataset: Optional[Dataset] = None):
-        """Initialize the STS12 wrapper.
-
-        :param Dataset | None dataset: Optional pre-loaded dataset.
-        """
-        super().__init__(dataset=dataset)
-
     def from_hub(self) -> Dataset:
         """Load and normalize the high-similarity STS12 split.
 
         :return Dataset: Normalized STS12 dataset.
         """
-        num_proc = len(os.sched_getaffinity(0))
+        num_proc = _default_num_proc()
         dataset = load_dataset("mteb/sts12-sts", split="train", num_proc=num_proc)
 
         dataset = dataset.filter(lambda x: x["score"] > 4)
@@ -1002,13 +896,7 @@ class STS12(AbsDataset):
         dataset = dataset.rename_column("sentence1", "query")
         dataset = dataset.rename_column("sentence2", "corpus")
 
-        dataset = dataset.remove_columns(
-            [
-                col
-                for col in dataset.column_names
-                if col not in ["query", "corpus", "negative"]
-            ]
-        )
+        dataset = dataset.remove_columns(_non_contrastive_columns(dataset))
 
         return dataset
 
@@ -1018,19 +906,12 @@ class STSBENCHMARK(AbsDataset):
 
     name = "STSBENCHMARK"
 
-    def __init__(self, dataset: Optional[Dataset] = None):
-        """Initialize the STS Benchmark wrapper.
-
-        :param Dataset | None dataset: Optional pre-loaded dataset.
-        """
-        super().__init__(dataset=dataset)
-
     def from_hub(self) -> Dataset:
         """Load and normalize the high-similarity STS Benchmark split.
 
         :return Dataset: Normalized STS Benchmark dataset.
         """
-        num_proc = len(os.sched_getaffinity(0))
+        num_proc = _default_num_proc()
         dataset = load_dataset(
             "mteb/stsbenchmark-sts", split="train", num_proc=num_proc
         )
@@ -1040,13 +921,7 @@ class STSBENCHMARK(AbsDataset):
         dataset = dataset.rename_column("sentence1", "query")
         dataset = dataset.rename_column("sentence2", "corpus")
 
-        dataset = dataset.remove_columns(
-            [
-                col
-                for col in dataset.column_names
-                if col not in ["query", "corpus", "negative"]
-            ]
-        )
+        dataset = dataset.remove_columns(_non_contrastive_columns(dataset))
 
         return dataset
 
@@ -1056,19 +931,12 @@ class TRIVIAQA(AbsDataset):
 
     name = "TRIVIAQA"
 
-    def __init__(self, dataset: Optional[Dataset] = None):
-        """Initialize the TriviaQA wrapper.
-
-        :param Dataset | None dataset: Optional pre-loaded dataset.
-        """
-        super().__init__(dataset=dataset)
-
     def from_hub(self) -> Dataset:
         """Load and normalize the TriviaQA triplet split.
 
         :return Dataset: Normalized TriviaQA dataset.
         """
-        num_proc = len(os.sched_getaffinity(0))
+        num_proc = _default_num_proc()
         dataset = load_dataset(
             "sentence-transformers/trivia-qa-triplet",
             name="triplet",
@@ -1087,19 +955,12 @@ class WIKIHOW(AbsDataset):
 
     name = "WIKIHOW"
 
-    def __init__(self, dataset: Optional[Dataset] = None):
-        """Initialize the WikiHow wrapper.
-
-        :param Dataset | None dataset: Optional pre-loaded dataset.
-        """
-        super().__init__(dataset=dataset)
-
     def from_hub(self) -> Dataset:
         """Load and normalize the WikiHow query/summary split.
 
         :return Dataset: Normalized WikiHow dataset.
         """
-        num_proc = len(os.sched_getaffinity(0))
+        num_proc = _default_num_proc()
         dataset = load_dataset(
             "sentence-transformers/wikihow", split="train", num_proc=num_proc
         )

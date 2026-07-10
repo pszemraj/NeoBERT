@@ -112,6 +112,7 @@ def pipeline(cfg: Any) -> DatasetDict:
                 column_names=subdataset.column_names,
                 max_length=getattr(cfg.tokenizer, "max_length", 512),
                 truncation=getattr(cfg.tokenizer, "truncation", True),
+                token_columns=token_columns,
             )
             if reuse_cached:
                 validate_tokenized_cache_manifest(dataset_dir, manifest)
