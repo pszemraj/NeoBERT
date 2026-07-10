@@ -267,8 +267,8 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 | `nesterov`                     | `bool`           | `true`            | Use standard Muon Nesterov momentum (`g + beta * buffer`).   |
 | `muon_decay`                   | `float`          | `0.0`             | Muon weight decay.                                           |
 | `ns_steps`                     | `int`            | `5`               | Newton-Schulz/Polar iterations.                              |
-| `enable_clipping`              | `bool`           | `true`            | Enable MuonClip's QK clipping path (separate from `trainer.gradient_clipping`). |
-| `clipping_threshold`           | `float`          | `50.0`            | QK clipping threshold.                                       |
+| `enable_clipping`              | `bool`           | `true`            | Enable [MuonClip QK clipping](../guides/training-optimization.md#clipping), separate from `trainer.gradient_clipping`; FSDP2 requires `false`. |
+| `clipping_threshold`           | `float`          | `50.0`            | Target for the global mean of each head's valid per-sample maximum logit. |
 | `clipping_alpha`               | `float`          | `0.5`             | Q/K scaling balance parameter.                               |
 | `clipping_warmup_steps`        | `int`            | `0`               | Disable clipping before this many steps.                     |
 | `clipping_interval`            | `int`            | `10`              | Apply clipping every N update steps.                         |
@@ -407,11 +407,13 @@ Checkpoint layout, selectors, and resume behavior are described in [Training](..
 | `trainer.use_cpu=true` on a CUDA host                                              | **CPU TARGET**     | Runtime preserves the requested precision policy and forces `model.attn_backend='sdpa'` for explicit CPU runs.      |
 | GLUE task with `model.attn_backend=flash_attn_varlen`                              | **AUTO-ADJUST**    | GLUE classifier wrappers force `model.attn_backend='sdpa'`; packed flash attention is not part of the supported GLUE path. |
 | `optimizer.name=muonclip` with FSDP v1                                             | **ERROR**          | MuonClip distributed mode requires FSDP2 (`fsdp_version=2`).                                                       |
+| `optimizer.name=muonclip` with FSDP2 and `muon_config.enable_clipping=true`         | **ERROR**          | QK activation clipping is unsupported by the sharded owner-compute path; use the no-clipping recipe.              |
 | Any DeepSpeed runtime                                                              | **ERROR**          | DeepSpeed execution is unsupported in this repo; use Accelerate FSDP v2 for distributed runs. Legacy DeepSpeed checkpoint conversion remains available separately. |
 | `trainer.mixed_precision='no'` with `model.attn_backend=flash_attn_varlen`         | **AUTO-ADJUST**    | Runtime switches attention backend to `sdpa` with a warning.                                                       |
 | `contrastive.pretraining_prob > 0` with `model.dropout_prob <= 0`                 | **ERROR**          | SimCSE-style anti-forgetting steps require dropout-created views.                                                   |
 | Contrastive training without resume, pretrained checkpoint, or random opt-in      | **ERROR**          | Set `contrastive.pretrained_checkpoint_dir`, resume a self-contained contrastive checkpoint, or explicitly set `contrastive.allow_random_weights=true`. |
 | `datacollator.pack_sequences=true` with `model.attn_backend=sdpa`                 | **WARNING**        | Works, but slower than `flash_attn_varlen`; SDPA uses fallback path.                                                |
+| Distributed packed training with `trainer.enforce_full_packed_batches=true`       | **ERROR**          | Rank-local buffering can desynchronize model calls and resume cursors; leave it `false` and use variable local microbatch sizes. |
 | `dataset.path` and `dataset.name` both set                                        | **PRECEDENCE**     | Existing local `dataset.path` is used first; hub dataset acts as fallback.                                          |
 | Tokenizer/model vocab sizes                                                       | **IMPORTANT**      | Runtime pads the tokenizer with inert tokens so tokenizer length matches model vocabulary size.                    |
 | `model.pad_token_id`                                                              | **IMPORTANT**      | Runtime syncs this from tokenizer before model init/checkpoint save.                                                |

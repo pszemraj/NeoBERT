@@ -60,6 +60,10 @@ Actions:
 
 - Set `optimizer.muon_config.enable_clipping: false` for FSDP2 Muon, or use an unsharded run for QK clipping. See [Clipping](training-optimization.md#clipping).
 
+### Full packed batches rejected in distributed training
+
+- Leave `trainer.enforce_full_packed_batches: false` for distributed runs. Rank-local packing can produce different row counts, so buffering until each rank independently has a full batch can desynchronize model calls and resume cursors. Variable local packed microbatches are supported and normalized by the global masked-token count; see [Packed Training](training-optimization.md#packed-training).
+
 ### Accelerate launch warnings about mixed precision or dynamo
 
 - `accelerate launch` warnings about its default `--mixed_precision` or `--dynamo_backend` describe omitted launcher flags, not a NeoBERT override; the trainer still constructs `Accelerator(...)` from `trainer.mixed_precision` and the repo's compile settings.
@@ -91,7 +95,7 @@ Actions:
 
 - `optimizer_param_names.json is missing`: the checkpoint predates the optimizer resume manifest, so parameter order and state semantics cannot be verified. Start a new run or continue from model weights only; this repo does not carry checkpoint back-compat before a stable release.
 - `outdated manifest schema`: the manifest was written before state-semantics tracking. Start a current run from the portable model weights or start fresh.
-- `Optimizer state semantics changed`: the optimizer's update rule changed since the checkpoint was written - an implementation change (for example a momentum-scale change), or for MuonClip a drifted update-rule selector (`norm_factor`, `param_policy`, `orthogonalization`, `nesterov`, `clipping`), including a changed repo default. Resuming a clipping run as Muon-only (or vice versa) trips the `clipping` selector. Re-pin the checkpoint's selectors explicitly in the launch config to continue, or start a new run.
+- `Optimizer state semantics changed`: the optimizer's update rule changed since the checkpoint was written. If a MuonClip selector (`norm_factor`, `param_policy`, `orthogonalization`, `nesterov`, or `clipping`) drifted, re-pin the checkpoint's value explicitly in the launch config. If the implementation or clipping reduction contract changed, the old optimizer buffers are not safely resumable; start a new run or continue from portable model weights only.
 - `Optimizer parameter order changed`: the model's parameter registration order differs from the checkpoint; PyTorch optimizer state is positional, so a silent load would hand buffers to the wrong parameters.
 
 ### Resume fails because the Accelerate state directory is missing
