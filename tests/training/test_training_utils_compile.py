@@ -16,7 +16,9 @@ from accelerate.utils import DataLoaderConfiguration, DistributedType
 from neobert.config import Config, ConfigLoader
 from neobert.checkpointing import (
     ACCELERATE_STATE_DIR,
+    CHECKPOINT_COMPLETE_NAME,
     OPTIMIZER_PARAM_NAMES_MANIFEST,
+    checkpoint_resume_errors,
     mark_checkpoint_complete,
 )
 from neobert.model import NeoBERT, NeoBERTConfig
@@ -105,6 +107,39 @@ def test_latest_resume_preserves_zero_padding_and_skips_incomplete(
     _write_complete_checkpoint_shell(complete)
     (incomplete / ACCELERATE_STATE_DIR).mkdir()
 
+    resume_path, iteration = _resolve_resume_checkpoint(
+        "latest", str(checkpoint_dir), str(output_dir)
+    )
+
+    assert Path(resume_path) == complete
+    assert iteration == 51
+
+
+@pytest.mark.parametrize(
+    "marker_payload",
+    [None, []],
+    ids=["null", "array"],
+)
+def test_latest_resume_skips_non_object_completion_marker(
+    tmp_path: Path,
+    marker_payload: object,
+) -> None:
+    """Latest skips checkpoints whose completion marker is not a JSON object."""
+    output_dir = tmp_path / "run"
+    checkpoint_dir = output_dir / "checkpoints"
+    complete = checkpoint_dir / "50"
+    damaged = checkpoint_dir / "60"
+    complete.mkdir(parents=True)
+    damaged.mkdir()
+    _write_complete_checkpoint_shell(complete)
+    _write_complete_checkpoint_shell(damaged)
+    (damaged / CHECKPOINT_COMPLETE_NAME).write_text(
+        json.dumps(marker_payload), encoding="utf-8"
+    )
+
+    assert checkpoint_resume_errors(damaged) == [
+        f"invalid {CHECKPOINT_COMPLETE_NAME}: expected a JSON object"
+    ]
     resume_path, iteration = _resolve_resume_checkpoint(
         "latest", str(checkpoint_dir), str(output_dir)
     )

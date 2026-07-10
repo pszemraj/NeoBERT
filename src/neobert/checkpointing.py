@@ -265,6 +265,9 @@ def checkpoint_resume_errors(checkpoint_path: str | Path) -> list[str]:
     except (OSError, json.JSONDecodeError) as exc:
         errors.append(f"invalid {CHECKPOINT_COMPLETE_NAME}: {exc}")
         return errors
+    if not isinstance(marker, Mapping):
+        errors.append(f"invalid {CHECKPOINT_COMPLETE_NAME}: expected a JSON object")
+        return errors
     if marker.get("format_version") != CHECKPOINT_COMPLETE_VERSION:
         errors.append(
             f"unsupported completion marker version {marker.get('format_version')!r}"
