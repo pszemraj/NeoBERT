@@ -9,19 +9,16 @@ from typing import Any
 import torch
 from mteb import MTEB
 
-from neobert.checkpointing import (
-    load_step_checkpoint_state_dict,
-    resolve_training_checkpoint_artifacts,
-)
+from neobert.checkpointing import load_step_checkpoint_state_dict
 from neobert.config import ConfigLoader
+from neobert.evaluation_utils import resolve_checkpoint_model_source
 from neobert.mteb_tasks import (
     MTEB_ALL_EXECUTION_TASKS,
     MTEB_EXECUTION_TASKS_BY_TYPE,
     MTEB_TASK_SPECS_BY_EXECUTION_NAME,
     expand_mteb_task_name,
 )
-from neobert.model import NeoBERTConfig, NeoBERTForMTEB
-from neobert.tokenizer import get_tokenizer
+from neobert.model import NeoBERTForMTEB
 
 logging.basicConfig(level=logging.INFO)
 
@@ -171,22 +168,13 @@ def evaluate_mteb(cfg: Any) -> None:
     pretrained_checkpoint_dir = Path(cfg.trainer.output_dir)
     selected_tasks = _resolve_mteb_tasks(cfg)
 
-    # Get checkpoint number
-    checkpoint_root, checkpoint_step_dir, ckpt = resolve_training_checkpoint_artifacts(
+    requested_max_length = int(cfg.tokenizer.max_length)
+    resolved = resolve_checkpoint_model_source(
         pretrained_checkpoint_dir,
         pretrained_checkpoint,
+        max_length=requested_max_length,
     )
-    checkpoint_config_path = checkpoint_step_dir / "config.yaml"
-    checkpoint_tokenizer_path = checkpoint_step_dir / "tokenizer"
-    if not checkpoint_config_path.is_file():
-        raise FileNotFoundError(
-            f"Checkpoint-local training config is missing: {checkpoint_config_path}"
-        )
-    if not checkpoint_tokenizer_path.is_dir():
-        raise FileNotFoundError(
-            f"Checkpoint-local tokenizer is missing: {checkpoint_tokenizer_path}"
-        )
-    checkpoint_cfg = ConfigLoader.load(checkpoint_config_path)
+    ckpt = resolved.checkpoint_tag
 
     # Define path to store results
     configured_output = getattr(cfg, "output_folder", None)
@@ -202,46 +190,10 @@ def evaluate_mteb(cfg: Any) -> None:
     # Cuda
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Load tokenizer
-    tokenizer = get_tokenizer(
-        pretrained_model_name_or_path=str(checkpoint_tokenizer_path),
-        max_length=cfg.tokenizer.max_length,
-        trust_remote_code=False,
-        revision=None,
-    )
-    if len(tokenizer) != int(checkpoint_cfg.model.vocab_size):
-        raise ValueError(
-            "Checkpoint tokenizer/model vocabulary mismatch: "
-            f"tokenizer={len(tokenizer)}, model={checkpoint_cfg.model.vocab_size}."
-        )
-    if tokenizer.pad_token_id != int(checkpoint_cfg.model.pad_token_id):
-        raise ValueError(
-            "Checkpoint tokenizer/model pad-token mismatch: "
-            f"tokenizer={tokenizer.pad_token_id}, "
-            f"model={checkpoint_cfg.model.pad_token_id}."
-        )
-    requested_max_length = int(cfg.tokenizer.max_length)
-    trained_max_length = int(checkpoint_cfg.model.max_position_embeddings)
-    if not checkpoint_cfg.model.rope and requested_max_length > trained_max_length:
-        raise ValueError(
-            f"Requested max_length={requested_max_length} exceeds the learned "
-            f"position limit ({trained_max_length}) in {checkpoint_step_dir}."
-        )
-    model_max_length = (
-        requested_max_length if checkpoint_cfg.model.rope else trained_max_length
-    )
-
     # Instantiate model
-    model_config = NeoBERTConfig.from_model_config(
-        checkpoint_cfg.model,
-        max_length=model_max_length,
-        pad_token_id=tokenizer.pad_token_id,
-        attn_backend="sdpa",
-    )
-
     model = NeoBERTForMTEB(
-        config=model_config,
-        tokenizer=tokenizer,
+        config=resolved.model_config,
+        tokenizer=resolved.tokenizer,
         batch_size=mteb_batch_size,
         pooling=mteb_pooling,
         max_length=requested_max_length,
@@ -249,7 +201,7 @@ def evaluate_mteb(cfg: Any) -> None:
 
     # Load pretrained weights
     state_dict = load_step_checkpoint_state_dict(
-        checkpoint_root,
+        resolved.checkpoint_root,
         ckpt,
         map_location=device,
     )

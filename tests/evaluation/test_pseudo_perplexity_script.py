@@ -13,8 +13,46 @@ from datasets import Dataset
 
 from neobert.checkpointing import save_state_dict_safetensors
 from neobert.config import Config, ConfigLoader
+from neobert import evaluation_utils
 from neobert.model import NeoBERTConfig, NeoBERTLMHead
 from tests.tokenizer_utils import build_wordlevel_tokenizer
+
+
+def test_shared_checkpoint_source_forwards_tokenizer_rewrite_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All evaluation entry points must reconstruct checkpoint tokenizer policy."""
+    checkpoint_root = tmp_path / "checkpoints"
+    checkpoint_dir = checkpoint_root / "10"
+    (checkpoint_dir / "tokenizer").mkdir(parents=True)
+    (checkpoint_dir / "config.yaml").touch()
+    cfg = Config()
+    cfg.tokenizer.allow_special_token_rewrite = True
+    tokenizer = build_wordlevel_tokenizer()
+    cfg.model.vocab_size = len(tokenizer)
+    cfg.model.pad_token_id = tokenizer.pad_token_id
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        evaluation_utils,
+        "resolve_training_checkpoint_artifacts",
+        lambda *_args: (checkpoint_root, checkpoint_dir, "10"),
+    )
+    monkeypatch.setattr(evaluation_utils.ConfigLoader, "load", lambda _path: cfg)
+
+    def _get_tokenizer(**kwargs):
+        captured.update(kwargs)
+        return tokenizer
+
+    monkeypatch.setattr(evaluation_utils, "get_tokenizer", _get_tokenizer)
+    evaluation_utils.resolve_checkpoint_model_source(
+        checkpoint_root,
+        "10",
+        max_length=32,
+    )
+
+    assert captured["allow_special_token_rewrite"] is True
 
 
 def _load_pseudo_perplexity_module():
@@ -227,20 +265,29 @@ def test_build_neobert_uses_runtime_config_fields(
         checkpoint_calls.append((Path(path), checkpoint, map_location))
         return expected_state_dict
 
-    monkeypatch.setattr(module.ConfigLoader, "load", lambda _path: cfg)
     checkpoint_dir = tmp_path / "checkpoints" / "10"
     (checkpoint_dir / "tokenizer").mkdir(parents=True)
     (checkpoint_dir / "config.yaml").touch()
+    resolved_model_config = NeoBERTConfig.from_model_config(
+        model_cfg,
+        max_length=256,
+        pad_token_id=tokenizer.pad_token_id,
+        attn_backend="sdpa",
+    )
     monkeypatch.setattr(
         module,
-        "resolve_training_checkpoint_artifacts",
-        lambda _path, _checkpoint: (
-            tmp_path / "checkpoints",
-            checkpoint_dir,
-            "10",
+        "resolve_checkpoint_model_source",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            checkpoint_root=tmp_path / "checkpoints",
+            checkpoint_dir=checkpoint_dir,
+            checkpoint_tag="10",
+            config_path=checkpoint_dir / "config.yaml",
+            tokenizer_path=checkpoint_dir / "tokenizer",
+            training_config=cfg,
+            tokenizer=tokenizer,
+            model_config=resolved_model_config,
         ),
     )
-    monkeypatch.setattr(module, "get_tokenizer", lambda **_kwargs: tokenizer)
     monkeypatch.setattr(
         module,
         "NeoBERTLMHead",

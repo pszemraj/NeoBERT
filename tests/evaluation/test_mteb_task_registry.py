@@ -12,6 +12,7 @@ from neobert.mteb_tasks import (
     MTEB_TASK_GROUPS_BY_KEY,
     expand_mteb_task_name,
 )
+from neobert.model import NeoBERTConfig
 
 SCRIPT_DIR = Path(__file__).resolve().parents[2] / "scripts" / "evaluation"
 
@@ -189,17 +190,30 @@ def test_mteb_uses_checkpoint_local_model_and_tokenizer(
         def run(_model, **kwargs):
             captured["run_kwargs"] = kwargs
 
-    def _get_tokenizer(**kwargs):
-        captured["tokenizer_kwargs"] = kwargs
-        return _Tokenizer()
+    tokenizer = _Tokenizer()
+    model_config = NeoBERTConfig.from_model_config(
+        checkpoint_cfg.model,
+        max_length=32,
+        pad_token_id=tokenizer.pad_token_id,
+        attn_backend="sdpa",
+    )
+
+    def _resolve_source(*_args, **kwargs):
+        captured["resolver_kwargs"] = kwargs
+        return SimpleNamespace(
+            checkpoint_root=checkpoint_root,
+            checkpoint_dir=checkpoint_dir,
+            checkpoint_tag="10",
+            training_config=checkpoint_cfg,
+            tokenizer=tokenizer,
+            model_config=model_config,
+        )
 
     monkeypatch.setattr(
         run_mteb,
-        "resolve_training_checkpoint_artifacts",
-        lambda *_args: (checkpoint_root, checkpoint_dir, "10"),
+        "resolve_checkpoint_model_source",
+        _resolve_source,
     )
-    monkeypatch.setattr(run_mteb.ConfigLoader, "load", lambda path: checkpoint_cfg)
-    monkeypatch.setattr(run_mteb, "get_tokenizer", _get_tokenizer)
     monkeypatch.setattr(run_mteb, "NeoBERTForMTEB", _Model)
     monkeypatch.setattr(
         run_mteb, "load_step_checkpoint_state_dict", lambda *_a, **_k: {}
@@ -211,7 +225,5 @@ def test_mteb_uses_checkpoint_local_model_and_tokenizer(
 
     model_config = captured["model_config"]
     assert model_config.hidden_size == checkpoint_cfg.model.hidden_size
-    assert captured["tokenizer_kwargs"]["pretrained_model_name_or_path"] == str(
-        tokenizer_dir
-    )
+    assert captured["resolver_kwargs"] == {"max_length": 32}
     assert captured["run_kwargs"]["eval_splits"] == ["test"]

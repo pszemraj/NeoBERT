@@ -15,13 +15,9 @@ from datasets import DatasetDict, load_dataset, load_from_disk
 from tqdm import tqdm
 from transformers import AutoModelForMaskedLM, AutoTokenizer
 
-from neobert.checkpointing import (
-    load_step_checkpoint_state_dict,
-    resolve_training_checkpoint_artifacts,
-)
-from neobert.config import ConfigLoader
-from neobert.model import NeoBERTConfig, NeoBERTLMHead
-from neobert.tokenizer import get_tokenizer
+from neobert.checkpointing import load_step_checkpoint_state_dict
+from neobert.evaluation_utils import resolve_checkpoint_model_source
+from neobert.model import NeoBERTLMHead
 
 
 def _load_hub_masked_lm(
@@ -94,74 +90,35 @@ def _build_neobert_masked_lm(
     :raises FileNotFoundError: If checkpoint config or tokenizer artifacts are missing.
     :raises ValueError: If context length or tokenizer/model identity is incompatible.
     """
-    checkpoint_root, checkpoint_dir, concrete_tag = (
-        resolve_training_checkpoint_artifacts(checkpoint_path, checkpoint)
-    )
-    config_path = checkpoint_dir / "config.yaml"
-    tokenizer_path = checkpoint_dir / "tokenizer"
-    if not config_path.is_file():
-        raise FileNotFoundError(
-            f"Checkpoint-local training config is missing: {config_path}"
-        )
-    if not tokenizer_path.is_dir():
-        raise FileNotFoundError(
-            f"Checkpoint-local tokenizer is missing: {tokenizer_path}"
-        )
-    cfg = ConfigLoader.load(config_path)
-    tokenizer = get_tokenizer(
-        pretrained_model_name_or_path=str(tokenizer_path),
+    resolved = resolve_checkpoint_model_source(
+        checkpoint_path,
+        checkpoint,
         max_length=max_length,
-        trust_remote_code=False,
-        revision=None,
-        allow_special_token_rewrite=cfg.tokenizer.allow_special_token_rewrite,
     )
-    if len(tokenizer) != int(cfg.model.vocab_size):
-        raise ValueError(
-            "Checkpoint tokenizer/model vocabulary mismatch: "
-            f"tokenizer={len(tokenizer)}, model={cfg.model.vocab_size}."
-        )
-    if tokenizer.pad_token_id != int(cfg.model.pad_token_id):
-        raise ValueError(
-            "Checkpoint tokenizer/model pad-token mismatch: "
-            f"tokenizer={tokenizer.pad_token_id}, model={cfg.model.pad_token_id}."
-        )
-    trained_max_length = int(cfg.model.max_position_embeddings)
-    if not cfg.model.rope and max_length > trained_max_length:
-        raise ValueError(
-            f"Requested max_length={max_length} exceeds the learned position limit "
-            f"({trained_max_length}) in {checkpoint_dir}."
-        )
-    model_max_length = max_length if cfg.model.rope else trained_max_length
-    model_config = NeoBERTConfig.from_model_config(
-        cfg.model,
-        max_length=model_max_length,
-        pad_token_id=tokenizer.pad_token_id,
-        attn_backend="sdpa",
-    )
-    model = NeoBERTLMHead(model_config)
+    model = NeoBERTLMHead(resolved.model_config)
     state_dict = load_step_checkpoint_state_dict(
-        checkpoint_root,
-        concrete_tag,
+        resolved.checkpoint_root,
+        resolved.checkpoint_tag,
         map_location="cpu",
     )
     model.load_state_dict(state_dict)
     run_name = (
-        checkpoint_dir.parent.parent.name
-        if checkpoint_dir.parent.name == "checkpoints"
-        else checkpoint_dir.parent.name
+        resolved.checkpoint_dir.parent.parent.name
+        if resolved.checkpoint_dir.parent.name == "checkpoints"
+        else resolved.checkpoint_dir.parent.name
     )
-    model_label = str(cfg.model.name or run_name).replace("/", "_")
+    model_label = str(resolved.training_config.model.name or run_name).replace("/", "_")
     return _ResolvedModelSource(
         model=model,
-        tokenizer=tokenizer,
+        tokenizer=resolved.tokenizer,
         model_label=model_label,
-        checkpoint_label=concrete_tag,
+        checkpoint_label=resolved.checkpoint_tag,
         provenance={
             "kind": "checkpoint",
-            "checkpoint": str(checkpoint_dir.resolve()),
-            "checkpoint_tag": concrete_tag,
-            "config": str(config_path.resolve()),
-            "tokenizer": str(tokenizer_path.resolve()),
+            "checkpoint": str(resolved.checkpoint_dir.resolve()),
+            "checkpoint_tag": resolved.checkpoint_tag,
+            "config": str(resolved.config_path.resolve()),
+            "tokenizer": str(resolved.tokenizer_path.resolve()),
         },
     )
 
