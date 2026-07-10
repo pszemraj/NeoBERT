@@ -922,44 +922,61 @@ def save_portable_checkpoint_weights(
     :param Any accelerator: Active accelerator runtime.
     :param str | Path checkpoint_path: Step checkpoint directory path.
     :param bool skip_if_exists: Return early when a portable file already exists.
-    :return bool: True when portable weights were saved (or already existed).
+    :raises RuntimeError: If state collection or portable serialization fails.
+    :return bool: True on the writing rank; false on other ranks.
     """
     checkpoint_path = Path(checkpoint_path)
     weights_path = checkpoint_path / MODEL_WEIGHTS_NAME
     if skip_if_exists and weights_path.exists():
         return True
 
+    local_error: str | None = None
+    local_exception: Exception | None = None
+    state_dict: dict[str, torch.Tensor] | None = None
     try:
         # Distributed backends (FSDP/FSDP2/DeepSpeed) may require all ranks to
         # participate in state-dict collection collectives even when only rank 0
         # persists the portable safetensors payload.
         state_dict = accelerator.get_state_dict(model, unwrap=True)
     except Exception as exc:
-        if getattr(accelerator, "is_main_process", True):
-            logger.warning(
-                "Unable to export portable checkpoint weights to %s: %s. "
-                "Resumable state was still saved.",
-                weights_path,
-                exc,
+        local_error = (
+            f"failed to collect portable model state for {weights_path}: {exc}"
+        )
+        local_exception = exc
+
+    is_main_process = bool(getattr(accelerator, "is_main_process", True))
+    if local_error is None and is_main_process:
+        assert state_dict is not None
+        try:
+            weights_path = save_state_dict_safetensors(
+                state_dict,
+                checkpoint_path,
+                metadata={"format": "pt", "source": "accelerate.get_state_dict"},
             )
-        return False
+        except Exception as exc:
+            local_error = (
+                f"failed to persist portable model weights at {weights_path}: {exc}"
+            )
+            local_exception = exc
 
-    if not getattr(accelerator, "is_main_process", True):
-        return False
+    reduce_fn = getattr(accelerator, "reduce", None)
+    if callable(reduce_fn):
+        failed = torch.tensor(
+            int(local_error is not None),
+            device=accelerator.device,
+            dtype=torch.int32,
+        )
+        failure_count = int(reduce_fn(failed, reduction="sum").item())
+    else:
+        failure_count = int(local_error is not None)
+    if failure_count:
+        message = local_error or (
+            "portable checkpoint export failed on another rank; inspect the main-rank "
+            "error for details"
+        )
+        raise RuntimeError(message) from local_exception
 
-    try:
-        weights_path = save_state_dict_safetensors(
-            state_dict,
-            checkpoint_path,
-            metadata={"format": "pt", "source": "accelerate.get_state_dict"},
-        )
-    except Exception as exc:
-        logger.warning(
-            "Failed to persist portable checkpoint weights at %s: %s. "
-            "Resumable state was still saved.",
-            weights_path,
-            exc,
-        )
+    if not is_main_process:
         return False
 
     logger.info("Saved portable model weights to %s.", weights_path)

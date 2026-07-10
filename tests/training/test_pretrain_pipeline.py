@@ -296,7 +296,6 @@ class TestPretrainComponents:
 
         cases = [
             (_MainSuccessAccelerator(), True, True),
-            (_MainFailureAccelerator(), False, False),
             (_NonMainAccelerator(), False, False),
         ]
         for accelerator, expected_saved, expected_file in cases:
@@ -315,6 +314,15 @@ class TestPretrainComponents:
                         checkpoint_path, map_location="cpu"
                     )
                     assert "weight" in state_dict
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with pytest.raises(RuntimeError, match="failed to collect portable"):
+                save_portable_checkpoint_weights(
+                    model,
+                    _MainFailureAccelerator(),
+                    Path(tmpdir),
+                )
+            assert not (Path(tmpdir) / MODEL_WEIGHTS_NAME).exists()
 
         assert _NonMainAccelerator.get_state_dict_called
 
