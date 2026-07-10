@@ -15,23 +15,33 @@ from datasets import DatasetDict, load_dataset, load_from_disk
 from tqdm import tqdm
 from transformers import AutoModelForMaskedLM, AutoTokenizer
 
-from neobert.checkpointing import load_step_checkpoint_state_dict
+from neobert.checkpointing import (
+    load_step_checkpoint_state_dict,
+    resolve_training_checkpoint_artifacts,
+)
 from neobert.config import ConfigLoader
 from neobert.model import NeoBERTConfig, NeoBERTLMHead
 from neobert.tokenizer import get_tokenizer
 
 
-def _load_hub_masked_lm(model_name: str, *, max_length: int) -> Any:
+def _load_hub_masked_lm(
+    model_name: str,
+    *,
+    max_length: int,
+    revision: str | None = None,
+) -> Any:
     """Load a Hub masked-language model without modifying its learned embeddings.
 
     :param str model_name: Hub model identifier/path.
     :param int max_length: Requested evaluation context length.
+    :param str | None revision: Optional Hub revision.
     :raises ValueError: If the requested length exceeds the model's position limit.
     :return Any: Loaded masked-language-model instance.
     """
     model = AutoModelForMaskedLM.from_pretrained(
         model_name,
         trust_remote_code=True,
+        revision=revision,
     )
     position_limit = getattr(model.config, "max_position_embeddings", None)
     if position_limit is not None and max_length > int(position_limit):
@@ -42,46 +52,118 @@ def _load_hub_masked_lm(model_name: str, *, max_length: int) -> Any:
     return model
 
 
+class _ResolvedModelSource:
+    """Concrete model, tokenizer, output identity, and provenance."""
+
+    def __init__(
+        self,
+        *,
+        model: Any,
+        tokenizer: Any,
+        model_label: str,
+        checkpoint_label: str,
+        provenance: dict[str, Any],
+    ) -> None:
+        """Store a fully resolved evaluation source.
+
+        :param Any model: Loaded masked-language model.
+        :param Any tokenizer: Checkpoint-matched tokenizer.
+        :param str model_label: Filesystem-safe model label.
+        :param str checkpoint_label: Concrete checkpoint tag.
+        :param dict[str, Any] provenance: Serializable source identity.
+        """
+        self.model = model
+        self.tokenizer = tokenizer
+        self.model_label = model_label
+        self.checkpoint_label = checkpoint_label
+        self.provenance = provenance
+
+
 def _build_neobert_masked_lm(
-    config_path: str | Path,
     *,
     checkpoint_path: str | Path,
     checkpoint: str,
     max_length: int,
-) -> tuple[NeoBERTLMHead, Any, str]:
-    """Build a NeoBERT MLM from a training config and checkpoint.
+) -> _ResolvedModelSource:
+    """Build a NeoBERT MLM from checkpoint-local config and tokenizer artifacts.
 
-    :param str | Path config_path: Training configuration path.
     :param str | Path checkpoint_path: Checkpoint root or step directory.
     :param str checkpoint: Checkpoint selector.
     :param int max_length: Evaluation context length.
-    :return tuple[NeoBERTLMHead, Any, str]: Model, tokenizer, and output label.
+    :return _ResolvedModelSource: Resolved local model source.
+    :raises FileNotFoundError: If checkpoint config or tokenizer artifacts are missing.
+    :raises ValueError: If context length or tokenizer/model identity is incompatible.
     """
+    checkpoint_root, checkpoint_dir, concrete_tag = (
+        resolve_training_checkpoint_artifacts(checkpoint_path, checkpoint)
+    )
+    config_path = checkpoint_dir / "config.yaml"
+    tokenizer_path = checkpoint_dir / "tokenizer"
+    if not config_path.is_file():
+        raise FileNotFoundError(
+            f"Checkpoint-local training config is missing: {config_path}"
+        )
+    if not tokenizer_path.is_dir():
+        raise FileNotFoundError(
+            f"Checkpoint-local tokenizer is missing: {tokenizer_path}"
+        )
     cfg = ConfigLoader.load(config_path)
     tokenizer = get_tokenizer(
-        pretrained_model_name_or_path=cfg.tokenizer.name,
+        pretrained_model_name_or_path=str(tokenizer_path),
         max_length=max_length,
-        trust_remote_code=cfg.tokenizer.trust_remote_code,
-        revision=cfg.tokenizer.revision,
+        trust_remote_code=False,
+        revision=None,
         allow_special_token_rewrite=cfg.tokenizer.allow_special_token_rewrite,
     )
+    if len(tokenizer) != int(cfg.model.vocab_size):
+        raise ValueError(
+            "Checkpoint tokenizer/model vocabulary mismatch: "
+            f"tokenizer={len(tokenizer)}, model={cfg.model.vocab_size}."
+        )
+    if tokenizer.pad_token_id != int(cfg.model.pad_token_id):
+        raise ValueError(
+            "Checkpoint tokenizer/model pad-token mismatch: "
+            f"tokenizer={tokenizer.pad_token_id}, model={cfg.model.pad_token_id}."
+        )
+    trained_max_length = int(cfg.model.max_position_embeddings)
+    if not cfg.model.rope and max_length > trained_max_length:
+        raise ValueError(
+            f"Requested max_length={max_length} exceeds the learned position limit "
+            f"({trained_max_length}) in {checkpoint_dir}."
+        )
+    model_max_length = max_length if cfg.model.rope else trained_max_length
     model_config = NeoBERTConfig.from_model_config(
         cfg.model,
-        max_length=max_length,
+        max_length=model_max_length,
         pad_token_id=tokenizer.pad_token_id,
         attn_backend="sdpa",
     )
     model = NeoBERTLMHead(model_config)
     state_dict = load_step_checkpoint_state_dict(
-        checkpoint_path,
-        checkpoint,
+        checkpoint_root,
+        concrete_tag,
         map_location="cpu",
     )
     model.load_state_dict(state_dict)
-    model_label = str(cfg.model.name or Path(checkpoint_path).resolve().name).replace(
-        "/", "_"
+    run_name = (
+        checkpoint_dir.parent.parent.name
+        if checkpoint_dir.parent.name == "checkpoints"
+        else checkpoint_dir.parent.name
     )
-    return model, tokenizer, model_label
+    model_label = str(cfg.model.name or run_name).replace("/", "_")
+    return _ResolvedModelSource(
+        model=model,
+        tokenizer=tokenizer,
+        model_label=model_label,
+        checkpoint_label=concrete_tag,
+        provenance={
+            "kind": "checkpoint",
+            "checkpoint": str(checkpoint_dir.resolve()),
+            "checkpoint_tag": concrete_tag,
+            "config": str(config_path.resolve()),
+            "tokenizer": str(tokenizer_path.resolve()),
+        },
+    )
 
 
 def _load_evaluation_dataset(
@@ -246,6 +328,38 @@ def _write_score(output_file: Path, sample_id: str, losses: Sequence[float]) -> 
         )
 
 
+def _ensure_run_manifest(
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    *,
+    results_exist: bool,
+) -> None:
+    """Write or validate the identity of a resumable pseudo-perplexity run.
+
+    :param Path manifest_path: Sidecar manifest path.
+    :param dict[str, Any] manifest: Expected run identity and scoring contract.
+    :param bool results_exist: Whether a result CSV already exists.
+    :raises RuntimeError: If existing results have missing or different provenance.
+    """
+    if manifest_path.is_file():
+        saved = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if saved != manifest:
+            raise RuntimeError(
+                f"Existing pseudo-perplexity results use a different run contract: "
+                f"{manifest_path}"
+            )
+        return
+    if results_exist:
+        raise RuntimeError(
+            f"Existing pseudo-perplexity results have no provenance manifest: "
+            f"{manifest_path}"
+        )
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the pseudo-perplexity command-line parser.
 
@@ -255,10 +369,12 @@ def _build_parser() -> argparse.ArgumentParser:
     model_source = parser.add_mutually_exclusive_group(required=True)
     model_source.add_argument("--hub_model", help="Hub masked-LM identifier")
     model_source.add_argument(
-        "--config_path", type=Path, help="NeoBERT training config"
+        "--checkpoint_path",
+        type=Path,
+        help="NeoBERT run root, checkpoints root, or concrete step directory",
     )
-    parser.add_argument("--checkpoint_path", type=Path)
     parser.add_argument("--checkpoint", default="latest")
+    parser.add_argument("--revision", help="Optional Hub model/tokenizer revision")
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--compile", action="store_true")
@@ -293,28 +409,39 @@ def main(argv: Sequence[str] | None = None) -> None:
     """
     parser = _build_parser()
     args = parser.parse_args(argv)
-    if args.config_path is not None and args.checkpoint_path is None:
-        parser.error("--checkpoint_path is required with --config_path")
     if args.batch_size <= 0 or args.max_length <= 0:
         parser.error("--batch_size and --max_length must be positive")
 
     if args.hub_model is not None:
-        model = _load_hub_masked_lm(args.hub_model, max_length=args.max_length)
+        model = _load_hub_masked_lm(
+            args.hub_model,
+            max_length=args.max_length,
+            revision=args.revision,
+        )
         tokenizer = AutoTokenizer.from_pretrained(
             args.hub_model,
             trust_remote_code=True,
+            revision=args.revision,
         )
         tokenizer.model_max_length = args.max_length
         model_label = args.hub_model.replace("/", "_")
         checkpoint_label = "hub"
+        model_provenance = {
+            "kind": "hub",
+            "model": args.hub_model,
+            "revision": args.revision,
+        }
     else:
-        model, tokenizer, model_label = _build_neobert_masked_lm(
-            args.config_path,
+        source = _build_neobert_masked_lm(
             checkpoint_path=args.checkpoint_path,
             checkpoint=args.checkpoint,
             max_length=args.max_length,
         )
-        checkpoint_label = args.checkpoint
+        model = source.model
+        tokenizer = source.tokenizer
+        model_label = source.model_label
+        checkpoint_label = source.checkpoint_label
+        model_provenance = source.provenance
 
     dataset, dataset_label = _load_evaluation_dataset(
         data_path=args.data_path,
@@ -345,6 +472,34 @@ def main(argv: Sequence[str] | None = None) -> None:
         f"{dataset_label}_chars-{args.min_chars}-{args.max_chars}_"
         f"tokens-{args.max_length}_seed-{args.seed}_ppl_"
         f"{args.dataset_shard_index}-of-{args.num_dataset_shards}.csv"
+    )
+    manifest = {
+        "schema_version": 1,
+        "model": model_provenance,
+        "dataset": {
+            "data_path": str(args.data_path.resolve()) if args.data_path else None,
+            "dataset_name": args.dataset_name if args.data_path is None else None,
+            "dataset_config": args.dataset_config,
+            "dataset_split": args.dataset_split,
+            "dataset_label": dataset_label,
+            "text_column": args.text_column,
+            "id_column": args.id_column,
+            "min_chars": args.min_chars,
+            "max_chars": args.max_chars,
+            "n_sentences": args.n_sentences,
+            "num_shards": args.num_dataset_shards,
+            "shard_index": args.dataset_shard_index,
+            "seed": args.seed,
+        },
+        "scoring": {
+            "max_length": args.max_length,
+            "batch_size": args.batch_size,
+        },
+    }
+    _ensure_run_manifest(
+        output_file.with_suffix(".manifest.json"),
+        manifest,
+        results_exist=output_file.exists(),
     )
     completed_ids = _read_completed_ids(output_file)
     if not output_file.exists():

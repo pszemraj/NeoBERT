@@ -76,7 +76,7 @@ python scripts/evaluation/run_mteb.py \
 - Task split metadata comes from the shared registry. MSMARCO runs and aggregates its `dev` score; other registered tasks currently use `test`.
 - `mteb_pooling` defaults to mask-aware average pooling (`avg`; `mean` is accepted as an alias). Set it to `cls` for first-token pooling.
 - Output defaults to `outputs/<run>/mteb/<ckpt>/<max_length>/`; pass `--output_folder` to choose another result directory.
-- If using a local tokenizer, point `tokenizer.name` to that path.
+- Local checkpoint evaluation requires `config.yaml` and `tokenizer/` inside the resolved step. Model architecture and token-to-ID identity come from those artifacts; launch configuration controls only evaluation settings such as task selection, pooling, batch size, and requested context length.
 - `NeoBERTForMTEB.encode()` honors `num_workers` and `pin_memory` overrides; on CUDA it keeps loader-side pinned staging enabled for overlapped host-to-device copies.
 
 ### Aggregate MTEB results
@@ -91,17 +91,16 @@ python scripts/evaluation/avg_mteb.py \
 
 ## Pseudo-Perplexity Utility
 
-`scripts/evaluation/pseudo_perplexity.py` can load NeoBERT checkpoints from the current portable step layout (`checkpoints/<step>/model.safetensors`) and falls back to legacy DeepSpeed ZeRO conversion only when portable weights are absent. That legacy fallback requires the optional `neobert[legacy-checkpoints]` extra. When `checkpoint_path` points at a checkpoint root, `--checkpoint latest` first honors a legacy DeepSpeed `latest` file when present; otherwise it resolves to the newest loadable numbered step. If `checkpoint_path` already points at a specific step directory, pass the matching `--checkpoint` tag; explicit missing non-`latest` tags fail fast instead of silently loading the direct path.
+`scripts/evaluation/pseudo_perplexity.py` can load NeoBERT checkpoints from the current portable step layout (`checkpoints/<step>/model.safetensors`) and falls back to legacy DeepSpeed ZeRO conversion only when portable weights are absent. That legacy fallback requires the optional `neobert[legacy-checkpoints]` extra. `--checkpoint_path` accepts a run root, its `checkpoints/` directory, or a concrete step. `--checkpoint latest` resolves once to a concrete tag, and that tag—not the reusable word `latest`—becomes the output directory identity.
 
-Select exactly one model source: use `--hub_model <model-id>` for a Hub masked LM, or use `--config_path <training-config> --checkpoint_path <run-or-checkpoint-path>` for a NeoBERT checkpoint. Hub models retain their learned position embeddings and reject `--max_length` values beyond the model's configured position limit.
+Select exactly one model source: use `--hub_model <model-id>` for a Hub masked LM, or `--checkpoint_path <run-or-checkpoint-path>` for a NeoBERT checkpoint. Local evaluation requires checkpoint-local `config.yaml` and `tokenizer/`, validates vocabulary and pad-token identity, and does not accept a separate launch config that could silently disagree. Non-RoPE models are constructed with their trained positional-table size and reject evaluation beyond it; shorter evaluation contexts do not resize learned embeddings. Hub sources accept `--revision` and retain their learned position embeddings.
 
 The default dataset is `wikipedia` (`20220301.en`, `train`). Override it with `--dataset_name`, `--dataset_config`, and `--dataset_split`, or pass `--data_path` for a dataset saved with `Dataset.save_to_disk()`. The utility applies one inclusive `--min_chars`/`--max_chars` filter, then deterministic shuffling and optional `--num_dataset_shards`/`--dataset_shard_index` sharding.
 
-Results default to `results/pseudo_perplexity/<model>/<checkpoint>/...csv`; `--output_path` changes the root. Reruns read existing sample IDs from the CSV and skip completed examples. Use `--device`, `--bf16`, and `--compile` to control execution.
+Results default to `results/pseudo_perplexity/<model>/<checkpoint>/...csv`; `--output_path` changes the root. Each CSV has a manifest recording the concrete model/config/tokenizer source, dataset selection and sharding, length filters, seed, batch size, and context length. Reruns skip completed sample IDs only when that manifest matches exactly; stale or mixed-checkpoint CSVs fail closed. Use `--device`, `--bf16`, and `--compile` to control execution.
 
 ```bash
 python scripts/evaluation/pseudo_perplexity.py \
-  --config_path outputs/my-run/checkpoints/<step>/config.yaml \
   --checkpoint_path outputs/my-run \
   --checkpoint <step> \
   --max_length 512

@@ -531,6 +531,31 @@ def resolve_step_checkpoint_dir(
     return checkpoint_root
 
 
+def resolve_training_checkpoint_artifacts(
+    checkpoint_path: str | Path,
+    checkpoint: str | int,
+) -> tuple[Path, Path, str]:
+    """Resolve a run root, checkpoint root, or direct step to one concrete step.
+
+    :param str | Path checkpoint_path: Run root, checkpoint root, or step directory.
+    :param str | int checkpoint: Requested checkpoint selector.
+    :return tuple[Path, Path, str]: Checkpoint root, step directory, and concrete tag.
+    """
+    provided_path = Path(checkpoint_path)
+    checkpoint_root = (
+        provided_path / "checkpoints"
+        if (provided_path / "checkpoints").is_dir()
+        else provided_path
+    )
+    concrete_tag = resolve_step_checkpoint_selector(checkpoint_root, checkpoint)
+    step_dir = resolve_step_checkpoint_dir(checkpoint_root, concrete_tag)
+    if not step_dir.is_dir():
+        raise FileNotFoundError(
+            f"Resolved checkpoint directory does not exist: {step_dir}"
+        )
+    return checkpoint_root, step_dir, concrete_tag
+
+
 def load_step_checkpoint_state_dict(
     checkpoint_path: str | Path,
     checkpoint: str | int,

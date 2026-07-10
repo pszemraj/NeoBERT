@@ -11,6 +11,11 @@ import pytest
 import torch
 from datasets import Dataset
 
+from neobert.checkpointing import save_state_dict_safetensors
+from neobert.config import Config, ConfigLoader
+from neobert.model import NeoBERTConfig, NeoBERTLMHead
+from tests.tokenizer_utils import build_wordlevel_tokenizer
+
 
 def _load_pseudo_perplexity_module():
     """Load ``pseudo_perplexity.py`` for direct helper tests."""
@@ -56,10 +61,15 @@ def test_load_hub_masked_lm_preserves_learned_embeddings(
         config=SimpleNamespace(max_position_embeddings=512),
         roberta=SimpleNamespace(embeddings=embeddings),
     )
-    calls: list[tuple[str, bool]] = []
+    calls: list[tuple[str, bool, str | None]] = []
 
-    def _from_pretrained(model_name: str, *, trust_remote_code: bool = False):
-        calls.append((model_name, trust_remote_code))
+    def _from_pretrained(
+        model_name: str,
+        *,
+        trust_remote_code: bool = False,
+        revision: str | None = None,
+    ):
+        calls.append((model_name, trust_remote_code, revision))
         return model
 
     monkeypatch.setattr(
@@ -67,7 +77,7 @@ def test_load_hub_masked_lm_preserves_learned_embeddings(
     )
 
     assert module._load_hub_masked_lm("roberta-base", max_length=512) is model
-    assert calls == [("roberta-base", True)]
+    assert calls == [("roberta-base", True, None)]
     assert model.roberta.embeddings is embeddings
     with pytest.raises(ValueError, match="exceeds.*position limit"):
         module._load_hub_masked_lm("roberta-base", max_length=1024)
@@ -125,9 +135,11 @@ def test_model_source_cli_is_exclusive_and_local_requires_checkpoint() -> None:
     with pytest.raises(SystemExit):
         parser.parse_args([])
     with pytest.raises(SystemExit):
-        parser.parse_args(["--hub_model", "bert-base-uncased", "--config_path", "x"])
+        parser.parse_args(
+            ["--hub_model", "bert-base-uncased", "--checkpoint_path", "x"]
+        )
     with pytest.raises(SystemExit):
-        module.main(["--config_path", "x"])
+        module.main(["--checkpoint", "10"])
 
 
 def test_masked_batches_exclude_special_tokens() -> None:
@@ -186,6 +198,8 @@ def test_build_neobert_uses_runtime_config_fields(
         kernel_backend="torch",
         ngpt=True,
         base_scale=0.25,
+        max_position_embeddings=128,
+        pad_token_id=7,
     )
     cfg = SimpleNamespace(
         model=model_cfg,
@@ -196,7 +210,14 @@ def test_build_neobert_uses_runtime_config_fields(
             allow_special_token_rewrite=False,
         ),
     )
-    tokenizer = SimpleNamespace(pad_token_id=7)
+
+    class _Tokenizer:
+        pad_token_id = 7
+
+        def __len__(self):
+            return 128
+
+    tokenizer = _Tokenizer()
     captured = SimpleNamespace(config=None, loaded_state_dict=None)
     captured.load_state_dict = lambda state_dict: setattr(
         captured, "loaded_state_dict", state_dict
@@ -209,6 +230,18 @@ def test_build_neobert_uses_runtime_config_fields(
         return expected_state_dict
 
     monkeypatch.setattr(module.ConfigLoader, "load", lambda _path: cfg)
+    checkpoint_dir = tmp_path / "checkpoints" / "10"
+    (checkpoint_dir / "tokenizer").mkdir(parents=True)
+    (checkpoint_dir / "config.yaml").touch()
+    monkeypatch.setattr(
+        module,
+        "resolve_training_checkpoint_artifacts",
+        lambda _path, _checkpoint: (
+            tmp_path / "checkpoints",
+            checkpoint_dir,
+            "10",
+        ),
+    )
     monkeypatch.setattr(module, "get_tokenizer", lambda **_kwargs: tokenizer)
     monkeypatch.setattr(
         module,
@@ -221,16 +254,16 @@ def test_build_neobert_uses_runtime_config_fields(
         _load_state_dict,
     )
 
-    model, loaded_tokenizer, label = module._build_neobert_masked_lm(
-        tmp_path / "config.yaml",
+    source = module._build_neobert_masked_lm(
         checkpoint_path=tmp_path / "checkpoints",
         checkpoint="10",
         max_length=256,
     )
 
-    assert model is captured
-    assert loaded_tokenizer is tokenizer
-    assert label == "tiny"
+    assert source.model is captured
+    assert source.tokenizer is tokenizer
+    assert source.model_label == "tiny"
+    assert source.checkpoint_label == "10"
     assert captured.config.max_length == 256
     assert captured.config.dropout == 0.1
     assert captured.config.pad_token_id == 7
@@ -240,3 +273,67 @@ def test_build_neobert_uses_runtime_config_fields(
     assert captured.config.base_scale == 0.25
     assert captured.loaded_state_dict == expected_state_dict
     assert checkpoint_calls == [(tmp_path / "checkpoints", "10", "cpu")]
+
+
+def test_non_rope_local_model_keeps_trained_position_table(tmp_path: Path) -> None:
+    """Shorter evaluation does not rebuild learned position embeddings."""
+    module = _load_pseudo_perplexity_module()
+    checkpoint_dir = tmp_path / "checkpoints" / "10"
+    tokenizer = build_wordlevel_tokenizer()
+    tokenizer.save_pretrained(checkpoint_dir / "tokenizer")
+
+    cfg = Config()
+    cfg.model.hidden_size = 16
+    cfg.model.num_hidden_layers = 1
+    cfg.model.num_attention_heads = 2
+    cfg.model.intermediate_size = 32
+    cfg.model.vocab_size = len(tokenizer)
+    cfg.model.rope = False
+    cfg.model.max_position_embeddings = 8
+    cfg.model.pad_token_id = tokenizer.pad_token_id
+    cfg.model.attn_backend = "sdpa"
+    cfg.model.hidden_act = "gelu"
+    cfg.dataset.max_seq_length = 8
+    cfg.dataset.min_length = 1
+    cfg.tokenizer.max_length = 8
+    ConfigLoader.save(cfg, checkpoint_dir / "config.yaml")
+    model_config = NeoBERTConfig.from_model_config(
+        cfg.model,
+        max_length=8,
+        pad_token_id=tokenizer.pad_token_id,
+        attn_backend="sdpa",
+    )
+    trained_model = NeoBERTLMHead(model_config)
+    save_state_dict_safetensors(trained_model.state_dict(), checkpoint_dir)
+
+    source = module._build_neobert_masked_lm(
+        checkpoint_path=tmp_path,
+        checkpoint="latest",
+        max_length=4,
+    )
+
+    assert source.checkpoint_label == "10"
+    assert source.model.config.max_length == 8
+    with pytest.raises(ValueError, match="learned position limit"):
+        module._build_neobert_masked_lm(
+            checkpoint_path=tmp_path,
+            checkpoint="latest",
+            max_length=16,
+        )
+
+
+def test_existing_results_require_matching_run_manifest(tmp_path: Path) -> None:
+    """CSV resume cannot mix checkpoints or scoring contracts."""
+    module = _load_pseudo_perplexity_module()
+    manifest_path = tmp_path / "scores.manifest.json"
+    expected = {"schema_version": 1, "model": {"checkpoint_tag": "10"}}
+
+    module._ensure_run_manifest(manifest_path, expected, results_exist=False)
+    module._ensure_run_manifest(manifest_path, expected, results_exist=True)
+
+    with pytest.raises(RuntimeError, match="different run contract"):
+        module._ensure_run_manifest(
+            manifest_path,
+            {"schema_version": 1, "model": {"checkpoint_tag": "20"}},
+            results_exist=True,
+        )

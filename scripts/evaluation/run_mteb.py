@@ -11,7 +11,7 @@ from mteb import MTEB
 
 from neobert.checkpointing import (
     load_step_checkpoint_state_dict,
-    resolve_step_checkpoint_selector,
+    resolve_training_checkpoint_artifacts,
 )
 from neobert.config import ConfigLoader
 from neobert.mteb_tasks import (
@@ -172,8 +172,21 @@ def evaluate_mteb(cfg: Any) -> None:
     selected_tasks = _resolve_mteb_tasks(cfg)
 
     # Get checkpoint number
-    checkpoint_root = pretrained_checkpoint_dir / "checkpoints"
-    ckpt = resolve_step_checkpoint_selector(checkpoint_root, pretrained_checkpoint)
+    checkpoint_root, checkpoint_step_dir, ckpt = resolve_training_checkpoint_artifacts(
+        pretrained_checkpoint_dir,
+        pretrained_checkpoint,
+    )
+    checkpoint_config_path = checkpoint_step_dir / "config.yaml"
+    checkpoint_tokenizer_path = checkpoint_step_dir / "tokenizer"
+    if not checkpoint_config_path.is_file():
+        raise FileNotFoundError(
+            f"Checkpoint-local training config is missing: {checkpoint_config_path}"
+        )
+    if not checkpoint_tokenizer_path.is_dir():
+        raise FileNotFoundError(
+            f"Checkpoint-local tokenizer is missing: {checkpoint_tokenizer_path}"
+        )
+    checkpoint_cfg = ConfigLoader.load(checkpoint_config_path)
 
     # Define path to store results
     configured_output = getattr(cfg, "output_folder", None)
@@ -191,16 +204,37 @@ def evaluate_mteb(cfg: Any) -> None:
 
     # Load tokenizer
     tokenizer = get_tokenizer(
-        pretrained_model_name_or_path=cfg.tokenizer.name,
+        pretrained_model_name_or_path=str(checkpoint_tokenizer_path),
         max_length=cfg.tokenizer.max_length,
-        trust_remote_code=bool(getattr(cfg.tokenizer, "trust_remote_code", False)),
-        revision=getattr(cfg.tokenizer, "revision", None),
+        trust_remote_code=False,
+        revision=None,
+    )
+    if len(tokenizer) != int(checkpoint_cfg.model.vocab_size):
+        raise ValueError(
+            "Checkpoint tokenizer/model vocabulary mismatch: "
+            f"tokenizer={len(tokenizer)}, model={checkpoint_cfg.model.vocab_size}."
+        )
+    if tokenizer.pad_token_id != int(checkpoint_cfg.model.pad_token_id):
+        raise ValueError(
+            "Checkpoint tokenizer/model pad-token mismatch: "
+            f"tokenizer={tokenizer.pad_token_id}, "
+            f"model={checkpoint_cfg.model.pad_token_id}."
+        )
+    requested_max_length = int(cfg.tokenizer.max_length)
+    trained_max_length = int(checkpoint_cfg.model.max_position_embeddings)
+    if not checkpoint_cfg.model.rope and requested_max_length > trained_max_length:
+        raise ValueError(
+            f"Requested max_length={requested_max_length} exceeds the learned "
+            f"position limit ({trained_max_length}) in {checkpoint_step_dir}."
+        )
+    model_max_length = (
+        requested_max_length if checkpoint_cfg.model.rope else trained_max_length
     )
 
     # Instantiate model
     model_config = NeoBERTConfig.from_model_config(
-        cfg.model,
-        max_length=cfg.model.max_position_embeddings,
+        checkpoint_cfg.model,
+        max_length=model_max_length,
         pad_token_id=tokenizer.pad_token_id,
         attn_backend="sdpa",
     )
@@ -210,7 +244,7 @@ def evaluate_mteb(cfg: Any) -> None:
         tokenizer=tokenizer,
         batch_size=mteb_batch_size,
         pooling=mteb_pooling,
-        max_length=cfg.tokenizer.max_length,
+        max_length=requested_max_length,
     )
 
     # Load pretrained weights

@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import pytest
 
+from neobert.config import Config
 from neobert.mteb_tasks import (
     CQADUPSTACK_TASKS,
     MTEB_ALL_EXECUTION_TASKS,
@@ -126,3 +127,91 @@ def test_explicit_all_overrides_narrower_config_selection() -> None:
 
     config.task_types = run_mteb._parse_task_type_override("all")
     assert run_mteb._resolve_mteb_tasks(config) == list(MTEB_ALL_EXECUTION_TASKS)
+
+
+def test_mteb_uses_checkpoint_local_model_and_tokenizer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Launch configuration cannot substitute a same-shaped tokenizer/model."""
+    run_mteb = _load_script("run_mteb")
+    checkpoint_root = tmp_path / "checkpoints"
+    checkpoint_dir = checkpoint_root / "10"
+    tokenizer_dir = checkpoint_dir / "tokenizer"
+    tokenizer_dir.mkdir(parents=True)
+    config_path = checkpoint_dir / "config.yaml"
+    config_path.touch()
+
+    checkpoint_cfg = Config()
+    checkpoint_cfg.model.hidden_size = 64
+    checkpoint_cfg.model.num_hidden_layers = 2
+    checkpoint_cfg.model.num_attention_heads = 2
+    checkpoint_cfg.model.intermediate_size = 128
+    launch_cfg = Config()
+    launch_cfg.trainer.output_dir = str(tmp_path)
+    launch_cfg.pretrained_checkpoint = "latest"
+    launch_cfg.task_types = ["STS12"]
+    launch_cfg.output_folder = tmp_path / "results"
+    launch_cfg.tokenizer.max_length = 32
+    launch_cfg.model.hidden_size = 999
+
+    class _Tokenizer:
+        pad_token_id = checkpoint_cfg.model.pad_token_id
+
+        def __len__(self):
+            return checkpoint_cfg.model.vocab_size
+
+    captured: dict[str, object] = {}
+
+    class _Model:
+        def __init__(self, *, config, **kwargs):
+            captured["model_config"] = config
+            captured["model_kwargs"] = kwargs
+
+        @staticmethod
+        def load_state_dict(_state_dict, strict=False):
+            assert strict is False
+            return SimpleNamespace(unexpected_keys=[], missing_keys=[])
+
+        def to(self, device):
+            captured["device"] = device
+            return self
+
+        def eval(self):
+            return self
+
+    class _MTEB:
+        def __init__(self, *, tasks, task_langs):
+            captured["tasks"] = tasks
+            captured["task_langs"] = task_langs
+
+        @staticmethod
+        def run(_model, **kwargs):
+            captured["run_kwargs"] = kwargs
+
+    def _get_tokenizer(**kwargs):
+        captured["tokenizer_kwargs"] = kwargs
+        return _Tokenizer()
+
+    monkeypatch.setattr(
+        run_mteb,
+        "resolve_training_checkpoint_artifacts",
+        lambda *_args: (checkpoint_root, checkpoint_dir, "10"),
+    )
+    monkeypatch.setattr(run_mteb.ConfigLoader, "load", lambda path: checkpoint_cfg)
+    monkeypatch.setattr(run_mteb, "get_tokenizer", _get_tokenizer)
+    monkeypatch.setattr(run_mteb, "NeoBERTForMTEB", _Model)
+    monkeypatch.setattr(
+        run_mteb, "load_step_checkpoint_state_dict", lambda *_a, **_k: {}
+    )
+    monkeypatch.setattr(run_mteb, "MTEB", _MTEB)
+    monkeypatch.setattr(run_mteb.torch.cuda, "is_available", lambda: False)
+
+    run_mteb.evaluate_mteb(launch_cfg)
+
+    model_config = captured["model_config"]
+    assert model_config.hidden_size == checkpoint_cfg.model.hidden_size
+    assert captured["tokenizer_kwargs"]["pretrained_model_name_or_path"] == str(
+        tokenizer_dir
+    )
+    assert captured["run_kwargs"]["eval_splits"] == ["test"]

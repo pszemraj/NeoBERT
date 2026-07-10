@@ -25,6 +25,7 @@ from neobert.checkpointing import (
     resolve_deepspeed_checkpoint_root_and_tag,
     resolve_step_checkpoint_dir,
     resolve_step_checkpoint_selector,
+    resolve_training_checkpoint_artifacts,
     save_accelerate_state,
     save_state_dict_safetensors,
 )
@@ -142,6 +143,24 @@ def test_resolve_accelerate_state_dir_requires_canonical_layout(
         resolve_accelerate_state_dir(tmp_path)
     (tmp_path / ACCELERATE_STATE_DIR).mkdir()
     assert resolve_accelerate_state_dir(tmp_path) == tmp_path / ACCELERATE_STATE_DIR
+
+
+def test_resolve_training_checkpoint_artifacts_accepts_run_root(
+    tmp_path: Path,
+) -> None:
+    """Evaluation run roots resolve to one concrete checkpoint directory."""
+    step_dir = tmp_path / "checkpoints" / "00050"
+    step_dir.mkdir(parents=True)
+    (step_dir / MODEL_WEIGHTS_NAME).touch()
+
+    checkpoint_root, resolved_step, tag = resolve_training_checkpoint_artifacts(
+        tmp_path,
+        "latest",
+    )
+
+    assert checkpoint_root == tmp_path / "checkpoints"
+    assert resolved_step == step_dir
+    assert tag == "00050"
 
 
 def test_save_state_dict_safetensors_roundtrip(tmp_path: Path) -> None:
