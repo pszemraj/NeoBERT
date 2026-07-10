@@ -7,13 +7,15 @@ from collections.abc import Callable, Iterator, Mapping
 from copy import deepcopy
 from typing import Any, TypeVar
 
+import aiohttp
+import httpx
 import requests
 import torch
 from datasets import IterableDataset as HuggingFaceIterableDataset
 
 logger = logging.getLogger(__name__)
 
-_TRANSIENT_HTTP_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+_TRANSIENT_HTTP_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
 _TRANSIENT_OS_ERRNOS = frozenset(
     {
         errno.ECONNABORTED,
@@ -166,21 +168,28 @@ def _iter_exception_chain(exc: BaseException) -> Iterator[BaseException]:
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         yield current
-        current = current.__cause__ or current.__context__
+        if current.__cause__ is not None:
+            current = current.__cause__
+        elif not current.__suppress_context__:
+            current = current.__context__
+        else:
+            current = None
 
 
 def is_transient_streaming_error(exc: BaseException) -> bool:
     """Return whether an exception looks like a transient remote-read failure.
 
-    Message-fragment matching is restricted to network-layer exception types
-    (``OSError`` and ``requests`` errors). Arbitrary exceptions whose text
-    merely mentions e.g. ``timeout`` (config validation, auth failures inside
-    dataset scripts) must fail fast instead of burning the retry budget.
+    Message-fragment matching is restricted to network-layer exception types.
+    Arbitrary exceptions whose text merely mentions e.g. ``timeout`` (config
+    validation, auth failures inside dataset scripts) must fail fast instead of
+    burning the retry budget.
 
     :param BaseException exc: Exception to classify.
     :return bool: ``True`` for retryable network/service failures.
     """
     for candidate in _iter_exception_chain(exc):
+        if isinstance(candidate, (TimeoutError, ConnectionError)):
+            return True
         if isinstance(
             candidate,
             (
@@ -193,6 +202,29 @@ def is_transient_streaming_error(exc: BaseException) -> bool:
             response = getattr(candidate, "response", None)
             status_code = getattr(response, "status_code", None)
             if status_code in _TRANSIENT_HTTP_STATUS_CODES:
+                return True
+        if isinstance(
+            candidate,
+            (
+                httpx.TimeoutException,
+                httpx.NetworkError,
+                httpx.RemoteProtocolError,
+            ),
+        ):
+            return True
+        if isinstance(candidate, httpx.HTTPStatusError):
+            if candidate.response.status_code in _TRANSIENT_HTTP_STATUS_CODES:
+                return True
+        if isinstance(
+            candidate,
+            (
+                aiohttp.ClientConnectionError,
+                aiohttp.ClientPayloadError,
+            ),
+        ):
+            return True
+        if isinstance(candidate, aiohttp.ClientResponseError):
+            if candidate.status in _TRANSIENT_HTTP_STATUS_CODES:
                 return True
         if isinstance(candidate, OSError) and getattr(candidate, "errno", None) in (
             _TRANSIENT_OS_ERRNOS

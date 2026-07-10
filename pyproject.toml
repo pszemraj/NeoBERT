@@ -9,19 +9,22 @@ description = "A state-of-the-art update of BERT"
 requires-python = ">= 3.10"
 dependencies = [
     "accelerate",
+    "aiohttp",
     "datasets",
     "einops",
     "evaluate",
+    "httpx",
+    "liger-kernel>=0.6",
     "mteb",
     "numpy",
     "pyyaml",
+    "requests",
     "safetensors",
     "scikit-learn",
     "torch>=2.6.0",
     "tqdm",
     "transformers",
     "wandb",
-    "liger-kernel>=0.6",
 ]
 authors = [
     { name = "Lola Le Breton", email = "lola.lebreton@mila.quebec" },

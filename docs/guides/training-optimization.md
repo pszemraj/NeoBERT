@@ -109,7 +109,7 @@ NeoBERT keeps pinned CPU staging enabled on CUDA. When Accelerate owns device pl
 For hub-backed streaming datasets:
 
 - Hugging Face iterable streams are detected as streaming datasets before DataLoader construction, adapted to PyTorch's iterable API when needed, and not given map-style options such as DataLoader-level `shuffle`,
-- NeoBERT retries transient read failures while inspecting schemas and during long-running stream iteration; only network-layer failures (request timeouts/connection errors, retryable HTTP statuses, socket errnos) classify as transient, so permanent errors such as auth/config failures fail fast instead of consuming the retry budget,
+- NeoBERT retries transient read failures while inspecting schemas and during long-running stream iteration; only typed network-layer failures from built-in sockets, `requests`, `httpx`, and `aiohttp` (timeouts/connection errors, retryable HTTP statuses, and socket errnos) classify as transient, so permanent errors such as auth/config failures fail fast instead of consuming the retry budget,
 - retry recovery resumes from the last yielded example when the underlying HF iterable dataset supports `state_dict()/load_state_dict()`; the wrapper remains visible to streaming detection and eval-budget checks, but its raw cursor is not checkpointed because the prepared dataloader is the safe resume boundary,
 - shuffled streams lose the in-memory shuffle buffer on retry recovery because HF `state_dict()` does not serialize buffer contents: the cursor rewinds correctly, but up to `dataset.shuffle_buffer_size` buffered-but-unyielded examples are skipped and the buffer refills from new data. The wrapper logs a warning whenever such a lossy recovery happens; unshuffled streams recover exactly-once.
 
