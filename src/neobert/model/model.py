@@ -269,6 +269,8 @@ class NeoBERTConfig(PretrainedConfig):
             raise ValueError(
                 f"Unsupported hidden_act '{hidden_act}'. Supported: swiglu, gelu."
             )
+        if ngpt and normalized_act != "swiglu":
+            raise ValueError("ngpt=True requires hidden_act='swiglu'.")
         self.hidden_act = normalized_act
         self.vocab_size = vocab_size
         self.pad_token_id = pad_token_id

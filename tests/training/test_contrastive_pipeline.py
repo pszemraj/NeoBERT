@@ -313,6 +313,7 @@ class TestContrastivePipeline:
         config.dataset.path = str(tmp_path)
         config.optimizer.name = "muonclip"
         config.model.ngpt = True
+        config.model.hidden_act = "swiglu"
         config.contrastive.allow_random_weights = True
         config.trainer.max_steps = 0
         config.wandb.mode = "disabled"

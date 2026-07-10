@@ -678,7 +678,7 @@ def test_optimizer_state_semantics_tags() -> None:
     model = torch.nn.Linear(2, 2, bias=False)
     adamw = torch.optim.AdamW(model.parameters(), lr=1e-3)
     assert optimizer_state_semantics(adamw) == "adamw-v1"
-    assert MuonClipOptimizer.STATE_SEMANTICS == "muonclip-heavyball-v1"
+    assert MuonClipOptimizer.STATE_SEMANTICS == "muonclip-heavyball-v2"
 
 
 def test_optimizer_state_semantics_honors_instance_qualified_tags() -> None:

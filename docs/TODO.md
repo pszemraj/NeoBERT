@@ -14,10 +14,6 @@ Deferred because it is an overhead-only win (identical FLOPs, fewer launches) th
 - stacking the split matrices in `_orthogonalize_fused_qkv_update` and applying `_normalize_muon_update` per matrix (all three share one shape, so the scale is common),
 - verifying against `tests/test_muonclip_unit.py` reference implementations and the manual FSDP2 golden tests (`tests/manual/test_muonclip_fsdp2_golden.py`), plus a wall-clock benchmark demonstrating the win in eager mode.
 
-### Split the nGPT fused FFN before orthogonalization
-
-`_uses_fused_qkv_muon_split` (`src/neobert/optimizer/muon_clip.py`) special-cases only `proj_type == "qkv"`, so attention `qkv.weight` is split into Q/K/V and each projection is orthogonalized separately. The nGPT block's `c_fc` weight fuses the SwiGLU gate and up projections into one `(2*intermediate, hidden)` matrix (`NormEncoderBlock`, split only at forward time via `torch.chunk`), but it is never tagged, so Muon orthogonalizes the whole fused matrix and mixes the two projections' singular subspaces. Shipped configs keep `model.ngpt: false`; unit coverage confirms nGPT QK clipping runs, but no numerical oracle validates separate fused-FFN Muon updates. Completing this requires tagging `c_fc.weight` with a fused-FFN `proj_type`, adding a two-way split path, and adding an nGPT+Muon golden reference for the update math.
-
 ## Resume
 
 ### Name-keyed optimizer-state transplant

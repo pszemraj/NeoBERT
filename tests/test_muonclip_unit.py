@@ -560,7 +560,7 @@ class TestMuonClipOptimizer:
         )
 
         assert optimizer.STATE_SEMANTICS == (
-            "muonclip-heavyball-v1|norm_factor=spectral|param_policy=hidden_2d"
+            "muonclip-heavyball-v2|norm_factor=spectral|param_policy=hidden_2d"
             "|orthogonalization=polar_express|nesterov=True|clipping=False"
         )
 
@@ -1015,6 +1015,60 @@ class TestMuonClipOptimizer:
 
         torch.testing.assert_close(actual, expected)
 
+    def test_ngpt_fused_swiglu_muon_splits_up_and_gate_projections(self):
+        """nGPT fused FFN updates must not mix up/gate singular subspaces."""
+        torch.manual_seed(0)
+        config = NeoBERTConfig(
+            hidden_size=8,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=16,
+            vocab_size=32,
+            max_length=8,
+            attn_backend="sdpa",
+            hidden_act="swiglu",
+            rope=False,
+            ngpt=True,
+        )
+        model = NeoBERTLMHead(config)
+        optimizer = MuonClipOptimizer(
+            model,
+            config,
+            MuonClipConfig(
+                enable_clipping=False,
+                orthogonalization="polar_express",
+            ),
+        )
+        c_fc_weight = model.model.transformer_encoder[0].c_fc.weight
+        muon_group = next(
+            group for group in optimizer.param_groups if group["use_muon"]
+        )
+        param_index = next(
+            idx
+            for idx, param in enumerate(muon_group["params"])
+            if param is c_fc_weight
+        )
+        param_info = muon_group["param_info"][param_index]
+        assert param_info["proj_type"] == "swiglu_up_gate"
+
+        muon_input = torch.randn_like(c_fc_weight)
+        up_input, gate_input = muon_input.chunk(2, dim=0)
+        expected = torch.cat(
+            (
+                _neobert_polar_express_reference(up_input, nesterov=False),
+                _neobert_polar_express_reference(gate_input, nesterov=False),
+            ),
+            dim=0,
+        )
+
+        actual = optimizer._orthogonalize_muon_input(
+            muon_input=muon_input,
+            param_shape=c_fc_weight.shape,
+            param_info=param_info,
+        )
+
+        torch.testing.assert_close(actual, expected)
+
     def test_qkv_scaling_rejects_non_interleaved_layout(self):
         """Ensure fused QKV scaling fails fast on incompatible weight layouts."""
         config = NeoBERTConfig(
@@ -1078,7 +1132,7 @@ class TestMuonClipOptimizer:
             vocab_size=64,
             max_length=16,
             attn_backend="sdpa",
-            hidden_act="gelu",
+            hidden_act="swiglu",
             rope=False,
             ngpt=True,
         )

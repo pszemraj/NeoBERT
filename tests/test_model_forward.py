@@ -90,6 +90,8 @@ class TestModelForward(unittest.TestCase):
             NeoBERTConfig(attn_backend="bad_backend")
         with self.assertRaisesRegex(ValueError, "Unknown kernel_backend"):
             NeoBERTConfig(kernel_backend="bad_backend")
+        with self.assertRaisesRegex(ValueError, "requires hidden_act='swiglu'"):
+            NeoBERTConfig(ngpt=True, hidden_act="gelu")
 
     def test_runtime_config_factory_preserves_fields_and_task_overrides(self):
         """Ensure typed model settings and explicit task overrides map canonically."""
@@ -104,7 +106,7 @@ class TestModelForward(unittest.TestCase):
             vocab_size=257,
             rope=True,
             rms_norm=False,
-            hidden_act="gelu",
+            hidden_act="swiglu",
             dropout_prob=0.125,
             norm_eps=2e-5,
             embedding_init_range=0.011,
@@ -370,7 +372,7 @@ class TestModelForward(unittest.TestCase):
                     max_length=8,
                     attn_backend="sdpa",
                     ngpt=ngpt,
-                    hidden_act="gelu",
+                    hidden_act="swiglu" if ngpt else "gelu",
                 )
 
                 model = build_neobert_backbone(config)
@@ -1021,7 +1023,7 @@ class TestModelForward(unittest.TestCase):
                 max_length=8,
                 attn_backend="sdpa",
                 ngpt=True,
-                hidden_act="gelu",
+                hidden_act="swiglu",
                 tie_word_embeddings=True,
             )
         )
@@ -1450,7 +1452,7 @@ class TestModelForward(unittest.TestCase):
                     max_length=8,
                     attn_backend="sdpa",
                     ngpt=True,
-                    hidden_act="gelu",
+                    hidden_act="swiglu",
                 ),
                 {"num_labels": 2},
                 NormNeoBERT,
@@ -1484,7 +1486,7 @@ class TestModelForward(unittest.TestCase):
                     max_length=8,
                     attn_backend="sdpa",
                     ngpt=True,
-                    hidden_act="gelu",
+                    hidden_act="swiglu",
                     num_labels=3,
                 ),
                 {},
@@ -1514,7 +1516,7 @@ class TestModelForward(unittest.TestCase):
             max_length=8,
             attn_backend="sdpa",
             ngpt=True,
-            hidden_act="gelu",
+            hidden_act="swiglu",
         )
         model = NeoBERTForMTEB(
             config=config,

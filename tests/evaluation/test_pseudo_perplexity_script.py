@@ -189,7 +189,7 @@ def test_build_neobert_uses_runtime_config_fields(
         vocab_size=128,
         rope=True,
         rms_norm=True,
-        hidden_act="gelu",
+        hidden_act="swiglu",
         dropout_prob=0.1,
         norm_eps=1e-5,
         embedding_init_range=0.01,

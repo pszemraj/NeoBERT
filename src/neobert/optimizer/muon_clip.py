@@ -498,7 +498,7 @@ class MuonClipOptimizer(Optimizer):
     # of silently feeding stale-scale buffers into the new rule. Instances
     # shadow this tag with config qualifiers (see __init__) so resuming under
     # a changed update-rule selector is rejected as well.
-    STATE_SEMANTICS = "muonclip-heavyball-v1"
+    STATE_SEMANTICS = "muonclip-heavyball-v2"
 
     def __init__(
         self, model: torch.nn.Module, model_config: Any, config: MuonClipConfig
@@ -731,6 +731,10 @@ class MuonClipOptimizer(Optimizer):
                         continue
                     proj_type_by_param_id[id(module.weight)] = proj_type
 
+            fused_ffn_module = getattr(layer, "c_fc", None)
+            if fused_ffn_module is not None and hasattr(fused_ffn_module, "weight"):
+                proj_type_by_param_id[id(fused_ffn_module.weight)] = "swiglu_up_gate"
+
         embedding_param_ids = embedding_parameter_ids(model)
 
         for name, param in model.named_parameters():
@@ -743,6 +747,12 @@ class MuonClipOptimizer(Optimizer):
             proj_type = proj_type_by_param_id.get(param_id)
             if proj_type is None and "qkv" in name:
                 proj_type = "qkv"
+            if (
+                proj_type is None
+                and bool(getattr(self.model_config, "ngpt", False))
+                and name.endswith("c_fc.weight")
+            ):
+                proj_type = "swiglu_up_gate"
             if proj_type is None:
                 for canonical, pattern in self._layer_mapping.items():
                     if not pattern or pattern not in name:
@@ -1574,30 +1584,13 @@ class MuonClipOptimizer(Optimizer):
         :param dict[str, Any] | None param_info: Static metadata for the parameter.
         :return torch.Tensor: Orthogonalized and normalized update tensor.
         """
-        if self._uses_fused_qkv_muon_split(
-            param_shape=param_shape, param_info=param_info
-        ):
+        proj_type = (param_info or {}).get("proj_type")
+        if len(param_shape) == 2 and proj_type == "qkv":
             return self._orthogonalize_fused_qkv_update(muon_input)
+        if len(param_shape) == 2 and proj_type == "swiglu_up_gate":
+            return self._orthogonalize_fused_swiglu_update(muon_input)
         update = self._orthogonalize_update(muon_input)
         return self._normalize_muon_update(update, param_shape)
-
-    def _uses_fused_qkv_muon_split(
-        self,
-        *,
-        param_shape: torch.Size,
-        param_info: Optional[Dict[str, Any]] = None,
-    ) -> bool:
-        """Return whether a parameter should split fused QKV for Muon.
-
-        :param torch.Size param_shape: Shape of the owning parameter.
-        :param dict[str, Any] | None param_info: Static metadata for the parameter.
-        :return bool: ``True`` when the update should be split into Q/K/V matrices.
-        """
-        if len(param_shape) != 2:
-            return False
-        if (param_info or {}).get("proj_type") != "qkv":
-            return False
-        return True
 
     def _orthogonalize_fused_qkv_update(self, muon_input: torch.Tensor) -> torch.Tensor:
         """Orthogonalize fused QKV matrices as separate Q, K, and V projections.
@@ -1612,6 +1605,32 @@ class MuonClipOptimizer(Optimizer):
             for update in self._split_interleaved_qkv_matrix(muon_input)
         )
         return self._merge_interleaved_qkv_matrix(q_update, k_update, v_update)
+
+    def _orthogonalize_fused_swiglu_update(
+        self, muon_input: torch.Tensor
+    ) -> torch.Tensor:
+        """Orthogonalize fused SwiGLU up/gate matrices as separate projections.
+
+        ``NormEncoderBlock.c_fc`` stores the up projection in its first row half
+        and the gate projection in its second row half.
+
+        :param torch.Tensor muon_input: Fused up/gate update tensor.
+        :raises RuntimeError: If the fused row layout is invalid.
+        :return torch.Tensor: Fused update rebuilt from independent Muon updates.
+        """
+        if muon_input.ndim != 2 or muon_input.shape[0] % 2 != 0:
+            raise RuntimeError(
+                "Unexpected fused SwiGLU parameter layout; expected an even-row "
+                f"rank-2 tensor, got shape={tuple(muon_input.shape)}."
+            )
+        up_input, gate_input = muon_input.chunk(2, dim=0)
+        updates = (
+            self._normalize_muon_update(
+                self._orthogonalize_update(projection), projection.shape
+            )
+            for projection in (up_input, gate_input)
+        )
+        return torch.cat(tuple(updates), dim=0)
 
     def _split_interleaved_qkv_matrix(
         self, matrix: torch.Tensor

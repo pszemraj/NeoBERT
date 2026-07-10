@@ -82,7 +82,7 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 | `model.intermediate_size`       | `int`         | `3072`     | FFN/MLP hidden size before activation projection.            |
 | `model.max_position_embeddings` | `int`         | `512`      | Maximum supported sequence length.                           |
 | `model.vocab_size`              | `int`         | `30522`    | Runtime-synchronized model vocab size.                       |
-| `model.hidden_act`              | `str`         | `"swiglu"` | `swiglu` or `gelu`.                                          |
+| `model.hidden_act`              | `str`         | `"swiglu"` | See [Feed-Forward](architecture.md#feed-forward).             |
 | `model.dropout_prob`            | `float`       | `0.0`      | Dropout probability in model blocks.                         |
 | `model.norm_eps`                | `float`       | `1e-5`     | Epsilon for normalization stability.                         |
 
@@ -94,7 +94,7 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 | `model.attn_backend`          | `str`   | `"sdpa"`             | Attention backend: `sdpa` or `flash_attn_varlen`. |
 | `model.kernel_backend`        | `str`   | `"auto"`             | Kernel backend: `auto`, `liger`, or `torch`.      |
 | `model.rope`                  | `bool`  | `true`               | Enable rotary positional encoding.                |
-| `model.ngpt`                  | `bool`  | `false`              | Enable nGPT variant.                              |
+| `model.ngpt`                  | `bool`  | `false`              | Enable [nGPT mode](architecture.md#ngpt-mode).     |
 | `model.base_scale`            | `float` | `1.0 / (960.0**0.5)` | nGPT scale constant.                              |
 | `model.pad_token_id`          | `int`   | `0`                  | Runtime-synced from tokenizer.                    |
 | `model.embedding_init_range`  | `float` | `0.02`               | Embedding init stddev.                            |

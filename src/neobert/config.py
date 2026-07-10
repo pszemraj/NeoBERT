@@ -1394,6 +1394,12 @@ class ConfigLoader:
         else:
             config.task = task
 
+        if (
+            config.model.ngpt
+            and str(config.model.hidden_act).strip().lower() != "swiglu"
+        ):
+            errors.append("model.ngpt=true requires model.hidden_act='swiglu'.")
+
         if config.dataset.max_seq_length <= 0:
             errors.append(
                 "dataset.max_seq_length must be > 0, "

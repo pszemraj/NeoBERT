@@ -64,7 +64,7 @@ When `model.ngpt: true`, pretraining, contrastive training, MTEB evaluation, and
 - learned scaling parameters for attention/MLP branches,
 - custom normalization dynamics relative to standard encoder blocks.
 
-All task wrappers construct their backbone from the checkpoint configuration, so strict checkpoint loading rejects standard/nGPT architecture mismatches. Hugging Face export does not support nGPT checkpoints.
+The nGPT block requires `model.hidden_act: swiglu`; GELU is rejected instead of being accepted as an inert selector. MuonClip treats the fused SwiGLU up/gate matrix as two independent projections during orthogonalization. All task wrappers construct their backbone from the checkpoint configuration, so strict checkpoint loading rejects standard/nGPT architecture mismatches. Hugging Face export does not support nGPT checkpoints.
 
 ## HF Export Model Differences
 
