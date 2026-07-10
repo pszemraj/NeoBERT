@@ -367,6 +367,7 @@ def test_sync_resume_forces_sequence_length_for_non_rope(tmp_path: Path) -> None
     checkpoint_cfg.model.max_position_embeddings = 256
     checkpoint_cfg.tokenizer.max_length = 256
     checkpoint_cfg.dataset.max_seq_length = 256
+    checkpoint_cfg.datacollator.max_length = 256
     checkpoint_cfg.dataset.name = "checkpoint-dataset"
     ConfigLoader.save(checkpoint_cfg, str(checkpoint_dir / "config.yaml"))
 
@@ -375,6 +376,7 @@ def test_sync_resume_forces_sequence_length_for_non_rope(tmp_path: Path) -> None
     runtime_cfg.model.max_position_embeddings = 512
     runtime_cfg.tokenizer.max_length = 512
     runtime_cfg.dataset.max_seq_length = 512
+    runtime_cfg.datacollator.max_length = 512
     runtime_cfg.dataset.name = "runtime-dataset"
 
     sync_resume_source_of_truth(
@@ -385,8 +387,52 @@ def test_sync_resume_forces_sequence_length_for_non_rope(tmp_path: Path) -> None
     assert runtime_cfg.model.max_position_embeddings == 256
     assert runtime_cfg.tokenizer.max_length == 256
     assert runtime_cfg.dataset.max_seq_length == 256
+    assert runtime_cfg.datacollator.max_length == 256
     # Corpus identity is still operator-controlled.
     assert runtime_cfg.dataset.name == "runtime-dataset"
+
+
+def test_sync_resume_preserves_rope_packed_context_and_pretraining_batch_size(
+    tmp_path: Path,
+) -> None:
+    """RoPE context may extend, but a batch cursor keeps checkpoint geometry."""
+    checkpoint_dir = tmp_path / "checkpoints" / "10"
+    checkpoint_dir.mkdir(parents=True)
+    checkpoint_cfg = Config()
+    checkpoint_cfg.model.rope = True
+    checkpoint_cfg.model.max_position_embeddings = 1024
+    checkpoint_cfg.tokenizer.max_length = 1024
+    checkpoint_cfg.dataset.max_seq_length = 1024
+    checkpoint_cfg.datacollator.max_length = 1024
+    checkpoint_cfg.trainer.per_device_train_batch_size = 8
+    ConfigLoader.save(checkpoint_cfg, str(checkpoint_dir / "config.yaml"))
+
+    runtime_cfg = Config()
+    runtime_cfg.model.rope = True
+    runtime_cfg.model.max_position_embeddings = 2048
+    runtime_cfg.tokenizer.max_length = 2048
+    runtime_cfg.dataset.max_seq_length = 2048
+    runtime_cfg.datacollator.max_length = 2048
+    runtime_cfg.trainer.per_device_train_batch_size = 32
+
+    drift = sync_resume_source_of_truth(
+        runtime_cfg,
+        checkpoint_dir,
+        task="pretraining",
+        log=logging.getLogger("test"),
+    )
+
+    assert runtime_cfg.model.max_position_embeddings == 2048
+    assert runtime_cfg.tokenizer.max_length == 2048
+    assert runtime_cfg.dataset.max_seq_length == 2048
+    assert runtime_cfg.datacollator.max_length == 2048
+    assert runtime_cfg.trainer.per_device_train_batch_size == 8
+    assert {
+        "model.max_position_embeddings",
+        "tokenizer.max_length",
+        "dataset.max_seq_length",
+        "datacollator.max_length",
+    } <= drift
 
 
 def test_sync_resume_source_of_truth_rejects_missing_config(tmp_path: Path) -> None:

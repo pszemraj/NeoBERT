@@ -112,6 +112,14 @@ _BATCH_BUFFER_STATE_VERSION = 1
 _BATCH_BUFFER_STATE_VERSION_KEY = "batch_buffer_version"
 _BATCH_BUFFER_STATE_WORLD_SIZE_KEY = "world_size"
 _BATCH_BUFFER_STATE_RANKS_KEY = "rank_buffers"
+_PRETRAINING_CORPUS_IDENTITY_FIELDS = frozenset(
+    {
+        "dataset.name",
+        "dataset.config",
+        "dataset.path",
+        "dataset.text_column",
+    }
+)
 
 
 def _resolve_masked_logits_only_loss(value: Any) -> bool:
@@ -164,28 +172,29 @@ def _resolve_resume_checkpoint_and_eval_samples(
     cfg: Config,
     checkpoint_dir: Path,
     output_dir: Path,
-) -> tuple[Optional[str], int, Optional[int]]:
+) -> tuple[Optional[str], int, Optional[int], set[str]]:
     """Resolve resume state and derive eval sample cap after config sync.
 
     :param Config cfg: Mutable training configuration.
     :param Path checkpoint_dir: Canonical checkpoint root.
     :param Path output_dir: Training output root.
-    :return tuple[str | None, int, int | None]: Resume path, iteration, and eval cap.
+    :return tuple[str | None, int, int | None, set[str]]: Resume path, iteration, eval cap, and launch-controlled drift.
     """
     resume_checkpoint_path, iteration = _resolve_resume_checkpoint(
         cfg.trainer.resume_from_checkpoint,
         str(checkpoint_dir),
         str(output_dir),
     )
+    resume_config_drift: set[str] = set()
     if cfg.trainer.resume_from_checkpoint and resume_checkpoint_path:
-        sync_resume_source_of_truth(
+        resume_config_drift = sync_resume_source_of_truth(
             cfg,
             resume_checkpoint_path,
             task="pretraining",
             log=logger,
         )
     eval_samples = _resolve_eval_samples(getattr(cfg.dataset, "eval_samples", None))
-    return resume_checkpoint_path, iteration, eval_samples
+    return resume_checkpoint_path, iteration, eval_samples, resume_config_drift
 
 
 def _format_percent(value: float) -> str:
@@ -1586,6 +1595,37 @@ def _prepare_resume_dataloader(
     return skipped_dataloader
 
 
+def _reset_data_position_for_corpus_change(
+    metrics: Metrics,
+    stored_batch: BatchEncoding,
+    train_dataset: Any,
+    train_dataloader: Any,
+    resume_config_drift: set[str],
+) -> set[str]:
+    """Reset rank-local data state when continued pretraining changes corpus.
+
+    :param Metrics metrics: Restored training metrics and cursors.
+    :param BatchEncoding stored_batch: Restored packed-fragment buffer.
+    :param Any train_dataset: Runtime training dataset.
+    :param Any train_dataloader: Prepared runtime training dataloader.
+    :param set[str] resume_config_drift: Launch-controlled checkpoint drift.
+    :return set[str]: Drifted corpus-identity fields that triggered the reset.
+    """
+    changed_fields = resume_config_drift & _PRETRAINING_CORPUS_IDENTITY_FIELDS
+    if not changed_fields:
+        return set()
+
+    metrics["train/epochs"] = 0
+    metrics["train/batches_in_epoch"] = 0
+    metrics["train/dataloader_batches_in_epoch"] = 0
+    _clear_stored_batch(stored_batch)
+    if hasattr(train_dataset, "set_epoch"):
+        train_dataset.set_epoch(0)
+    if hasattr(train_dataloader, "set_epoch"):
+        train_dataloader.set_epoch(0)
+    return set(changed_fields)
+
+
 def _safe_len(dataloader: torch.utils.data.DataLoader) -> Optional[int]:
     """Return dataloader length when available, else ``None``.
 
@@ -1628,7 +1668,7 @@ def trainer(cfg: Config) -> None:
     output_dir = Path(cfg.trainer.output_dir)
     checkpoint_dir = output_dir / "checkpoints"
     checkpoint_retention_limit = _resolve_checkpoint_retention_limit(cfg)
-    resume_checkpoint_path, iteration, eval_samples = (
+    resume_checkpoint_path, iteration, eval_samples, resume_config_drift = (
         _resolve_resume_checkpoint_and_eval_samples(cfg, checkpoint_dir, output_dir)
     )
 
@@ -2460,16 +2500,32 @@ def trainer(cfg: Config) -> None:
             log=logger,
             context="pretraining resume",
         )
-        if is_streaming and hasattr(train_dataset, "set_epoch"):
+        changed_corpus_fields = _reset_data_position_for_corpus_change(
+            metrics,
+            stored_batch,
+            train_dataset,
+            train_dataloader,
+            resume_config_drift,
+        )
+        corpus_changed = bool(changed_corpus_fields)
+        if corpus_changed:
+            logger.warning(
+                "Resume corpus changed (%s); preserving optimizer/model progress "
+                "but restarting data position at epoch zero and clearing packed "
+                "fragments from the previous corpus.",
+                ", ".join(sorted(changed_corpus_fields)),
+            )
+        elif is_streaming and hasattr(train_dataset, "set_epoch"):
             resume_epoch = int(metrics.get("train/epochs", 0))
             train_dataset.set_epoch(resume_epoch)
             logger.info(
                 "Restored streaming dataset epoch to "
                 f"{resume_epoch} before resume skipping."
             )
-        skipped_train_dataloader = _prepare_resume_dataloader(
-            train_dataloader, metrics, accelerator, is_streaming
-        )
+        if not corpus_changed:
+            skipped_train_dataloader = _prepare_resume_dataloader(
+                train_dataloader, metrics, accelerator, is_streaming
+            )
     elif cfg.trainer.resume_from_checkpoint:
         logger.warning(
             "resume_from_checkpoint is set but no valid checkpoints were found in "

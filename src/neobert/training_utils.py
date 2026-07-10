@@ -829,7 +829,7 @@ def sync_resume_source_of_truth(
     *,
     task: str,
     log: logging.Logger,
-) -> None:
+) -> set[str]:
     """Make checkpoint metadata authoritative for resume-sensitive config fields.
 
     A resumable checkpoint contains optimizer and scheduler state, so silently
@@ -837,9 +837,10 @@ def sync_resume_source_of_truth(
     contrastive objective is not a faithful continuation. The entire ``trainer``
     section (batch size, gradient accumulation, precision, compile flags, loss
     path, ``max_steps``, logging cadence, ...) intentionally remains controlled
-    by the current launch config: those knobs shape runtime execution, not the
-    optimizer/scheduler state being restored, and operators legitimately change
-    them mid-run (for example rebalancing batch size after a hardware change).
+    by the current launch config because those knobs shape runtime execution, not
+    the optimizer/scheduler state being restored. Pretraining's per-device batch
+    size is the exception: its resume cursor counts batches, so the checkpoint
+    value remains authoritative to preserve sample position.
 
     Two continuation knobs are likewise launch-controlled (the launch config
     wins, drift is warned but not reverted): the training corpus identity
@@ -856,10 +857,11 @@ def sync_resume_source_of_truth(
     :param str | Path | None resume_checkpoint_path: Resolved checkpoint step path.
     :param str task: Training task name.
     :param logging.Logger log: Logger for drift warnings.
+    :return set[str]: Launch-controlled fields that differ from the checkpoint.
     :raises RuntimeError: If checkpoint ``config.yaml`` is missing.
     """
     if resume_checkpoint_path is None:
-        return
+        return set()
 
     from neobert.config import ConfigLoader
 
@@ -955,20 +957,32 @@ def sync_resume_source_of_truth(
             section="dataset",
         )
     )
+    datacollator_forced = [
+        "mlm_probability",
+        "pad_to_multiple_of",
+        "mask_all",
+        "pack_sequences",
+    ]
+    if not rope_enabled:
+        datacollator_forced.append("max_length")
+
     changed.extend(
         _copy_checkpoint_config_fields(
             cfg.datacollator,
             checkpoint_cfg.datacollator,
-            (
-                "mlm_probability",
-                "pad_to_multiple_of",
-                "mask_all",
-                "pack_sequences",
-                "max_length",
-            ),
+            tuple(datacollator_forced),
             section="datacollator",
         )
     )
+    if task == "pretraining":
+        changed.extend(
+            _copy_checkpoint_config_fields(
+                cfg.trainer,
+                checkpoint_cfg.trainer,
+                ("per_device_train_batch_size",),
+                section="trainer",
+            )
+        )
     if task == "contrastive":
         changed.extend(
             _copy_checkpoint_config_fields(
@@ -1021,6 +1035,14 @@ def sync_resume_source_of_truth(
                 section="dataset",
             )
         )
+        operator_controlled.extend(
+            _report_launch_controlled_config_drift(
+                cfg.datacollator,
+                checkpoint_cfg.datacollator,
+                ("max_length",),
+                section="datacollator",
+            )
+        )
 
     checkpoint_tokenizer_dir = checkpoint_path / "tokenizer"
     if checkpoint_tokenizer_dir.is_dir():
@@ -1043,6 +1065,7 @@ def sync_resume_source_of_truth(
             "context extension).",
             ", ".join(sorted(set(operator_controlled))),
         )
+    return set(operator_controlled)
 
 
 def _optimizer_param_groups(optimizer: Any) -> list[dict[str, Any]]:

@@ -791,7 +791,7 @@ class TestPretrainComponents:
         runtime_cfg.trainer.resume_from_checkpoint = "latest"
         runtime_cfg.dataset.eval_samples = None
 
-        resume_path, iteration, eval_samples = (
+        resume_path, iteration, eval_samples, resume_drift = (
             _resolve_resume_checkpoint_and_eval_samples(
                 runtime_cfg,
                 output_dir / "checkpoints",
@@ -803,6 +803,7 @@ class TestPretrainComponents:
         assert iteration == 11
         assert runtime_cfg.dataset.eval_samples == 17
         assert eval_samples == 17
+        assert resume_drift == set()
 
     def test_eval_split_selection_helpers(self):
         """Ensure eval split discovery and train/eval partition helpers stay stable."""

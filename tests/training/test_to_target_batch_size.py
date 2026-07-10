@@ -9,8 +9,10 @@ from neobert.pretraining.trainer import (
     _CheckpointableBatchBuffer,
     _append_to_stored_batch,
     _has_stored_batch,
+    _reset_data_position_for_corpus_change,
     to_target_batch_size,
 )
+from neobert.pretraining.metrics import Metrics
 
 
 class TestToTargetBatchSizeDevice(unittest.TestCase):
@@ -254,6 +256,63 @@ def test_checkpointable_batch_buffer_accelerate_round_trip(tmp_path):
 
 class TestToTargetBatchSizeCPU(unittest.TestCase):
     """CPU-path regression tests for to_target_batch_size."""
+
+    class _EpochAware:
+        def __init__(self) -> None:
+            self.epoch = None
+
+        def set_epoch(self, epoch: int) -> None:
+            self.epoch = epoch
+
+    def test_corpus_change_resets_cursor_and_packed_fragments(self):
+        """A new corpus starts at zero without old rank-local fragments."""
+        metrics = Metrics()
+        metrics["train/steps"] = 12
+        metrics["train/epochs"] = 3
+        metrics["train/batches_in_epoch"] = 4
+        metrics["train/dataloader_batches_in_epoch"] = 6
+        stored_batch = {
+            "input_ids": torch.tensor([[1, 2]]),
+            "attention_mask": torch.ones((1, 2), dtype=torch.long),
+        }
+        dataset = self._EpochAware()
+        dataloader = self._EpochAware()
+
+        changed = _reset_data_position_for_corpus_change(
+            metrics,
+            stored_batch,
+            dataset,
+            dataloader,
+            {"dataset.path", "dataset.cache_dir"},
+        )
+
+        self.assertEqual(changed, {"dataset.path"})
+        self.assertEqual(metrics["train/steps"], 12)
+        self.assertEqual(metrics["train/epochs"], 0)
+        self.assertEqual(metrics["train/batches_in_epoch"], 0)
+        self.assertEqual(metrics["train/dataloader_batches_in_epoch"], 0)
+        self.assertIsNone(stored_batch["input_ids"])
+        self.assertIsNone(stored_batch["attention_mask"])
+        self.assertEqual(dataset.epoch, 0)
+        self.assertEqual(dataloader.epoch, 0)
+
+    def test_cache_dir_change_preserves_data_position(self):
+        """Moving only the cache does not change corpus identity."""
+        metrics = Metrics()
+        metrics["train/epochs"] = 3
+        stored_batch = {"input_ids": torch.tensor([[1, 2]])}
+
+        changed = _reset_data_position_for_corpus_change(
+            metrics,
+            stored_batch,
+            self._EpochAware(),
+            self._EpochAware(),
+            {"dataset.cache_dir"},
+        )
+
+        self.assertEqual(changed, set())
+        self.assertEqual(metrics["train/epochs"], 3)
+        self.assertIsNotNone(stored_batch["input_ids"])
 
     def test_to_target_batch_size_handles_empty_buffer(self):
         """Ensure batch packing handles empty buffers without crashing."""
