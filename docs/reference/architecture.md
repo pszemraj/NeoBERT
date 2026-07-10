@@ -29,6 +29,7 @@ NeoBERT is a transformer encoder with:
 - With `rope: true`, Q/K receive rotary embeddings.
 - With `rope: false`, learned positional embeddings are used.
 - In learned-position mode, position IDs reserve `0` for padding and start real tokens at `1`.
+- In packed learned-position batches, position IDs restart at `1` for every segment so each document receives the same positional embeddings it would receive when processed alone.
 
 ## Attention Paths
 
@@ -41,6 +42,7 @@ NeoBERT is a transformer encoder with:
 
 - For packed batches, the model can use flash-attn varlen kernels when `model.attn_backend: flash_attn_varlen` and CUDA plus flash-attn are available.
 - Packed metadata is represented as `packed_seqlens` and converted to varlen flattening metadata (`flat_token_indices`, `cu_seqlens`, `max_seqlen`).
+- The same segment lengths define learned-position resets; no separate position metadata is carried through the training pipeline.
 - Metadata is prepared once per forward pass and reused across all encoder layers to reduce host overhead.
 - SDPA segmented fallback exists for correctness/testing when flash-attn is not used, but is slower.
 

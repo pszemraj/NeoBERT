@@ -92,6 +92,8 @@ Useful control:
 
 `model.attn_backend: sdpa` still works for packed runs but uses the slower segmented fallback path.
 
+Packing preserves document semantics across both position systems: RoPE attention is invariant to each segment's constant offset, while learned absolute position IDs restart at one at every segment boundary.
+
 ## Dataloader and Streaming Throughput
 
 Primary throughput knobs:

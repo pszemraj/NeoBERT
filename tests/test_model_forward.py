@@ -162,6 +162,64 @@ class TestModelForward(unittest.TestCase):
             out = model(x, pad_mask=None, packed_seqlens=packed)
         self.assertEqual(out.shape, (2, 8, 32))
 
+    def test_packed_learned_position_ids_reset_per_segment(self):
+        """Packed learned positions restart at one and leave tail padding at zero."""
+        from neobert.model.model import _build_learned_position_ids
+
+        src = torch.tensor(
+            [
+                [1, 11, 12, 2, 1, 21, 2, 0],
+                [1, 31, 2, 0, 0, 0, 0, 0],
+            ]
+        )
+        packed_seqlens = torch.tensor([[4, 3, 0], [3, 0, 0]], dtype=torch.int32)
+
+        position_ids = _build_learned_position_ids(
+            src,
+            pad_token_id=0,
+            packed_seqlens=packed_seqlens,
+        )
+
+        torch.testing.assert_close(
+            position_ids,
+            torch.tensor(
+                [
+                    [1, 2, 3, 4, 1, 2, 3, 0],
+                    [1, 2, 3, 0, 0, 0, 0, 0],
+                ]
+            ),
+        )
+
+    def test_packed_learned_position_forward_matches_standalone_segments(self):
+        """Packing must not change a document's learned-position representation."""
+        torch.manual_seed(0)
+        config = NeoBERTConfig(
+            hidden_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=32,
+            dropout=0.0,
+            vocab_size=64,
+            max_length=16,
+            attn_backend="sdpa",
+            hidden_act="gelu",
+            rope=False,
+        )
+        model = NeoBERT(config).eval()
+        document_a = torch.tensor([[1, 11, 12, 2]])
+        document_b = torch.tensor([[1, 21, 22, 23, 2]])
+
+        with torch.no_grad():
+            output_a = model(document_a)
+            output_b = model(document_b)
+            packed_output = model(
+                torch.cat((document_a, document_b), dim=1),
+                packed_seqlens=torch.tensor([[4, 5]], dtype=torch.int32),
+            )
+
+        torch.testing.assert_close(packed_output[:, :4], output_a, rtol=1e-5, atol=1e-6)
+        torch.testing.assert_close(packed_output[:, 4:], output_b, rtol=1e-5, atol=1e-6)
+
     def test_packed_seqlens_conversion_is_canonical(self):
         """Ensure all packed-attention consumers share one metadata conversion."""
         from neobert.modeling_utils import packed_seqlens_to_tensor

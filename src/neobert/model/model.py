@@ -111,19 +111,29 @@ def _normalize_packed_seqlens(
     packed_seqlens: Any,
     *,
     seq_len: Optional[int] = None,
+    batch_size: Optional[int] = None,
 ) -> Optional[torch.Tensor]:
     """Normalize packed sequence lengths to rank-2 int32 tensors.
 
     :param Any packed_seqlens: Packed segment lengths tensor or list.
     :param int | None seq_len: Optional sequence length for validation.
+    :param int | None batch_size: Optional batch size for validation.
     :return torch.Tensor | None: Packed segment lengths tensor of shape ``[B, N]``.
     """
     tensor = packed_seqlens_to_tensor(packed_seqlens)
     if tensor is None:
         return None
 
+    if batch_size is not None and tensor.shape[0] != batch_size:
+        raise ValueError(
+            "packed_seqlens batch dimension does not match input batch size "
+            f"({tensor.shape[0]} != {batch_size})."
+        )
+    if (tensor < 0).any():
+        raise ValueError("packed_seqlens must contain non-negative lengths.")
+
     if seq_len is not None:
-        sums = tensor.clamp_min(0).sum(dim=1)
+        sums = tensor.sum(dim=1)
         bad = sums > seq_len
         if bad.any():
             bad_idx = int(torch.where(bad)[0][0].item())
@@ -133,6 +143,45 @@ def _normalize_packed_seqlens(
             )
 
     return tensor
+
+
+def _build_learned_position_ids(
+    src: torch.Tensor,
+    *,
+    pad_token_id: int,
+    packed_seqlens: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Build one-indexed learned position IDs with zero reserved for padding.
+
+    Packed segment lengths define document boundaries, so positions restart at
+    one for every segment. Unpacked inputs retain the pad-aware cumulative
+    positions used by the original model.
+
+    :param torch.Tensor src: Token IDs shaped ``[batch, sequence]``.
+    :param int pad_token_id: Token ID treated as padding for unpacked inputs.
+    :param torch.Tensor | None packed_seqlens: Normalized packed segment lengths.
+    :return torch.Tensor: Position IDs shaped like ``src``.
+    """
+    if packed_seqlens is None:
+        token_mask = src.ne(pad_token_id).to(torch.long)
+        return torch.cumsum(token_mask, dim=1) * token_mask
+
+    batch_size, seq_len = src.shape
+    lengths = packed_seqlens.to(device=src.device, dtype=torch.long)
+    segment_starts = torch.cumsum(lengths, dim=1) - lengths
+    sentinel_starts = torch.full_like(segment_starts, seq_len)
+    safe_starts = torch.where(lengths > 0, segment_starts, sentinel_starts)
+
+    start_offsets = torch.zeros(
+        (batch_size, seq_len + 1), device=src.device, dtype=torch.long
+    )
+    start_offsets.scatter_(1, safe_starts, safe_starts)
+    latest_start = torch.cummax(start_offsets[:, :seq_len], dim=1).values
+
+    token_offsets = torch.arange(seq_len, device=src.device).unsqueeze(0)
+    position_ids = token_offsets - latest_start + 1
+    valid_tokens = token_offsets < lengths.sum(dim=1, keepdim=True)
+    return position_ids * valid_tokens
 
 
 class SwiGLU(nn.Module):
@@ -585,7 +634,11 @@ class NeoBERT(NeoBERTPreTrainedModel):
         :return torch.Tensor: Encoded hidden states.
         """
         seq_len = src.shape[1]
-        packed_seqlens = _normalize_packed_seqlens(packed_seqlens, seq_len=seq_len)
+        packed_seqlens = _normalize_packed_seqlens(
+            packed_seqlens,
+            seq_len=seq_len,
+            batch_size=src.shape[0],
+        )
 
         use_packed = self.config.attn_backend != "sdpa" or packed_seqlens is not None
         if use_packed:
@@ -647,9 +700,12 @@ class NeoBERT(NeoBERTPreTrainedModel):
 
         # Positional embedding
         if not self.config.rope:
-            mask = src.ne(self.config.pad_token_id).int()
-            incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask)) * mask
-            x += self.positional_embedding(incremental_indices.long())
+            position_ids = _build_learned_position_ids(
+                src,
+                pad_token_id=self.config.pad_token_id,
+                packed_seqlens=packed_seqlens,
+            )
+            x += self.positional_embedding(position_ids)
 
         # Transformer encoder
         for layer in self.transformer_encoder:
