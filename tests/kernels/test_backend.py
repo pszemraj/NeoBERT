@@ -1,5 +1,7 @@
 """Focused kernel backend dispatch regression tests."""
 
+from unittest.mock import patch
+
 import pytest
 import torch
 
@@ -53,3 +55,19 @@ def test_dispatch_helpers_reject_invalid_backend_consistently() -> None:
 
     with pytest.raises(ValueError, match="Unknown kernel_backend"):
         get_cross_entropy_loss(reduction="mean", backend="bad_backend")
+
+
+def test_explicit_liger_never_silently_falls_back_when_unavailable() -> None:
+    """Explicit Liger requests should fail when the requested kernel is absent."""
+    with (
+        patch("neobert.kernels.backend.LIGER_AVAILABLE", False),
+        patch("neobert.kernels.backend._LigerRMSNormFunction", None),
+        patch("neobert.kernels.backend._LigerSiLUMulFunction", None),
+        patch("neobert.kernels.backend._LigerCrossEntropyLoss", None),
+    ):
+        with pytest.raises(ImportError, match="Liger RMSNorm"):
+            get_rmsnorm(64, 1e-5, "liger")
+        with pytest.raises(ImportError, match="Liger SwiGLU"):
+            swiglu_forward(torch.randn(2, 4), torch.randn(2, 4), "liger")
+        with pytest.raises(ImportError, match="Liger CrossEntropy"):
+            get_cross_entropy_loss(backend="liger")

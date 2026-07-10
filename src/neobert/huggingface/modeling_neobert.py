@@ -6,8 +6,6 @@ math consistent across implementations. Packed/varlen sequences are
 intentionally unsupported here.
 """
 
-import inspect
-import math
 from importlib import import_module
 from typing import Any, Optional, Union
 
@@ -63,14 +61,6 @@ def swiglu_intermediate_size(intermediate_size: int, multiple_of: int = 8) -> in
     return multiple_of * ((reduced + multiple_of - 1) // multiple_of)
 
 
-try:
-    _SDPA_SUPPORTS_SCALE = (
-        "scale" in inspect.signature(scaled_dot_product_attention).parameters
-    )
-except (TypeError, ValueError):  # pragma: no cover - defensive fallback.
-    _SDPA_SUPPORTS_SCALE = False
-
-
 def scaled_dot_product_attention_compat(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -80,7 +70,7 @@ def scaled_dot_product_attention_compat(
     scale: Optional[float] = None,
     is_causal: bool = False,
 ) -> torch.Tensor:
-    """Run SDPA with backward-compatible ``scale`` handling.
+    """Run SDPA with the explicit softmax scale.
 
     :param torch.Tensor query: Query tensor of shape (B, H, M, K).
     :param torch.Tensor key: Key tensor of shape (B, H, N, K).
@@ -91,30 +81,6 @@ def scaled_dot_product_attention_compat(
     :param bool is_causal: Whether to apply causal mask.
     :return torch.Tensor: Attention output.
     """
-    if scale is None:
-        return scaled_dot_product_attention(
-            query=query,
-            key=key,
-            value=value,
-            attn_mask=attn_mask,
-            dropout_p=dropout_p,
-            is_causal=is_causal,
-        )
-
-    if _SDPA_SUPPORTS_SCALE:
-        return scaled_dot_product_attention(
-            query=query,
-            key=key,
-            value=value,
-            attn_mask=attn_mask,
-            dropout_p=dropout_p,
-            is_causal=is_causal,
-            scale=scale,
-        )
-
-    head_dim = query.size(-1)
-    default_scale = 1.0 / math.sqrt(head_dim)
-    query = query * (scale / default_scale)
     return scaled_dot_product_attention(
         query=query,
         key=key,
@@ -122,6 +88,7 @@ def scaled_dot_product_attention_compat(
         attn_mask=attn_mask,
         dropout_p=dropout_p,
         is_causal=is_causal,
+        scale=scale,
     )
 
 
@@ -969,17 +936,14 @@ class NeoBERTForSequenceClassification(NeoBERTPreTrainedModel):
         self.classifier = nn.Linear(self.config.hidden_size, self.num_labels)
 
         self.post_init()
-
-    def _init_weights(self, module: nn.Module) -> None:
-        """Initialize weights for classification layers.
-
-        Args:
-            module: The module to initialize weights for.
-        """
-        if isinstance(module, nn.Linear):
-            module.weight.data.normal_(mean=0.0, std=self.classifier_init_range)
-            if module.bias is not None:
-                module.bias.data.zero_()
+        for layer in (self.dense, self.classifier):
+            nn.init.normal_(
+                layer.weight,
+                mean=0.0,
+                std=self.classifier_init_range,
+            )
+            if layer.bias is not None:
+                nn.init.zeros_(layer.bias)
 
     def forward(
         self,

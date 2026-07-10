@@ -19,7 +19,7 @@ PYTHON=(conda run --name neobert python)
 # GLUE config generation - from a sweep directory of pretrained runs
 # CHECKPOINT_ROOT="outputs/my-sweep"
 # WANDB_PROJECT="neobert/glue"
-# "${BASH_IN_ENV[@]}" scripts/evaluation/glue/build_configs.sh "${CHECKPOINT_ROOT}" "${WANDB_PROJECT}" \
+# scripts/evaluation/glue/build_configs.sh "${CHECKPOINT_ROOT}" "${WANDB_PROJECT}" \
 #   --config-output-dir configs/glue/generated \
 #   --results-root outputs/glue \
 #   --tasks cola,qnli

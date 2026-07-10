@@ -7,14 +7,14 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers.modeling_outputs import SequenceClassifierOutput
 
 from neobert.model.classification import (
-    _BaseSequenceClassifier,
-    _resolve_classifier_config,
+    BaseSequenceClassifier,
+    resolve_classifier_config,
 )
 from neobert.model.model import NeoBERTConfig
 from neobert.utils import additive_attention_mask
 
 
-class NeoBERTHFForSequenceClassification(_BaseSequenceClassifier):
+class NeoBERTHFForSequenceClassification(BaseSequenceClassifier):
     """Hugging Face-compatible wrapper around the training-time classifier."""
 
     config_class = NeoBERTConfig
@@ -24,7 +24,7 @@ class NeoBERTHFForSequenceClassification(_BaseSequenceClassifier):
 
         :param NeoBERTConfig config: Model configuration.
         """
-        local_config = _resolve_classifier_config(
+        local_config = resolve_classifier_config(
             config,
             owner_name=type(self).__name__,
         )

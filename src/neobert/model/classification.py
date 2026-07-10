@@ -12,7 +12,7 @@ from .model import NeoBERT, NeoBERTConfig, NeoBERTPreTrainedModel
 logger = logging.getLogger(__name__)
 
 
-def _resolve_classifier_config(
+def resolve_classifier_config(
     config: NeoBERTConfig,
     *,
     owner_name: str,
@@ -34,7 +34,7 @@ def _resolve_classifier_config(
     return local_config
 
 
-class _BaseSequenceClassifier(NeoBERTPreTrainedModel):
+class BaseSequenceClassifier(NeoBERTPreTrainedModel):
     """Shared sequence-classification backbone and head wiring."""
 
     def _init_classifier_head(
@@ -85,7 +85,7 @@ class _BaseSequenceClassifier(NeoBERTPreTrainedModel):
         return self.classifier(x)
 
 
-class NeoBERTForSequenceClassification(_BaseSequenceClassifier):
+class NeoBERTForSequenceClassification(BaseSequenceClassifier):
     """NeoBERT with a training-oriented classification head."""
 
     def __init__(
@@ -105,7 +105,7 @@ class NeoBERTForSequenceClassification(_BaseSequenceClassifier):
         :param Any kwargs: Unused extra arguments for compatibility.
         """
         del kwargs
-        local_config = _resolve_classifier_config(
+        local_config = resolve_classifier_config(
             config,
             owner_name=type(self).__name__,
         )

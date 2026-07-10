@@ -10,6 +10,7 @@ import torch
 from torch import nn
 from transformers import DataCollatorWithPadding, PreTrainedTokenizerFast
 
+from neobert.collator import attention_mask_to_packed_seqlens
 from neobert.training_utils import _pin_cpu_tensors
 from neobert.utils import additive_attention_mask
 
@@ -298,9 +299,7 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
                 if self.config.attn_backend != "sdpa":
                     # Packed path: compute packed_seqlens on CPU to avoid CUDA sync,
                     # then pass pad_mask=None so the model uses packed attention.
-                    packed_seqlens = int_mask.sum(dim=1, keepdim=True).to(
-                        device="cpu", dtype=torch.int32
-                    )
+                    packed_seqlens = attention_mask_to_packed_seqlens(int_mask)
                     outputs = self.model(input_ids, None, packed_seqlens=packed_seqlens)
                     pool_mask = int_mask.to(
                         device=device,
@@ -320,7 +319,8 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
                     outputs = outputs * pool_mask.unsqueeze(-1).expand(
                         -1, -1, outputs.shape[-1]
                     )
-                    outputs = outputs.sum(dim=1) / pool_mask.sum(dim=1).unsqueeze(-1)
+                    denominator = pool_mask.sum(dim=1).clamp_min(1).unsqueeze(-1)
+                    outputs = outputs.sum(dim=1) / denominator
                 else:
                     outputs = outputs[:, 0, :]
 

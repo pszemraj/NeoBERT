@@ -304,6 +304,12 @@ class TestModelForward(unittest.TestCase):
         rank_one = packed_seqlens_to_tensor(torch.tensor([3, 2]))
         self.assertEqual(rank_one.shape, (2, 1))
         self.assertEqual(rank_one.dtype, torch.int32)
+        on_cpu = packed_seqlens_to_tensor([[3], [2]], device=torch.device("cpu"))
+        self.assertEqual(on_cpu.device.type, "cpu")
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            packed_seqlens_to_tensor([[3, -1]])
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            packed_seqlens_to_tensor(torch.tensor([[3, -1]]))
         with self.assertRaisesRegex(TypeError, "Unsupported packed_seqlens type"):
             packed_seqlens_to_tensor((3, 2))
 
@@ -838,11 +844,11 @@ class TestModelForward(unittest.TestCase):
             )
         )
 
-    def test_hf_sdpa_compat_omits_scale_kw_when_unavailable(self):
-        """Ensure SDPA compat path never passes unsupported ``scale`` kwarg."""
+    def test_hf_sdpa_compat_forwards_explicit_scale(self):
+        """Ensure SDPA forwards the supported explicit ``scale`` argument."""
         import neobert.huggingface.modeling_neobert as hf_mod
 
-        captured_queries: list[torch.Tensor] = []
+        captured_scales: list[float | None] = []
 
         def _fake_sdpa(
             *,
@@ -852,19 +858,17 @@ class TestModelForward(unittest.TestCase):
             attn_mask: torch.Tensor | None = None,
             dropout_p: float = 0.0,
             is_causal: bool = False,
+            scale: float | None = None,
         ) -> torch.Tensor:
             del key, value, attn_mask, dropout_p, is_causal
-            captured_queries.append(query.detach().clone())
+            captured_scales.append(scale)
             return torch.zeros_like(query)
 
         query = torch.randn(1, 2, 3, 8)
         key = torch.randn(1, 2, 3, 8)
         value = torch.randn(1, 2, 3, 8)
 
-        with (
-            patch.object(hf_mod, "_SDPA_SUPPORTS_SCALE", False),
-            patch.object(hf_mod, "scaled_dot_product_attention", new=_fake_sdpa),
-        ):
+        with patch.object(hf_mod, "scaled_dot_product_attention", new=_fake_sdpa):
             out_default = hf_mod.scaled_dot_product_attention_compat(
                 query=query, key=key, value=value, scale=None
             )
@@ -874,8 +878,7 @@ class TestModelForward(unittest.TestCase):
 
         self.assertEqual(out_default.shape, query.shape)
         self.assertEqual(out_scaled.shape, query.shape)
-        self.assertEqual(len(captured_queries), 2)
-        self.assertFalse(torch.allclose(captured_queries[0], captured_queries[1]))
+        self.assertEqual(captured_scales, [None, 0.5])
 
     def test_hf_return_dict_contracts(self):
         """Ensure HF base/classifier/lm-head return_dict contracts stay stable."""
@@ -1457,6 +1460,30 @@ class TestModelForward(unittest.TestCase):
                 f"({config.decoder_init_range}); _init_weights may be overwriting backbone.",
             )
 
+    def test_hf_seq_class_init_preserves_backbone_weights(self):
+        """Ensure HF classifier initialization is explicitly limited to its head."""
+        from neobert.huggingface.modeling_neobert import (
+            NeoBERTConfig as HFNeoBERTConfig,
+            NeoBERTForSequenceClassification as HFSequenceClassifier,
+        )
+
+        config = HFNeoBERTConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=64,
+            vocab_size=100,
+            max_length=8,
+            hidden_act="gelu",
+            decoder_init_range=0.02,
+            classifier_init_range=0.5,
+        )
+        model = HFSequenceClassifier(config)
+
+        qkv_weight = model.model.transformer_encoder[0].qkv.weight
+        self.assertLessEqual(qkv_weight.abs().max().item(), config.decoder_init_range)
+        self.assertGreater(model.classifier.weight.std().item(), 0.1)
+
     def test_sequence_classification_backbone_uses_sdpa(self):
         """Ensure sequence-classification wrappers force the unpacked SDPA path."""
         cases = [
@@ -1581,7 +1608,7 @@ class TestModelForward(unittest.TestCase):
                     [
                         {
                             "input_ids": torch.tensor([[2, 3], [2, 0]]),
-                            "attention_mask": torch.tensor([[1, 1], [1, 0]]),
+                            "attention_mask": torch.tensor([[1, 1], [0, 0]]),
                         }
                     ]
                 )
@@ -1596,6 +1623,7 @@ class TestModelForward(unittest.TestCase):
         self.assertTrue(captured["kwargs"]["pin_memory"])
         self.assertEqual(embeddings.shape[0], 2)
         self.assertEqual(embeddings.shape[1], config.hidden_size)
+        self.assertTrue(torch.isfinite(torch.from_numpy(embeddings)).all())
 
     @unittest.skipUnless(
         torch.cuda.is_available(), "CUDA required for flash_attn_varlen MTEB test"

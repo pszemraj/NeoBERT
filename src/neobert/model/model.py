@@ -14,6 +14,7 @@ from transformers import PretrainedConfig, PreTrainedModel
 
 from neobert.kernels.attention import (
     PackedFlashMetadata,
+    PackedSeqLens,
     attention_forward,
     canonicalize_attn_backend,
     prepare_packed_flash_metadata,
@@ -27,6 +28,7 @@ from neobert.model.rotary import apply_rotary_emb, precompute_freqs_cis
 from neobert.modeling_utils import (
     is_torch_compiling,
     packed_seqlens_to_tensor,
+    removed_model_config_fields,
     swiglu_intermediate_size,
 )
 from neobert.warnings import NeoBERTWarning
@@ -35,7 +37,6 @@ if TYPE_CHECKING:
     from neobert.config import ModelConfig
 
 logger = logging.getLogger(__name__)
-PackedSeqLens = torch.Tensor | list[list[int]]
 
 
 def _normalize_pad_mask(pad_mask: torch.Tensor) -> torch.Tensor:
@@ -129,9 +130,6 @@ def _normalize_packed_seqlens(
             "packed_seqlens batch dimension does not match input batch size "
             f"({tensor.shape[0]} != {batch_size})."
         )
-    if (tensor < 0).any():
-        raise ValueError("packed_seqlens must contain non-negative lengths.")
-
     if seq_len is not None:
         sums = tensor.sum(dim=1)
         bad = sums > seq_len
@@ -266,11 +264,11 @@ class NeoBERTConfig(PretrainedConfig):
         :param bool tie_word_embeddings: Whether to tie input/output embeddings.
         :param Any kwargs: Additional configuration parameters.
         """
-        removed_fields = {"ngpt", "base_scale"}.intersection(kwargs)
+        removed_fields = removed_model_config_fields(kwargs)
         if removed_fields:
             raise TypeError(
                 "Unsupported removed NeoBERT config field(s): "
-                + ", ".join(sorted(removed_fields))
+                + ", ".join(removed_fields)
             )
         # Legacy: accept flash_attention bool and map to attn_backend
         if "flash_attention" in kwargs:

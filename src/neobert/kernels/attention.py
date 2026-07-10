@@ -8,13 +8,13 @@ from typing import Literal, Optional
 import torch
 
 from neobert.modeling_utils import (
+    PackedSeqLens,
     is_torch_compiling,
     packed_seqlens_to_tensor,
     scaled_dot_product_attention_compat,
 )
 
 logger = logging.getLogger(__name__)
-PackedSeqLens = torch.Tensor | list[list[int]]
 
 
 @dataclass(frozen=True)
@@ -138,15 +138,23 @@ def _normalize_packed_seqlens_tensor(
     *,
     batch_size: int,
     seq_len: int,
+    device: torch.device | None = None,
+    validate_lengths: bool = True,
 ) -> torch.Tensor:
     """Normalize packed metadata to a fixed-rank int32 tensor.
 
     :param torch.Tensor | list[list[int]] packed_seqlens: Packed segment lengths.
     :param int batch_size: Expected batch size.
     :param int seq_len: Expected padded sequence length.
+    :param torch.device | None device: Optional destination device.
+    :param bool validate_lengths: Whether to validate nonnegative lengths and row sums.
     :return torch.Tensor: ``int32`` tensor of shape ``[B, N]``.
     """
-    tensor = packed_seqlens_to_tensor(packed_seqlens)
+    tensor = packed_seqlens_to_tensor(
+        packed_seqlens,
+        device=device,
+        validate=validate_lengths,
+    )
     if tensor is None:
         raise TypeError("packed_seqlens must not be None")
 
@@ -155,7 +163,9 @@ def _normalize_packed_seqlens_tensor(
             "packed_seqlens batch mismatch: "
             f"{tensor.shape[0]} != batch_size={batch_size}"
         )
-    sums = tensor.clamp_min(0).sum(dim=1)
+    if not validate_lengths:
+        return tensor
+    sums = tensor.sum(dim=1)
     bad = sums > seq_len
     if bad.any():
         bad_idx = int(torch.where(bad)[0][0].item())
@@ -413,29 +423,13 @@ def attention_forward(
     """
     attn_backend = canonicalize_attn_backend(attn_backend)
     if packed_seqlens is not None:
-        if packed_flash_metadata is not None and torch.is_tensor(packed_seqlens):
-            # Reuse already-normalized tensor path when metadata is precomputed
-            # once in the model forward; avoid per-layer revalidation overhead.
-            packed_tensor = packed_seqlens.detach()
-            if packed_tensor.ndim == 1:
-                packed_tensor = packed_tensor.unsqueeze(1)
-            if packed_tensor.ndim != 2:
-                raise ValueError(
-                    "packed_seqlens tensor must be rank 1 or 2, got "
-                    f"shape={tuple(packed_tensor.shape)}"
-                )
-            if packed_tensor.shape[0] != xq.shape[0]:
-                raise ValueError(
-                    "packed_seqlens batch mismatch: "
-                    f"{packed_tensor.shape[0]} != batch_size={xq.shape[0]}"
-                )
-            packed_tensor = packed_tensor.to(device=xq.device, dtype=torch.int32)
-        else:
-            packed_tensor = _normalize_packed_seqlens_tensor(
-                packed_seqlens,
-                batch_size=xq.shape[0],
-                seq_len=xq.shape[1],
-            )
+        packed_tensor = _normalize_packed_seqlens_tensor(
+            packed_seqlens,
+            batch_size=xq.shape[0],
+            seq_len=xq.shape[1],
+            device=xq.device if packed_flash_metadata is not None else None,
+            validate_lengths=packed_flash_metadata is None,
+        )
         # Packed sequences
         if attn_backend == "flash_attn_varlen":
             if not xq.is_cuda:
