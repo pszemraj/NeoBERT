@@ -86,7 +86,7 @@ def test_checkpoint_completion_marker_validates_resume_artifacts(
     checkpoint_path.mkdir()
 
     assert not is_resumable_checkpoint(checkpoint_path)
-    with pytest.raises(RuntimeError, match="missing accelerate/ state"):
+    with pytest.raises(RuntimeError, match="missing Accelerate model state"):
         mark_checkpoint_complete(checkpoint_path, task="pretraining")
 
     (checkpoint_path / ACCELERATE_STATE_DIR).mkdir()

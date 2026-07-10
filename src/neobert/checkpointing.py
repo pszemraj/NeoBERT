@@ -75,8 +75,6 @@ def _checkpoint_resume_artifact_errors(checkpoint_path: Path) -> list[str]:
     errors: list[str] = []
     if not checkpoint_path.is_dir():
         return ["step directory is missing"]
-    if not (checkpoint_path / ACCELERATE_STATE_DIR).is_dir():
-        errors.append(f"missing {ACCELERATE_STATE_DIR}/ state directory")
     optimizer_manifest_path = checkpoint_path / OPTIMIZER_PARAM_NAMES_MANIFEST
     if not _is_nonempty_file(optimizer_manifest_path):
         errors.append(f"missing {OPTIMIZER_PARAM_NAMES_MANIFEST}")

@@ -31,14 +31,10 @@ from transformers import (
 
 from neobert.checkpointing import (
     MODEL_WEIGHTS_NAME,
-    invalidate_checkpoint_completion,
     load_step_checkpoint_state_dict,
-    mark_checkpoint_complete,
     prune_step_checkpoints as _prune_step_checkpoints,
     resolve_accelerate_state_dir,
     resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
-    save_accelerate_state,
-    save_portable_checkpoint_weights,
 )
 from neobert.kernels.attention import canonicalize_attn_backend
 from neobert.model import NeoBERTConfig, NeoBERTForSequenceClassification
@@ -62,7 +58,7 @@ from neobert.training_utils import (
     attach_optimizer_param_names,
     build_dataloader_config,
     create_accelerator,
-    save_optimizer_param_name_manifest,
+    save_training_checkpoint as _save_shared_training_checkpoint,
     sync_resume_source_of_truth,
     validate_distributed_runtime_policy,
     validate_muon_distributed_compatibility,
@@ -697,20 +693,13 @@ def save_training_checkpoint(
     checkpoint_tag = str(completed_steps)
     checkpoint_path = resume_checkpoint_dir / checkpoint_tag
 
-    # Save resumable Accelerate state for true optimizer/scheduler resume.
-    if accelerator.is_main_process:
-        invalidate_checkpoint_completion(checkpoint_path)
-    accelerator.wait_for_everyone()
-    save_accelerate_state(accelerator, checkpoint_path)
-    accelerator.wait_for_everyone()
-    if accelerator.is_main_process:
-        # Guard resume against optimizer parameter-order drift, matching the
-        # pretraining and contrastive trainers (Accelerate restores optimizer
-        # state positionally, so a construction/refactor change silently
-        # corrupts it without this manifest).
-        save_optimizer_param_name_manifest(optimizer, checkpoint_path)
-        ConfigLoader.save(cfg, str(checkpoint_path / "config.yaml"))
-        tokenizer.save_pretrained(checkpoint_path / "tokenizer")
+    def _save_metadata(path: Path) -> None:
+        """Save GLUE-specific config, tokenizer, and optional Hub model config.
+
+        :param Path path: Checkpoint step directory.
+        """
+        ConfigLoader.save(cfg, str(path / "config.yaml"))
+        tokenizer.save_pretrained(path / "tokenizer")
         unwrapped_model = accelerator.unwrap_model(model)
         while hasattr(unwrapped_model, "_orig_mod"):
             unwrapped_model = unwrapped_model._orig_mod
@@ -720,12 +709,16 @@ def save_training_checkpoint(
             and model_config is not None
             and hasattr(model_config, "save_pretrained")
         ):
-            model_config.save_pretrained(checkpoint_path / "model_config")
-    save_portable_checkpoint_weights(model, accelerator, checkpoint_path)
-    accelerator.wait_for_everyone()
-    if accelerator.is_main_process:
-        mark_checkpoint_complete(checkpoint_path, task="glue")
-    accelerator.wait_for_everyone()
+            model_config.save_pretrained(path / "model_config")
+
+    _save_shared_training_checkpoint(
+        task="glue",
+        checkpoint_path=checkpoint_path,
+        accelerator=accelerator,
+        model=model,
+        optimizer=optimizer,
+        save_metadata=_save_metadata,
+    )
 
     if accelerator.is_main_process:
         retention_limit = _resolve_checkpoint_retention_limit(cfg)
