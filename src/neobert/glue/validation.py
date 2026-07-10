@@ -19,6 +19,18 @@ class GlueValidationError(Exception):
     """Raised when a GLUE configuration is invalid."""
 
 
+def _load_config_with_warnings(path: str | Path) -> tuple[Config, list[str]]:
+    """Load one config while capturing warning messages.
+
+    :param str | Path path: Configuration path.
+    :return tuple[Config, list[str]]: Loaded config and warning messages.
+    """
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        cfg = ConfigLoader.load(path)
+    return cfg, [str(item.message) for item in captured]
+
+
 def load_validated_glue_config(
     config_path: str | Path,
     *,
@@ -34,10 +46,7 @@ def load_validated_glue_config(
     :param str | None output_dir: Optional output-directory override.
     :return tuple[Config, tuple[str, ...]]: Validated config and warning messages.
     """
-    with warnings.catch_warnings(record=True) as captured:
-        warnings.simplefilter("always")
-        cfg = ConfigLoader.load(config_path)
-    config_warnings = [str(item.message) for item in captured]
+    cfg, config_warnings = _load_config_with_warnings(config_path)
 
     if task_name:
         cfg.glue.task_name = task_name
@@ -69,12 +78,10 @@ def load_validated_glue_config(
         elif cfg.glue.pretrained_model_path:
             pretrained_config_path = Path(cfg.glue.pretrained_model_path)
             if pretrained_config_path.is_file():
-                with warnings.catch_warnings(record=True) as pretrained_warnings:
-                    warnings.simplefilter("always")
-                    pretrained_cfg = ConfigLoader.load(pretrained_config_path)
-                config_warnings.extend(
-                    str(item.message) for item in pretrained_warnings
+                pretrained_cfg, pretrained_warnings = _load_config_with_warnings(
+                    pretrained_config_path
                 )
+                config_warnings.extend(pretrained_warnings)
                 effective_model_config = pretrained_cfg.model
 
     glue_warnings = validate_glue_config(

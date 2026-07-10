@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from neobert.mteb_tasks import (
@@ -127,26 +128,8 @@ def compute_table() -> None:
     if result_file.exists():
         result_file.unlink()
 
-    def explore(path: Path) -> list[Path]:
-        """Collect leaf directories containing result JSON files.
-
-        :param Path path: Root path to search.
-        :return list[Path]: Leaf directories with JSON files.
-        """
-        paths = []
-        file_level = False
-        files = list(path.iterdir())
-        for file in files:
-            if file.is_dir():
-                paths.extend(explore(file))
-            else:
-                file_level = True
-        if file_level:
-            paths.append(path)
-        return paths
-
     for checkpoint in result_dir.iterdir():
-        paths = explore(checkpoint)
+        paths = [Path(root) for root, _, files in os.walk(checkpoint) if files]
         checkpoint_name = checkpoint.name
 
         for path in paths:
