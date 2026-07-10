@@ -1544,6 +1544,16 @@ def trainer(cfg: Config) -> None:
     last_val_metrics = deepcopy(loop_state.last_val_metrics)
     train_predictions_buffer: list[torch.Tensor] = []
     train_references_buffer: list[torch.Tensor] = []
+    evaluate_split = partial(
+        get_evaluation,
+        model=model,
+        accelerator=accelerator,
+        dtype_pad_mask=dtype_pad_mask,
+        is_regression=is_regression,
+        return_predictions=False,
+        use_hf_signature=from_hub,
+        disable_tqdm=bool(cfg.trainer.disable_tqdm),
+    )
 
     for epoch in range(starting_epoch, cfg.trainer.num_train_epochs):
         if completed_steps >= cfg.trainer.max_steps or early_stop:
@@ -1678,16 +1688,9 @@ def trainer(cfg: Config) -> None:
                             ).item()
 
                         model.eval()
-                        eval_metric = get_evaluation(
-                            model=model,
+                        eval_metric = evaluate_split(
                             dataloader=eval_dataloader,
-                            accelerator=accelerator,
                             metric=eval_metric_tracker,
-                            dtype_pad_mask=dtype_pad_mask,
-                            is_regression=is_regression,
-                            return_predictions=False,
-                            use_hf_signature=from_hub,
-                            disable_tqdm=bool(cfg.trainer.disable_tqdm),
                         )["eval_metric"]
 
                         # Log all metrics properly for STS-B (both Pearson and Spearman)
@@ -1715,16 +1718,9 @@ def trainer(cfg: Config) -> None:
                             results["accuracy"] = eval_metric["accuracy"]
 
                             # Evaluation on mismatched MNLI
-                            mm_eval_metric = get_evaluation(
-                                model=model,
+                            mm_eval_metric = evaluate_split(
                                 dataloader=mm_eval_dataloader,
-                                accelerator=accelerator,
                                 metric=mm_metric,
-                                dtype_pad_mask=dtype_pad_mask,
-                                is_regression=is_regression,
-                                return_predictions=False,
-                                use_hf_signature=from_hub,
-                                disable_tqdm=bool(cfg.trainer.disable_tqdm),
                             )["eval_metric"]
                             results["accuracy_mm"] = mm_eval_metric["accuracy"]
 
