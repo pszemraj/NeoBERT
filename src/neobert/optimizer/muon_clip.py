@@ -32,19 +32,6 @@ except Exception:  # pragma: no cover - older torch builds without DTensor APIs
     DTensor = None  # type: ignore[assignment]
     Shard = None  # type: ignore[assignment]
 
-try:
-    _dynamo_disable = torch._dynamo.disable  # pyright: ignore[reportAttributeAccessIssue]
-except Exception:
-
-    def _dynamo_disable(fn: Callable[..., Any]) -> Callable[..., Any]:
-        """Return ``fn`` unchanged when torch Dynamo is unavailable.
-
-        :param Callable[..., Any] fn: Function to wrap.
-        :return Callable[..., Any]: The original function ``fn``.
-        """
-        return fn
-
-
 # Configuration
 
 
@@ -291,7 +278,7 @@ class NeoBERTAttentionHooks:
 
         return None
 
-    @_dynamo_disable
+    @torch.compiler.disable
     def _module_layer_idx(self, module: torch.nn.Module) -> Optional[int]:
         """Resolve the cached layer index for a hook module.
 
@@ -306,7 +293,7 @@ class NeoBERTAttentionHooks:
         except (TypeError, ValueError):
             return None
 
-    @_dynamo_disable
+    @torch.compiler.disable
     def _detach_to_cpu(self, tensor: torch.Tensor) -> torch.Tensor:
         """Detach ``tensor`` and cache it on CPU with async-friendly semantics.
 
@@ -325,7 +312,7 @@ class NeoBERTAttentionHooks:
         pinned.copy_(detached, non_blocking=True)
         return pinned
 
-    @_dynamo_disable
+    @torch.compiler.disable
     def _qkv_input_hook(
         self, module: torch.nn.Module, inputs: tuple[Any, ...], output: Any
     ) -> None:
@@ -353,7 +340,7 @@ class NeoBERTAttentionHooks:
         # Offload to pinned host memory so CUDA->CPU transfer can be async.
         self.layer_inputs[layer_idx] = self._detach_to_cpu(x)
 
-    @_dynamo_disable
+    @torch.compiler.disable
     def _block_context_hook(
         self, module: torch.nn.Module, inputs: tuple[Any, ...], output: Any
     ) -> None:

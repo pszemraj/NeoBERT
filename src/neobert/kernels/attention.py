@@ -46,12 +46,6 @@ except (ImportError, RuntimeError) as exc:
 _WARNED_SDPA_PACKED_GPU = False
 
 
-try:
-    _dynamo_disable = torch.compiler.disable
-except (AttributeError, RuntimeError):
-    _dynamo_disable = torch._dynamo.disable  # type: ignore[attr-defined]
-
-
 def canonicalize_attn_backend(
     requested: str,
 ) -> Literal["sdpa", "flash_attn_varlen"]:
@@ -176,7 +170,7 @@ def _normalize_packed_seqlens_tensor(
     return tensor
 
 
-@_dynamo_disable
+@torch.compiler.disable
 def prepare_packed_flash_metadata(
     packed_seqlens: torch.Tensor,
     *,
@@ -262,7 +256,7 @@ def prepare_packed_flash_metadata(
     )
 
 
-@_dynamo_disable
+@torch.compiler.disable
 def _flash_varlen_attention(
     xq: torch.Tensor,
     xk: torch.Tensor,
