@@ -46,8 +46,10 @@ The quick suite runs RTE, MRPC, STS-B, and CoLA and stops at the first failure. 
 
 - GLUE always runs with SDPA attention in classifier wrappers; non-SDPA `model.attn_backend` requests are normalized away with a warning.
 - `glue.max_seq_length` controls task tokenization. Checkpoint tokenizer defaults do not override it; learned-position checkpoints reject lengths beyond their trained position table, while RoPE checkpoints can extend context without resizing weights.
-- Pretrained local checkpoints are required unless either `glue.allow_random_weights: true` or `model.from_hub: true`.
+- A fresh run requires pretrained local weights unless either `glue.allow_random_weights: true` or `model.from_hub: true`. `trainer.resume_from_checkpoint` instead uses the selected GLUE step's bundled config, tokenizer, model state, loop cursor, and metric-selection state; the original pretraining checkpoint may be moved or pruned.
 - When checkpoint saving is enabled, GLUE writes checkpoints to `trainer.output_dir/checkpoints/<step>/`.
+- GLUE resume preserves existing result files, restores the checkpoint's seed and batch/accumulation geometry, and rejects a different distributed world size.
+- Hub classifiers that require `tokenizer.trust_remote_code: true` may run only with checkpoint saving disabled; their external modeling code is not portable enough for the self-contained GLUE resume contract.
 - Legacy `model_checkpoints/<step>/` paths are still accepted when loading older artifacts.
 - Results are stored under `trainer.output_dir` as JSON metrics.
 

@@ -41,15 +41,47 @@ from neobert.training_utils import (
 )
 
 
+def _write_complete_checkpoint_shell(
+    checkpoint_path: Path,
+    *,
+    task: str = "pretraining",
+) -> None:
+    """Write minimal current-format artifacts for resume-selection tests.
+
+    :param Path checkpoint_path: Existing step directory.
+    :param str task: Task recorded in config and marker.
+    """
+    accelerate_dir = checkpoint_path / ACCELERATE_STATE_DIR
+    accelerate_dir.mkdir(exist_ok=True)
+    for filename in (
+        "model.safetensors",
+        "optimizer.bin",
+        "scheduler.bin",
+        "random_states_0.pkl",
+    ):
+        (accelerate_dir / filename).write_bytes(b"x")
+    (accelerate_dir / "custom_checkpoint_0.pkl").write_bytes(b"x")
+    if task == "pretraining":
+        (accelerate_dir / "custom_checkpoint_1.pkl").write_bytes(b"x")
+    (checkpoint_path / OPTIMIZER_PARAM_NAMES_MANIFEST).write_text(
+        '{"schema_version":1,"state_semantics":"adamw-v1","param_name_groups":[]}\n',
+        encoding="utf-8",
+    )
+    (checkpoint_path / "config.yaml").write_text(f"task: {task}\n", encoding="utf-8")
+    (checkpoint_path / "model.safetensors").write_bytes(b"x")
+    tokenizer_dir = checkpoint_path / "tokenizer"
+    tokenizer_dir.mkdir(exist_ok=True)
+    (tokenizer_dir / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+    mark_checkpoint_complete(checkpoint_path, task=task)
+
+
 def test_numeric_resume_selector_resolves_under_checkpoint_root(tmp_path: Path) -> None:
     """Bare step selectors resolve to the canonical checkpoints directory."""
     output_dir = tmp_path / "run"
     checkpoint_dir = output_dir / "checkpoints"
     expected = checkpoint_dir / "100"
     expected.mkdir(parents=True)
-    (expected / ACCELERATE_STATE_DIR).mkdir()
-    (expected / OPTIMIZER_PARAM_NAMES_MANIFEST).write_text("{}\n", encoding="utf-8")
-    mark_checkpoint_complete(expected, task="pretraining")
+    _write_complete_checkpoint_shell(expected)
     (output_dir / "100").mkdir()
 
     resume_path, iteration = _resolve_resume_checkpoint(
@@ -70,9 +102,7 @@ def test_latest_resume_preserves_zero_padding_and_skips_incomplete(
     incomplete = checkpoint_dir / "60"
     complete.mkdir(parents=True)
     incomplete.mkdir()
-    (complete / ACCELERATE_STATE_DIR).mkdir()
-    (complete / OPTIMIZER_PARAM_NAMES_MANIFEST).write_text("{}\n", encoding="utf-8")
-    mark_checkpoint_complete(complete, task="pretraining")
+    _write_complete_checkpoint_shell(complete)
     (incomplete / ACCELERATE_STATE_DIR).mkdir()
 
     resume_path, iteration = _resolve_resume_checkpoint(
@@ -335,6 +365,7 @@ def test_sync_resume_source_of_truth_uses_checkpoint_config(
     tokenizer_dir.mkdir(parents=True)
 
     checkpoint_cfg = Config()
+    checkpoint_cfg.task = "contrastive"
     checkpoint_cfg.model.hidden_size = 128
     checkpoint_cfg.model.dropout_prob = 0.2
     checkpoint_cfg.tokenizer.name = "checkpoint-tokenizer"
@@ -348,11 +379,16 @@ def test_sync_resume_source_of_truth_uses_checkpoint_config(
     checkpoint_cfg.contrastive.pretraining_prob = 0.4
     checkpoint_cfg.trainer.per_device_train_batch_size = 8
     checkpoint_cfg.trainer.gradient_accumulation_steps = 4
+    checkpoint_cfg.optimizer.name = "adamw"
+    checkpoint_cfg.optimizer.lr = 2e-5
+    checkpoint_cfg.scheduler.name = "linear"
+    checkpoint_cfg.scheduler.warmup_percent = 10
     checkpoint_cfg.trainer.gradient_checkpointing = True
     checkpoint_cfg.trainer.torch_compile = True
     ConfigLoader.save(checkpoint_cfg, str(checkpoint_dir / "config.yaml"))
 
     runtime_cfg = Config()
+    runtime_cfg.task = "contrastive"
     runtime_cfg.model.hidden_size = 64
     runtime_cfg.model.dropout_prob = 0.0
     runtime_cfg.tokenizer.name = "runtime-tokenizer"
@@ -366,6 +402,10 @@ def test_sync_resume_source_of_truth_uses_checkpoint_config(
     runtime_cfg.contrastive.pretraining_prob = 0.0
     runtime_cfg.trainer.per_device_train_batch_size = 32
     runtime_cfg.trainer.gradient_accumulation_steps = 1
+    runtime_cfg.optimizer.name = "adam"
+    runtime_cfg.optimizer.lr = 1e-3
+    runtime_cfg.scheduler.name = "cosine"
+    runtime_cfg.scheduler.warmup_percent = 5
     runtime_cfg.trainer.gradient_checkpointing = False
     runtime_cfg.trainer.torch_compile = False
 
@@ -396,6 +436,10 @@ def test_sync_resume_source_of_truth_uses_checkpoint_config(
     assert runtime_cfg.trainer.gradient_accumulation_steps == 1
     assert runtime_cfg.trainer.gradient_checkpointing is False
     assert runtime_cfg.trainer.torch_compile is False
+    assert runtime_cfg.optimizer.name == "adamw"
+    assert runtime_cfg.optimizer.lr == pytest.approx(2e-5)
+    assert runtime_cfg.scheduler.name == "linear"
+    assert runtime_cfg.scheduler.warmup_percent == 10
 
 
 def test_sync_resume_forces_sequence_length_for_non_rope(tmp_path: Path) -> None:
@@ -478,6 +522,72 @@ def test_sync_resume_preserves_rope_packed_context_and_pretraining_batch_size(
         "dataset.max_seq_length",
         "datacollator.max_length",
     } <= drift
+
+
+def test_sync_glue_resume_forces_task_and_cursor_geometry(tmp_path: Path) -> None:
+    """GLUE continuation should reconstruct task semantics and sample geometry."""
+    checkpoint_dir = tmp_path / "checkpoints" / "10"
+    (checkpoint_dir / "tokenizer").mkdir(parents=True)
+    checkpoint_cfg = Config()
+    checkpoint_cfg.task = "glue"
+    checkpoint_cfg.seed = 17
+    checkpoint_cfg.model.name = "checkpoint-model"
+    checkpoint_cfg.model.from_hub = True
+    checkpoint_cfg.model.max_position_embeddings = 256
+    checkpoint_cfg.tokenizer.max_length = 192
+    checkpoint_cfg.glue.task_name = "stsb"
+    checkpoint_cfg.glue.num_labels = 1
+    checkpoint_cfg.glue.max_seq_length = 192
+    checkpoint_cfg.glue.classifier_dropout = 0.2
+    checkpoint_cfg.trainer.per_device_train_batch_size = 8
+    checkpoint_cfg.trainer.gradient_accumulation_steps = 4
+    checkpoint_cfg.optimizer.name = "adamw"
+    checkpoint_cfg.optimizer.lr = 2e-5
+    checkpoint_cfg.scheduler.name = "linear"
+    checkpoint_cfg.scheduler.warmup_percent = 10
+    ConfigLoader.save(checkpoint_cfg, checkpoint_dir / "config.yaml")
+
+    runtime_cfg = Config()
+    runtime_cfg.task = "glue"
+    runtime_cfg.seed = 99
+    runtime_cfg.model.name = "launch-model"
+    runtime_cfg.model.from_hub = False
+    runtime_cfg.model.max_position_embeddings = 512
+    runtime_cfg.tokenizer.max_length = 128
+    runtime_cfg.glue.task_name = "sst2"
+    runtime_cfg.glue.num_labels = 2
+    runtime_cfg.glue.max_seq_length = 128
+    runtime_cfg.glue.classifier_dropout = 0.1
+    runtime_cfg.trainer.per_device_train_batch_size = 32
+    runtime_cfg.trainer.gradient_accumulation_steps = 1
+    runtime_cfg.optimizer.name = "adam"
+    runtime_cfg.optimizer.lr = 1e-3
+    runtime_cfg.scheduler.name = "cosine"
+    runtime_cfg.scheduler.warmup_percent = 5
+
+    sync_resume_source_of_truth(
+        runtime_cfg,
+        checkpoint_dir,
+        task="glue",
+        log=logging.getLogger("test"),
+    )
+
+    assert runtime_cfg.seed == 17
+    assert runtime_cfg.model.name == "checkpoint-model"
+    assert runtime_cfg.model.from_hub is True
+    assert runtime_cfg.model.max_position_embeddings == 256
+    assert runtime_cfg.tokenizer.max_length == 192
+    assert runtime_cfg.tokenizer.path == str(checkpoint_dir / "tokenizer")
+    assert runtime_cfg.glue.task_name == "stsb"
+    assert runtime_cfg.glue.num_labels == 1
+    assert runtime_cfg.glue.max_seq_length == 192
+    assert runtime_cfg.glue.classifier_dropout == pytest.approx(0.2)
+    assert runtime_cfg.trainer.per_device_train_batch_size == 8
+    assert runtime_cfg.trainer.gradient_accumulation_steps == 4
+    assert runtime_cfg.optimizer.name == "adamw"
+    assert runtime_cfg.optimizer.lr == pytest.approx(2e-5)
+    assert runtime_cfg.scheduler.name == "linear"
+    assert runtime_cfg.scheduler.warmup_percent == 10
 
 
 def test_sync_resume_source_of_truth_rejects_missing_config(tmp_path: Path) -> None:

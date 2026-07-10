@@ -792,9 +792,27 @@ class TestPretrainComponents:
         checkpoint_cfg.dataset.eval_samples = 17
         ConfigLoader.save(checkpoint_cfg, str(checkpoint_dir / "config.yaml"))
         (checkpoint_dir / ACCELERATE_STATE_DIR).mkdir()
-        (checkpoint_dir / OPTIMIZER_PARAM_NAMES_MANIFEST).write_text(
-            "{}\n", encoding="utf-8"
+        for filename in (
+            "model.safetensors",
+            "optimizer.bin",
+            "scheduler.bin",
+            "random_states_0.pkl",
+        ):
+            (checkpoint_dir / ACCELERATE_STATE_DIR / filename).write_bytes(b"x")
+        (checkpoint_dir / ACCELERATE_STATE_DIR / "custom_checkpoint_0.pkl").write_bytes(
+            b"x"
         )
+        (checkpoint_dir / ACCELERATE_STATE_DIR / "custom_checkpoint_1.pkl").write_bytes(
+            b"x"
+        )
+        (checkpoint_dir / OPTIMIZER_PARAM_NAMES_MANIFEST).write_text(
+            '{"schema_version":1,"state_semantics":"adamw-v1","param_name_groups":[]}\n',
+            encoding="utf-8",
+        )
+        (checkpoint_dir / "model.safetensors").write_bytes(b"x")
+        tokenizer_dir = checkpoint_dir / "tokenizer"
+        tokenizer_dir.mkdir()
+        (tokenizer_dir / "tokenizer_config.json").write_text("{}", encoding="utf-8")
         mark_checkpoint_complete(checkpoint_dir, task="pretraining")
 
         runtime_cfg = Config()

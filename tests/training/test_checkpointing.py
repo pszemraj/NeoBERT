@@ -1,6 +1,7 @@
 """Tests for safetensors checkpoint utilities."""
 
 import builtins
+import json
 from pathlib import Path
 
 import pytest
@@ -76,18 +77,76 @@ def test_checkpoint_completion_marker_validates_resume_artifacts(
         mark_checkpoint_complete(checkpoint_path, task="pretraining")
 
     (checkpoint_path / ACCELERATE_STATE_DIR).mkdir()
+    for filename in (
+        "model.safetensors",
+        "optimizer.bin",
+        "scheduler.bin",
+        "random_states_0.pkl",
+        "custom_checkpoint_0.pkl",
+        "custom_checkpoint_1.pkl",
+    ):
+        (checkpoint_path / ACCELERATE_STATE_DIR / filename).write_bytes(b"x")
     (checkpoint_path / OPTIMIZER_PARAM_NAMES_MANIFEST).write_text(
-        "{}\n", encoding="utf-8"
+        '{"schema_version":1,"state_semantics":"adamw-v1","param_name_groups":[]}\n',
+        encoding="utf-8",
     )
+    (checkpoint_path / "config.yaml").write_text(
+        "task: pretraining\n", encoding="utf-8"
+    )
+    (checkpoint_path / MODEL_WEIGHTS_NAME).write_bytes(b"x")
+    tokenizer_dir = checkpoint_path / "tokenizer"
+    tokenizer_dir.mkdir()
+    (tokenizer_dir / "tokenizer_config.json").write_text("{}", encoding="utf-8")
     marker_path = mark_checkpoint_complete(checkpoint_path, task="pretraining")
 
     assert marker_path == checkpoint_path / CHECKPOINT_COMPLETE_NAME
     assert checkpoint_resume_errors(checkpoint_path) == []
     assert is_resumable_checkpoint(checkpoint_path)
 
+    marker_payload = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker_payload["artifacts"][0]["size"] = "invalid"
+    marker_path.write_text(json.dumps(marker_payload), encoding="utf-8")
+    assert any(
+        "invalid size" in error for error in checkpoint_resume_errors(checkpoint_path)
+    )
+    mark_checkpoint_complete(checkpoint_path, task="pretraining")
+
+    (tokenizer_dir / "tokenizer_config.json").write_text("{}\n", encoding="utf-8")
+    assert any(
+        "size mismatch for inventoried artifact" in error
+        for error in checkpoint_resume_errors(checkpoint_path)
+    )
+    (tokenizer_dir / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+    assert is_resumable_checkpoint(checkpoint_path)
+
     invalidate_checkpoint_completion(checkpoint_path)
     assert not marker_path.exists()
     assert not is_resumable_checkpoint(checkpoint_path)
+
+
+def test_checkpoint_completion_rejects_missing_accelerate_state_roles(
+    tmp_path: Path,
+) -> None:
+    """A custom-state pickle alone cannot bless an unloadable checkpoint."""
+    checkpoint_path = tmp_path / "10"
+    accelerate_dir = checkpoint_path / ACCELERATE_STATE_DIR
+    accelerate_dir.mkdir(parents=True)
+    (accelerate_dir / "custom_checkpoint_0.pkl").write_bytes(b"x")
+    (accelerate_dir / "custom_checkpoint_1.pkl").write_bytes(b"x")
+    (checkpoint_path / OPTIMIZER_PARAM_NAMES_MANIFEST).write_text(
+        '{"schema_version":1,"state_semantics":"adamw-v1","param_name_groups":[]}',
+        encoding="utf-8",
+    )
+    (checkpoint_path / "config.yaml").write_text(
+        "task: pretraining\n", encoding="utf-8"
+    )
+    (checkpoint_path / MODEL_WEIGHTS_NAME).write_bytes(b"x")
+    tokenizer_dir = checkpoint_path / "tokenizer"
+    tokenizer_dir.mkdir()
+    (tokenizer_dir / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="missing Accelerate model state"):
+        mark_checkpoint_complete(checkpoint_path, task="pretraining")
 
 
 def test_model_state_dict_for_safetensors_strips_compile_prefixes() -> None:

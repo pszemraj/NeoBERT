@@ -1,11 +1,18 @@
 """Side-effect-free validation helpers for GLUE fine-tuning."""
 
+import logging
 import warnings
 from pathlib import Path
 from typing import Any
 
 from neobert.config import Config, ConfigLoader
 from neobert.glue.tasks import SUPPORTED_GLUE_TASK_SPECS, get_glue_task_spec
+from neobert.training_utils import (
+    _resolve_resume_checkpoint,
+    sync_resume_source_of_truth,
+)
+
+_logger = logging.getLogger(__name__)
 
 
 class GlueValidationError(Exception):
@@ -40,8 +47,23 @@ def load_validated_glue_config(
     if output_dir:
         cfg.trainer.output_dir = output_dir
 
+    resume_checkpoint_path, _ = _resolve_resume_checkpoint(
+        cfg.trainer.resume_from_checkpoint,
+        str(Path(cfg.trainer.output_dir) / "checkpoints"),
+        str(cfg.trainer.output_dir),
+    )
+    if resume_checkpoint_path is not None:
+        sync_resume_source_of_truth(
+            cfg,
+            resume_checkpoint_path,
+            task="glue",
+            log=_logger,
+        )
+
     effective_model_config: Any | None = None
-    if not cfg.model.from_hub:
+    if resume_checkpoint_path is not None and not cfg.model.from_hub:
+        effective_model_config = cfg.model
+    elif not cfg.model.from_hub:
         if cfg.glue.allow_random_weights:
             effective_model_config = cfg.model
         elif cfg.glue.pretrained_model_path:
@@ -58,6 +80,7 @@ def load_validated_glue_config(
     glue_warnings = validate_glue_config(
         cfg,
         effective_model_config=effective_model_config,
+        resume_checkpoint_path=resume_checkpoint_path,
     )
     return cfg, tuple(config_warnings) + glue_warnings
 
@@ -66,11 +89,13 @@ def validate_glue_config(
     cfg: Any,
     *,
     effective_model_config: Any | None = None,
+    resume_checkpoint_path: str | Path | None = None,
 ) -> tuple[str, ...]:
     """Validate GLUE configuration before training.
 
     :param Any cfg: Configuration object.
     :param Any | None effective_model_config: Resolved model architecture, when known.
+    :param str | Path | None resume_checkpoint_path: Validated self-contained resume step.
     :raises GlueValidationError: If configuration is invalid.
     :return tuple[str, ...]: Non-fatal validation warnings.
     """
@@ -110,8 +135,28 @@ def validate_glue_config(
 
         model_cfg = getattr(cfg, "model", None)
         from_hub = bool(getattr(model_cfg, "from_hub", False))
+        trust_remote_code = bool(
+            getattr(getattr(cfg, "tokenizer", None), "trust_remote_code", False)
+        )
+        checkpointing_enabled = (
+            bool(getattr(getattr(cfg, "trainer", None), "save_model", True))
+            and str(
+                getattr(getattr(cfg, "trainer", None), "save_strategy", "steps")
+            ).lower()
+            != "no"
+        )
+        if (
+            from_hub
+            and trust_remote_code
+            and (resume_checkpoint_path is not None or checkpointing_enabled)
+        ):
+            errors.append(
+                "Self-contained GLUE checkpoint/resume does not support Hub models "
+                "with tokenizer.trust_remote_code=true. Disable checkpointing for "
+                "a non-resumable comparison run or use a standard Transformers model."
+            )
 
-        if not allow_random and not from_hub:
+        if not allow_random and not from_hub and resume_checkpoint_path is None:
             if (
                 _is_missing(pretrained_model_path)
                 or _is_missing(checkpoint_dir)

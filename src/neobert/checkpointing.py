@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import torch
+import yaml
 from safetensors.torch import load_file, save_file
 from torch import nn
 
@@ -14,7 +15,7 @@ MODEL_WEIGHTS_NAME = "model.safetensors"
 ACCELERATE_STATE_DIR = "accelerate"
 OPTIMIZER_PARAM_NAMES_MANIFEST = "optimizer_param_names.json"
 CHECKPOINT_COMPLETE_NAME = "checkpoint_complete.json"
-CHECKPOINT_COMPLETE_VERSION = 1
+CHECKPOINT_COMPLETE_VERSION = 2
 logger = logging.getLogger(__name__)
 _RUNTIME_PREFIXES = ("_orig_mod.", "module.")
 _DEEPSPEED_TAG_DIR_PATTERNS = (
@@ -23,6 +24,15 @@ _DEEPSPEED_TAG_DIR_PATTERNS = (
     "bf16_zero_pp_rank_*_mp_rank_*_optim_states.pt",
 )
 _DEEPSPEED_NESTED_TAG_CANDIDATES = ("pytorch_model", "model")
+
+
+def _is_nonempty_file(path: Path) -> bool:
+    """Return whether a path is a nonempty regular file.
+
+    :param Path path: Artifact path.
+    :return bool: True when the file exists and contains bytes.
+    """
+    return path.is_file() and path.stat().st_size > 0
 
 
 def _checkpoint_resume_artifact_errors(checkpoint_path: Path) -> list[str]:
@@ -36,8 +46,205 @@ def _checkpoint_resume_artifact_errors(checkpoint_path: Path) -> list[str]:
         return ["step directory is missing"]
     if not (checkpoint_path / ACCELERATE_STATE_DIR).is_dir():
         errors.append(f"missing {ACCELERATE_STATE_DIR}/ state directory")
-    if not (checkpoint_path / OPTIMIZER_PARAM_NAMES_MANIFEST).is_file():
+    optimizer_manifest_path = checkpoint_path / OPTIMIZER_PARAM_NAMES_MANIFEST
+    if not _is_nonempty_file(optimizer_manifest_path):
         errors.append(f"missing {OPTIMIZER_PARAM_NAMES_MANIFEST}")
+    else:
+        try:
+            optimizer_manifest = json.loads(
+                optimizer_manifest_path.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            errors.append(f"invalid {OPTIMIZER_PARAM_NAMES_MANIFEST}: {exc}")
+        else:
+            param_groups = (
+                optimizer_manifest.get("param_name_groups")
+                if isinstance(optimizer_manifest, Mapping)
+                else None
+            )
+            valid_param_groups = isinstance(param_groups, list) and all(
+                isinstance(group, list) for group in param_groups
+            )
+            if (
+                not isinstance(optimizer_manifest, Mapping)
+                or optimizer_manifest.get("schema_version") != 1
+                or not isinstance(optimizer_manifest.get("state_semantics"), str)
+                or not valid_param_groups
+            ):
+                errors.append(f"invalid {OPTIMIZER_PARAM_NAMES_MANIFEST} schema")
+    return errors
+
+
+def _task_checkpoint_artifact_errors(
+    checkpoint_path: Path,
+    *,
+    task: object,
+) -> list[str]:
+    """Return missing task metadata required by current self-contained checkpoints.
+
+    :param Path checkpoint_path: Candidate step checkpoint directory.
+    :param object task: Task recorded by the completion marker.
+    :return list[str]: Human-readable validation errors.
+    """
+    task_name = str(task)
+    if task_name not in {"pretraining", "contrastive", "glue"}:
+        return [f"unsupported checkpoint task {task!r}"]
+
+    errors: list[str] = []
+    config_payload: Mapping[str, Any] | None = None
+    config_path = checkpoint_path / "config.yaml"
+    if not config_path.is_file():
+        errors.append("missing config.yaml")
+    else:
+        try:
+            config_payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError) as exc:
+            errors.append(f"invalid config.yaml: {exc}")
+        else:
+            if not isinstance(config_payload, Mapping):
+                config_payload = None
+            config_task = config_payload.get("task") if config_payload else None
+            if config_task != task_name:
+                errors.append(
+                    f"config task {config_task!r} does not match marker task "
+                    f"{task_name!r}"
+                )
+
+    tokenizer_dir = checkpoint_path / "tokenizer"
+    if not tokenizer_dir.is_dir() or not any(
+        _is_nonempty_file(path) for path in tokenizer_dir.rglob("*")
+    ):
+        errors.append("missing usable tokenizer/ artifacts")
+    if not _is_nonempty_file(checkpoint_path / MODEL_WEIGHTS_NAME):
+        errors.append(f"missing {MODEL_WEIGHTS_NAME}")
+
+    accelerate_dir = checkpoint_path / ACCELERATE_STATE_DIR
+    accelerate_artifacts = (
+        tuple(path for path in accelerate_dir.rglob("*") if _is_nonempty_file(path))
+        if accelerate_dir.is_dir()
+        else ()
+    )
+    accelerate_entries = tuple(
+        (path, path.relative_to(accelerate_dir).parts) for path in accelerate_artifacts
+    )
+    has_model_state = any(
+        path.name
+        in {"model.safetensors", "pytorch_model.bin", "pytorch_model_fsdp.bin"}
+        or any(part.startswith("pytorch_model_fsdp_") for part in relative_parts)
+        for path, relative_parts in accelerate_entries
+    )
+    has_optimizer_state = any(
+        path.name == "optimizer.bin"
+        or (path.name.startswith("optimizer_") and path.suffix == ".bin")
+        or any(part.startswith("optimizer_") for part in relative_parts)
+        for path, relative_parts in accelerate_entries
+    )
+    has_scheduler_state = any(
+        path.name == "scheduler.bin"
+        or (path.name.startswith("scheduler_") and path.suffix == ".bin")
+        for path, _ in accelerate_entries
+    )
+    has_rng_state = any(
+        path.name.startswith("random_states_") and path.suffix == ".pkl"
+        for path, _ in accelerate_entries
+    )
+    for present, role in (
+        (has_model_state, "model"),
+        (has_optimizer_state, "optimizer"),
+        (has_scheduler_state, "scheduler"),
+        (has_rng_state, "RNG"),
+    ):
+        if not present:
+            errors.append(f"missing Accelerate {role} state")
+
+    custom_state_files = (
+        tuple(
+            path
+            for path in accelerate_dir.rglob("custom_checkpoint_*.pkl")
+            if _is_nonempty_file(path)
+        )
+        if accelerate_dir.is_dir()
+        else ()
+    )
+    expected_custom_states = {"pretraining": 2, "contrastive": 1, "glue": 1}[task_name]
+    if len(custom_state_files) != expected_custom_states:
+        errors.append(
+            "wrong checkpointable-state count in accelerate/: "
+            f"expected {expected_custom_states}, found {len(custom_state_files)}"
+        )
+
+    model_payload = config_payload.get("model") if config_payload else None
+    from_hub = bool(
+        model_payload.get("from_hub", False)
+        if isinstance(model_payload, Mapping)
+        else False
+    )
+    if task_name == "glue" and from_hub:
+        model_config_dir = checkpoint_path / "model_config"
+        if not model_config_dir.is_dir() or not any(
+            _is_nonempty_file(path) for path in model_config_dir.rglob("*")
+        ):
+            errors.append("missing GLUE model_config/ artifacts")
+    return errors
+
+
+def _checkpoint_artifact_inventory(checkpoint_path: Path) -> list[dict[str, Any]]:
+    """Return a deterministic size inventory for checkpoint artifacts.
+
+    :param Path checkpoint_path: Completed step checkpoint directory.
+    :return list[dict[str, Any]]: Relative paths and byte sizes.
+    """
+    excluded = {CHECKPOINT_COMPLETE_NAME, f".{CHECKPOINT_COMPLETE_NAME}.tmp"}
+    return [
+        {
+            "path": path.relative_to(checkpoint_path).as_posix(),
+            "size": path.stat().st_size,
+        }
+        for path in sorted(checkpoint_path.rglob("*"))
+        if path.is_file() and path.name not in excluded
+    ]
+
+
+def _checkpoint_inventory_errors(
+    checkpoint_path: Path,
+    inventory: object,
+) -> list[str]:
+    """Validate the completion marker's recorded file inventory.
+
+    :param Path checkpoint_path: Candidate step checkpoint directory.
+    :param object inventory: Marker inventory payload.
+    :return list[str]: Human-readable validation errors.
+    """
+    if not isinstance(inventory, list) or not inventory:
+        return ["completion marker has no artifact inventory"]
+    errors: list[str] = []
+    for entry in inventory:
+        if not isinstance(entry, Mapping):
+            errors.append("completion marker contains an invalid inventory entry")
+            continue
+        relative_path = Path(str(entry.get("path", "")))
+        if (
+            not relative_path.parts
+            or relative_path.is_absolute()
+            or ".." in relative_path.parts
+        ):
+            errors.append(f"completion marker has unsafe artifact path {relative_path}")
+            continue
+        artifact_path = checkpoint_path / relative_path
+        if not artifact_path.is_file():
+            errors.append(f"missing inventoried artifact {relative_path.as_posix()}")
+            continue
+        raw_size = entry.get("size")
+        if isinstance(raw_size, bool) or not isinstance(raw_size, int) or raw_size < 0:
+            errors.append(
+                f"completion marker has invalid size for {relative_path.as_posix()}"
+            )
+            continue
+        expected_size = raw_size
+        if artifact_path.stat().st_size != expected_size:
+            errors.append(
+                f"size mismatch for inventoried artifact {relative_path.as_posix()}"
+            )
     return errors
 
 
@@ -64,6 +271,15 @@ def checkpoint_resume_errors(checkpoint_path: str | Path) -> list[str]:
         )
     if marker.get("complete") is not True:
         errors.append("completion marker does not declare complete=true")
+    errors.extend(
+        _task_checkpoint_artifact_errors(
+            checkpoint_path,
+            task=marker.get("task"),
+        )
+    )
+    errors.extend(
+        _checkpoint_inventory_errors(checkpoint_path, marker.get("artifacts"))
+    )
     return errors
 
 
@@ -103,6 +319,7 @@ def mark_checkpoint_complete(
     """
     checkpoint_path = Path(checkpoint_path)
     errors = _checkpoint_resume_artifact_errors(checkpoint_path)
+    errors.extend(_task_checkpoint_artifact_errors(checkpoint_path, task=task))
     if errors:
         raise RuntimeError(
             f"Cannot mark incomplete checkpoint {checkpoint_path}: " + "; ".join(errors)
@@ -114,6 +331,7 @@ def mark_checkpoint_complete(
         "complete": True,
         "task": str(task),
         "step": checkpoint_path.name,
+        "artifacts": _checkpoint_artifact_inventory(checkpoint_path),
     }
     temporary_path.write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",

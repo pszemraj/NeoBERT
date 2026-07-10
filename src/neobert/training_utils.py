@@ -836,13 +836,13 @@ def sync_resume_source_of_truth(
 
     A resumable checkpoint contains optimizer and scheduler state, so silently
     combining it with a different tokenizer, model shape, masking contract, or
-    contrastive objective is not a faithful continuation. The entire ``trainer``
-    section (batch size, gradient accumulation, precision, compile flags, loss
-    path, ``max_steps``, logging cadence, ...) intentionally remains controlled
-    by the current launch config because those knobs shape runtime execution, not
-    the optimizer/scheduler state being restored. Pretraining's per-device batch
-    size is the exception: its resume cursor counts batches, so the checkpoint
-    value remains authoritative to preserve sample position.
+    contrastive objective is not a faithful continuation. Trainer controls that
+    do not define saved state (precision, compile flags, loss path, ``max_steps``,
+    logging cadence, ...) remain launch-controlled. Cursor-sensitive geometry is
+    checkpoint-controlled: pretraining forces its per-device batch size, while
+    GLUE forces its seed, per-device batch size, gradient accumulation,
+    optimizer/scheduler construction, and task/head semantics so loaded state
+    and the saved epoch/microbatch cursor retain their meaning.
 
     Two continuation knobs are likewise launch-controlled (the launch config
     wins, drift is warned but not reverted): the training corpus identity
@@ -876,6 +876,11 @@ def sync_resume_source_of_truth(
         )
 
     checkpoint_cfg = ConfigLoader.load(str(checkpoint_config_path))
+    if checkpoint_cfg.task != task:
+        raise RuntimeError(
+            f"Checkpoint task {checkpoint_cfg.task!r} does not match requested "
+            f"resume task {task!r}."
+        )
     changed: list[str] = []
 
     # Sequence-length geometry (context window) is operator-controlled on resume
@@ -985,6 +990,30 @@ def sync_resume_source_of_truth(
                 section="trainer",
             )
         )
+    changed.extend(
+        _copy_checkpoint_config_fields(
+            cfg.optimizer,
+            checkpoint_cfg.optimizer,
+            ("name", "lr", "weight_decay", "betas", "eps", "muon_config"),
+            section="optimizer",
+        )
+    )
+    changed.extend(
+        _copy_checkpoint_config_fields(
+            cfg.scheduler,
+            checkpoint_cfg.scheduler,
+            (
+                "name",
+                "warmup_steps",
+                "total_steps",
+                "decay_steps",
+                "final_lr_ratio",
+                "warmup_percent",
+                "decay_percent",
+            ),
+            section="scheduler",
+        )
+    )
     if task == "contrastive":
         changed.extend(
             _copy_checkpoint_config_fields(
@@ -998,6 +1027,52 @@ def sync_resume_source_of_truth(
                 section="contrastive",
             )
         )
+    if task == "glue":
+        changed.extend(
+            _copy_checkpoint_config_fields(
+                cfg.model,
+                checkpoint_cfg.model,
+                ("name", "from_hub", "max_position_embeddings"),
+                section="model",
+            )
+        )
+        changed.extend(
+            _copy_checkpoint_config_fields(
+                cfg.tokenizer,
+                checkpoint_cfg.tokenizer,
+                ("max_length",),
+                section="tokenizer",
+            )
+        )
+        changed.extend(
+            _copy_checkpoint_config_fields(
+                cfg.glue,
+                checkpoint_cfg.glue,
+                (
+                    "task_name",
+                    "num_labels",
+                    "max_seq_length",
+                    "classifier_dropout",
+                    "classifier_init_range",
+                    "allow_random_weights",
+                ),
+                section="glue",
+            )
+        )
+        changed.extend(
+            _copy_checkpoint_config_fields(
+                cfg.trainer,
+                checkpoint_cfg.trainer,
+                (
+                    "per_device_train_batch_size",
+                    "gradient_accumulation_steps",
+                ),
+                section="trainer",
+            )
+        )
+        if int(cfg.seed) != int(checkpoint_cfg.seed):
+            changed.append("seed")
+        cfg.seed = int(checkpoint_cfg.seed)
 
     # Operator-controlled resume fields: the launch config wins so a deliberate
     # continuation change is honored instead of silently reverted. Corpus
