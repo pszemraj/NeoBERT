@@ -169,17 +169,16 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
     def encode_corpus(
         self,
         corpus: List[Dict[str, str]] | Dict[str, List[str]],
-        batch_size: int,
+        batch_size: int | None = None,
         **kwargs: Any,
     ) -> np.ndarray:
         """Encode a corpus of documents.
 
         :param list[dict[str, str]] | dict[str, list[str]] corpus: Corpus inputs.
-        :param int batch_size: Encoding batch size.
+        :param int | None batch_size: Optional encoding batch-size override.
         :param Any kwargs: Additional encoding arguments.
         :return np.ndarray: Encoded corpus embeddings.
         """
-        del batch_size
         if isinstance(corpus, dict):
             sentences = [
                 (corpus["title"][i] + " " + corpus["text"][i]).strip()
@@ -204,6 +203,8 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
             }
         else:
             new_kwargs = kwargs
+        if batch_size is not None:
+            new_kwargs["batch_size"] = batch_size
 
         return self.encode(
             sentences,
@@ -229,6 +230,9 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
         device = param.device
         # Keep additive masks in float32 for numerical stability (match training).
         mask_dtype = torch.float32
+        batch_size = int(kwargs.pop("batch_size", self.batch_size))
+        if batch_size < 1:
+            raise ValueError(f"batch_size must be positive, got {batch_size}.")
         num_workers = int(kwargs.pop("num_workers", 0))
         pin_memory = kwargs.pop("pin_memory", None)
         if pin_memory is None:
@@ -261,7 +265,7 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
         dataloader = DataLoader(
             dataset,
             collate_fn=data_collator,
-            batch_size=self.batch_size,
+            batch_size=batch_size,
             num_workers=num_workers,
             shuffle=False,
             pin_memory=pin_memory,

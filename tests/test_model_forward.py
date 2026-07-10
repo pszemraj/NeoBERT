@@ -1592,6 +1592,48 @@ class TestModelForward(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unsupported MTEB pooling"):
             normalize_mteb_pooling("first")
 
+    def test_mteb_encode_corpus_batch_size_is_optional(self):
+        """Retrieval hooks work when MTEB omits its batch-size override."""
+        from neobert.model import NeoBERTConfig, NeoBERTForMTEB
+
+        tokenizer = build_wordlevel_tokenizer(
+            vocab={"title": 2, "text": 3},
+            include_mask=False,
+            include_sep=False,
+        )
+        config = NeoBERTConfig(
+            hidden_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=32,
+            vocab_size=10,
+            max_length=8,
+            attn_backend="sdpa",
+            hidden_act="gelu",
+        )
+        model = NeoBERTForMTEB(
+            config=config,
+            tokenizer=tokenizer,
+            max_length=8,
+            batch_size=2,
+            pooling="avg",
+        )
+        embeddings = torch.empty(1, config.hidden_size).numpy()
+        corpus = [{"title": "title", "text": "text"}]
+
+        with patch.object(
+            NeoBERTForMTEB,
+            "encode",
+            autospec=True,
+            return_value=embeddings,
+        ) as encode:
+            self.assertIs(model.encode_corpus(corpus), embeddings)
+            encode.assert_called_once_with(model, ["title text"])
+
+            encode.reset_mock()
+            self.assertIs(model.encode_corpus(corpus, batch_size=3), embeddings)
+            encode.assert_called_once_with(model, ["title text"], batch_size=3)
+
     def test_mteb_encode_propagates_pin_memory_to_dataloader(self):
         """Ensure MTEB encode forwards the requested pin_memory setting."""
         from neobert.model import NeoBERTConfig, NeoBERTForMTEB
@@ -1638,11 +1680,13 @@ class TestModelForward(unittest.TestCase):
         with patch("torch.utils.data.DataLoader", _FakeDataLoader):
             embeddings = model.encode(
                 ["hello world", "hello"],
+                batch_size=1,
                 num_workers=2,
                 pin_memory=True,
             )
 
         self.assertTrue(captured["kwargs"]["pin_memory"])
+        self.assertEqual(captured["kwargs"]["batch_size"], 1)
         self.assertEqual(embeddings.shape[0], 2)
         self.assertEqual(embeddings.shape[1], config.hidden_size)
         self.assertTrue(torch.isfinite(torch.from_numpy(embeddings)).all())
