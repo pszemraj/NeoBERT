@@ -47,6 +47,7 @@ from neobert.checkpointing import (
     save_accelerate_state,
     save_portable_checkpoint_weights as _save_portable_checkpoint_weights,
 )
+from neobert.collator import resolve_packed_token_limits
 from neobert.config import (
     Config,
     ConfigLoader,
@@ -1250,29 +1251,6 @@ def _append_to_stored_batch(
     return stored_batch
 
 
-def _resolve_pack_token_limits(
-    tokenizer: PreTrainedTokenizerBase, max_length: int
-) -> Tuple[int, Optional[int], Optional[int]]:
-    """Compute tokenization limits for packed sequences.
-
-    :param PreTrainedTokenizerBase tokenizer: Tokenizer supplying special tokens.
-    :param int max_length: Target packed sequence length.
-    :return tuple[int, int | None, int | None]: Trimmed max_length and boundary IDs.
-    """
-    start_token_id = (
-        tokenizer.cls_token_id
-        if tokenizer.cls_token_id is not None
-        else tokenizer.bos_token_id
-    )
-    end_token_id = (
-        tokenizer.sep_token_id
-        if tokenizer.sep_token_id is not None
-        else tokenizer.eos_token_id
-    )
-    reserve = int(start_token_id is not None) + int(end_token_id is not None)
-    return max(1, max_length - reserve), start_token_id, end_token_id
-
-
 def _resolve_tokenize_num_proc(
     requested: Optional[int],
     num_processes: int,
@@ -1893,7 +1871,7 @@ def trainer(cfg: Config) -> None:
     tokenize_max_length = cfg.dataset.max_seq_length
     if pack_sequences:
         pack_target_length = cfg.datacollator.max_length or cfg.dataset.max_seq_length
-        tokenize_max_length, _, _ = _resolve_pack_token_limits(
+        tokenize_max_length, _, _ = resolve_packed_token_limits(
             tokenizer, pack_target_length
         )
 

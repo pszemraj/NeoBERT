@@ -11,6 +11,7 @@ from typing import Any
 
 from datasets import concatenate_datasets, load_dataset
 
+from neobert.collator import resolve_packed_token_limits
 from neobert.config import load_config_from_args
 from neobert.tokenizer import get_tokenizer, resolve_text_column, tokenize
 
@@ -47,13 +48,22 @@ def preprocess(cfg: Any) -> None:
         preferred=getattr(cfg.dataset, "text_column", None),
     )
 
+    pack_sequences = bool(cfg.datacollator.pack_sequences)
+    tokenize_max_length = cfg.dataset.max_seq_length
+    if pack_sequences:
+        pack_target_length = cfg.datacollator.max_length or cfg.dataset.max_seq_length
+        tokenize_max_length, _, _ = resolve_packed_token_limits(
+            tokenizer, pack_target_length
+        )
+
     print(f"Tokenizing dataset (column={text_column})")
     dataset = tokenize(
         dataset,
         tokenizer,
         column_name=text_column,
-        max_length=cfg.tokenizer.max_length,
+        max_length=tokenize_max_length,
         truncation=cfg.tokenizer.truncation,
+        add_special_tokens=not pack_sequences,
         remove_columns=True,
         return_special_tokens_mask=True,
     )

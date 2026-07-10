@@ -6,6 +6,7 @@ from pathlib import Path
 
 from datasets import load_dataset
 
+from neobert.collator import resolve_packed_token_limits
 from neobert.tokenizer import get_tokenizer, resolve_text_column, tokenize
 
 
@@ -69,9 +70,9 @@ def main() -> None:
         help="Maximum number of samples to tokenize (default: all)",
     )
     parser.add_argument(
-        "--no-special-tokens",
+        "--for-packing",
         action="store_true",
-        help="Disable tokenizer special tokens (useful for packed-sequence pretraining).",
+        help="Prepare raw segments for downstream packed-sequence pretraining.",
     )
     parser.add_argument(
         "--return-special-tokens-mask",
@@ -108,16 +109,21 @@ def main() -> None:
         dataset, is_streaming=False, preferred=args.text_column
     )
 
-    add_special_tokens = not args.no_special_tokens
+    add_special_tokens = not args.for_packing
+    tokenize_max_length = args.max_length
+    if args.for_packing:
+        tokenize_max_length, _, _ = resolve_packed_token_limits(
+            tokenizer, args.max_length
+        )
     print(
-        f"Tokenizing with max_length={args.max_length} "
+        f"Tokenizing with max_length={tokenize_max_length} "
         f"(add_special_tokens={add_special_tokens})..."
     )
     tokenized_dataset = tokenize(
         dataset,
         tokenizer,
         column_name=text_column,
-        max_length=args.max_length,
+        max_length=tokenize_max_length,
         num_proc=args.num_proc,
         add_special_tokens=add_special_tokens,
         return_special_tokens_mask=args.return_special_tokens_mask,
@@ -133,6 +139,7 @@ def main() -> None:
         f.write(f"Max length: {args.max_length}\n")
         f.write(f"Text column: {text_column}\n")
         f.write(f"Add special tokens: {add_special_tokens}\n")
+        f.write(f"Packing ready: {args.for_packing}\n")
         f.write(f"Return special_tokens_mask: {args.return_special_tokens_mask}\n")
         f.write(f"Dataset: {args.dataset}\n")
         f.write(f"Split: {args.split}\n")

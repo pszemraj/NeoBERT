@@ -762,6 +762,8 @@ optimizer:
                     "glue": {"preprocessing_num_proc": -1},
                 }
             )
+        with self.assertRaisesRegex(ValueError, "datacollator.max_length"):
+            ConfigLoader.dict_to_config({"datacollator": {"max_length": 0}})
 
     def test_glue_seq_length_syncs_tokenizer_max_length(self):
         """Ensure tokenizer.max_length is synced to glue.max_seq_length for GLUE."""

@@ -292,7 +292,7 @@ Muon routing, normalization, orthogonalization, clipping, and distributed constr
 | --------------------------------- | ------------- | ------- | -------------------------------------------------------------- |
 | `datacollator.mlm_probability`    | `float`       | `0.15`  | Probability of selecting tokens for MLM corruption.            |
 | `datacollator.mask_all`           | `bool`        | `false` | `false`: standard 80/10/10; `true`: 100% `[MASK]` replacement. |
-| `datacollator.pack_sequences`     | `bool`        | `false` | Enable sequence packing.                                       |
+| `datacollator.pack_sequences`     | `bool`        | `false` | Enable sequence packing; inputs must omit outer special tokens. |
 | `datacollator.max_length`         | `int \| None` | `null`  | Packed target length override.                                 |
 | `datacollator.pad_to_multiple_of` | `int \| None` | `null`  | Pad to multiple for kernel efficiency in non-packed mode.      |
 

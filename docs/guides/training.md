@@ -174,8 +174,11 @@ python scripts/pretraining/tokenize_dataset.py \
   --dataset EleutherAI/SmolLM2-1.7B-stage-4-100B \
   --output tokenized_data/smollm2 \
   --tokenizer BEE-spoke-data/wordpiece-tokenizer-32k-en_code-msp \
-  --max-length 1024
+  --max-length 1024 \
+  --for-packing
 ```
+
+When `datacollator.pack_sequences` is enabled, each stored example must contain raw content tokens without outer CLS/SEP or BOS/EOS tokens. The packing collator inserts one boundary pair per segment and rejects pre-specialized inputs rather than silently duplicating boundaries. The config-driven preprocessor applies this contract automatically; the standalone helper requires `--for-packing`, where `--max-length` is the final packed length and the helper reserves space for the boundary tokens.
 
 ## Contrastive
 

@@ -7,7 +7,12 @@ import warnings
 import numpy as np
 import torch
 
-from neobert.collator import CustomCollatorForMLM, DataCollatorWithPacking, get_collator
+from neobert.collator import (
+    CustomCollatorForMLM,
+    DataCollatorWithPacking,
+    get_collator,
+    resolve_packed_token_limits,
+)
 from neobert.utils import additive_attention_mask
 from tests.tokenizer_utils import build_wordlevel_tokenizer
 
@@ -132,6 +137,52 @@ class TestCollatorPacking(unittest.TestCase):
         ]
         self.assertEqual(token_counts, packed_counts)
         self.assertEqual(batch["input_ids"].shape[1], 6)
+
+    def test_rejects_inputs_with_outer_boundaries(self):
+        """Reject pre-specialized segments instead of duplicating boundaries."""
+        collator = DataCollatorWithPacking(
+            start_token_id=10,
+            end_token_id=11,
+            max_length=8,
+            default_data_collator=DummyPadCollator(),
+        )
+
+        for input_ids in ([10, 1, 2], [1, 2, 11], [10, 1, 11]):
+            with self.subTest(input_ids=input_ids):
+                with self.assertRaisesRegex(ValueError, "add_special_tokens=False"):
+                    collator([{"input_ids": input_ids}])
+
+    def test_allows_boundary_tokens_inside_raw_segment(self):
+        """Keep literal special tokens when they are not outer boundaries."""
+        collator = DataCollatorWithPacking(
+            start_token_id=10,
+            end_token_id=11,
+            max_length=8,
+            default_data_collator=DummyPadCollator(),
+        )
+
+        batch = collator([{"input_ids": [1, 10, 11, 2]}])
+
+        self.assertEqual(batch["input_ids"][0].tolist(), [10, 1, 10, 11, 2, 11, 0, 0])
+
+    def test_resolve_packed_token_limits_reserves_boundaries(self):
+        """Use one shared token budget for online and offline packing inputs."""
+        tokenizer = build_wordlevel_tokenizer(include_cls=True, include_sep=True)
+
+        token_limit, start_token_id, end_token_id = resolve_packed_token_limits(
+            tokenizer, 8
+        )
+
+        self.assertEqual(token_limit, 6)
+        self.assertEqual(start_token_id, tokenizer.cls_token_id)
+        self.assertEqual(end_token_id, tokenizer.sep_token_id)
+
+    def test_packed_length_must_leave_room_for_content(self):
+        """Reject target lengths consumed entirely by segment boundaries."""
+        tokenizer = build_wordlevel_tokenizer(include_cls=True, include_sep=True)
+
+        with self.assertRaisesRegex(ValueError, "must exceed"):
+            resolve_packed_token_limits(tokenizer, 2)
 
     def test_return_packed_seqlens_omits_key_when_left_padded(self):
         """Ensure packed_seqlens is omitted for non-right-padded masks."""

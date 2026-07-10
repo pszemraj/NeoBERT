@@ -1497,6 +1497,14 @@ class ConfigLoader:
                 "datacollator.mlm_probability must be in [0, 1], got "
                 f"{config.datacollator.mlm_probability}."
             )
+        if (
+            config.datacollator.max_length is not None
+            and config.datacollator.max_length <= 0
+        ):
+            errors.append(
+                "datacollator.max_length must be > 0 when set, got "
+                f"{config.datacollator.max_length}."
+            )
 
         if config.trainer.per_device_train_batch_size <= 0:
             errors.append(

@@ -87,6 +87,47 @@ class CustomCollatorForMLM(DataCollatorForLanguageModeling):
         return inputs, labels
 
 
+def _packed_content_token_limit(max_length: int, boundary_count: int) -> int:
+    """Return the content-token budget after validating boundary capacity.
+
+    :param int max_length: Target packed sequence length.
+    :param int boundary_count: Number of boundary tokens added to each segment.
+    :raises ValueError: If no room remains for a content token.
+    :return int: Maximum content-token count per segment.
+    """
+    if max_length <= boundary_count:
+        raise ValueError(
+            f"Packed max_length={max_length} must exceed the {boundary_count} "
+            "reserved segment boundary token(s)."
+        )
+    return max_length - boundary_count
+
+
+def resolve_packed_token_limits(
+    tokenizer: PreTrainedTokenizerBase, max_length: int
+) -> tuple[int, Optional[int], Optional[int]]:
+    """Resolve the raw-token budget and segment boundary IDs for packing.
+
+    :param PreTrainedTokenizerBase tokenizer: Tokenizer supplying special tokens.
+    :param int max_length: Target packed sequence length.
+    :raises ValueError: If the target cannot hold boundaries and one content token.
+    :return tuple[int, int | None, int | None]: Raw-token limit and boundary IDs.
+    """
+    start_token_id = (
+        tokenizer.cls_token_id
+        if tokenizer.cls_token_id is not None
+        else tokenizer.bos_token_id
+    )
+    end_token_id = (
+        tokenizer.sep_token_id
+        if tokenizer.sep_token_id is not None
+        else tokenizer.eos_token_id
+    )
+    reserve = int(start_token_id is not None) + int(end_token_id is not None)
+    token_limit = _packed_content_token_limit(max_length, reserve)
+    return token_limit, start_token_id, end_token_id
+
+
 # Training-only collator for packed-sequence pretraining (not used in HF export).
 class DataCollatorWithPacking(DefaultDataCollator):
     """Collator that packs segments into fixed-length sequences.
@@ -116,6 +157,7 @@ class DataCollatorWithPacking(DefaultDataCollator):
         self.max_length = max_length
         self.default_data_collator = default_data_collator
         reserve = int(start_token_id is not None) + int(end_token_id is not None)
+        _packed_content_token_limit(max_length, reserve)
         min_segment_len = max(1, reserve)
         # Fixed-width packed_seqlens avoids shape mismatches in dispatch/concatenate.
         self.max_segments = max(1, max_length // min_segment_len)
@@ -136,6 +178,15 @@ class DataCollatorWithPacking(DefaultDataCollator):
             seq = feature["input_ids"]
             if torch.is_tensor(seq):
                 seq = seq.tolist()
+            if seq and (
+                (self.start_token_id is not None and seq[0] == self.start_token_id)
+                or (self.end_token_id is not None and seq[-1] == self.end_token_id)
+            ):
+                raise ValueError(
+                    "Packed input_ids already contain an outer segment boundary. "
+                    "The packing collator owns outer CLS/SEP or BOS/EOS insertion; "
+                    "re-tokenize packed inputs with add_special_tokens=False."
+                )
 
             special_mask = feature.get("special_tokens_mask")
             if torch.is_tensor(special_mask):
@@ -378,15 +429,8 @@ def get_collator(
     )
 
     if pack_sequences:
-        start_token_id = (
-            tokenizer.cls_token_id
-            if tokenizer.cls_token_id is not None
-            else tokenizer.bos_token_id
-        )
-        end_token_id = (
-            tokenizer.sep_token_id
-            if tokenizer.sep_token_id is not None
-            else tokenizer.eos_token_id
+        _, start_token_id, end_token_id = resolve_packed_token_limits(
+            tokenizer, max_length
         )
         collator = DataCollatorWithPacking(
             start_token_id=start_token_id,
