@@ -3,39 +3,9 @@
 
 import math
 import unittest
-from typing import Any, Dict, List, Tuple
-
-import torch
 
 from neobert.pretraining.metrics import Metrics
-
-
-class _AcceleratorStub:
-    """Minimal accelerator stub for unit-testing metrics aggregation."""
-
-    def __init__(self) -> None:
-        """Initialize a CPU-only accelerator stub."""
-        self.device = torch.device("cpu")
-        self.is_main_process = True
-        self.logged: List[Tuple[Dict[str, Any], int]] = []
-
-    def reduce(self, tensor: torch.Tensor, reduction: str = "sum") -> torch.Tensor:
-        """Return local tensors unchanged for single-process tests.
-
-        :param torch.Tensor tensor: Value to reduce.
-        :param str reduction: Reduction mode.
-        :return torch.Tensor: Unchanged input tensor.
-        """
-        _ = reduction
-        return tensor
-
-    def log(self, values: Dict[str, Any], step: int) -> None:
-        """Capture tracker payloads for assertions.
-
-        :param dict[str, Any] values: Metrics payload.
-        :param int step: Logging step.
-        """
-        self.logged.append((values, step))
+from tests.metrics_utils import AcceleratorStub
 
 
 class TestPretrainingMetrics(unittest.TestCase):
@@ -73,7 +43,7 @@ class TestPretrainingMetrics(unittest.TestCase):
         metrics["train/local_num_correct"] = 2
         metrics["train/local_sum_loss"] = 6.0
 
-        accelerator = _AcceleratorStub()
+        accelerator = AcceleratorStub()
         _ = metrics.log(accelerator)
 
         self.assertEqual(len(accelerator.logged), 1)
@@ -105,7 +75,7 @@ class TestPretrainingMetrics(unittest.TestCase):
         metrics["train/local_num_correct"] = 6
         metrics["train/local_sum_loss"] = 4.0
 
-        accelerator = _AcceleratorStub()
+        accelerator = AcceleratorStub()
         _ = metrics.log(accelerator)
 
         payload, step = accelerator.logged[0]

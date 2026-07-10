@@ -10,7 +10,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from accelerate.state import AcceleratorState, GradientState
 from accelerate.utils import DataLoaderConfiguration, DistributedType
 
 from neobert.config import Config, ConfigLoader
@@ -26,6 +25,7 @@ from neobert.optimizer import get_optimizer
 from neobert.training_utils import (
     _compute_l2_norm_for_logging,
     _maybe_compile_model,
+    _reset_accelerate_runtime_state,
     _resolve_resume_checkpoint,
     _update_global_norm_metric_for_logging,
     attach_optimizer_param_names,
@@ -784,8 +784,7 @@ def test_optimizer_param_name_manifest_rejects_changed_state_semantics(
 
 def test_create_accelerator_recreates_state_for_mixed_precision_reuse() -> None:
     """Sequential trainer runs should honor updated mixed precision settings."""
-    GradientState._reset_state()
-    AcceleratorState._reset_state(reset_partial_state=True)
+    _reset_accelerate_runtime_state()
 
     try:
         first = create_accelerator(
@@ -804,8 +803,7 @@ def test_create_accelerator_recreates_state_for_mixed_precision_reuse() -> None:
         assert second.device.type == "cpu"
         assert second.state.mixed_precision == "no"
     finally:
-        GradientState._reset_state()
-        AcceleratorState._reset_state(reset_partial_state=True)
+        _reset_accelerate_runtime_state()
 
 
 def test_create_accelerator_resets_on_state_mismatch_error(
