@@ -98,6 +98,10 @@ Actions:
 
 - Full resume requires `<step>/accelerate/`. A checkpoint written before that layout may still contain portable `model.safetensors`, but it cannot restore optimizer, scheduler, random, or custom trainer state. Start a current run from the portable model weights or start fresh.
 
+### Contrastive job exits with status 143 after SIGTERM
+
+- This is the expected preemption path. The trainer synchronizes the termination request at the next completed optimizer update, writes a complete checkpoint under `checkpoints/<step>/`, and exits with `128 + SIGTERM`. Resume from `latest`; do not treat the nonzero status as an incomplete save unless the completion marker is absent.
+
 ## Evaluation Issues
 
 ### GLUE backend errors

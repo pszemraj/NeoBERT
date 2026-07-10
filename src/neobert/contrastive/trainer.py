@@ -3,9 +3,9 @@
 import logging
 import os
 import signal
-import sys
 from contextlib import nullcontext
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
 from typing import Any, Literal
@@ -208,6 +208,73 @@ def _save_contrastive_checkpoint_metadata(
     ConfigLoader.save(cfg, str(checkpoint_path / "config.yaml"))
     tokenizer_dir = checkpoint_path / "tokenizer"
     tokenizer.save_pretrained(tokenizer_dir)
+
+
+def _save_contrastive_step_checkpoint(
+    cfg: Config,
+    tokenizer: Any,
+    model: torch.nn.Module,
+    optimizer: Any,
+    accelerator: Any,
+    checkpoint_dir: Path,
+    step: int,
+) -> Path:
+    """Save one complete contrastive checkpoint at an optimizer boundary.
+
+    :param Config cfg: Runtime configuration.
+    :param Any tokenizer: Runtime tokenizer.
+    :param torch.nn.Module model: Prepared contrastive model.
+    :param Any optimizer: Prepared optimizer.
+    :param Any accelerator: Active Accelerator instance.
+    :param Path checkpoint_dir: Root checkpoint directory.
+    :param int step: Completed optimizer step.
+    :return Path: Completed step checkpoint directory.
+    """
+    checkpoint_path = checkpoint_dir / str(int(step))
+    if accelerator.is_main_process:
+        invalidate_checkpoint_completion(checkpoint_path)
+    accelerator.wait_for_everyone()
+    save_accelerate_state(accelerator, checkpoint_path)
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        save_optimizer_param_name_manifest(optimizer, checkpoint_path)
+        _save_contrastive_checkpoint_metadata(cfg, tokenizer, checkpoint_path)
+    _save_portable_checkpoint_weights(model, accelerator, checkpoint_path)
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        mark_checkpoint_complete(checkpoint_path, task="contrastive")
+    accelerator.wait_for_everyone()
+    return checkpoint_path
+
+
+@dataclass
+class _PreemptionState:
+    """Signal-safe intent recorded until the next optimizer boundary."""
+
+    requested_signum: int = 0
+
+    def request(self, signum: int, frame: FrameType | None) -> None:
+        """Record preemption intent without I/O, CUDA work, or collectives.
+
+        :param int signum: Received signal number.
+        :param FrameType | None frame: Interrupted Python frame.
+        """
+        del frame
+        self.requested_signum = int(signum)
+
+    def synchronize(self, accelerator: Any) -> bool:
+        """Return whether any rank requested preemption.
+
+        :param Any accelerator: Active Accelerator instance.
+        :return bool: True when at least one rank requested termination.
+        """
+        local_request = torch.tensor(
+            int(self.requested_signum != 0),
+            device=accelerator.device,
+            dtype=torch.int32,
+        )
+        requests = accelerator.reduce(local_request, reduction="sum")
+        return bool(int(requests.item()))
 
 
 def _sync_contrastive_runtime_from_pretraining(
@@ -986,35 +1053,9 @@ def trainer(cfg: Config) -> None:
                 f"{checkpoint_dir}"
             )
 
-    # Signal handler that save the accelerate state
-    def handler(signum: int, frame: FrameType | None) -> None:
-        """Handle termination signals by checkpointing state.
-
-        :param int signum: Signal number received.
-        :param FrameType | None frame: Current stack frame.
-        """
-        print(
-            f"Signal {signum} received on rank {accelerator.process_index}, checkpointing..."
-        )
-        step_tag = str(int(metrics["train/steps"]))
-        checkpoint_path = checkpoint_dir / step_tag
-        if accelerator.is_main_process:
-            invalidate_checkpoint_completion(checkpoint_path)
-        accelerator.wait_for_everyone()
-        save_accelerate_state(accelerator, checkpoint_path)
-        if accelerator.is_main_process:
-            save_optimizer_param_name_manifest(optimizer, checkpoint_path)
-            _save_contrastive_checkpoint_metadata(cfg, tokenizer, checkpoint_path)
-        _save_portable_checkpoint_weights(model, accelerator, checkpoint_path)
-        accelerator.wait_for_everyone()
-        if accelerator.is_main_process:
-            mark_checkpoint_complete(checkpoint_path, task="contrastive")
-        accelerator.wait_for_everyone()
-        print(f"Done on rank {accelerator.process_index}")
-        sys.exit(0)
-
-    # Register handler to the signal SIGTERM
-    signal.signal(signal.SIGTERM, handler)
+    preemption = _PreemptionState()
+    previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, preemption.request)
 
     # Progress bar
     pbar = tqdm(
@@ -1318,30 +1359,32 @@ def trainer(cfg: Config) -> None:
                 save_model=save_model,
                 save_strategy=save_strategy,
             )
-            if should_save:
-                step_tag = str(metrics["train/steps"])
-                checkpoint_path = checkpoint_dir / step_tag
-                # Save resumable optimizer/scheduler/metric state + portable weights
-                # to a single step directory.
-                if accelerator.is_main_process:
-                    invalidate_checkpoint_completion(checkpoint_path)
-                accelerator.wait_for_everyone()
-                save_accelerate_state(accelerator, checkpoint_path)
-                accelerator.wait_for_everyone()
-                if accelerator.is_main_process:
-                    save_optimizer_param_name_manifest(optimizer, checkpoint_path)
-                    _save_contrastive_checkpoint_metadata(
-                        cfg, tokenizer, checkpoint_path
-                    )
-                _save_portable_checkpoint_weights(model, accelerator, checkpoint_path)
-                accelerator.wait_for_everyone()
-                if accelerator.is_main_process:
-                    mark_checkpoint_complete(checkpoint_path, task="contrastive")
-                accelerator.wait_for_everyone()
+            preemption_requested = preemption.synchronize(accelerator)
+            if should_save or preemption_requested:
+                _save_contrastive_step_checkpoint(
+                    cfg,
+                    tokenizer,
+                    model,
+                    optimizer,
+                    accelerator,
+                    checkpoint_dir,
+                    int(metrics["train/steps"]),
+                )
 
                 limit = _resolve_checkpoint_retention_limit(cfg)
                 if limit > 0 and accelerator.is_main_process:
                     _prune_step_checkpoints(checkpoint_dir, retention_limit=limit)
+                accelerator.wait_for_everyone()
+
+            if preemption_requested:
+                accelerator.print(
+                    "SIGTERM received; saved a synchronized checkpoint at "
+                    f"completed optimizer step {metrics['train/steps']}."
+                )
+                pbar.close()
+                signal.signal(signal.SIGTERM, previous_sigterm_handler)
+                accelerator.end_training()
+                raise SystemExit(128 + signal.SIGTERM)
 
             if metrics["train/steps"] >= cfg.trainer.max_steps:
                 break
@@ -1354,4 +1397,5 @@ def trainer(cfg: Config) -> None:
 
     # Make sure that the wandb tracker finishes correctly and close the progress bar
     pbar.close()
+    signal.signal(signal.SIGTERM, previous_sigterm_handler)
     accelerator.end_training()

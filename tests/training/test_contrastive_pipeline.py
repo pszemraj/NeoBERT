@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Test contrastive training pipeline functionality."""
 
+import signal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -13,6 +14,7 @@ from neobert.config import Config, ConfigLoader
 from neobert.contrastive.datasets import get_bsz
 from neobert.contrastive.loss import SupConLoss
 from neobert.contrastive.trainer import (
+    _PreemptionState,
     _contrastive_loss_for_backward,
     _load_contrastive_pretrained_backbone_weights,
     _normalize_contrastive_pretrained_checkpoint_root,
@@ -106,6 +108,7 @@ class TestContrastivePipeline:
         def _fake_load_from_disk(path: str):
             return pretraining_dataset
 
+        previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
         with (
             mock.patch(
                 "neobert.contrastive.trainer.load_from_disk",
@@ -125,6 +128,7 @@ class TestContrastivePipeline:
             ),
         ):
             trainer(config)
+        assert signal.getsignal(signal.SIGTERM) == previous_sigterm_handler
 
         cached_loader.assert_called_once()
         if pretraining_prob > 0:
@@ -276,6 +280,23 @@ class TestContrastivePipeline:
         assert any(
             call == (dataloaders["pretraining"],) for call in accelerator.prepared
         )
+
+    def test_preemption_handler_only_records_intent(self):
+        """SIGTERM handling defers collectives and checkpoint I/O to the loop."""
+
+        class LocalAccelerator:
+            device = torch.device("cpu")
+
+            @staticmethod
+            def reduce(value, reduction):
+                assert reduction == "sum"
+                return value
+
+        state = _PreemptionState()
+        state.request(signal.SIGTERM, None)
+
+        assert state.requested_signum == signal.SIGTERM
+        assert state.synchronize(LocalAccelerator()) is True
 
     def test_muonclip_trainer_passes_model_config(
         self,
