@@ -4,7 +4,31 @@ import argparse
 import json
 from pathlib import Path
 
-from neobert.mteb_tasks import MTEB_TASK_GROUPS, MTEBTaskSpec
+from neobert.mteb_tasks import (
+    MTEB_ALL_EXECUTION_TASKS,
+    MTEB_TASK_GROUPS,
+    MTEB_TASK_SPECS_BY_EXECUTION_NAME,
+    MTEBTaskSpec,
+)
+
+
+def _execution_score(
+    model_results: dict,
+    result_name: str,
+    split: str,
+) -> float | None:
+    """Return one concrete task score for its configured evaluation split.
+
+    :param dict model_results: Result payloads keyed by concrete task name.
+    :param str result_name: Concrete MTEB task name.
+    :param str split: Evaluation split containing the official score.
+    :return float | None: Main score, or ``None`` when missing.
+    """
+    try:
+        score = model_results[result_name]["scores"][split][0]["main_score"]
+    except (KeyError, TypeError, IndexError):
+        return None
+    return float(score) if score is not None else None
 
 
 def _task_score(model_results: dict, task: MTEBTaskSpec) -> float | None:
@@ -14,24 +38,26 @@ def _task_score(model_results: dict, task: MTEBTaskSpec) -> float | None:
     :param MTEBTaskSpec task: Task specification to aggregate.
     :return float | None: Mean main score, or ``None`` when no result is present.
     """
-    scores = []
+    scores: list[float] = []
     for result_name in task.execution_names:
-        try:
-            score = model_results[result_name]["scores"]["test"][0]["main_score"]
-        except (KeyError, TypeError, IndexError):
-            continue
-        if score is not None:
-            scores.append(float(score))
-    return sum(scores) / len(scores) if scores else None
+        score = _execution_score(
+            model_results,
+            result_name,
+            task.evaluation_split,
+        )
+        if score is None:
+            return None
+        scores.append(score)
+    return sum(scores) / len(scores)
 
 
-def _average_categories(model_results: dict) -> dict[str, float]:
+def _average_categories(model_results: dict) -> dict[str, float | None]:
     """Compute category and overall averages for one model.
 
     :param dict model_results: Result payloads keyed by concrete MTEB task name.
-    :return dict[str, float]: Percentage scores keyed by reporting label.
+    :return dict[str, float | None]: Percentage scores keyed by reporting label.
     """
-    category_scores: dict[str, float] = {}
+    category_scores: dict[str, float | None] = {}
     all_task_scores = []
     for group in MTEB_TASK_GROUPS:
         scores = [
@@ -41,14 +67,44 @@ def _average_categories(model_results: dict) -> dict[str, float]:
         ]
         all_task_scores.extend(scores)
         category_scores[group.label] = (
-            round(100 * sum(scores) / len(scores), 2) if scores else 0
+            round(100 * sum(scores) / len(scores), 2) if scores else None
         )
     category_scores["Avg."] = (
         round(100 * sum(all_task_scores) / len(all_task_scores), 2)
         if all_task_scores
-        else 0
+        else None
     )
     return category_scores
+
+
+def _result_coverage(model_results: dict) -> dict[str, object]:
+    """Summarize concrete and logical MTEB result coverage.
+
+    :param dict model_results: Result payloads keyed by concrete task name.
+    :return dict[str, object]: Coverage counts, completeness, and missing results.
+    """
+    missing_results = [
+        f"{name}:{MTEB_TASK_SPECS_BY_EXECUTION_NAME[name].evaluation_split}"
+        for name in MTEB_ALL_EXECUTION_TASKS
+        if _execution_score(
+            model_results,
+            name,
+            MTEB_TASK_SPECS_BY_EXECUTION_NAME[name].evaluation_split,
+        )
+        is None
+    ]
+    logical_tasks = [task for group in MTEB_TASK_GROUPS for task in group.tasks]
+    logical_present = sum(
+        _task_score(model_results, task) is not None for task in logical_tasks
+    )
+    return {
+        "complete": not missing_results,
+        "concrete_present": len(MTEB_ALL_EXECUTION_TASKS) - len(missing_results),
+        "concrete_expected": len(MTEB_ALL_EXECUTION_TASKS),
+        "logical_present": logical_present,
+        "logical_expected": len(logical_tasks),
+        "missing_results": missing_results,
+    }
 
 
 def compute_table() -> None:
@@ -56,6 +112,11 @@ def compute_table() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--result_folder", required=True, type=Path)
     parser.add_argument("--model_name", required=True)
+    parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="Write explicitly marked partial aggregates instead of failing",
+    )
     args = parser.parse_args()
 
     all_results = {}
@@ -104,10 +165,19 @@ def compute_table() -> None:
                     results = json.load(f)
                     all_results[model_name][file_path.stem] = results
 
-    avg_results = {
-        model: _average_categories(model_results)
-        for model, model_results in all_results.items()
-    }
+    avg_results = {}
+    for model, model_results in all_results.items():
+        coverage = _result_coverage(model_results)
+        if not coverage["complete"] and not args.allow_partial:
+            missing = ", ".join(coverage["missing_results"])
+            raise RuntimeError(
+                f"MTEB results for {model} are incomplete: {missing}. "
+                "Rerun missing tasks or pass --allow-partial."
+            )
+        avg_results[model] = {
+            "scores": _average_categories(model_results),
+            "coverage": coverage,
+        }
 
     with result_file.open("w", encoding="utf-8") as f:
         json.dump(avg_results, f, indent=2)

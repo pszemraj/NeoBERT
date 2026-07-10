@@ -11,6 +11,7 @@ class MTEBTaskSpec:
 
     aggregation_name: str
     executable_names: tuple[str, ...] = ()
+    evaluation_split: str = "test"
 
     @property
     def execution_names(self) -> tuple[str, ...]:
@@ -121,7 +122,8 @@ MTEB_TASK_GROUPS = (
         "retrieval",
         "Retr.",
         (
-            *_tasks("MSMARCO", "ArguAna", "ClimateFEVER"),
+            MTEBTaskSpec("MSMARCO", evaluation_split="dev"),
+            *_tasks("ArguAna", "ClimateFEVER"),
             MTEBTaskSpec("CQADupstackRetrieval", CQADUPSTACK_TASKS),
             *_tasks(
                 "DBPedia",
@@ -165,6 +167,14 @@ MTEB_EXECUTION_TASKS_BY_TYPE = {
     **{group.key: group.execution_names for group in MTEB_TASK_GROUPS},
     "all": MTEB_ALL_EXECUTION_TASKS,
 }
+MTEB_TASK_SPECS_BY_EXECUTION_NAME = {
+    execution_name: task
+    for group in MTEB_TASK_GROUPS
+    for task in group.tasks
+    for execution_name in task.execution_names
+}
+if len(MTEB_TASK_SPECS_BY_EXECUTION_NAME) != len(MTEB_ALL_EXECUTION_TASKS):
+    raise RuntimeError("MTEB execution task names must be unique across the registry.")
 
 
 def expand_mteb_task_name(name: str) -> tuple[str, ...] | None:

@@ -17,6 +17,7 @@ from neobert.config import ConfigLoader
 from neobert.mteb_tasks import (
     MTEB_ALL_EXECUTION_TASKS,
     MTEB_EXECUTION_TASKS_BY_TYPE,
+    MTEB_TASK_SPECS_BY_EXECUTION_NAME,
     expand_mteb_task_name,
 )
 from neobert.model import NeoBERTConfig, NeoBERTForMTEB
@@ -89,6 +90,17 @@ def _resolve_mteb_tasks(cfg: Any) -> list[str]:
             "`--task_types` (for example 'all', 'sts', or 'MSMARCO')."
         )
     return resolved
+
+
+def _parse_task_type_override(value: str | None) -> list[str] | None:
+    """Preserve omission separately from an explicit ``all`` override.
+
+    :param str | None value: Raw CLI task selector.
+    :return list[str] | None: Parsed override, or ``None`` when omitted.
+    """
+    if value is None:
+        return None
+    return [token.strip() for token in value.split(",")]
 
 
 def _load_mteb_encoder_weights(
@@ -219,7 +231,7 @@ def evaluate_mteb(cfg: Any) -> None:
     # Evaluate
     for task in selected_tasks:
         logger.info(f"Running task: {task}")
-        eval_splits = ["dev"] if task == "MSMARCO" else ["test"]
+        eval_splits = [MTEB_TASK_SPECS_BY_EXECUTION_NAME[task].evaluation_split]
         evaluation = MTEB(tasks=[task], task_langs=["en"])
         with torch.autocast(device_type=device, dtype=torch.bfloat16):
             evaluation.run(
@@ -239,9 +251,7 @@ def main() -> None:
     parser.add_argument(
         "--model_name_or_path", type=str, required=True, help="Model path"
     )
-    parser.add_argument(
-        "--task_types", type=str, default="all", help="Task types to evaluate"
-    )
+    parser.add_argument("--task_types", type=str, help="Task types to evaluate")
     parser.add_argument(
         "--output_folder",
         type=Path,
@@ -253,7 +263,7 @@ def main() -> None:
     # Load configuration
     config = ConfigLoader.load(args.config, remaining)
     config.trainer.output_dir = args.model_name_or_path
-    config.task_types = args.task_types.split(",") if args.task_types != "all" else None
+    config.task_types = _parse_task_type_override(args.task_types)
     config.output_folder = args.output_folder
 
     # Run MTEB evaluation

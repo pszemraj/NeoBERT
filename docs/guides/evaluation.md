@@ -72,6 +72,8 @@ python scripts/evaluation/run_mteb.py \
 - Runner loads checkpoints from `<model_name_or_path>/checkpoints/`.
 - Task family selection is read from config field `mteb_task_type`.
 - `--task_types` can override config selection at launch time. It accepts `classification`, `clustering`, `pair_classification`, `reranking`, `retrieval`, `sts`, `summarization`, `all`, or explicit task names as a comma-separated list.
+- Omitting `--task_types` preserves `mteb_task_type`; explicitly passing `--task_types all` always selects the full registry.
+- Task split metadata comes from the shared registry. MSMARCO runs and aggregates its `dev` score; other registered tasks currently use `test`.
 - `mteb_pooling` defaults to mask-aware average pooling (`avg`; `mean` is accepted as an alias). Set it to `cls` for first-token pooling.
 - Output defaults to `outputs/<run>/mteb/<ckpt>/<max_length>/`; pass `--output_folder` to choose another result directory.
 - If using a local tokenizer, point `tokenizer.name` to that path.
@@ -79,7 +81,7 @@ python scripts/evaluation/run_mteb.py \
 
 ### Aggregate MTEB results
 
-Point the aggregator at the directory containing checkpoint result folders. It writes `<model-name>_avg_table.json` in that directory with per-category and overall scores.
+Point the aggregator at the directory containing checkpoint result folders. It writes `<model-name>_avg_table.json` with separate `scores` and `coverage` objects for each model/checkpoint. The default is fail-closed: every concrete result must be present on its configured split, and all CQADupstack variants must exist before that logical task contributes. Use `--allow-partial` only for exploratory subsets; missing categories are `null`, coverage is marked incomplete, and missing task/split pairs are listed instead of silently shrinking the denominator.
 
 ```bash
 python scripts/evaluation/avg_mteb.py \
