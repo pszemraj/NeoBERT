@@ -138,7 +138,7 @@ python scripts/pretraining/pretrain.py \
   --trainer.resume_from_checkpoint latest
 ```
 
-Confirm in logs that startup loads `outputs/.../checkpoints/<step>/` and that training resumes from the saved global step instead of step 0.
+Confirm in logs that startup loads `outputs/.../checkpoints/<step>/` and that training resumes from the saved global step instead of step 0. A resumable step contains `accelerate/`, `optimizer_param_names.json`, and `checkpoint_complete.json`. The completion marker is written last; `latest` ignores newer numeric directories left incomplete by an interrupted save, preserves zero-padded step names, and explicit selection of an incomplete step fails with the missing artifacts listed.
 
 Resume treats checkpoint metadata as authoritative for model shape/semantics, tokenizer identity, masking, objective fields, and the pretraining per-device batch size. If the current launch config disagrees with the checkpoint's `config.yaml`, the checkpoint values win before tokenizer/model/dataloader construction, and `tokenizer/` inside the checkpoint is used when present. The batch size cannot change because the mid-epoch data cursor counts batches; reinterpreting it under a different batch size would skip or replay samples. Other `trainer.*` runtime/performance knobs such as gradient accumulation, precision, compile flags, loss path, and step budget stay controlled by the current launch config.
 

@@ -1,5 +1,6 @@
 """Checkpoint I/O helpers for NeoBERT training and evaluation."""
 
+import json
 import logging
 import shutil
 from pathlib import Path
@@ -11,6 +12,9 @@ from torch import nn
 
 MODEL_WEIGHTS_NAME = "model.safetensors"
 ACCELERATE_STATE_DIR = "accelerate"
+OPTIMIZER_PARAM_NAMES_MANIFEST = "optimizer_param_names.json"
+CHECKPOINT_COMPLETE_NAME = "checkpoint_complete.json"
+CHECKPOINT_COMPLETE_VERSION = 1
 logger = logging.getLogger(__name__)
 _RUNTIME_PREFIXES = ("_orig_mod.", "module.")
 _DEEPSPEED_TAG_DIR_PATTERNS = (
@@ -19,6 +23,104 @@ _DEEPSPEED_TAG_DIR_PATTERNS = (
     "bf16_zero_pp_rank_*_mp_rank_*_optim_states.pt",
 )
 _DEEPSPEED_NESTED_TAG_CANDIDATES = ("pytorch_model", "model")
+
+
+def _checkpoint_resume_artifact_errors(checkpoint_path: Path) -> list[str]:
+    """Return missing resume-critical artifacts other than the completion marker.
+
+    :param Path checkpoint_path: Candidate step checkpoint directory.
+    :return list[str]: Human-readable validation errors.
+    """
+    errors: list[str] = []
+    if not checkpoint_path.is_dir():
+        return ["step directory is missing"]
+    if not (checkpoint_path / ACCELERATE_STATE_DIR).is_dir():
+        errors.append(f"missing {ACCELERATE_STATE_DIR}/ state directory")
+    if not (checkpoint_path / OPTIMIZER_PARAM_NAMES_MANIFEST).is_file():
+        errors.append(f"missing {OPTIMIZER_PARAM_NAMES_MANIFEST}")
+    return errors
+
+
+def checkpoint_resume_errors(checkpoint_path: str | Path) -> list[str]:
+    """Return reasons a training checkpoint cannot be resumed safely.
+
+    :param str | Path checkpoint_path: Candidate step checkpoint directory.
+    :return list[str]: Human-readable validation errors.
+    """
+    checkpoint_path = Path(checkpoint_path)
+    errors = _checkpoint_resume_artifact_errors(checkpoint_path)
+    marker_path = checkpoint_path / CHECKPOINT_COMPLETE_NAME
+    if not marker_path.is_file():
+        errors.append(f"missing {CHECKPOINT_COMPLETE_NAME}")
+        return errors
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        errors.append(f"invalid {CHECKPOINT_COMPLETE_NAME}: {exc}")
+        return errors
+    if marker.get("format_version") != CHECKPOINT_COMPLETE_VERSION:
+        errors.append(
+            f"unsupported completion marker version {marker.get('format_version')!r}"
+        )
+    if marker.get("complete") is not True:
+        errors.append("completion marker does not declare complete=true")
+    return errors
+
+
+def is_resumable_checkpoint(checkpoint_path: str | Path) -> bool:
+    """Return whether a step checkpoint has complete resumable state.
+
+    :param str | Path checkpoint_path: Candidate step checkpoint directory.
+    :return bool: True when all resume-critical artifacts are complete.
+    """
+    return not checkpoint_resume_errors(checkpoint_path)
+
+
+def invalidate_checkpoint_completion(checkpoint_path: str | Path) -> None:
+    """Remove completion metadata before creating or overwriting a checkpoint.
+
+    :param str | Path checkpoint_path: Step checkpoint directory.
+    """
+    checkpoint_path = Path(checkpoint_path)
+    for name in (CHECKPOINT_COMPLETE_NAME, f".{CHECKPOINT_COMPLETE_NAME}.tmp"):
+        try:
+            (checkpoint_path / name).unlink()
+        except FileNotFoundError:
+            pass
+
+
+def mark_checkpoint_complete(
+    checkpoint_path: str | Path,
+    *,
+    task: str,
+) -> Path:
+    """Atomically mark a checkpoint complete after validating resume artifacts.
+
+    :param str | Path checkpoint_path: Step checkpoint directory.
+    :param str task: Training task that produced the checkpoint.
+    :return Path: Written completion marker path.
+    :raises RuntimeError: If resume-critical artifacts are missing.
+    """
+    checkpoint_path = Path(checkpoint_path)
+    errors = _checkpoint_resume_artifact_errors(checkpoint_path)
+    if errors:
+        raise RuntimeError(
+            f"Cannot mark incomplete checkpoint {checkpoint_path}: " + "; ".join(errors)
+        )
+    marker_path = checkpoint_path / CHECKPOINT_COMPLETE_NAME
+    temporary_path = checkpoint_path / f".{CHECKPOINT_COMPLETE_NAME}.tmp"
+    payload = {
+        "format_version": CHECKPOINT_COMPLETE_VERSION,
+        "complete": True,
+        "task": str(task),
+        "step": checkpoint_path.name,
+    }
+    temporary_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary_path.replace(marker_path)
+    return marker_path
 
 
 def _unwrap_compile_wrappers(model: nn.Module) -> nn.Module:

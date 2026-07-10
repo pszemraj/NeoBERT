@@ -27,8 +27,10 @@ from transformers import DataCollatorWithPadding
 # Configuration
 from neobert.checkpointing import (
     MODEL_WEIGHTS_NAME,
+    invalidate_checkpoint_completion,
     load_deepspeed_fp32_state_dict,
     load_step_checkpoint_state_dict,
+    mark_checkpoint_complete,
     prune_step_checkpoints as _prune_step_checkpoints,
     resolve_accelerate_state_dir,
     resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
@@ -926,11 +928,17 @@ def trainer(cfg: Config) -> None:
         )
         step_tag = str(int(metrics["train/steps"]))
         checkpoint_path = checkpoint_dir / step_tag
+        if accelerator.is_main_process:
+            invalidate_checkpoint_completion(checkpoint_path)
+        accelerator.wait_for_everyone()
         save_accelerate_state(accelerator, checkpoint_path)
         if accelerator.is_main_process:
             save_optimizer_param_name_manifest(optimizer, checkpoint_path)
             _save_contrastive_checkpoint_metadata(cfg, tokenizer, checkpoint_path)
         _save_portable_checkpoint_weights(model, accelerator, checkpoint_path)
+        accelerator.wait_for_everyone()
+        if accelerator.is_main_process:
+            mark_checkpoint_complete(checkpoint_path, task="contrastive")
         accelerator.wait_for_everyone()
         print(f"Done on rank {accelerator.process_index}")
         sys.exit(0)
@@ -1245,6 +1253,9 @@ def trainer(cfg: Config) -> None:
                 checkpoint_path = checkpoint_dir / step_tag
                 # Save resumable optimizer/scheduler/metric state + portable weights
                 # to a single step directory.
+                if accelerator.is_main_process:
+                    invalidate_checkpoint_completion(checkpoint_path)
+                accelerator.wait_for_everyone()
                 save_accelerate_state(accelerator, checkpoint_path)
                 accelerator.wait_for_everyone()
                 if accelerator.is_main_process:
@@ -1253,6 +1264,9 @@ def trainer(cfg: Config) -> None:
                         cfg, tokenizer, checkpoint_path
                     )
                 _save_portable_checkpoint_weights(model, accelerator, checkpoint_path)
+                accelerator.wait_for_everyone()
+                if accelerator.is_main_process:
+                    mark_checkpoint_complete(checkpoint_path, task="contrastive")
                 accelerator.wait_for_everyone()
 
                 limit = _resolve_checkpoint_retention_limit(cfg)

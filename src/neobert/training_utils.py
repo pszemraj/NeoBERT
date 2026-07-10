@@ -5,7 +5,6 @@ from copy import deepcopy
 import json
 import logging
 import os
-import re
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Tuple
 
@@ -14,7 +13,12 @@ from accelerate import Accelerator
 from accelerate.state import AcceleratorState, GradientState
 from accelerate.utils import DistributedType
 
-from neobert.checkpointing import strip_runtime_prefixes
+from neobert.checkpointing import (
+    OPTIMIZER_PARAM_NAMES_MANIFEST,
+    checkpoint_resume_errors,
+    is_resumable_checkpoint,
+    strip_runtime_prefixes,
+)
 
 try:
     from transformers import BatchEncoding
@@ -22,8 +26,6 @@ except Exception:  # pragma: no cover - transformers import should succeed in re
     BatchEncoding = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
-
-OPTIMIZER_PARAM_NAMES_MANIFEST = "optimizer_param_names.json"
 
 try:
     from torch.distributed.tensor import DTensor
@@ -1287,23 +1289,44 @@ def _resolve_resume_checkpoint(
                 candidate = output_dir_path / resume_path
                 if candidate.exists():
                     resume_path = candidate
+            errors = checkpoint_resume_errors(resume_path)
+            if errors:
+                raise RuntimeError(
+                    f"Checkpoint {resume_path} is not resumable: " + "; ".join(errors)
+                )
             base = resume_path.name
             iteration = int(base) + 1 if base.isdigit() else 0
             return str(resume_path), iteration
 
     if not checkpoint_dir_path.exists() or not any(checkpoint_dir_path.iterdir()):
-        return None, 0
+        raise FileNotFoundError(
+            f"No checkpoints found under requested resume root {checkpoint_dir_path}."
+        )
 
-    folders = [
+    numeric_folders = [
         folder
         for folder in checkpoint_dir_path.iterdir()
         if folder.is_dir() and folder.name.isdigit()
     ]
+    folders = [folder for folder in numeric_folders if is_resumable_checkpoint(folder)]
     if not folders:
-        return None, 0
+        if numeric_folders:
+            details = "; ".join(
+                f"{folder.name}: {', '.join(checkpoint_resume_errors(folder))}"
+                for folder in sorted(
+                    numeric_folders,
+                    key=lambda item: (int(item.name), item.name),
+                )
+            )
+            raise RuntimeError(
+                f"No complete resumable checkpoints found under {checkpoint_dir_path} "
+                f"({details})."
+            )
+        raise FileNotFoundError(
+            "No numbered checkpoints found under requested resume root "
+            f"{checkpoint_dir_path}."
+        )
 
-    latest_step = max(
-        int(re.findall(r"[\/]?([0-9]+)(?=[^\/]*$)", folder.name)[0])
-        for folder in folders
-    )
-    return str(checkpoint_dir_path / str(latest_step)), latest_step + 1
+    latest_folder = max(folders, key=lambda folder: (int(folder.name), folder.name))
+    latest_step = int(latest_folder.name)
+    return str(latest_folder), latest_step + 1

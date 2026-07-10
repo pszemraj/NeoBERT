@@ -31,7 +31,9 @@ from transformers import (
 
 from neobert.checkpointing import (
     MODEL_WEIGHTS_NAME,
+    invalidate_checkpoint_completion,
     load_step_checkpoint_state_dict,
+    mark_checkpoint_complete,
     prune_step_checkpoints as _prune_step_checkpoints,
     resolve_accelerate_state_dir,
     resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
@@ -715,6 +717,9 @@ def save_training_checkpoint(
     checkpoint_path = resume_checkpoint_dir / checkpoint_tag
 
     # Save resumable Accelerate state for true optimizer/scheduler resume.
+    if accelerator.is_main_process:
+        invalidate_checkpoint_completion(checkpoint_path)
+    accelerator.wait_for_everyone()
     save_accelerate_state(accelerator, checkpoint_path)
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
@@ -724,6 +729,9 @@ def save_training_checkpoint(
         # corrupts it without this manifest).
         save_optimizer_param_name_manifest(optimizer, checkpoint_path)
     save_portable_checkpoint_weights(model, accelerator, checkpoint_path)
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        mark_checkpoint_complete(checkpoint_path, task="glue")
     accelerator.wait_for_everyone()
 
     if accelerator.is_main_process:

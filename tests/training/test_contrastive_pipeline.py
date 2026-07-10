@@ -127,6 +127,7 @@ class TestContrastivePipeline:
         assert (step_dir / "model.safetensors").is_file()
         assert (step_dir / "config.yaml").is_file()
         assert (step_dir / "optimizer_param_names.json").is_file()
+        assert (step_dir / "checkpoint_complete.json").is_file()
         assert (step_dir / "tokenizer").is_dir()
         assert not (tmp_path / "model_checkpoints").exists()
 

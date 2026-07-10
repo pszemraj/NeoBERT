@@ -39,6 +39,8 @@ from tqdm import tqdm
 from transformers import BatchEncoding, PreTrainedTokenizerBase
 
 from neobert.checkpointing import (
+    invalidate_checkpoint_completion,
+    mark_checkpoint_complete,
     prune_step_checkpoints as _prune_step_checkpoints,
     resolve_accelerate_state_dir,
     resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
@@ -2859,6 +2861,9 @@ def trainer(cfg: Config) -> None:
                 if should_save:
                     step_tag = str(metrics["train/steps"])
                     checkpoint_path = checkpoint_dir / step_tag
+                    if accelerator.is_main_process:
+                        invalidate_checkpoint_completion(checkpoint_path)
+                    accelerator.wait_for_everyone()
                     save_accelerate_state(accelerator, checkpoint_path)
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
@@ -2894,6 +2899,12 @@ def trainer(cfg: Config) -> None:
                             "weights, config, and tokenizer artifacts)."
                         )
 
+                    accelerator.wait_for_everyone()
+                    if accelerator.is_main_process:
+                        mark_checkpoint_complete(
+                            checkpoint_path,
+                            task="pretraining",
+                        )
                     accelerator.wait_for_everyone()
 
                     if checkpoint_retention_limit > 0 and accelerator.is_main_process:

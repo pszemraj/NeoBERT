@@ -181,6 +181,7 @@ class TestGLUETaskSpecific:
                     if should_exist:
                         assert (step_dir / MODEL_WEIGHTS_NAME).exists()
                         assert (step_dir / OPTIMIZER_PARAM_NAMES_MANIFEST).exists()
+                        assert (step_dir / "checkpoint_complete.json").exists()
                 assert not (Path(tmpdir) / "model_checkpoints").exists()
 
     def test_glue_schedule_and_save_strategy_semantics(self):

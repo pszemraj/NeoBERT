@@ -10,10 +10,16 @@ from torch import nn
 
 from neobert.checkpointing import (
     ACCELERATE_STATE_DIR,
+    CHECKPOINT_COMPLETE_NAME,
     MODEL_WEIGHTS_NAME,
+    OPTIMIZER_PARAM_NAMES_MANIFEST,
+    checkpoint_resume_errors,
+    invalidate_checkpoint_completion,
+    is_resumable_checkpoint,
     load_deepspeed_fp32_state_dict,
     load_model_safetensors,
     load_step_checkpoint_state_dict,
+    mark_checkpoint_complete,
     model_state_dict_for_safetensors,
     resolve_accelerate_state_dir,
     resolve_deepspeed_checkpoint_root_and_tag,
@@ -55,6 +61,32 @@ def _make_small_lm() -> NeoBERTLMHead:
         rms_norm=True,
     )
     return NeoBERTLMHead(config)
+
+
+def test_checkpoint_completion_marker_validates_resume_artifacts(
+    tmp_path: Path,
+) -> None:
+    """Only checkpoints with state, manifest, and final marker are resumable."""
+    checkpoint_path = tmp_path / "00050"
+    checkpoint_path.mkdir()
+
+    assert not is_resumable_checkpoint(checkpoint_path)
+    with pytest.raises(RuntimeError, match="missing accelerate/ state"):
+        mark_checkpoint_complete(checkpoint_path, task="pretraining")
+
+    (checkpoint_path / ACCELERATE_STATE_DIR).mkdir()
+    (checkpoint_path / OPTIMIZER_PARAM_NAMES_MANIFEST).write_text(
+        "{}\n", encoding="utf-8"
+    )
+    marker_path = mark_checkpoint_complete(checkpoint_path, task="pretraining")
+
+    assert marker_path == checkpoint_path / CHECKPOINT_COMPLETE_NAME
+    assert checkpoint_resume_errors(checkpoint_path) == []
+    assert is_resumable_checkpoint(checkpoint_path)
+
+    invalidate_checkpoint_completion(checkpoint_path)
+    assert not marker_path.exists()
+    assert not is_resumable_checkpoint(checkpoint_path)
 
 
 def test_model_state_dict_for_safetensors_strips_compile_prefixes() -> None:

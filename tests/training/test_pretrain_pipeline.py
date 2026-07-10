@@ -12,7 +12,13 @@ from accelerate.utils import DistributedType
 from datasets import Dataset, DatasetDict
 from transformers import BatchEncoding
 
-from neobert.checkpointing import MODEL_WEIGHTS_NAME, load_model_safetensors
+from neobert.checkpointing import (
+    ACCELERATE_STATE_DIR,
+    MODEL_WEIGHTS_NAME,
+    OPTIMIZER_PARAM_NAMES_MANIFEST,
+    load_model_safetensors,
+    mark_checkpoint_complete,
+)
 from neobert.config import Config, ConfigLoader
 from neobert.dataloader import get_dataloader
 from neobert.pretraining.masked_objective import MaskedObjectiveOut
@@ -785,6 +791,11 @@ class TestPretrainComponents:
         checkpoint_cfg = Config()
         checkpoint_cfg.dataset.eval_samples = 17
         ConfigLoader.save(checkpoint_cfg, str(checkpoint_dir / "config.yaml"))
+        (checkpoint_dir / ACCELERATE_STATE_DIR).mkdir()
+        (checkpoint_dir / OPTIMIZER_PARAM_NAMES_MANIFEST).write_text(
+            "{}\n", encoding="utf-8"
+        )
+        mark_checkpoint_complete(checkpoint_dir, task="pretraining")
 
         runtime_cfg = Config()
         runtime_cfg.trainer.output_dir = str(output_dir)

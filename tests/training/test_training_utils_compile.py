@@ -14,6 +14,11 @@ from accelerate.state import AcceleratorState, GradientState
 from accelerate.utils import DataLoaderConfiguration, DistributedType
 
 from neobert.config import Config, ConfigLoader
+from neobert.checkpointing import (
+    ACCELERATE_STATE_DIR,
+    OPTIMIZER_PARAM_NAMES_MANIFEST,
+    mark_checkpoint_complete,
+)
 from neobert.model import NeoBERT, NeoBERTConfig
 from neobert.optimizer import get_optimizer
 from neobert.training_utils import (
@@ -42,6 +47,9 @@ def test_numeric_resume_selector_resolves_under_checkpoint_root(tmp_path: Path) 
     checkpoint_dir = output_dir / "checkpoints"
     expected = checkpoint_dir / "100"
     expected.mkdir(parents=True)
+    (expected / ACCELERATE_STATE_DIR).mkdir()
+    (expected / OPTIMIZER_PARAM_NAMES_MANIFEST).write_text("{}\n", encoding="utf-8")
+    mark_checkpoint_complete(expected, task="pretraining")
     (output_dir / "100").mkdir()
 
     resume_path, iteration = _resolve_resume_checkpoint(
@@ -50,6 +58,43 @@ def test_numeric_resume_selector_resolves_under_checkpoint_root(tmp_path: Path) 
 
     assert Path(resume_path) == expected
     assert iteration == 101
+
+
+def test_latest_resume_preserves_zero_padding_and_skips_incomplete(
+    tmp_path: Path,
+) -> None:
+    """Latest returns the exact newest complete directory spelling."""
+    output_dir = tmp_path / "run"
+    checkpoint_dir = output_dir / "checkpoints"
+    complete = checkpoint_dir / "00050"
+    incomplete = checkpoint_dir / "60"
+    complete.mkdir(parents=True)
+    incomplete.mkdir()
+    (complete / ACCELERATE_STATE_DIR).mkdir()
+    (complete / OPTIMIZER_PARAM_NAMES_MANIFEST).write_text("{}\n", encoding="utf-8")
+    mark_checkpoint_complete(complete, task="pretraining")
+    (incomplete / ACCELERATE_STATE_DIR).mkdir()
+
+    resume_path, iteration = _resolve_resume_checkpoint(
+        "latest", str(checkpoint_dir), str(output_dir)
+    )
+
+    assert Path(resume_path) == complete
+    assert iteration == 51
+
+
+def test_explicit_incomplete_resume_is_rejected(tmp_path: Path) -> None:
+    """Explicit selectors cannot bypass checkpoint completion validation."""
+    output_dir = tmp_path / "run"
+    checkpoint_dir = output_dir / "checkpoints"
+    incomplete = checkpoint_dir / "60"
+    incomplete.mkdir(parents=True)
+
+    with pytest.raises(RuntimeError, match="not resumable"):
+        _resolve_resume_checkpoint("60", str(checkpoint_dir), str(output_dir))
+
+    with pytest.raises(RuntimeError, match="No complete resumable checkpoints"):
+        _resolve_resume_checkpoint("latest", str(checkpoint_dir), str(output_dir))
 
 
 def _make_cfg() -> Config:
