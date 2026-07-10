@@ -64,13 +64,13 @@ def get_optimizer(
     optimizer_name = kwargs.pop("name").lower()
 
     logger.info(f"Initializing optimizer: {optimizer_name}")
+    if muon_config is not None and optimizer_name in {"adam", "adamw"}:
+        logger.warning(
+            f"optimizer.muon_config provided but optimizer is {optimizer_name}; ignoring"
+        )
 
     match optimizer_name:
         case "adamw":
-            if muon_config is not None:
-                logger.warning(
-                    "optimizer.muon_config provided but optimizer is adamw; ignoring"
-                )
             weight_decay = kwargs.pop("weight_decay", 0.0)
             param_groups = _build_adamw_param_groups(model, weight_decay)
             optimizer = AdamW(param_groups, **kwargs)
@@ -78,10 +78,6 @@ def get_optimizer(
             return optimizer
 
         case "adam":
-            if muon_config is not None:
-                logger.warning(
-                    "optimizer.muon_config provided but optimizer is adam; ignoring"
-                )
             optimizer = Adam(model.parameters(), **kwargs)
             logger.info(f"Adam initialized with lr={kwargs.get('lr', 'default')}")
             return optimizer

@@ -15,9 +15,27 @@ from torch.distributed.checkpoint.state_dict import (
     set_optimizer_state_dict,
 )
 
+from neobert.config import MuonConfig
 from neobert.model import NeoBERT, NeoBERTConfig, NeoBERTLMHead
 from neobert.optimizer import MuonClipConfig, MuonClipOptimizer
 from neobert.warnings import NeoBERTWarning
+
+
+def _max_param_diff(
+    model_a: torch.nn.Module, model_b: torch.nn.Module
+) -> tuple[float, str]:
+    """Return the largest corresponding parameter difference and its name."""
+    max_diff = 0.0
+    max_name = ""
+    for (name, param), (other_name, other_param) in zip(
+        model_a.named_parameters(), model_b.named_parameters(), strict=True
+    ):
+        assert other_name == name
+        diff = float((param - other_param).abs().max().item())
+        if diff > max_diff:
+            max_diff = diff
+            max_name = name
+    return max_diff, max_name
 
 
 def _neobert_polar_express_reference(
@@ -350,6 +368,19 @@ class TestMuonClipConfig:
         assert config.norm_factor == "neobert"
         assert config.param_policy == "hidden_2d"
 
+    def test_runtime_config_inherits_shared_muon_defaults(self):
+        """Runtime config should source shared fields from ``MuonConfig``."""
+        configured = MuonConfig()
+        runtime = MuonClipConfig()
+
+        assert isinstance(runtime, MuonConfig)
+        for field_name in configured.__dataclass_fields__:
+            assert getattr(runtime, field_name) == getattr(configured, field_name)
+
+        runtime_override = MuonClipConfig(muon_beta=0.8, lr=2e-4)
+        assert runtime_override.muon_beta == pytest.approx(0.8)
+        assert runtime_override.lr == pytest.approx(2e-4)
+
     def test_invalid_numeric_fields_raise(self):
         """Test invalid numeric config values fail fast."""
         cases = [
@@ -622,32 +653,21 @@ class TestMuonClipOptimizer:
         with pytest.raises(RuntimeError, match="state semantics changed"):
             validate_optimizer_param_name_manifest(muon_only, tmp_path)
 
-    def test_parameter_grouping(self, model):
-        """Default grouping should keep embeddings/output weights on Adam."""
-        model_instance, config = model
-
-        muon_config = MuonClipConfig(enable_clipping=False)
-        optimizer = MuonClipOptimizer(model_instance, config, muon_config)
-
-        muon_group = next(g for g in optimizer.param_groups if g["use_muon"])
-        muon_params = set(muon_group["params"])
-        for p in muon_group["params"]:
-            assert p.ndim == 2
-
-        assert muon_group["param_policy"] == "hidden_2d"
-        assert model_instance.encoder.weight not in muon_params
-        if hasattr(model_instance, "positional_embedding"):
-            assert model_instance.positional_embedding.weight not in muon_params
-        assert model_instance.transformer_encoder[0].qkv.weight in muon_params
-
-        adam_groups = [g for g in optimizer.param_groups if not g["use_muon"]]
-        adam_params = {param for group in adam_groups for param in group["params"]}
-        assert model_instance.encoder.weight in adam_params
-        if hasattr(model_instance, "positional_embedding"):
-            assert model_instance.positional_embedding.weight in adam_params
-
-    def test_grouping_all_2d_routes_embeddings_and_lm_head_to_muon(self):
-        """all_2d should restore v0.1.3-style Muon scope."""
+    @pytest.mark.parametrize(
+        ("param_policy", "with_lm_head", "embeddings_use_muon"),
+        [
+            pytest.param("hidden_2d", False, False, id="hidden-base-model"),
+            pytest.param("hidden_2d", True, False, id="hidden-lm-head"),
+            pytest.param("all_2d", True, True, id="all-2d-lm-head"),
+        ],
+    )
+    def test_parameter_grouping(
+        self,
+        param_policy: str,
+        with_lm_head: bool,
+        embeddings_use_muon: bool,
+    ):
+        """Parameter policy should route embeddings and output weights correctly."""
         config = NeoBERTConfig(
             hidden_size=64,
             num_hidden_layers=2,
@@ -660,56 +680,34 @@ class TestMuonClipOptimizer:
             rope=False,
             tie_word_embeddings=False,
         )
-        model = NeoBERTLMHead(config)
+        model = NeoBERTLMHead(config) if with_lm_head else NeoBERT(config)
         optimizer = MuonClipOptimizer(
             model,
             config,
-            MuonClipConfig(enable_clipping=False, param_policy="all_2d"),
+            MuonClipConfig(enable_clipping=False, param_policy=param_policy),
         )
 
         muon_group = next(g for g in optimizer.param_groups if g["use_muon"])
         muon_params = set(muon_group["params"])
         adam_groups = [g for g in optimizer.param_groups if not g["use_muon"]]
         adam_params = {param for group in adam_groups for param in group["params"]}
+        model_base = model.model if isinstance(model, NeoBERTLMHead) else model
 
-        assert model.model.encoder.weight in muon_params
-        assert model.decoder.weight in muon_params
-        assert model.model.encoder.weight not in adam_params
-        assert model.decoder.weight not in adam_params
-        assert model.model.transformer_encoder[0].qkv.weight in muon_params
-
-    def test_grouping_hidden_2d_excludes_embeddings_and_lm_head(self):
-        """hidden_2d should keep embeddings/output projection in Adam."""
-        config = NeoBERTConfig(
-            hidden_size=64,
-            num_hidden_layers=2,
-            num_attention_heads=4,
-            intermediate_size=128,
-            vocab_size=257,
-            max_length=64,
-            attn_backend="sdpa",
-            hidden_act="gelu",
-            rope=False,
-            tie_word_embeddings=False,
-        )
-        model = NeoBERTLMHead(config)
-        optimizer = MuonClipOptimizer(
-            model,
-            config,
-            MuonClipConfig(enable_clipping=False, param_policy="hidden_2d"),
-        )
-
-        muon_group = next(g for g in optimizer.param_groups if g["use_muon"])
-        muon_params = set(muon_group["params"])
-        adam_groups = [g for g in optimizer.param_groups if not g["use_muon"]]
-        adam_params = {param for group in adam_groups for param in group["params"]}
-
-        assert muon_group["param_policy"] == "hidden_2d"
-        assert model.model.encoder.weight not in muon_params
-        assert model.model.encoder.weight in adam_params
-        assert model.decoder.weight not in muon_params
-        assert model.decoder.weight in adam_params
-        assert model.model.transformer_encoder[0].qkv.weight in muon_params
+        assert muon_group["param_policy"] == param_policy
+        assert all(param.ndim == 2 for param in muon_params)
+        assert (model_base.encoder.weight in muon_params) is embeddings_use_muon
+        assert (model_base.encoder.weight in adam_params) is not embeddings_use_muon
+        if hasattr(model_base, "positional_embedding"):
+            assert (
+                model_base.positional_embedding.weight in muon_params
+            ) is embeddings_use_muon
+            assert (
+                model_base.positional_embedding.weight in adam_params
+            ) is not embeddings_use_muon
+        assert model_base.transformer_encoder[0].qkv.weight in muon_params
+        if isinstance(model, NeoBERTLMHead):
+            assert (model.decoder.weight in muon_params) is embeddings_use_muon
+            assert (model.decoder.weight in adam_params) is not embeddings_use_muon
 
     def test_adam_fallback_splits_decay_and_no_decay(self):
         """MuonClip Adam fallback should mirror the repo's AdamW decay policy."""
@@ -799,8 +797,9 @@ class TestMuonClipOptimizer:
             normalized = optimizer._normalize_muon_update(update, param_shape)
             assert torch.allclose(normalized, update * expected_scale)
 
-    def test_default_muon_step_matches_neobert_polar_step(self):
-        """Default Muon settings should match the NeoBERT default step."""
+    @pytest.mark.parametrize("nesterov", [True, False])
+    def test_muon_step_matches_neobert_polar_step(self, nesterov: bool):
+        """Muon momentum variants should match the NeoBERT reference step."""
         torch.manual_seed(0)
         config = NeoBERTConfig(
             hidden_size=16,
@@ -817,6 +816,7 @@ class TestMuonClipOptimizer:
         muon_config = MuonClipConfig(
             lr=1e-3,
             muon_beta=0.95,
+            nesterov=nesterov,
             muon_decay=0.0,
             adam_decay=0.0,
             ns_steps=5,
@@ -824,54 +824,7 @@ class TestMuonClipOptimizer:
             orthogonalization="polar_express",
         )
         assert muon_config.norm_factor == "neobert"
-        assert muon_config.nesterov is True
-        optimizer = MuonClipOptimizer(model, config, muon_config)
-
-        target = model.transformer_encoder[0].wo.weight
-        grad = torch.randn_like(target)
-        initial = target.detach().clone()
-
-        for param in model.parameters():
-            if param.requires_grad:
-                param.grad = torch.zeros_like(param)
-        target.grad = grad.clone()
-
-        expected_update = _neobert_polar_express_reference(
-            grad,
-            steps=muon_config.ns_steps,
-            beta=muon_config.muon_beta,
-            nesterov=muon_config.nesterov,
-        )
-        expected = initial - muon_config.lr * expected_update
-
-        optimizer.step()
-        assert torch.allclose(target, expected, atol=1e-6, rtol=1e-6)
-
-    def test_non_nesterov_muon_step_uses_plain_momentum_buffer(self):
-        """Disabling Nesterov should orthogonalize the raw momentum buffer."""
-        torch.manual_seed(0)
-        config = NeoBERTConfig(
-            hidden_size=16,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            intermediate_size=32,
-            vocab_size=64,
-            max_length=16,
-            attn_backend="sdpa",
-            hidden_act="gelu",
-            rope=False,
-        )
-        model = NeoBERT(config)
-        muon_config = MuonClipConfig(
-            lr=1e-3,
-            muon_beta=0.95,
-            nesterov=False,
-            muon_decay=0.0,
-            adam_decay=0.0,
-            ns_steps=5,
-            enable_clipping=False,
-            orthogonalization="polar_express",
-        )
+        assert muon_config.nesterov is nesterov
         optimizer = MuonClipOptimizer(model, config, muon_config)
 
         target = model.transformer_encoder[0].wo.weight
@@ -1277,18 +1230,7 @@ class TestMuonClipOptimizer:
         optimizer_clone.step()
         optimizer_clone.zero_grad()
 
-        max_diff = 0.0
-        max_name = ""
-        for (name, param), (clone_name, clone_param) in zip(
-            model_instance.named_parameters(),
-            model_clone.named_parameters(),
-            strict=True,
-        ):
-            assert clone_name == name
-            diff = float((param - clone_param).abs().max().item())
-            if diff > max_diff:
-                max_diff = diff
-                max_name = name
+        max_diff, max_name = _max_param_diff(model_instance, model_clone)
 
         assert max_diff <= 5e-5, (
             "Distributed checkpoint optimizer restore drifted on the next update: "
@@ -1364,18 +1306,7 @@ class TestMuonClipOptimizer:
         optimizer_clone.step()
         optimizer_clone.zero_grad()
 
-        max_diff = 0.0
-        max_name = ""
-        for (name, param), (clone_name, clone_param) in zip(
-            model_instance.named_parameters(),
-            model_clone.named_parameters(),
-            strict=True,
-        ):
-            assert clone_name == name
-            diff = float((param - clone_param).abs().max().item())
-            if diff > max_diff:
-                max_diff = diff
-                max_name = name
+        max_diff, max_name = _max_param_diff(model_instance, model_clone)
 
         assert max_diff < 1e-6, (
             f"Next Muon step diverged after DCP reload at {max_name}"
@@ -1434,18 +1365,7 @@ class TestMuonClipOptimizer:
         optimizer_clone.step()
         optimizer_clone.zero_grad()
 
-        max_diff = 0.0
-        max_name = ""
-        for (name, param), (clone_name, clone_param) in zip(
-            model_ref.named_parameters(),
-            model_clone.named_parameters(),
-            strict=True,
-        ):
-            assert clone_name == name
-            diff = float((param - clone_param).abs().max().item())
-            if diff > max_diff:
-                max_diff = diff
-                max_name = name
+        max_diff, max_name = _max_param_diff(model_ref, model_clone)
 
         assert max_diff <= 5e-5, (
             "MuonClip stripped-group resume drifted on the next update: "
@@ -1870,7 +1790,7 @@ class TestNewtonSchulz:
         """Test orthogonalization produces orthogonal matrix."""
         from neobert.optimizer.muon_clip import MuonClipOptimizer
 
-        # Create random matrix
+        torch.manual_seed(0)
         G = torch.randn(64, 64)
 
         # Create dummy optimizer to access method
@@ -1884,14 +1804,15 @@ class TestNewtonSchulz:
         muon_config = MuonClipConfig()
         optimizer = MuonClipOptimizer(model, config, muon_config)
 
-        # Orthogonalize
         X = optimizer._newton_schulz_update(G, steps=5)
 
-        # Check that the result has proper scaling
-        # After Newton-Schulz + RMS scaling, the matrix should have
-        # reasonable norm
-        assert X.norm() > 0
-        assert X.norm() < G.norm() * 10  # Should not explode
+        identity = torch.eye(X.shape[0], dtype=X.dtype)
+        orthogonality_error = torch.linalg.matrix_norm(X @ X.T - identity)
+        normalized_input = G / (torch.linalg.norm(G) + 1e-7)
+        input_error = torch.linalg.matrix_norm(
+            normalized_input @ normalized_input.T - identity
+        )
+        assert orthogonality_error < input_error * 0.5
 
     def test_orthogonalization_rejects_fp16(self):
         """Ensure MuonClip orthogonalization rejects unsupported fp16 grads."""

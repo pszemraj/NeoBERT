@@ -7,7 +7,7 @@ References: Kimi K2 report, Muon, MuonClip, DISCO, Polar Express.
 import copy
 import logging
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import torch
@@ -20,11 +20,7 @@ from neobert.optimizer.parameter_groups import (
 )
 from torch.utils.hooks import RemovableHandle
 
-from neobert.config import (
-    normalize_muon_norm_factor,
-    normalize_muon_orthogonalization,
-    normalize_muon_param_policy,
-)
+from neobert.config import MuonConfig
 from neobert.warnings import NeoBERTWarning
 
 logger = logging.getLogger(__name__)
@@ -53,43 +49,16 @@ except Exception:
 
 
 @dataclass
-class MuonClipConfig:
-    """Configuration container for the MuonClip optimizer."""
+class MuonClipConfig(MuonConfig):
+    """Runtime MuonClip configuration with optimizer-wide Adam settings."""
 
     # Learning rates
     lr: float = 1e-4
-
-    # Muon parameters (for hidden-layer 2D weight matrices)
-    muon_beta: float = 0.95  # Momentum coefficient
-    nesterov: bool = True
-    muon_decay: float = 0.0  # Weight decay for Muon params
-    ns_steps: int = 5  # Newton-Schulz iterations (3-9 recommended)
 
     # Adam parameters (for 1D params: biases, LayerNorm)
     adam_betas: Tuple[float, float] = (0.9, 0.98)
     adam_decay: float = 0.0  # Weight decay for Adam params
     adam_eps: float = 1e-10
-
-    # QK-Clipping parameters
-    enable_clipping: bool = True
-    clipping_threshold: float = 50.0  # Conservative for encoders
-    clipping_alpha: float = 0.5  # Q/K scaling balance (0.5 = equal)
-    clipping_warmup_steps: int = 0  # Disable clipping for N steps
-    clipping_interval: int = 10  # Apply clipping every N steps to cap overhead
-    clipping_qk_chunk_size: int = (
-        1024  # Chunk size for QK max tiling to avoid S^2 peaks
-    )
-
-    # Architecture adaptation
-    clipping_layers_mapping: Dict[str, str] = field(default_factory=dict)
-
-    # Monitoring and debugging
-    detect_anomalies: bool = False  # Enable gradient anomaly detection
-
-    # Orthogonalization / routing control
-    orthogonalization: str = "polar_express"
-    norm_factor: str = "neobert"
-    param_policy: str = "hidden_2d"
 
     def __post_init__(self) -> None:
         """Validate configuration.
@@ -170,13 +139,7 @@ class MuonClipConfig:
                 "adam_betas must be a 2-tuple of floats, got "
                 f"{type(self.adam_betas).__name__}={self.adam_betas!r}"
             )
-        _ = self.adam_betas[1]
-
-        self.orthogonalization = normalize_muon_orthogonalization(
-            self.orthogonalization
-        )
-        self.norm_factor = normalize_muon_norm_factor(self.norm_factor)
-        self.param_policy = normalize_muon_param_policy(self.param_policy)
+        super().__post_init__()
 
 
 # Attention hooks
@@ -596,11 +559,11 @@ class MuonClipOptimizer(Optimizer):
         if not self._runtime_clipping_enabled:
             return False
 
-        warmup = int(getattr(self.config, "clipping_warmup_steps", 0))
+        warmup = int(self.config.clipping_warmup_steps)
         if update_step < warmup:
             return False
 
-        interval = int(getattr(self.config, "clipping_interval", 1))
+        interval = int(self.config.clipping_interval)
         if interval <= 0:
             raise ValueError(f"clipping_interval must be >= 1, got {interval}")
 
@@ -1038,17 +1001,12 @@ class MuonClipOptimizer(Optimizer):
 
         group_param_info = group.get("param_info")
         for param_idx, param in enumerate(group["params"]):
-            if param.grad is None:
+            grad = self._validated_gradient(param)
+            if grad is None:
                 continue
             param_info = None
             if group_param_info is not None and param_idx < len(group_param_info):
                 param_info = group_param_info[param_idx]
-
-            # Check for NaN/Inf in gradients
-            if self.config.detect_anomalies:
-                if not torch.isfinite(param.grad).all():
-                    logger.error(f"Non-finite gradient detected in {param.shape}")
-                    continue
 
             # Get optimizer state
             state = self.state[param]
@@ -1057,9 +1015,6 @@ class MuonClipOptimizer(Optimizer):
                 state["step"] = 0
 
             state["step"] += 1
-            grad = param.grad
-            if grad is None:
-                continue
 
             # Apply momentum
             state["momentum_buffer"].mul_(group["beta"]).add_(grad)
@@ -1102,9 +1057,7 @@ class MuonClipOptimizer(Optimizer):
                     param_info=param_info,
                 )
 
-            # Weight decay
-            if group["weight_decay"] > 0:
-                param.mul_(1 - group["lr"] * group["weight_decay"])
+            self._apply_weight_decay(param, group)
 
             # Parameter update
             param.add_(update, alpha=-group["lr"])
@@ -1115,14 +1068,9 @@ class MuonClipOptimizer(Optimizer):
         :param dict[str, Any] group: Parameter group metadata.
         """
         for param in group["params"]:
-            if param.grad is None:
+            grad = self._validated_gradient(param)
+            if grad is None:
                 continue
-
-            # Check for anomalies
-            if self.config.detect_anomalies:
-                if not torch.isfinite(param.grad).all():
-                    logger.error(f"Non-finite gradient detected in {param.shape}")
-                    continue
 
             # Get optimizer state
             state = self.state[param]
@@ -1132,9 +1080,6 @@ class MuonClipOptimizer(Optimizer):
                 state["step"] = 0
 
             state["step"] += 1
-            grad = param.grad
-            if grad is None:
-                continue
 
             beta1, beta2 = group["betas"]
 
@@ -1149,9 +1094,7 @@ class MuonClipOptimizer(Optimizer):
             # Step size with bias correction
             step_size = group["lr"] / bias_correction1
 
-            # Weight decay
-            if group["weight_decay"] > 0:
-                param.mul_(1 - group["lr"] * group["weight_decay"])
+            self._apply_weight_decay(param, group)
 
             # Denominator with eps for numerical stability
             denom = (state["exp_avg_sq"].sqrt() / (bias_correction2**0.5)).add_(
@@ -1160,6 +1103,30 @@ class MuonClipOptimizer(Optimizer):
 
             # Update parameters
             param.addcdiv_(state["exp_avg"], denom, value=-step_size)
+
+    def _validated_gradient(self, param: torch.Tensor) -> Optional[torch.Tensor]:
+        """Return a usable gradient, logging and skipping non-finite values.
+
+        :param torch.Tensor param: Parameter whose gradient should be validated.
+        :return torch.Tensor | None: Gradient to update from, if usable.
+        """
+        grad = param.grad
+        if grad is None:
+            return None
+        if self.config.detect_anomalies and not torch.isfinite(grad).all():
+            logger.error(f"Non-finite gradient detected in {param.shape}")
+            return None
+        return grad
+
+    @staticmethod
+    def _apply_weight_decay(param: torch.Tensor, group: Dict[str, Any]) -> None:
+        """Apply decoupled weight decay configured for a parameter group.
+
+        :param torch.Tensor param: Parameter to decay in place.
+        :param dict[str, Any] group: Parameter group metadata.
+        """
+        if group["weight_decay"] > 0:
+            param.mul_(1 - group["lr"] * group["weight_decay"])
 
     def _is_dtensor(self, tensor: torch.Tensor) -> bool:
         """Return whether ``tensor`` is a DTensor instance.
@@ -1732,39 +1699,16 @@ class MuonClipOptimizer(Optimizer):
         :param int steps: Number of iteration steps.
         :return torch.Tensor: Orthogonalized update.
         """
-        if grad.ndim != 2:
-            return grad
-
-        # Handle matrix orientation
-        is_transpose = grad.size(0) > grad.size(1)
-        working = grad.T if is_transpose else grad
-
-        original_dtype = working.dtype
-        if working.dtype == torch.float16:
-            raise RuntimeError(
-                "fp16/float16 gradients are not supported by MuonClip "
-                "orthogonalization. Use bf16 or fp32."
-            )
-        if working.dtype == torch.bfloat16:
-            # NS path computes in fp32 for stability, then casts back.
-            working = working.float()
-        norm = torch.linalg.norm(working)
-        if norm == 0:
-            return torch.zeros_like(grad)
-
         # Newton-Schulz iteration coefficients from Polar Express appendix.
-        a, b, c = (3.4445, -4.7750, 2.0315)
-        X = working / (norm + 1e-7)
-
-        for _ in range(steps):
-            A = X @ X.T
-            B = b * A + c * A @ A
-            X = a * X + B @ X
-
-        if X.dtype != original_dtype:
-            X = X.to(original_dtype)
-
-        return X.T if is_transpose else X
+        coefficients = [(3.4445, -4.7750, 2.0315)] * steps
+        work_dtype = torch.float32 if grad.dtype == torch.bfloat16 else None
+        return self._iterative_orthogonalize(
+            grad,
+            coefficients,
+            work_dtype=work_dtype,
+            reject_fp16=True,
+            scale_gram_before_square=True,
+        )
 
     def _normalize_muon_update(
         self, update: torch.Tensor, param_shape: torch.Size
@@ -1787,7 +1731,7 @@ class MuonClipOptimizer(Optimizer):
 
         d_out, d_in = int(param_shape[0]), int(param_shape[1])
         # MuonClipConfig.__post_init__ normalizes spellings; read canonically.
-        norm_factor = str(getattr(self.config, "norm_factor", "neobert"))
+        norm_factor = self.config.norm_factor
         if norm_factor == "none":
             scale = 1.0
         elif norm_factor == "neobert":
@@ -1818,7 +1762,7 @@ class MuonClipOptimizer(Optimizer):
         :param torch.Tensor grad: Gradient tensor.
         :return torch.Tensor: Orthogonalized update.
         """
-        algo = getattr(self.config, "orthogonalization", "polar_express")
+        algo = self.config.orthogonalization
         if algo == "polar_express":
             return self._polar_express_update(grad, self.config.ns_steps)
         return self._newton_schulz_update(grad, self.config.ns_steps)
@@ -1833,39 +1777,72 @@ class MuonClipOptimizer(Optimizer):
         :param float eps: Numerical stability epsilon.
         :return torch.Tensor: Orthogonalized update.
         """
+        steps = max(1, steps)
+        return self._iterative_orthogonalize(
+            grad,
+            self._get_polar_coefficients(steps),
+            work_dtype=self._polar_work_dtype,
+            cuda_work_dtype_only=True,
+            reject_nonfinite_norm=True,
+            norm_scale=1.01,
+            eps=eps,
+        )
+
+    @staticmethod
+    def _iterative_orthogonalize(
+        grad: torch.Tensor,
+        coefficients: Sequence[Tuple[float, float, float]],
+        *,
+        work_dtype: Optional[torch.dtype] = None,
+        cuda_work_dtype_only: bool = False,
+        reject_fp16: bool = False,
+        reject_nonfinite_norm: bool = False,
+        scale_gram_before_square: bool = False,
+        norm_scale: float = 1.0,
+        eps: float = 1e-7,
+    ) -> torch.Tensor:
+        """Apply a coefficient schedule to a normalized two-dimensional update.
+
+        :param torch.Tensor grad: Gradient tensor.
+        :param Sequence[Tuple[float, float, float]] coefficients: Iteration schedule.
+        :param torch.dtype | None work_dtype: Optional iteration dtype.
+        :param bool cuda_work_dtype_only: Apply ``work_dtype`` only on CUDA.
+        :param bool reject_fp16: Reject float16 inputs instead of iterating.
+        :param bool reject_nonfinite_norm: Return zeros for non-finite input norms.
+        :param bool scale_gram_before_square: Preserve coefficient operation order.
+        :param float norm_scale: Multiplier applied to the input norm.
+        :param float eps: Numerical stability epsilon.
+        :return torch.Tensor: Orthogonalized update.
+        """
         if grad.ndim != 2:
             return grad
 
-        steps = max(1, steps)
-
         is_transpose = grad.size(0) > grad.size(1)
         working = grad.T if is_transpose else grad
-
         original_dtype = working.dtype
-        if (
-            self._polar_work_dtype is not None
-            and working.is_cuda
-            and working.dtype != self._polar_work_dtype
-        ):
-            # Polar path intentionally stays in a fast CUDA work dtype (bf16).
-            working = working.to(self._polar_work_dtype)
+        if reject_fp16 and original_dtype == torch.float16:
+            raise RuntimeError(
+                "fp16/float16 gradients are not supported by MuonClip "
+                "orthogonalization. Use bf16 or fp32."
+            )
+        if work_dtype is not None and (working.is_cuda or not cuda_work_dtype_only):
+            working = working.to(work_dtype)
 
-        # Frobenius norm provides the needed scale control without expensive SVD
-        spectral_norm = torch.linalg.norm(working)
-        if spectral_norm == 0 or not torch.isfinite(spectral_norm):
+        norm = torch.linalg.norm(working)
+        if norm == 0 or (reject_nonfinite_norm and not torch.isfinite(norm)):
             return torch.zeros_like(grad)
+        working = working / (norm * norm_scale + eps)
 
-        working = working / (spectral_norm * 1.01 + eps)
-
-        coeffs = self._get_polar_coefficients(steps)
-        for a, b, c in coeffs:
-            A = working @ working.T
-            B = b * A + c * (A @ A)
-            working = a * working + B @ working
+        for a, b, c in coefficients:
+            gram = working @ working.T
+            quadratic = (
+                (c * gram) @ gram if scale_gram_before_square else c * (gram @ gram)
+            )
+            polynomial = b * gram + quadratic
+            working = a * working + polynomial @ working
 
         if working.dtype != original_dtype:
             working = working.to(original_dtype)
-
         return working.T if is_transpose else working
 
     def _get_polar_coefficients(self, steps: int) -> List[Tuple[float, float, float]]:
