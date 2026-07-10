@@ -4,7 +4,6 @@ import warnings
 
 import pytest
 
-from neobert.config import ConfigLoader
 from neobert.warnings import NeoBERTWarning
 
 
@@ -18,8 +17,8 @@ def test_warning_policy_scopes_warnings_as_errors(pytestconfig) -> None:
 
 def test_project_warning_is_an_error_independent_of_stacklevel() -> None:
     """Project warnings remain strict when attributed to an external caller."""
-    with pytest.raises(NeoBERTWarning, match="legacy setting"):
-        ConfigLoader._warn_legacy("legacy setting")
+    with pytest.raises(NeoBERTWarning, match="project setting"):
+        warnings.warn("project setting", NeoBERTWarning, stacklevel=2)
 
 
 def test_external_runtime_warning_is_not_promoted_to_error() -> None:
