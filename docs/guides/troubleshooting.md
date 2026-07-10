@@ -21,7 +21,7 @@ Checklist:
 1. use `model.attn_backend: flash_attn_varlen` for packed runs,
 2. ensure flash-attn is installed,
 3. tune dataloader knobs (`dataset.num_workers`, `dataset.pin_memory`, `dataset.persistent_workers`, `dataset.prefetch_factor`); pinning-path behavior is described in [Training Optimization](training-optimization.md#dataloader-and-streaming-throughput),
-4. compare `tokens/sec` (not only `steps/sec`) when `trainer.enforce_full_packed_batches: true`.
+4. compare `tokens/sec` rather than only `steps/sec`; single-process runs can benchmark `trainer.enforce_full_packed_batches: true`, while distributed runs must leave it false.
 
 ### Pretraining OOM from logits memory
 

@@ -50,7 +50,7 @@ class TestConfigSystem(unittest.TestCase):
         self.assertFalse(config.trainer.log_train_accuracy)
         self.assertFalse(config.trainer.torch_compile)
         self.assertEqual(config.trainer.torch_compile_backend, "inductor")
-        self.assertTrue(config.trainer.enforce_full_packed_batches)
+        self.assertFalse(config.trainer.enforce_full_packed_batches)
         self.assertEqual(config.dataset.min_length, 5)
         self.assertEqual(config.contrastive.pretraining_prob, 0.0)
         self.assertIsNone(config.contrastive.pretraining_dataset_path)

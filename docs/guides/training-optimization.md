@@ -86,9 +86,9 @@ Recommended for throughput:
 - `model.attn_backend: flash_attn_varlen`
 - flash-attn installed via `pip install -e .[flash]`
 
-Useful control:
+Single-process throughput control:
 
-- `trainer.enforce_full_packed_batches: true` improves token-throughput stability by buffering undersized packed outputs, usually at some cost to step rate
+- `trainer.enforce_full_packed_batches: true` buffers undersized packed outputs into full microbatches, usually at some cost to step rate. Distributed runs reject this option because each rank packs different examples and could otherwise skip a different number of model calls. Distributed packed training uses variable local microbatch sizes and normalizes gradients by the global masked-token count.
 
 `model.attn_backend: sdpa` still works for packed runs but uses the slower segmented fallback path.
 

@@ -18,6 +18,7 @@ from neobert.pretraining.trainer import (
     _maybe_shuffle_streaming_dataset,
     _load_streaming_split,
     _prepare_resume_dataloader,
+    _validate_packed_batch_buffering_policy,
 )
 from neobert.streaming import (
     RetryingStreamingDataset,
@@ -226,6 +227,25 @@ class TestStreamingShuffle(unittest.TestCase):
             self.assertTrue(dataloader_config.use_seedable_sampler)
             self.assertEqual(dataloader_config.data_seed, 2718)
             self.assertEqual(dataloader_config.dispatch_batches, expected_dispatch)
+
+    def test_full_packed_batch_buffering_is_single_process_only(self):
+        """Distributed ranks must not make local skip/forward decisions."""
+        _validate_packed_batch_buffering_policy(
+            pack_sequences=True,
+            enforce_full_packed_batches=True,
+            num_processes=1,
+        )
+        _validate_packed_batch_buffering_policy(
+            pack_sequences=True,
+            enforce_full_packed_batches=False,
+            num_processes=2,
+        )
+        with self.assertRaisesRegex(ValueError, "single-process-only"):
+            _validate_packed_batch_buffering_policy(
+                pack_sequences=True,
+                enforce_full_packed_batches=True,
+                num_processes=2,
+            )
 
     def test_prepare_resume_dataloader_no_raw_pulls_returns_none(self):
         """No dataloader pulls this epoch (or a pre-counter checkpoint) skips nothing."""

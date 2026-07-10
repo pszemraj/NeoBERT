@@ -1634,6 +1634,29 @@ def _build_pretraining_dataloader_config(cfg: Config) -> DataLoaderConfiguration
     )
 
 
+def _validate_packed_batch_buffering_policy(
+    *,
+    pack_sequences: bool,
+    enforce_full_packed_batches: bool,
+    num_processes: int,
+) -> None:
+    """Reject rank-local packed-batch skipping in distributed training.
+
+    :param bool pack_sequences: Whether the packing collator is active.
+    :param bool enforce_full_packed_batches: Whether undersized rows are buffered.
+    :param int num_processes: Distributed process count.
+    :raises ValueError: If distributed packing could skip model calls per rank.
+    """
+    if pack_sequences and enforce_full_packed_batches and num_processes > 1:
+        raise ValueError(
+            "trainer.enforce_full_packed_batches=true is single-process-only. "
+            "Packing produces data-dependent row counts on each rank, so rank-local "
+            "buffering can desynchronize model calls and resume cursors. Leave it "
+            "false for distributed runs; unequal local packed microbatches are "
+            "normalized by the global masked-token count."
+        )
+
+
 def trainer(cfg: Config) -> None:
     """Run the pretraining loop.
 
@@ -1787,7 +1810,12 @@ def trainer(cfg: Config) -> None:
     accelerator.register_for_checkpointing(metrics, stored_batch)
     log_interval = max(1, cfg.trainer.logging_steps)
     enforce_full_packed_batches = bool(
-        getattr(cfg.trainer, "enforce_full_packed_batches", True)
+        getattr(cfg.trainer, "enforce_full_packed_batches", False)
+    )
+    _validate_packed_batch_buffering_policy(
+        pack_sequences=bool(cfg.datacollator.pack_sequences),
+        enforce_full_packed_batches=enforce_full_packed_batches,
+        num_processes=accelerator.num_processes,
     )
     log_train_accuracy = bool(getattr(cfg.trainer, "log_train_accuracy", False))
     log_grad_norm = bool(getattr(cfg.trainer, "log_grad_norm", False))

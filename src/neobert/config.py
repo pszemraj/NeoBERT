@@ -296,7 +296,7 @@ class TrainerConfig:
     eval_steps: int = 10000
     eval_max_batches: Optional[int] = None
     logging_steps: int = 100
-    enforce_full_packed_batches: bool = True
+    enforce_full_packed_batches: bool = False
     log_train_accuracy: bool = False
     log_grad_norm: bool = True
     output_dir: str = "./output"
@@ -2060,8 +2060,8 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         "--trainer.enforce_full_packed_batches",
         type=_parse_cli_bool,
         help=(
-            "If true, buffer undersized packed batches to emit full microbatches. "
-            "Improves token throughput stability but lowers step/s."
+            "Single-process only: buffer undersized packed batches to emit full "
+            "microbatches. Distributed runs must leave this false."
         ),
     )
     parser.add_argument(

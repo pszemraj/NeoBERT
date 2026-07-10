@@ -6,7 +6,19 @@ from collections import defaultdict
 from typing import Any, Callable, Dict
 
 import torch
+import torch.distributed as dist
 from accelerate import Accelerator
+
+_METRICS_STATE_VERSION = 1
+_METRICS_STATE_VERSION_KEY = "metrics_state_version"
+_METRICS_STATE_WORLD_SIZE_KEY = "world_size"
+_METRICS_STATE_PAYLOAD_KEY = "metrics"
+_RESUME_POSITION_KEYS = (
+    "train/steps",
+    "train/epochs",
+    "train/batches_in_epoch",
+    "train/dataloader_batches_in_epoch",
+)
 
 
 def format_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
@@ -83,18 +95,66 @@ class Metrics(defaultdict):
         self._last_log_time: float | None = None
 
     def state_dict(self) -> Dict[str, Any]:
-        """Return a serializable copy of the metrics.
+        """Return versioned metrics after validating distributed resume position.
 
+        :raises RuntimeError: If distributed ranks have different resume cursors.
         :return dict[str, Any]: Metrics state.
         """
-        return dict(self)
+        world_size = 1
+        if dist.is_available() and dist.is_initialized():
+            world_size = int(dist.get_world_size())
+            if world_size > 1:
+                local_position = {
+                    key: int(self.get(key, 0)) for key in _RESUME_POSITION_KEYS
+                }
+                rank_positions: list[dict[str, int] | None] = [None] * world_size
+                dist.all_gather_object(rank_positions, local_position)
+                if any(
+                    position != rank_positions[0] for position in rank_positions[1:]
+                ):
+                    raise RuntimeError(
+                        "Distributed pretraining ranks disagree on checkpoint resume "
+                        f"position: {rank_positions}. Refusing to persist a shared cursor."
+                    )
+
+        return {
+            _METRICS_STATE_VERSION_KEY: _METRICS_STATE_VERSION,
+            _METRICS_STATE_WORLD_SIZE_KEY: world_size,
+            _METRICS_STATE_PAYLOAD_KEY: dict(self),
+        }
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        """Load metrics from a serialized state.
+        """Load versioned metrics state for the current distributed topology.
 
         :param dict[str, Any] state_dict: Metrics state to load.
+        :raises ValueError: If the schema or distributed world size differs.
         """
-        for k, v in state_dict.items():
+        version = state_dict.get(_METRICS_STATE_VERSION_KEY)
+        if version != _METRICS_STATE_VERSION:
+            raise ValueError(
+                "Unsupported pretraining metrics checkpoint version "
+                f"{version!r}; expected {_METRICS_STATE_VERSION}. Older loop state "
+                "cannot prove that distributed packed-data cursors were aligned."
+            )
+        checkpoint_world_size = int(state_dict.get(_METRICS_STATE_WORLD_SIZE_KEY, 0))
+        runtime_world_size = (
+            int(dist.get_world_size())
+            if dist.is_available() and dist.is_initialized()
+            else 1
+        )
+        if checkpoint_world_size != runtime_world_size:
+            raise ValueError(
+                "Cannot restore pretraining metrics with a different world size: "
+                f"checkpoint={checkpoint_world_size}, runtime={runtime_world_size}."
+            )
+        payload = state_dict.get(_METRICS_STATE_PAYLOAD_KEY)
+        if not isinstance(payload, dict):
+            raise ValueError(
+                "Pretraining metrics checkpoint payload must be a mapping."
+            )
+
+        self.clear()
+        for k, v in payload.items():
             self[k] = v
         self._last_log_time = None
 
