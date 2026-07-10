@@ -28,7 +28,7 @@ def process_function(
     :param Any tokenizer: Tokenizer with sequence-classification support.
     :return dict[str, Any]: Tokenized batch with labels when applicable.
     """
-    task = str(getattr(cfg.glue, "task_name", getattr(cfg, "task", "glue"))).strip()
+    task = str(cfg.glue.task_name).strip()
     result = tokenizer(
         *get_sentences(examples, task),
         padding=False,

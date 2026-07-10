@@ -123,10 +123,6 @@ SUPPORTED_GLUE_TASK_SPECS: Mapping[str, GlueTaskSpec] = {
     **GLUE_LIKE_TASK_SPECS,
 }
 
-_METRIC_ALIASES: Mapping[str, tuple[str, ...]] = {
-    "accuracy_mm": ("accuracy_mismatched", "mnli_mm", "accuracy-mm"),
-}
-
 
 def get_glue_task_spec(task: str) -> GlueTaskSpec:
     """Return metadata for a supported task.
@@ -164,21 +160,6 @@ def normalize_glue_metrics(metrics: Mapping[str, object] | None) -> dict[str, fl
     return normalized
 
 
-def _get_metric(metrics: Mapping[str, float], metric: str) -> float | None:
-    """Resolve one metric, including its documented aliases.
-
-    :param Mapping[str, float] metrics: Normalized metrics.
-    :param str metric: Canonical metric name.
-    :return float | None: Resolved metric value.
-    """
-    if metric in metrics:
-        return metrics[metric]
-    for alias in _METRIC_ALIASES.get(metric, ()):
-        if alias in metrics:
-            return metrics[alias]
-    return None
-
-
 def compute_official_glue_score(
     task: str, metrics: Mapping[str, object] | None
 ) -> float | None:
@@ -193,7 +174,7 @@ def compute_official_glue_score(
         return None
 
     normalized = normalize_glue_metrics(metrics)
-    values = [_get_metric(normalized, metric) for metric in spec.score_metrics]
+    values = [normalized.get(metric) for metric in spec.score_metrics]
     if any(value is None for value in values):
         return None
     return sum(value for value in values if value is not None) / len(values)
@@ -209,4 +190,4 @@ def get_checkpoint_selection_score(
     :return float | None: Selection score when the preferred metric is present.
     """
     spec = get_glue_task_spec(task)
-    return _get_metric(normalize_glue_metrics(metrics), spec.checkpoint_metric)
+    return normalize_glue_metrics(metrics).get(spec.checkpoint_metric)

@@ -116,27 +116,6 @@ class TestPretrainingMetrics(unittest.TestCase):
         self.assertIn("train/accuracy", payload)
         self.assertEqual(payload["train/accuracy"], 0.75)
 
-    def test_tracker_payload_strips_loss_path_debug_metrics(self):
-        """Never emit masked-loss-path diagnostics to external trackers."""
-        metrics = Metrics()
-        metrics["train/steps"] = 7
-        metrics["train/local_samples"] = 1
-        metrics["train/local_tokens"] = 4
-        metrics["train/local_num_pred"] = 2
-        metrics["train/local_num_correct"] = 1
-        metrics["train/local_sum_loss"] = 3.0
-        metrics["train/loss_path_steps_liger_flce"] = 10
-        metrics["train/loss_path_ratio_liger_flce"] = 1.0
-
-        accelerator = _AcceleratorStub()
-        formatted = metrics.log(accelerator)
-
-        payload, _ = accelerator.logged[0]
-        self.assertIn("train/loss_path_steps_liger_flce", formatted)
-        self.assertIn("train/loss_path_ratio_liger_flce", formatted)
-        self.assertNotIn("train/loss_path_steps_liger_flce", payload)
-        self.assertNotIn("train/loss_path_ratio_liger_flce", payload)
-
 
 def test_metrics_accelerate_checkpoint_round_trip(tmp_path) -> None:
     """Accelerate persists and restores the versioned pretraining loop state."""

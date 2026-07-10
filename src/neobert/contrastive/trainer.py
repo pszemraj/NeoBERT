@@ -114,22 +114,14 @@ def _resolve_checkpoint_tag(checkpoint_dir: Path, checkpoint: str | int | None) 
 
     Resolution delegates to :func:`neobert.checkpointing.resolve_step_checkpoint_selector`
     so ``latest`` handling (latest file, direct step dirs, loadability scan) stays
-    identical across tasks; this wrapper only adds ``None`` coercion and a hard
-    failure when ``latest`` cannot be resolved to a concrete step.
+    identical across tasks; this wrapper only adds ``None`` coercion.
 
     :param Path checkpoint_dir: Base directory that holds checkpoint step folders.
     :param str | int | None checkpoint: Tag or step to resolve, or ``None``/"latest".
-    :raises ValueError: If ``latest`` resolves to no loadable checkpoint step.
     :return str: Resolved checkpoint step tag.
     """
     requested = "latest" if checkpoint is None else str(checkpoint)
-    resolved = resolve_step_checkpoint_selector(checkpoint_dir, requested)
-    if requested.lower() == "latest" and resolved.lower() == "latest":
-        raise ValueError(
-            f"No loadable checkpoint steps found in {checkpoint_dir} to resolve "
-            "'latest'."
-        )
-    return resolved
+    return resolve_step_checkpoint_selector(checkpoint_dir, requested)
 
 
 def _resolve_contrastive_pooling(pooling: str) -> str:
@@ -711,6 +703,7 @@ def trainer(cfg: Config) -> None:
     log_grad_norm = bool(getattr(cfg.trainer, "log_grad_norm", False))
     save_strategy = str(getattr(cfg.trainer, "save_strategy", "steps"))
     save_model = bool(getattr(cfg.trainer, "save_model", True))
+    checkpoint_retention_limit = _resolve_checkpoint_retention_limit(cfg)
 
     # Tokenizer
     tokenizer = get_tokenizer(
@@ -1043,19 +1036,15 @@ def trainer(cfg: Config) -> None:
         :raises KeyError: If required keys are missing.
         """
         if "input_ids_queries" not in batch:
-            if "input_ids_query" in batch:
-                batch["input_ids_queries"] = batch["input_ids_query"]
-            elif allow_single_view and "input_ids" in batch:
+            if allow_single_view and "input_ids" in batch:
                 batch["input_ids_queries"] = batch["input_ids"]
             else:
                 raise KeyError(
                     "Missing query token ids in contrastive batch. Expected "
-                    "'input_ids_queries', 'input_ids_query', or (single-view) 'input_ids'."
+                    "'input_ids_queries' or (single-view) 'input_ids'."
                 )
         if "input_ids_corpus" not in batch:
-            if "input_ids_query" in batch:
-                batch["input_ids_corpus"] = batch["input_ids_query"]
-            elif allow_single_view and "input_ids" in batch:
+            if allow_single_view and "input_ids" in batch:
                 batch["input_ids_corpus"] = batch["input_ids"]
             else:
                 raise KeyError(
@@ -1064,20 +1053,15 @@ def trainer(cfg: Config) -> None:
                 )
 
         if "attention_mask_queries" not in batch:
-            if "attention_mask_query" in batch:
-                batch["attention_mask_queries"] = batch["attention_mask_query"]
-            elif allow_single_view and "attention_mask" in batch:
+            if allow_single_view and "attention_mask" in batch:
                 batch["attention_mask_queries"] = batch["attention_mask"]
             else:
                 raise KeyError(
                     "Missing query attention mask in contrastive batch. Expected "
-                    "'attention_mask_queries', 'attention_mask_query', or "
-                    "(single-view) 'attention_mask'."
+                    "'attention_mask_queries' or (single-view) 'attention_mask'."
                 )
         if "attention_mask_corpus" not in batch:
-            if "attention_mask_query" in batch:
-                batch["attention_mask_corpus"] = batch["attention_mask_query"]
-            elif allow_single_view and "attention_mask" in batch:
+            if allow_single_view and "attention_mask" in batch:
                 batch["attention_mask_corpus"] = batch["attention_mask"]
             else:
                 raise KeyError(
@@ -1305,9 +1289,11 @@ def trainer(cfg: Config) -> None:
                     int(metrics["train/steps"]),
                 )
 
-                limit = _resolve_checkpoint_retention_limit(cfg)
-                if limit > 0 and accelerator.is_main_process:
-                    _prune_step_checkpoints(checkpoint_dir, retention_limit=limit)
+                if checkpoint_retention_limit > 0 and accelerator.is_main_process:
+                    _prune_step_checkpoints(
+                        checkpoint_dir,
+                        retention_limit=checkpoint_retention_limit,
+                    )
                 accelerator.wait_for_everyone()
 
             if preemption_requested:

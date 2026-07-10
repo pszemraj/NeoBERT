@@ -242,8 +242,6 @@ class Metrics(defaultdict):
         for key in list(tracker_payload):
             if key.startswith("train/local_"):
                 tracker_payload.pop(key, None)
-            if key.startswith("train/loss_path_"):
-                tracker_payload.pop(key, None)
         if not compute_accuracy:
             tracker_payload.pop("train/accuracy", None)
         accelerator.log(tracker_payload, step=current_step)

@@ -149,7 +149,8 @@ class TokenizerConfig:
     max_length: int = 512
     padding: str = "max_length"
     truncation: bool = True
-    vocab_size: Optional[int] = None  # For compatibility with tests
+    # Persisted tokenizer-derived vocabulary size used to validate checkpoint resume.
+    vocab_size: Optional[int] = None
     trust_remote_code: bool = False
     revision: Optional[str] = None
     allow_special_token_rewrite: bool = False

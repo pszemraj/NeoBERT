@@ -139,7 +139,7 @@ def _resolve_glue_task(cfg: Any) -> str:
     :param Any cfg: Runtime config object.
     :return str: Normalized GLUE task name.
     """
-    return str(getattr(cfg.glue, "task_name", getattr(cfg, "task", "glue"))).strip()
+    return str(cfg.glue.task_name).strip()
 
 
 def _resolve_glue_runtime_policy(cfg: Config) -> tuple[str, str]:

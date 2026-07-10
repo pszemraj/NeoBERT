@@ -43,7 +43,6 @@ from neobert.checkpointing import (
     resolve_accelerate_state_dir,
     resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
 )
-from neobert.collator import resolve_packed_token_limits
 from neobert.config import (
     Config,
     ConfigLoader,
@@ -73,6 +72,7 @@ from neobert.tokenizer import (
     align_tokenizer_vocab,
     get_tokenizer,
     resolve_text_column,
+    tokenize_pretraining_dataset,
 )
 from neobert.training_utils import (
     _maybe_compile_model,
@@ -1653,6 +1653,79 @@ def _save_pretraining_checkpoint_metadata(
     )
 
 
+def _tokenize_dataset_if_needed(
+    dataset: Any,
+    *,
+    tokenizer: PreTrainedTokenizerBase,
+    cfg: Config,
+    accelerator: Any,
+    context: str,
+    streaming_read_retries: int,
+    streaming_read_retry_backoff_seconds: float,
+    streaming_read_retry_max_backoff_seconds: float,
+) -> tuple[Any, bool, bool]:
+    """Tokenize a train/eval dataset when it does not already expose input IDs.
+
+    :param Any dataset: Map-style or streaming dataset.
+    :param PreTrainedTokenizerBase tokenizer: Runtime tokenizer.
+    :param Config cfg: Runtime configuration.
+    :param Any accelerator: Active Accelerator instance.
+    :param str context: Human-readable split label for retry diagnostics.
+    :param int streaming_read_retries: Maximum transient read retries.
+    :param float streaming_read_retry_backoff_seconds: Initial retry backoff.
+    :param float streaming_read_retry_max_backoff_seconds: Maximum retry backoff.
+    :return tuple[Any, bool, bool]: Dataset, streaming flag, and tokenization flag.
+    """
+    streaming = is_streaming_dataset(dataset)
+    if streaming:
+        first_example = peek_streaming_example(
+            dataset,
+            context=f"inspect {context} stream schema",
+            max_retries=streaming_read_retries,
+            base_backoff_seconds=streaming_read_retry_backoff_seconds,
+            max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+        )
+        needs_tokenization = "input_ids" not in first_example
+    else:
+        needs_tokenization = "input_ids" not in dataset.column_names
+    if not needs_tokenization:
+        return dataset, streaming, False
+
+    text_column = resolve_text_column(
+        dataset,
+        streaming,
+        preferred=cfg.dataset.text_column,
+        streaming_read_retries=streaming_read_retries,
+        streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+        streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+    )
+    num_proc = (
+        None
+        if streaming
+        else _resolve_tokenize_num_proc(
+            cfg.dataset.num_proc,
+            accelerator.num_processes,
+            accelerator.is_main_process,
+        )
+    )
+    target_length = cfg.datacollator.max_length or cfg.dataset.max_seq_length
+    with accelerator.main_process_first():
+        dataset = tokenize_pretraining_dataset(
+            dataset,
+            tokenizer,
+            column_name=text_column,
+            max_length=target_length,
+            truncation=cfg.tokenizer.truncation,
+            pack_sequences=cfg.datacollator.pack_sequences,
+            return_special_tokens_mask=True,
+            num_proc=num_proc,
+            streaming_read_retries=streaming_read_retries,
+            streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+            streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+        )
+    return dataset, streaming, True
+
+
 def _validate_packed_batch_buffering_policy(
     *,
     pack_sequences: bool,
@@ -1886,18 +1959,6 @@ def trainer(cfg: Config) -> None:
     if accelerator.is_main_process and wandb_enabled and wandb.run is not None:
         wandb.run.config.update(resolved_config_dict, allow_val_change=True)
 
-    # Tokenization strategy for packed sequences: strip special tokens and reinsert
-    # boundaries in the collator to avoid duplicate BOS/EOS/SEP tokens.
-    pack_sequences = cfg.datacollator.pack_sequences
-    add_special_tokens = not pack_sequences
-    return_special_tokens_mask = True
-    tokenize_max_length = cfg.dataset.max_seq_length
-    if pack_sequences:
-        pack_target_length = cfg.datacollator.max_length or cfg.dataset.max_seq_length
-        tokenize_max_length, _, _ = resolve_packed_token_limits(
-            tokenizer, pack_target_length
-        )
-
     # Dataset
     dataset_kwargs: dict[str, object] = {}
     if cfg.dataset.config:
@@ -1960,67 +2021,17 @@ def trainer(cfg: Config) -> None:
 
     is_streaming = is_streaming_dataset(train_dataset)
 
-    # Check if dataset needs tokenization
-    # For streaming datasets, we need to check differently
-    needs_tokenization = False
-
-    if train_dataset is not None:
-        if is_streaming:
-            # For streaming datasets, peek at the first example
-            first_example = peek_streaming_example(
-                train_dataset,
-                context="inspect training stream schema",
-                max_retries=streaming_read_retries,
-                base_backoff_seconds=streaming_read_retry_backoff_seconds,
-                max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
-            )
-            needs_tokenization = "input_ids" not in first_example
-        else:
-            needs_tokenization = "input_ids" not in train_dataset.column_names
-
-    if needs_tokenization:
-        accelerator.print("Dataset is not tokenized. Tokenizing now...")
-        from neobert.tokenizer import tokenize
-
-        # Non-streaming datasets tokenize through ``Dataset.map`` below, whose
-        # results HuggingFace caches automatically (keyed on a fingerprint of the
-        # tokenize function and tokenizer state), so a separate on-disk
-        # pre-tokenization cache is redundant and only adds a hand-maintained
-        # tokenization-contract manifest that is easy to get wrong.
-        text_column = resolve_text_column(
-            train_dataset,
-            is_streaming,
-            preferred=cfg.dataset.text_column,
-            streaming_read_retries=streaming_read_retries,
-            streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
-            streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
-        )
-        tokenize_num_proc = (
-            None
-            if is_streaming
-            else _resolve_tokenize_num_proc(
-                cfg.dataset.num_proc,
-                accelerator.num_processes,
-                accelerator.is_main_process,
-            )
-        )
-
-        # Tokenize dataset
-        with accelerator.main_process_first():
-            train_dataset = tokenize(
-                train_dataset,
-                tokenizer,
-                column_name=text_column,
-                max_length=tokenize_max_length,
-                remove_columns=True,
-                truncation=cfg.tokenizer.truncation,
-                num_proc=tokenize_num_proc,
-                add_special_tokens=add_special_tokens,
-                return_special_tokens_mask=return_special_tokens_mask,
-                streaming_read_retries=streaming_read_retries,
-                streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
-                streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
-            )
+    train_dataset, is_streaming, train_was_tokenized = _tokenize_dataset_if_needed(
+        train_dataset,
+        tokenizer=tokenizer,
+        cfg=cfg,
+        accelerator=accelerator,
+        context="training",
+        streaming_read_retries=streaming_read_retries,
+        streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+        streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+    )
+    if train_was_tokenized:
         if is_streaming:
             accelerator.print("Tokenization setup complete for streaming dataset.")
         else:
@@ -2105,11 +2116,7 @@ def trainer(cfg: Config) -> None:
         )
 
     if eval_dataset is not None and eval_samples is not None:
-        eval_dataset_is_streaming = (
-            cfg.dataset.streaming
-            and hasattr(eval_dataset, "take")
-            and hasattr(eval_dataset, "skip")
-        )
+        eval_dataset_is_streaming = is_streaming_dataset(eval_dataset)
         if eval_dataset_is_streaming:
             eval_dataset = eval_dataset.take(eval_samples)
         else:
@@ -2117,59 +2124,16 @@ def trainer(cfg: Config) -> None:
             eval_dataset = eval_dataset.select(range(min(eval_samples, eval_size)))
 
     if eval_dataset is not None:
-        eval_is_streaming = (
-            cfg.dataset.streaming
-            and hasattr(eval_dataset, "take")
-            and hasattr(eval_dataset, "skip")
+        eval_dataset, eval_is_streaming, _ = _tokenize_dataset_if_needed(
+            eval_dataset,
+            tokenizer=tokenizer,
+            cfg=cfg,
+            accelerator=accelerator,
+            context="eval",
+            streaming_read_retries=streaming_read_retries,
+            streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+            streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
         )
-        eval_needs_tokenization = False
-        if eval_is_streaming:
-            first_example = peek_streaming_example(
-                eval_dataset,
-                context="inspect eval stream schema",
-                max_retries=streaming_read_retries,
-                base_backoff_seconds=streaming_read_retry_backoff_seconds,
-                max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
-            )
-            eval_needs_tokenization = "input_ids" not in first_example
-        else:
-            eval_needs_tokenization = "input_ids" not in eval_dataset.column_names
-
-        if eval_needs_tokenization:
-            from neobert.tokenizer import tokenize
-
-            text_column = resolve_text_column(
-                eval_dataset,
-                eval_is_streaming,
-                preferred=cfg.dataset.text_column,
-                streaming_read_retries=streaming_read_retries,
-                streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
-                streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
-            )
-            eval_num_proc = (
-                None
-                if eval_is_streaming
-                else _resolve_tokenize_num_proc(
-                    cfg.dataset.num_proc,
-                    accelerator.num_processes,
-                    accelerator.is_main_process,
-                )
-            )
-            with accelerator.main_process_first():
-                eval_dataset = tokenize(
-                    eval_dataset,
-                    tokenizer,
-                    column_name=text_column,
-                    max_length=tokenize_max_length,
-                    remove_columns=True,
-                    truncation=cfg.tokenizer.truncation,
-                    num_proc=eval_num_proc,
-                    add_special_tokens=add_special_tokens,
-                    return_special_tokens_mask=return_special_tokens_mask,
-                    streaming_read_retries=streaming_read_retries,
-                    streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
-                    streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
-                )
 
         if not eval_is_streaming:
             accelerator.print(f"Eval dataset size: {len(eval_dataset)}")

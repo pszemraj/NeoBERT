@@ -569,7 +569,7 @@ class TestGLUETaskSpecific:
         ) == pytest.approx(0.85)
         assert compute_official_glue_score("mrpc", {"eval_f1": 0.8}) is None
         assert compute_official_glue_score(
-            "mnli", {"accuracy": 0.8, "accuracy_mismatched": 0.6}
+            "mnli", {"accuracy": 0.8, "accuracy_mm": 0.6}
         ) == pytest.approx(0.7)
 
     def test_sync_runtime_cfg_from_pretraining_uses_pretrained_values(self):
