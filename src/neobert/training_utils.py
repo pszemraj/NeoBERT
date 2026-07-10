@@ -28,6 +28,7 @@ from neobert.checkpointing import (
     save_portable_checkpoint_weights,
     strip_runtime_prefixes,
 )
+from neobert.distributed import is_dtensor_like, is_row_shard_placement
 
 try:
     from transformers import BatchEncoding
@@ -35,13 +36,6 @@ except Exception:  # pragma: no cover - transformers import should succeed in re
     BatchEncoding = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
-
-try:
-    from torch.distributed.tensor import DTensor
-    from torch.distributed.tensor.placement_types import Shard
-except Exception:  # pragma: no cover - older torch builds without DTensor APIs
-    DTensor = None  # type: ignore[assignment]
-    Shard = None  # type: ignore[assignment]
 
 _ACCELERATOR_STATE_REINIT_PREFIX = (
     "AcceleratorState has already been initialized and cannot be changed"
@@ -349,45 +343,13 @@ def _is_muonclip_optimizer(optimizer_name: str) -> bool:
     return optimizer_key in {"muonclip", "muon-clip", "muon_clip"}
 
 
-def _looks_like_dtensor(param: Any) -> bool:
-    """Return whether ``param`` exposes DTensor-like metadata.
-
-    :param Any param: Parameter candidate.
-    :return bool: ``True`` when the object behaves like a DTensor.
-    """
-    if DTensor is not None and isinstance(param, DTensor):
-        return True
-    return (
-        hasattr(param, "device_mesh")
-        and hasattr(param, "placements")
-        and callable(getattr(param, "to_local", None))
-    )
-
-
-def _is_row_shard_placement(placement: Any) -> bool:
-    """Return whether ``placement`` represents ``Shard(0)``.
-
-    :param Any placement: DTensor placement descriptor.
-    :return bool: ``True`` when the placement is a row shard.
-    """
-    if Shard is not None and isinstance(placement, Shard):
-        return int(getattr(placement, "dim", -1)) == 0
-
-    placement_name = type(placement).__name__.lower()
-    shard_dim = getattr(placement, "dim", None)
-    try:
-        return placement_name.endswith("shard") and int(shard_dim) == 0
-    except (TypeError, ValueError):
-        return False
-
-
 def _placement_requires_norm_reduction(placement: Any) -> bool:
     """Return whether a DTensor placement contributes only a local partial norm.
 
     :param Any placement: DTensor placement descriptor.
     :return bool: ``True`` when values must be reduced across ranks.
     """
-    if _is_row_shard_placement(placement):
+    if is_row_shard_placement(placement):
         return True
 
     placement_name = type(placement).__name__.lower()
@@ -464,16 +426,16 @@ def _compute_l2_norm_for_logging(
         if value is None:
             continue
 
-        local_value = value.to_local() if _looks_like_dtensor(value) else value.detach()
+        local_value = value.to_local() if is_dtensor_like(value) else value.detach()
         if not torch.is_tensor(local_value):
             continue
 
         saw_tensor = True
         contribution = _tensor_l2_sumsq(local_value)
         requires_reduction = False
-        if _looks_like_dtensor(value):
+        if is_dtensor_like(value):
             requires_reduction = _dtensor_requires_norm_reduction(value)
-        elif _looks_like_dtensor(param):
+        elif is_dtensor_like(param):
             # FSDP2 gradients are typically local tensors attached to DTensor params.
             requires_reduction = _dtensor_requires_norm_reduction(param)
         elif fsdp_multi_process:
@@ -770,7 +732,7 @@ def validate_muon_runtime_topology(
             continue
 
         for param in group.get("params", ()):
-            if not _looks_like_dtensor(param):
+            if not is_dtensor_like(param):
                 continue
             saw_dtensor = True
 
@@ -795,7 +757,7 @@ def validate_muon_runtime_topology(
                 )
 
             placements = tuple(getattr(param, "placements", ()))
-            if len(placements) != 1 or not _is_row_shard_placement(placements[0]):
+            if len(placements) != 1 or not is_row_shard_placement(placements[0]):
                 raise RuntimeError(
                     "MuonClip FSDP v2 currently supports only Shard(0) DTensor "
                     f"placements in {context}; got placements={placements!r}."

@@ -18,19 +18,13 @@ from neobert.optimizer.parameter_groups import (
     embedding_parameter_ids,
     uses_weight_decay,
 )
+from neobert.distributed import DTensor, Shard, is_dtensor_like
 from torch.utils.hooks import RemovableHandle
 
 from neobert.config import MuonConfig
 from neobert.warnings import NeoBERTWarning
 
 logger = logging.getLogger(__name__)
-
-try:
-    from torch.distributed.tensor import DTensor
-    from torch.distributed.tensor.placement_types import Shard
-except Exception:  # pragma: no cover - older torch builds without DTensor APIs
-    DTensor = None  # type: ignore[assignment]
-    Shard = None  # type: ignore[assignment]
 
 # Configuration
 
@@ -982,7 +976,7 @@ class MuonClipOptimizer(Optimizer):
         :param dict[str, Any] group: Parameter group metadata.
         """
         if self._runtime_clipping_enabled and any(
-            self._is_dtensor(param) for param in group["params"]
+            is_dtensor_like(param) for param in group["params"]
         ):
             self._reject_clipping_under_sharded_runtime()
 
@@ -1014,8 +1008,8 @@ class MuonClipOptimizer(Optimizer):
                 nesterov=bool(group.get("nesterov", True)),
             )
             # Parameter topology is the source of truth; loaded state must match it.
-            param_is_dtensor = self._is_dtensor(param)
-            buffer_is_dtensor = self._is_dtensor(momentum_buffer)
+            param_is_dtensor = is_dtensor_like(param)
+            buffer_is_dtensor = is_dtensor_like(momentum_buffer)
             if param_is_dtensor:
                 if not buffer_is_dtensor:
                     raise RuntimeError(
@@ -1115,14 +1109,6 @@ class MuonClipOptimizer(Optimizer):
         if group["weight_decay"] > 0:
             param.mul_(1 - group["lr"] * group["weight_decay"])
 
-    def _is_dtensor(self, tensor: torch.Tensor) -> bool:
-        """Return whether ``tensor`` is a DTensor instance.
-
-        :param torch.Tensor tensor: Candidate tensor.
-        :return bool: ``True`` when ``tensor`` is a DTensor.
-        """
-        return DTensor is not None and isinstance(tensor, DTensor)
-
     def _dtensor_mesh_signature(self, tensor: Any) -> Tuple[Any, ...]:
         """Build a comparable device-mesh signature for a DTensor-like object.
 
@@ -1172,8 +1158,8 @@ class MuonClipOptimizer(Optimizer):
                     continue
 
                 param_name = str(info.get("name", "<unknown>"))
-                param_is_dtensor = self._is_dtensor(param)
-                buffer_is_dtensor = self._is_dtensor(momentum_buffer)
+                param_is_dtensor = is_dtensor_like(param)
+                buffer_is_dtensor = is_dtensor_like(momentum_buffer)
                 if param_is_dtensor and not buffer_is_dtensor:
                     raise RuntimeError(
                         "MuonClip loaded a local Tensor momentum buffer for DTensor "

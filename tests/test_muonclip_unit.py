@@ -262,6 +262,11 @@ class _TopologyDTensor:
         if shape is not None:
             self.shape = torch.Size(shape)
 
+    @staticmethod
+    def to_local() -> torch.Tensor:
+        """Expose the DTensor-like local-shard protocol used by production checks."""
+        return torch.empty(0)
+
 
 def _set_single_muon_param_state(
     optimizer: MuonClipOptimizer,
@@ -1372,9 +1377,7 @@ class TestMuonClipOptimizer:
             f"param={max_name} max_diff={max_diff:.6e}"
         )
 
-    def test_loaded_state_rejects_tensor_momentum_for_dtensor_param(
-        self, model, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_loaded_state_rejects_tensor_momentum_for_dtensor_param(self, model):
         """Sharded Muon params must not accept local Tensor momentum buffers."""
         model_instance, config = model
         optimizer = MuonClipOptimizer(
@@ -1389,18 +1392,10 @@ class TestMuonClipOptimizer:
             fake_param,
             {"momentum_buffer": torch.zeros(2, 2)},
         )
-        monkeypatch.setattr(
-            optimizer,
-            "_is_dtensor",
-            lambda tensor: isinstance(tensor, _TopologyDTensor),
-        )
-
         with pytest.raises(RuntimeError, match="local Tensor momentum buffer"):
             optimizer._validate_loaded_muon_state_topology()
 
-    def test_loaded_state_rejects_mismatched_dtensor_topology(
-        self, model, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_loaded_state_rejects_mismatched_dtensor_topology(self, model):
         """Sharded Muon state must match the target DTensor mesh and placement."""
         model_instance, config = model
         optimizer = MuonClipOptimizer(
@@ -1416,18 +1411,10 @@ class TestMuonClipOptimizer:
             fake_param,
             {"momentum_buffer": fake_buffer},
         )
-        monkeypatch.setattr(
-            optimizer,
-            "_is_dtensor",
-            lambda tensor: isinstance(tensor, _TopologyDTensor),
-        )
-
         with pytest.raises(RuntimeError, match="mesh/placement metadata"):
             optimizer._validate_loaded_muon_state_topology()
 
-    def test_loaded_state_rejects_mismatched_momentum_shape(
-        self, model, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_loaded_state_rejects_mismatched_momentum_shape(self, model):
         """Muon state should fail fast when momentum-buffer shape mismatches param."""
         model_instance, config = model
         optimizer = MuonClipOptimizer(
@@ -1443,12 +1430,6 @@ class TestMuonClipOptimizer:
             fake_param,
             {"momentum_buffer": fake_buffer},
         )
-        monkeypatch.setattr(
-            optimizer,
-            "_is_dtensor",
-            lambda tensor: isinstance(tensor, _TopologyDTensor),
-        )
-
         with pytest.raises(RuntimeError, match="momentum state with shape"):
             optimizer._validate_loaded_muon_state_topology()
 
