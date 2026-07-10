@@ -378,7 +378,8 @@ Checkpoint layout, selectors, and resume behavior are described in [Training](..
 | --------------------------------------- | -------------------- | ---------- | --------------------------------------------------------------------------- |
 | `contrastive.temperature`               | `float`              | `0.05`     | Contrastive temperature.                                                    |
 | `contrastive.pooling`                   | `str`                | `"avg"`    | Pooling mode used by contrastive training: `avg`, `cls`, `max`.             |
-| `contrastive.pretraining_prob`          | `float`              | `0.3`      | Fraction of steps that draw the pretraining branch in contrastive training. |
+| `contrastive.pretraining_prob`          | `float`              | `0.0`      | Fraction of steps that draw the optional SimCSE pretraining branch.          |
+| `contrastive.pretraining_dataset_path` | `str \| None`        | `null`     | Tokenized dataset used by the SimCSE branch; required when its probability is positive. |
 | `contrastive.pretrained_checkpoint_dir` | `str \| None`        | `null`     | Optional pretraining checkpoint root used to initialize contrastive runs.   |
 | `contrastive.pretrained_checkpoint`     | `str \| int \| None` | `null`     | Optional checkpoint tag/step selector for contrastive initialization.       |
 | `contrastive.allow_random_weights`      | `bool`               | `false`    | Allow random initialization when no pretrained checkpoint is configured.    |
@@ -414,6 +415,7 @@ Checkpoint layout, selectors, and resume behavior are described in [Training](..
 | Any DeepSpeed runtime                                                              | **ERROR**          | DeepSpeed execution is unsupported in this repo; use Accelerate FSDP v2 for distributed runs. Legacy DeepSpeed checkpoint conversion remains available separately. |
 | `trainer.mixed_precision='no'` with `model.attn_backend=flash_attn_varlen`         | **AUTO-ADJUST**    | Runtime switches attention backend to `sdpa` with a warning.                                                       |
 | `contrastive.pretraining_prob > 0` with `model.dropout_prob <= 0`                 | **ERROR**          | SimCSE-style anti-forgetting steps require dropout-created views.                                                   |
+| Contrastive training without resume, pretrained checkpoint, or random opt-in      | **ERROR**          | Set `contrastive.pretrained_checkpoint_dir`, resume a self-contained contrastive checkpoint, or explicitly set `contrastive.allow_random_weights=true`. |
 | `datacollator.pack_sequences=true` with `model.attn_backend=sdpa`                 | **WARNING**        | Works, but slower than `flash_attn_varlen`; SDPA uses fallback path.                                                |
 | `dataset.path` and `dataset.name` both set                                        | **PRECEDENCE**     | Existing local `dataset.path` is used first; hub dataset acts as fallback.                                          |
 | Tokenizer/model vocab sizes                                                       | **IMPORTANT**      | Runtime pads the tokenizer with inert tokens so tokenizer length matches model vocabulary size.                    |

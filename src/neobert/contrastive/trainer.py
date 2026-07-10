@@ -8,7 +8,7 @@ from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
 from types import FrameType
-from typing import Any
+from typing import Any, Literal
 
 import numpy
 
@@ -461,6 +461,65 @@ class CustomDataCollatorWithPadding(DataCollatorWithPadding):
         return batch
 
 
+def _resolve_contrastive_initialization_source(
+    *,
+    resume_checkpoint_path: str | Path | None,
+    pretrained_checkpoint_dir: str | None,
+    allow_random_weights: bool,
+) -> Literal["resume", "pretrained", "random"]:
+    """Resolve the single source used to initialize contrastive model weights.
+
+    :param str | Path | None resume_checkpoint_path: Resolved contrastive checkpoint.
+    :param str | None pretrained_checkpoint_dir: Pretraining checkpoint root.
+    :param bool allow_random_weights: Whether random initialization is permitted.
+    :return Literal["resume", "pretrained", "random"]: Initialization source.
+    :raises ValueError: If no permitted initialization source is configured.
+    """
+    if resume_checkpoint_path is not None:
+        return "resume"
+    if pretrained_checkpoint_dir:
+        return "pretrained"
+    if allow_random_weights:
+        return "random"
+    raise ValueError(
+        "Contrastive training requires pretrained_checkpoint_dir or a resumable "
+        "contrastive checkpoint. Set contrastive.allow_random_weights=true only "
+        "for an intentional random-initialization experiment."
+    )
+
+
+def _prepare_contrastive_components(
+    accelerator: Any,
+    dataloaders: dict[str, DataLoader],
+    model: torch.nn.Module,
+    optimizer: Any,
+    scheduler: Any,
+) -> tuple[dict[str, DataLoader], torch.nn.Module, Any, Any]:
+    """Prepare the model, optimizer, scheduler, and every contrastive dataloader.
+
+    :param Any accelerator: Active Accelerator instance.
+    :param dict[str, DataLoader] dataloaders: Task dataloaders keyed by source.
+    :param torch.nn.Module model: Contrastive backbone.
+    :param Any optimizer: Optimizer instance.
+    :param Any scheduler: Scheduler instance.
+    :return tuple[dict[str, DataLoader], torch.nn.Module, Any, Any]: Prepared components.
+    :raises ValueError: If no dataloaders were constructed.
+    """
+    if not dataloaders:
+        raise ValueError("Contrastive training requires at least one dataloader.")
+    first_key = next(iter(dataloaders))
+    dataloaders[first_key], model, optimizer, scheduler = accelerator.prepare(
+        dataloaders[first_key],
+        model,
+        optimizer,
+        scheduler,
+    )
+    for key, dataloader in dataloaders.items():
+        if key != first_key:
+            dataloaders[key] = accelerator.prepare(dataloader)
+    return dataloaders, model, optimizer, scheduler
+
+
 def trainer(cfg: Config) -> None:
     """Run contrastive training loop.
 
@@ -493,6 +552,15 @@ def trainer(cfg: Config) -> None:
             "contrastive.pretraining_prob > 0 requires model.dropout_prob > 0 "
             "for SimCSE-style two-view corruption."
         )
+    pretraining_dataset_path = getattr(
+        cfg.contrastive, "pretraining_dataset_path", None
+    )
+    if pretraining_mix_prob > 0.0 and not pretraining_dataset_path:
+        raise ValueError(
+            "contrastive.pretraining_prob > 0 requires "
+            "contrastive.pretraining_dataset_path to identify the tokenized "
+            "SimCSE source."
+        )
     if not cfg.dataset.path:
         raise ValueError(
             "Contrastive training requires dataset.path to point to a preprocessed dataset. "
@@ -509,10 +577,15 @@ def trainer(cfg: Config) -> None:
     pretrained_checkpoint = getattr(cfg.contrastive, "pretrained_checkpoint", None)
     allow_random_weights = bool(getattr(cfg.contrastive, "allow_random_weights", False))
     use_deepspeed = getattr(cfg, "use_deepspeed", False)
+    initialization_source = _resolve_contrastive_initialization_source(
+        resume_checkpoint_path=resume_checkpoint_path,
+        pretrained_checkpoint_dir=pretrained_checkpoint_dir,
+        allow_random_weights=allow_random_weights,
+    )
 
     resolved_pretrained_checkpoint_dir: Path | None = None
     resolved_pretrained_checkpoint_tag: str | None = None
-    if pretrained_checkpoint_dir:
+    if initialization_source == "pretrained":
         resolved_pretrained_checkpoint_dir = (
             _normalize_contrastive_pretrained_checkpoint_root(pretrained_checkpoint_dir)
         )
@@ -666,52 +739,32 @@ def trainer(cfg: Config) -> None:
         list(dataset.keys()),
         dataset_path / "all",
     )
-    pretraining_dataset_raw = load_from_disk(
-        os.fspath(dataset_path)
-    )  # Base dataset for pretraining SimCSE
-    if isinstance(pretraining_dataset_raw, DatasetDict):
-        if "train" in pretraining_dataset_raw:
-            pretraining_dataset = pretraining_dataset_raw["train"]
-        elif len(pretraining_dataset_raw) > 0:
-            first_split = next(iter(pretraining_dataset_raw.keys()))
-            logger.warning(
-                "Contrastive pretraining dataset is a DatasetDict without a 'train' "
-                f"split; using first split '{first_split}'."
-            )
-            pretraining_dataset = pretraining_dataset_raw[first_split]
+    pretraining_dataset = None
+    if pretraining_mix_prob > 0.0:
+        pretraining_dataset_raw = load_from_disk(os.fspath(pretraining_dataset_path))
+        if isinstance(pretraining_dataset_raw, DatasetDict):
+            if "train" in pretraining_dataset_raw:
+                pretraining_dataset = pretraining_dataset_raw["train"]
+            elif len(pretraining_dataset_raw) > 0:
+                first_split = next(iter(pretraining_dataset_raw.keys()))
+                logger.warning(
+                    "Contrastive pretraining dataset is a DatasetDict without a "
+                    f"'train' split; using first split '{first_split}'."
+                )
+                pretraining_dataset = pretraining_dataset_raw[first_split]
+            else:
+                raise ValueError(
+                    "Pretraining dataset at "
+                    f"'{pretraining_dataset_path}' contains no splits."
+                )
         else:
-            raise ValueError(
-                f"Pretraining dataset at '{dataset_path}' contains no splits."
-            )
-    else:
-        pretraining_dataset = pretraining_dataset_raw
+            pretraining_dataset = pretraining_dataset_raw
 
     data_collator = CustomDataCollatorWithPadding(
         tokenizer=tokenizer,
         return_tensors="pt",
         pad_to_multiple_of=cfg.datacollator.pad_to_multiple_of,
     )
-    pretraining_column_names = set(getattr(pretraining_dataset, "column_names", []))
-    if {"input_ids", "attention_mask"}.issubset(pretraining_column_names):
-        pretraining_collator: DataCollatorWithPadding = DataCollatorWithPadding(
-            tokenizer=tokenizer,
-            return_tensors="pt",
-            pad_to_multiple_of=cfg.datacollator.pad_to_multiple_of,
-        )
-    elif {
-        "input_ids_query",
-        "attention_mask_query",
-        "input_ids_corpus",
-        "attention_mask_corpus",
-    }.issubset(pretraining_column_names):
-        pretraining_collator = data_collator
-    else:
-        logger.warning(
-            "Pretraining dataset columns do not match known SimCSE schemas; "
-            "falling back to CustomDataCollatorWithPadding. Found columns: "
-            f"{sorted(pretraining_column_names)}."
-        )
-        pretraining_collator = data_collator
     target_bsz = cfg.trainer.per_device_train_batch_size
     dataloader_kwargs, loader_perf_notes = _resolve_contrastive_dataloader_kwargs(
         cfg,
@@ -728,12 +781,34 @@ def trainer(cfg: Config) -> None:
         )
         for key in dataset.keys()
     }
-    dataloaders["pretraining"] = DataLoader(
-        pretraining_dataset,
-        batch_size=target_bsz,
-        collate_fn=pretraining_collator,
-        **dataloader_kwargs,
-    )
+    if pretraining_dataset is not None:
+        pretraining_column_names = set(getattr(pretraining_dataset, "column_names", []))
+        if {"input_ids", "attention_mask"}.issubset(pretraining_column_names):
+            pretraining_collator: DataCollatorWithPadding = DataCollatorWithPadding(
+                tokenizer=tokenizer,
+                return_tensors="pt",
+                pad_to_multiple_of=cfg.datacollator.pad_to_multiple_of,
+            )
+        elif {
+            "input_ids_query",
+            "attention_mask_query",
+            "input_ids_corpus",
+            "attention_mask_corpus",
+        }.issubset(pretraining_column_names):
+            pretraining_collator = data_collator
+        else:
+            logger.warning(
+                "Pretraining dataset columns do not match known SimCSE schemas; "
+                "falling back to CustomDataCollatorWithPadding. Found columns: "
+                f"{sorted(pretraining_column_names)}."
+            )
+            pretraining_collator = data_collator
+        dataloaders["pretraining"] = DataLoader(
+            pretraining_dataset,
+            batch_size=target_bsz,
+            collate_fn=pretraining_collator,
+            **dataloader_kwargs,
+        )
 
     alpha = getattr(cfg.dataset, "alpha", 1.0)
     total = sum(x**alpha for x in dataset.num_rows.values())
@@ -756,7 +831,7 @@ def trainer(cfg: Config) -> None:
     )
     model = NeoBERT(config=model_config)
 
-    if pretrained_checkpoint_dir:
+    if initialization_source == "pretrained":
         assert resolved_pretrained_checkpoint_dir is not None
         assert resolved_pretrained_checkpoint_tag is not None
         if use_deepspeed:
@@ -791,13 +866,9 @@ def trainer(cfg: Config) -> None:
                     "loaded fp32 weights from DeepSpeed checkpoint shards instead."
                 )
             _load_contrastive_pretrained_backbone_weights(model, state_dict)
-    elif allow_random_weights:
+    elif initialization_source == "random":
         logger.warning(
             "allow_random_weights=true: contrastive training will start from random initialization."
-        )
-    else:
-        logger.warning(
-            "No pretrained checkpoint provided. Contrastive training will start from random initialization."
         )
 
     # Log the number of parameters
@@ -842,17 +913,13 @@ def trainer(cfg: Config) -> None:
     )
 
     # Accelerate
-    keys = list(dataset.keys())
-
-    dataloaders[keys[0]], model, optimizer, scheduler = accelerator.prepare(
-        dataloaders[keys[0]],
+    dataloaders, model, optimizer, scheduler = _prepare_contrastive_components(
+        accelerator,
+        dataloaders,
         model,
         optimizer,
         scheduler,
     )
-
-    for key in keys[1:]:
-        dataloaders[key] = accelerator.prepare(dataloaders[key])
 
     validate_muon_runtime_topology(
         accelerator=accelerator,

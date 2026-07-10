@@ -180,7 +180,7 @@ python scripts/contrastive/finetune.py \
   configs/contrastive/contrastive_neobert.yaml
 ```
 
-Ensure `dataset.path` points to output from `scripts/contrastive/preprocess.py`.
+Set `dataset.path` to output from `scripts/contrastive/preprocess.py` and configure one initialization source: `contrastive.pretrained_checkpoint_dir` for normal training, a self-contained contrastive `trainer.resume_from_checkpoint`, or `contrastive.allow_random_weights: true` for an intentional random-weight experiment. Random initialization is rejected by default. The optional SimCSE anti-forgetting branch is disabled by default; enabling it requires both `contrastive.pretraining_prob > 0` and a separate tokenized dataset at `contrastive.pretraining_dataset_path`. Every active supervised and SimCSE dataloader is prepared and sharded by Accelerate.
 
 ## Related Docs
 

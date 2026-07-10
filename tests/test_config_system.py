@@ -51,7 +51,8 @@ class TestConfigSystem(unittest.TestCase):
         self.assertEqual(config.trainer.torch_compile_backend, "inductor")
         self.assertTrue(config.trainer.enforce_full_packed_batches)
         self.assertEqual(config.dataset.min_length, 5)
-        self.assertEqual(config.contrastive.pretraining_prob, 0.3)
+        self.assertEqual(config.contrastive.pretraining_prob, 0.0)
+        self.assertIsNone(config.contrastive.pretraining_dataset_path)
 
     def test_config_from_yaml(self):
         """Test loading config from YAML file."""

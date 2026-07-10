@@ -17,7 +17,9 @@ from neobert.contrastive.trainer import (
     _load_contrastive_pretrained_backbone_weights,
     _normalize_contrastive_pretrained_checkpoint_root,
     _pool_sequence,
+    _prepare_contrastive_components,
     _resolve_contrastive_dataloader_kwargs,
+    _resolve_contrastive_initialization_source,
     _sync_contrastive_runtime_from_pretraining,
     trainer,
 )
@@ -54,14 +56,16 @@ class TestContrastivePipeline:
         # guaranteed final-checkpoint path (nothing would be saved without it).
         [(1, 1), (1, 2)],
     )
+    @pytest.mark.parametrize("pretraining_prob", [0.0, 1.0])
     def test_contrastive_trainer_saves_under_checkpoints_root(
         self,
         tiny_contrastive_config_path: Path,
         tmp_path: Path,
         max_steps: int,
         save_steps: int,
+        pretraining_prob: float,
     ):
-        """Ensure contrastive saves portable weights under ``checkpoints/<step>/``."""
+        """Ensure supervised and SimCSE steps save complete portable checkpoints."""
         config = ConfigLoader.load(str(tiny_contrastive_config_path))
         config.dataset.path = str(tmp_path)
         config.trainer.output_dir = str(tmp_path)
@@ -76,7 +80,9 @@ class TestContrastivePipeline:
         config.trainer.disable_tqdm = True
         config.wandb.mode = "disabled"
         config.wandb.enabled = False
-        config.contrastive.pretraining_prob = 0.0
+        config.contrastive.pretraining_prob = pretraining_prob
+        config.contrastive.pretraining_dataset_path = str(tmp_path / "pretraining")
+        config.contrastive.allow_random_weights = True
 
         dataset_dict = DatasetDict(
             {
@@ -104,7 +110,7 @@ class TestContrastivePipeline:
             mock.patch(
                 "neobert.contrastive.trainer.load_from_disk",
                 side_effect=_fake_load_from_disk,
-            ),
+            ) as pretraining_loader,
             mock.patch(
                 "neobert.contrastive.trainer.load_cached_contrastive_datasets",
                 return_value=dataset_dict,
@@ -121,6 +127,10 @@ class TestContrastivePipeline:
             trainer(config)
 
         cached_loader.assert_called_once()
+        if pretraining_prob > 0:
+            pretraining_loader.assert_called_once_with(str(tmp_path / "pretraining"))
+        else:
+            pretraining_loader.assert_not_called()
         assert cached_loader.call_args.kwargs["selected_names"] == ["ALLNLI"]
         step_dir = tmp_path / "checkpoints" / str(max_steps)
         assert step_dir.is_dir()
@@ -177,6 +187,96 @@ class TestContrastivePipeline:
         with pytest.raises(ValueError, match="dataset.path"):
             trainer(config)
 
+    def test_simcse_branch_requires_explicit_dataset_path(
+        self,
+        tiny_contrastive_config_path: Path,
+        tmp_path: Path,
+    ):
+        """A positive mix probability cannot reuse the supervised cache root."""
+        config = ConfigLoader.load(str(tiny_contrastive_config_path))
+        config.dataset.path = str(tmp_path)
+        config.contrastive.pretraining_prob = 0.1
+        config.contrastive.pretraining_dataset_path = None
+
+        with pytest.raises(ValueError, match="pretraining_dataset_path"):
+            trainer(config)
+
+    def test_random_initialization_requires_explicit_opt_in(
+        self,
+        tiny_contrastive_config_path: Path,
+        tmp_path: Path,
+    ):
+        """Missing pretrained weights fail before runtime construction."""
+        config = ConfigLoader.load(str(tiny_contrastive_config_path))
+        config.dataset.path = str(tmp_path)
+        config.contrastive.pretraining_prob = 0.0
+        config.contrastive.allow_random_weights = False
+
+        with (
+            mock.patch("neobert.contrastive.trainer.create_accelerator") as create,
+            pytest.raises(ValueError, match="requires pretrained_checkpoint_dir"),
+        ):
+            trainer(config)
+        create.assert_not_called()
+
+    def test_initialization_source_prefers_self_contained_resume(self):
+        """A contrastive resume never reopens its original pretraining source."""
+        assert (
+            _resolve_contrastive_initialization_source(
+                resume_checkpoint_path="checkpoints/10",
+                pretrained_checkpoint_dir="pretraining/checkpoints",
+                allow_random_weights=False,
+            )
+            == "resume"
+        )
+        assert (
+            _resolve_contrastive_initialization_source(
+                resume_checkpoint_path=None,
+                pretrained_checkpoint_dir=None,
+                allow_random_weights=True,
+            )
+            == "random"
+        )
+
+    def test_prepare_contrastive_components_prepares_every_loader(self):
+        """The optional SimCSE loader is sharded and device-prepared too."""
+
+        class RecordingAccelerator:
+            def __init__(self) -> None:
+                self.prepared = []
+
+            def prepare(self, *objects):
+                self.prepared.append(objects)
+                return objects if len(objects) > 1 else objects[0]
+
+        accelerator = RecordingAccelerator()
+        dataloaders = {
+            "ALLNLI": object(),
+            "pretraining": object(),
+        }
+        model = torch.nn.Linear(2, 2)
+        optimizer = torch.optim.AdamW(model.parameters())
+        scheduler = object()
+
+        prepared, out_model, out_optimizer, out_scheduler = (
+            _prepare_contrastive_components(
+                accelerator,
+                dataloaders,
+                model,
+                optimizer,
+                scheduler,
+            )
+        )
+
+        assert prepared == dataloaders
+        assert out_model is model
+        assert out_optimizer is optimizer
+        assert out_scheduler is scheduler
+        assert len(accelerator.prepared) == 2
+        assert any(
+            call == (dataloaders["pretraining"],) for call in accelerator.prepared
+        )
+
     def test_muonclip_trainer_passes_model_config(
         self,
         tiny_contrastive_config_path: Path,
@@ -186,6 +286,7 @@ class TestContrastivePipeline:
         config = ConfigLoader.load(str(tiny_contrastive_config_path))
         config.dataset.path = str(tmp_path)
         config.optimizer.name = "muonclip"
+        config.contrastive.allow_random_weights = True
         config.trainer.max_steps = 0
         config.wandb.mode = "disabled"
 

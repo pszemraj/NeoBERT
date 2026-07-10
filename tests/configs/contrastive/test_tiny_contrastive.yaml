@@ -37,6 +37,8 @@ trainer:
 contrastive:
   temperature: 0.05
   pooling: "avg"
+  pretraining_prob: 0.0
+  allow_random_weights: true
 
 optimizer:
   name: "adamw"

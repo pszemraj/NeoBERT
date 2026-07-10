@@ -391,7 +391,8 @@ class ContrastiveConfig:
 
     temperature: float = 0.05
     pooling: str = "avg"  # avg, cls, max
-    pretraining_prob: float = 0.3
+    pretraining_prob: float = 0.0
+    pretraining_dataset_path: Optional[str] = None
     pretrained_checkpoint_dir: Optional[str] = None
     pretrained_checkpoint: Optional[Union[str, int]] = None
     allow_random_weights: bool = False
@@ -2160,6 +2161,16 @@ def create_argument_parser(require_config: bool = False) -> argparse.ArgumentPar
         "--contrastive.pretraining_prob",
         type=float,
         help="Probability of drawing a pretraining batch during contrastive training",
+    )
+    parser.add_argument(
+        "--contrastive.pretraining_dataset_path",
+        type=str,
+        help="Tokenized dataset used by the optional SimCSE pretraining branch",
+    )
+    parser.add_argument(
+        "--contrastive.allow_random_weights",
+        type=_parse_cli_bool,
+        help="Allow contrastive training to start from random weights",
     )
 
     # WandB arguments
