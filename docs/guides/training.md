@@ -9,7 +9,7 @@ This guide covers pretraining and contrastive workflows. Full field-level schema
 | `scripts/pretraining/pretrain.py`         | MLM pretraining                   |
 | `scripts/pretraining/preprocess.py`       | tokenize and save dataset to disk |
 | `scripts/pretraining/tokenize_dataset.py` | standalone tokenization helper    |
-| `scripts/pretraining/longer_seq.py`       | continue run at longer context    |
+| `scripts/pretraining/longer_seq.py`       | build long-sequence dataset views |
 | `scripts/contrastive/finetune.py`         | contrastive fine-tuning           |
 | `scripts/contrastive/preprocess.py`       | contrastive dataset preprocessing |
 | `scripts/contrastive/download.py`         | pre-download contrastive datasets |
@@ -179,6 +179,14 @@ python scripts/pretraining/tokenize_dataset.py \
 ```
 
 When `datacollator.pack_sequences` is enabled, each stored example must contain raw content tokens without outer CLS/SEP or BOS/EOS tokens. The packing collator inserts one boundary pair per segment and rejects pre-specialized inputs rather than silently duplicating boundaries. The config-driven preprocessor applies this contract automatically; the standalone helper requires `--for-packing`, where `--max-length` is the final packed length and the helper reserves space for the boundary tokens.
+
+To create filtered long-sequence views, pass the threshold explicitly; the utility writes `<dataset.path>+<min-length>` and a second view at twice the threshold:
+
+```bash
+python scripts/pretraining/longer_seq.py \
+  configs/pretraining/pretrain_neobert.yaml \
+  --min-length 512
+```
 
 ## Contrastive
 

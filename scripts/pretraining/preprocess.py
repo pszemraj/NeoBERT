@@ -9,11 +9,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from datasets import concatenate_datasets, load_dataset
+from datasets import load_dataset
 
-from neobert.collator import resolve_packed_token_limits
 from neobert.config import load_config_from_args
-from neobert.tokenizer import get_tokenizer, resolve_text_column, tokenize
+from neobert.tokenizer import (
+    get_tokenizer,
+    resolve_text_column,
+    tokenize_pretraining_dataset,
+)
 
 
 def preprocess(cfg: Any) -> None:
@@ -28,19 +31,7 @@ def preprocess(cfg: Any) -> None:
     print(tokenizer)
 
     print("Loading dataset")
-    if cfg.dataset.name == "wikibook":
-        bookcorpus = load_dataset("bookcorpus", split="train")
-        wiki = load_dataset("wikipedia", "20220301.en", split="train")
-        wiki = wiki.remove_columns([col for col in wiki.column_names if col != "text"])
-
-        if bookcorpus.features.type != wiki.features.type:
-            raise ValueError(
-                "wikibook sources have mismatched schema types: "
-                f"bookcorpus={bookcorpus.features.type} vs wiki={wiki.features.type}"
-            )
-        dataset = concatenate_datasets([bookcorpus, wiki]).shuffle(seed=0)
-    else:
-        dataset = load_dataset(cfg.dataset.name, split="train")
+    dataset = load_dataset(cfg.dataset.name, split="train")
 
     text_column = resolve_text_column(
         dataset,
@@ -49,22 +40,18 @@ def preprocess(cfg: Any) -> None:
     )
 
     pack_sequences = bool(cfg.datacollator.pack_sequences)
-    tokenize_max_length = cfg.dataset.max_seq_length
+    max_length = cfg.dataset.max_seq_length
     if pack_sequences:
-        pack_target_length = cfg.datacollator.max_length or cfg.dataset.max_seq_length
-        tokenize_max_length, _, _ = resolve_packed_token_limits(
-            tokenizer, pack_target_length
-        )
+        max_length = cfg.datacollator.max_length or max_length
 
     print(f"Tokenizing dataset (column={text_column})")
-    dataset = tokenize(
+    dataset = tokenize_pretraining_dataset(
         dataset,
         tokenizer,
         column_name=text_column,
-        max_length=tokenize_max_length,
+        max_length=max_length,
         truncation=cfg.tokenizer.truncation,
-        add_special_tokens=not pack_sequences,
-        remove_columns=True,
+        pack_sequences=pack_sequences,
         return_special_tokens_mask=True,
     )
 

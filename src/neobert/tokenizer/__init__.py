@@ -1,10 +1,17 @@
 """Tokenizer loading and dataset tokenization helpers."""
 
-__all__ = ["align_tokenizer_vocab", "get_tokenizer", "resolve_text_column", "tokenize"]
+__all__ = [
+    "align_tokenizer_vocab",
+    "get_tokenizer",
+    "resolve_text_column",
+    "tokenize",
+    "tokenize_pretraining_dataset",
+]
 
 from .tokenizer import (
     align_tokenizer_vocab,
     get_tokenizer,
     resolve_text_column,
     tokenize,
+    tokenize_pretraining_dataset,
 )

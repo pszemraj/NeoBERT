@@ -6,8 +6,11 @@ from pathlib import Path
 
 from datasets import load_dataset
 
-from neobert.collator import resolve_packed_token_limits
-from neobert.tokenizer import get_tokenizer, resolve_text_column, tokenize
+from neobert.tokenizer import (
+    get_tokenizer,
+    resolve_text_column,
+    tokenize_pretraining_dataset,
+)
 
 
 def main() -> None:
@@ -38,6 +41,22 @@ def main() -> None:
         type=str,
         default="google-bert/bert-base-uncased",
         help="Tokenizer model name or path",
+    )
+    parser.add_argument(
+        "--tokenizer-revision",
+        type=str,
+        default=None,
+        help="Optional tokenizer revision or commit to pin",
+    )
+    parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Allow tokenizer repositories to execute custom code",
+    )
+    parser.add_argument(
+        "--allow-special-token-rewrite",
+        action="store_true",
+        help="Allow fallback rewriting when the tokenizer lacks a mask token",
     )
     parser.add_argument(
         "--output",
@@ -103,6 +122,9 @@ def main() -> None:
     tokenizer = get_tokenizer(
         pretrained_model_name_or_path=args.tokenizer,
         max_length=args.max_length,
+        trust_remote_code=args.trust_remote_code,
+        revision=args.tokenizer_revision,
+        allow_special_token_rewrite=args.allow_special_token_rewrite,
     )
 
     text_column = resolve_text_column(
@@ -110,22 +132,18 @@ def main() -> None:
     )
 
     add_special_tokens = not args.for_packing
-    tokenize_max_length = args.max_length
-    if args.for_packing:
-        tokenize_max_length, _, _ = resolve_packed_token_limits(
-            tokenizer, args.max_length
-        )
     print(
-        f"Tokenizing with max_length={tokenize_max_length} "
+        f"Tokenizing for max_length={args.max_length} "
         f"(add_special_tokens={add_special_tokens})..."
     )
-    tokenized_dataset = tokenize(
+    tokenized_dataset = tokenize_pretraining_dataset(
         dataset,
         tokenizer,
         column_name=text_column,
-        max_length=tokenize_max_length,
+        max_length=args.max_length,
         num_proc=args.num_proc,
-        add_special_tokens=add_special_tokens,
+        truncation=True,
+        pack_sequences=args.for_packing,
         return_special_tokens_mask=args.return_special_tokens_mask,
     )
 

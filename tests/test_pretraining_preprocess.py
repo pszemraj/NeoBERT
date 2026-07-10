@@ -4,7 +4,55 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from neobert.tokenizer import tokenize_pretraining_dataset
 from scripts.pretraining.preprocess import preprocess
+
+
+@pytest.mark.parametrize(
+    ("pack_sequences", "expected_max_length", "expected_add_special_tokens"),
+    [(False, 12, True), (True, 10, False)],
+)
+def test_shared_pretraining_tokenization_contract(
+    pack_sequences: bool,
+    expected_max_length: int,
+    expected_add_special_tokens: bool,
+) -> None:
+    """The shared helper should own packing boundaries and special-token policy."""
+    dataset = MagicMock()
+    tokenizer = SimpleNamespace(
+        cls_token_id=1,
+        bos_token_id=None,
+        sep_token_id=2,
+        eos_token_id=None,
+    )
+    tokenized_dataset = MagicMock()
+
+    with patch(
+        "neobert.tokenizer.tokenizer.tokenize", return_value=tokenized_dataset
+    ) as tokenize_mock:
+        result = tokenize_pretraining_dataset(
+            dataset,
+            tokenizer,
+            column_name="text",
+            max_length=12,
+            truncation=True,
+            pack_sequences=pack_sequences,
+            return_special_tokens_mask=True,
+        )
+
+    assert result is tokenized_dataset
+    tokenize_mock.assert_called_once_with(
+        dataset,
+        tokenizer,
+        column_name="text",
+        max_length=expected_max_length,
+        truncation=True,
+        add_special_tokens=expected_add_special_tokens,
+        remove_columns=True,
+        return_special_tokens_mask=True,
+    )
 
 
 def test_packed_preprocessing_emits_raw_segments_with_reserved_boundaries() -> None:
@@ -44,7 +92,8 @@ def test_packed_preprocessing_emits_raw_segments_with_reserved_boundaries() -> N
             "scripts.pretraining.preprocess.resolve_text_column", return_value="text"
         ),
         patch(
-            "scripts.pretraining.preprocess.tokenize", return_value=tokenized_dataset
+            "scripts.pretraining.preprocess.tokenize_pretraining_dataset",
+            return_value=tokenized_dataset,
         ) as tokenize_mock,
     ):
         preprocess(cfg)
@@ -53,10 +102,9 @@ def test_packed_preprocessing_emits_raw_segments_with_reserved_boundaries() -> N
         source_dataset,
         tokenizer,
         column_name="text",
-        max_length=10,
+        max_length=12,
         truncation=True,
-        add_special_tokens=False,
-        remove_columns=True,
+        pack_sequences=True,
         return_special_tokens_mask=True,
     )
     tokenized_dataset.save_to_disk.assert_called_once_with(

@@ -14,6 +14,7 @@ from transformers import (
     PreTrainedTokenizerFast,
 )
 
+from neobert.collator import resolve_packed_token_limits
 from neobert.streaming import (
     is_streaming_dataset,
     is_transient_streaming_error,
@@ -21,6 +22,46 @@ from neobert.streaming import (
 )
 
 logger = logging.getLogger("neobert.tokenizer")
+
+
+def tokenize_pretraining_dataset(
+    dataset: Dataset,
+    tokenizer: PreTrainedTokenizer,
+    *,
+    column_name: str,
+    max_length: int,
+    truncation: bool,
+    pack_sequences: bool,
+    return_special_tokens_mask: bool,
+    **kwargs: Any,
+) -> Dataset:
+    """Tokenize pretraining text under the packed-sequence boundary contract.
+
+    :param Dataset dataset: Source dataset containing raw text.
+    :param PreTrainedTokenizer tokenizer: Tokenizer to apply.
+    :param str column_name: Source text column.
+    :param int max_length: Final sequence length target.
+    :param bool truncation: Whether to truncate long source examples.
+    :param bool pack_sequences: Whether the downstream collator packs raw segments.
+    :param bool return_special_tokens_mask: Whether to store special-token masks.
+    :param Any kwargs: Extra keyword arguments forwarded to :func:`tokenize`.
+    :return Dataset: Tokenized pretraining dataset.
+    """
+    tokenize_max_length = max_length
+    if pack_sequences:
+        tokenize_max_length, _, _ = resolve_packed_token_limits(tokenizer, max_length)
+
+    return tokenize(
+        dataset,
+        tokenizer,
+        column_name=column_name,
+        max_length=tokenize_max_length,
+        truncation=truncation,
+        add_special_tokens=not pack_sequences,
+        remove_columns=True,
+        return_special_tokens_mask=return_special_tokens_mask,
+        **kwargs,
+    )
 
 
 def align_tokenizer_vocab(
