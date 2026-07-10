@@ -475,6 +475,15 @@ class NeoBERTAttentionHooks:
         """
         return any(inputs is not None for inputs in self.layer_inputs.values())
 
+    def has_complete_captured_inputs(self) -> bool:
+        """Return whether every registered layer captured its input.
+
+        :return bool: True when all registered layer inputs are present.
+        """
+        return bool(self.layer_inputs) and all(
+            inputs is not None for inputs in self.layer_inputs.values()
+        )
+
     def remove_hooks(self) -> None:
         """Remove all registered forward hooks."""
         for handle in self.hook_handles:
@@ -519,16 +528,17 @@ class MuonClipOptimizer(Optimizer):
         # and Muon-only are different optimizer recipes; both the factory and
         # the runtime guard fail fast rather than silently downgrade, so
         # config.enable_clipping always equals the effective clipping mode.
-        self.STATE_SEMANTICS = "|".join(
-            (
-                type(self).STATE_SEMANTICS,
-                f"norm_factor={config.norm_factor}",
-                f"param_policy={config.param_policy}",
-                f"orthogonalization={config.orthogonalization}",
-                f"nesterov={config.nesterov}",
-                f"clipping={config.enable_clipping}",
-            )
-        )
+        state_semantics = [
+            type(self).STATE_SEMANTICS,
+            f"norm_factor={config.norm_factor}",
+            f"param_policy={config.param_policy}",
+            f"orthogonalization={config.orthogonalization}",
+            f"nesterov={config.nesterov}",
+            f"clipping={config.enable_clipping}",
+        ]
+        if config.enable_clipping:
+            state_semantics.append("clipping_reduction=global-v1")
+        self.STATE_SEMANTICS = "|".join(state_semantics)
         self._step = 0
         self._last_metrics: Dict[str, float] = {}
         self._layer_mapping = dict(self.config.clipping_layers_mapping)
@@ -598,6 +608,50 @@ class MuonClipOptimizer(Optimizer):
             raise ValueError(f"clipping_interval must be >= 1, got {interval}")
 
         return ((update_step - warmup) % interval) == 0
+
+    def _collective_device(self) -> torch.device:
+        """Return a parameter device compatible with the active process-group backend.
+
+        :return torch.device: Device for small optimizer-control collectives.
+        """
+        for group in self.param_groups:
+            params = group.get("params", ())
+            if params:
+                return params[0].device
+        return torch.device("cpu")
+
+    def _synchronize_capture_readiness(self) -> bool:
+        """Require every replica to have complete clipping captures.
+
+        :raises RuntimeError: If capture readiness differs across ranks or layers.
+        :return bool: True when every rank can enter clipping; false when none can.
+        """
+        assert self.hook_system is not None
+        local_state = torch.tensor(
+            [
+                int(self.hook_system.has_captured_inputs()),
+                int(self.hook_system.has_complete_captured_inputs()),
+            ],
+            device=self._collective_device(),
+            dtype=torch.int32,
+        )
+        world_size = 1
+        if dist.is_available() and dist.is_initialized():
+            world_size = int(dist.get_world_size())
+            if world_size > 1:
+                dist.all_reduce(local_state, op=dist.ReduceOp.SUM)
+
+        captured_ranks, complete_ranks = map(int, local_state.tolist())
+        if captured_ranks == 0:
+            return False
+        if captured_ranks != world_size or complete_ranks != world_size:
+            raise RuntimeError(
+                "MuonClip activation capture is incomplete or differs across "
+                "distributed ranks; refusing rank-local Q/K parameter mutation "
+                f"(captured={captured_ranks}/{world_size}, "
+                f"complete={complete_ranks}/{world_size})."
+            )
+        return True
 
     def prepare_for_forward(
         self, *, update_step: int, is_last_microbatch: bool
@@ -894,12 +948,12 @@ class MuonClipOptimizer(Optimizer):
         if self._runtime_clipping_enabled and self.hook_system:
             should_clip = self.should_clip_update(self._step)
             if should_clip:
-                if not self.hook_system.has_captured_inputs():
+                if not self._synchronize_capture_readiness():
                     logger.warning(
                         "MuonClip scheduled at update_step="
-                        f"{self._step} but no activations were captured. Clipping will be "
-                        "skipped. This usually means prepare_for_forward() was not called on "
-                        "the correct microbatch (or hooks were disabled/wrapped)."
+                        f"{self._step} but no rank captured activations. Clipping will "
+                        "be skipped. This usually means prepare_for_forward() was not "
+                        "called on the correct microbatch (or hooks were disabled/wrapped)."
                     )
                     self._last_metrics.clear()
                 else:
@@ -2137,11 +2191,23 @@ class MuonClipOptimizer(Optimizer):
             per_step_max, self.config.clipping_threshold
         )
 
-        global_max: Optional[float] = None
+        global_max_tensor = torch.full(
+            (),
+            float("-inf"),
+            device=per_step_max.device,
+            dtype=(
+                torch.float64 if per_step_max.dtype == torch.float64 else torch.float32
+            ),
+        )
         if per_step_max.numel() > 0:
-            candidate = per_step_max.max()
-            if torch.isfinite(candidate):
-                global_max = float(candidate.item())
+            global_max_tensor.copy_(per_step_max.max())
+        if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+            dist.all_reduce(global_max_tensor, op=dist.ReduceOp.MAX)
+        global_max = (
+            float(global_max_tensor.item())
+            if torch.isfinite(global_max_tensor)
+            else None
+        )
         return eta_per_head, global_max
 
     @staticmethod
@@ -2151,27 +2217,49 @@ class MuonClipOptimizer(Optimizer):
         """Reduce per-sample/per-head max logits to a per-head clip factor.
 
         ``per_step_max`` is ``[B, H]`` and holds ``-inf`` for samples with no
-        valid query/key positions (a fully padded example). The clip factor is
-        ``clipping_threshold / mean(max_logit)`` capped at 1.0, but the mean must
-        be taken over valid samples only: a plain ``mean(dim=0)`` propagates one
-        ``-inf`` across the whole head, which the ``clamp(min=1e-6)`` then turns
-        into ``eta = 1.0`` - clipping silently disabled for that head for every
-        sample in the batch, not just the degenerate one. Averaging over finite
-        entries keeps a single padded sample from suppressing the clip; a head
-        with no valid samples yields ``eta = 1.0`` (nothing to clip).
+        valid query/key positions. Replicated distributed runs all-reduce finite
+        sums, valid counts, and invalid-value counts so every rank derives the
+        same global-batch factor. NaN and positive infinity are numerical
+        failures; only negative infinity is an allowed padding sentinel.
 
         :param torch.Tensor per_step_max: Per-sample/per-head max logits ``[B, H]``.
         :param float clipping_threshold: Target maximum mean attention logit.
+        :raises FloatingPointError: If any rank observes NaN or positive infinity.
         :return torch.Tensor: Per-head clip factor ``[H]`` in ``(0, 1]``.
         """
-        finite = torch.isfinite(per_step_max)
-        valid_counts = finite.sum(dim=0)
-        finite_sums = torch.where(
-            finite, per_step_max, torch.zeros_like(per_step_max)
-        ).sum(dim=0)
+        if per_step_max.ndim != 2:
+            raise ValueError(
+                "per_step_max must have shape [batch, heads], got "
+                f"{tuple(per_step_max.shape)}."
+            )
+        accumulation_dtype = (
+            torch.float64 if per_step_max.dtype == torch.float64 else torch.float32
+        )
+        values = per_step_max.to(dtype=accumulation_dtype)
+        finite = torch.isfinite(values)
+        invalid = torch.isnan(values) | torch.isposinf(values)
+        statistics = torch.stack(
+            (
+                torch.where(finite, values, torch.zeros_like(values)).sum(dim=0),
+                finite.sum(dim=0, dtype=accumulation_dtype),
+                invalid.sum(dim=0, dtype=accumulation_dtype),
+            )
+        )
+        if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+            dist.all_reduce(statistics, op=dist.ReduceOp.SUM)
+
+        finite_sums, valid_counts, invalid_counts = statistics
+        bad_heads = torch.nonzero(invalid_counts > 0, as_tuple=False).flatten()
+        if bad_heads.numel() > 0:
+            raise FloatingPointError(
+                "NaN or positive-infinite Q/K attention logits were detected for "
+                f"attention head(s) {bad_heads.tolist()}."
+            )
+
         mean_per_head = finite_sums / valid_counts.clamp(min=1)
         denom = torch.clamp(mean_per_head, min=1e-6)
-        return (clipping_threshold / denom).clamp(max=1.0)
+        eta = (clipping_threshold / denom).clamp(max=1.0)
+        return torch.where(valid_counts > 0, eta, torch.ones_like(eta))
 
     def _attention_logit_max(
         self,

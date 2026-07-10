@@ -607,6 +607,7 @@ class TestMuonClipOptimizer:
             MuonClipConfig(enable_clipping=True),
         )
         assert "clipping=True" in clipped.STATE_SEMANTICS
+        assert "clipping_reduction=global-v1" in clipped.STATE_SEMANTICS
         attach_optimizer_param_names(model_instance, clipped)
         save_optimizer_param_name_manifest(clipped, tmp_path)
         validate_optimizer_param_name_manifest(clipped, tmp_path)
@@ -1206,6 +1207,14 @@ class TestMuonClipOptimizer:
         eta = MuonClipOptimizer._eta_from_per_step_max(per_step_max, 50.0)
         expected = (50.0 / per_step_max.mean(dim=0)).clamp(max=1.0)
         assert torch.allclose(eta, expected)
+
+    @pytest.mark.parametrize("invalid_value", [float("nan"), float("inf")])
+    def test_eta_rejects_invalid_attention_logits(self, invalid_value: float):
+        """NaN and positive infinity must fail instead of disabling clipping."""
+        per_step_max = torch.tensor([[200.0], [invalid_value]])
+
+        with pytest.raises(FloatingPointError, match="attention head"):
+            MuonClipOptimizer._eta_from_per_step_max(per_step_max, 50.0)
 
     def test_state_dict_persists_step(self, model):
         """Ensure MuonClip step counter persists across state dicts."""
