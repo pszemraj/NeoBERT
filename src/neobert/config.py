@@ -316,13 +316,6 @@ class TrainerConfig:
     save_strategy: str = "steps"  # "steps", "epoch", "best", or "no"
     save_total_limit: Optional[int] = 3
     early_stopping: int = 0
-    metric_for_best_model: Optional[str] = (
-        None  # NOTE: reserved, not yet implemented in pretraining
-    )
-    greater_is_better: bool = True  # NOTE: reserved, not yet implemented in pretraining
-    load_best_model_at_end: bool = (
-        False  # NOTE: reserved, not yet implemented in pretraining
-    )
     save_model: bool = True
 
     disable_tqdm: bool = False
@@ -1705,28 +1698,6 @@ class ConfigLoader:
                 UserWarning,
                 stacklevel=2,
             )
-        if task == "pretraining":
-            if config.trainer.metric_for_best_model is not None:
-                warnings.warn(
-                    "trainer.metric_for_best_model is not implemented for pretraining "
-                    "and is currently ignored.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-            if bool(config.trainer.load_best_model_at_end):
-                warnings.warn(
-                    "trainer.load_best_model_at_end is not implemented for "
-                    "pretraining and is currently ignored.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-            if config.trainer.greater_is_better is not True:
-                warnings.warn(
-                    "trainer.greater_is_better is not implemented for pretraining "
-                    "and is currently ignored.",
-                    UserWarning,
-                    stacklevel=2,
-                )
         if errors:
             raise ValueError("Invalid configuration values:\n- " + "\n- ".join(errors))
 

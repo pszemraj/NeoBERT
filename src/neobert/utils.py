@@ -92,9 +92,6 @@ _NON_CONTRASTIVE_TRAINER_EXCLUDE_FIELDS = {"dataloader_num_workers"}
 _PRETRAINING_TRAINER_EXCLUDE_FIELDS = {
     "disable_tqdm",
     "early_stopping",
-    "metric_for_best_model",
-    "greater_is_better",
-    "load_best_model_at_end",
     "save_model",
 }
 

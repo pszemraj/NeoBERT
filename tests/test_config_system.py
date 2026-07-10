@@ -68,6 +68,20 @@ class TestConfigSystem(unittest.TestCase):
         self.assertEqual(config.trainer.per_device_train_batch_size, 2)
         self.assertEqual(config.dataset.max_seq_length, 128)
 
+    def test_checked_in_configs_match_current_schema(self):
+        """Ensure every maintained example config loads through the current schema."""
+        config_root = Path(__file__).resolve().parents[1] / "configs"
+        config_paths = sorted(
+            path
+            for path in config_root.rglob("*.yaml")
+            if "accelerate" not in path.parts and "generated" not in path.parts
+        )
+
+        self.assertTrue(config_paths)
+        for config_path in config_paths:
+            with self.subTest(config=str(config_path.relative_to(config_root))):
+                ConfigLoader.load(config_path)
+
     def test_saved_default_config_loads_without_legacy_none_conflicts(self):
         """Saved configs should roundtrip even with null deprecated aliases."""
         config = Config()

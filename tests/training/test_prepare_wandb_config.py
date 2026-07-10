@@ -14,9 +14,6 @@ def test_prepare_wandb_config_task_scoping_matrix():
     cfg.mteb_batch_size = 64
     cfg.use_deepspeed = True
     cfg.trainer.dataloader_num_workers = 4
-    cfg.trainer.greater_is_better = False
-    cfg.trainer.load_best_model_at_end = True
-    cfg.trainer.metric_for_best_model = "loss"
     cfg.trainer.early_stopping = 2
     cfg.trainer.save_model = False
     cfg.trainer.disable_tqdm = True
@@ -32,9 +29,6 @@ def test_prepare_wandb_config_task_scoping_matrix():
     assert "min_length" not in payload["dataset"]
     assert "alpha" not in payload["dataset"]
     assert "dataloader_num_workers" not in payload["trainer"]
-    assert "greater_is_better" not in payload["trainer"]
-    assert "load_best_model_at_end" not in payload["trainer"]
-    assert "metric_for_best_model" not in payload["trainer"]
     assert "early_stopping" not in payload["trainer"]
     assert "save_model" not in payload["trainer"]
     assert "disable_tqdm" not in payload["trainer"]

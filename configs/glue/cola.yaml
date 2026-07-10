@@ -39,9 +39,6 @@ trainer:
   save_total_limit: 0
   logging_steps: 50
   early_stopping: 5
-  metric_for_best_model: eval_matthews_correlation
-  greater_is_better: true
-  load_best_model_at_end: true
   mixed_precision: bf16
   tf32: true
 optimizer:

@@ -227,9 +227,6 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 | `trainer.dataloader_num_workers` | `int`         | `0`       | Contrastive-only dataloader worker override.              |
 | `trainer.use_cpu`                | `bool`        | `false`   | Force CPU execution.                                      |
 | `trainer.early_stopping`         | `int`         | `0`       | GLUE evaluation cycles without improvement before stopping; other trainers ignore it. |
-| `trainer.metric_for_best_model`  | `str \| None` | `null`    | Stored but not consumed by current trainer runtime.       |
-| `trainer.greater_is_better`      | `bool`        | `true`    | Stored but not consumed by current trainer runtime.       |
-| `trainer.load_best_model_at_end` | `bool`        | `false`   | Stored but not consumed by current trainer runtime.       |
 | `trainer.save_model`             | `bool`        | `true`    | Enable checkpoint writes in all trainers.                 |
 
 ---

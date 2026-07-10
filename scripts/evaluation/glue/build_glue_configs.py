@@ -34,8 +34,6 @@ BASE_TRAINER = {
     "save_total_limit": 0,
     "logging_steps": 100,
     "early_stopping": 5,
-    "greater_is_better": True,
-    "load_best_model_at_end": True,
     "mixed_precision": "bf16",
     "tf32": True,
 }
@@ -172,7 +170,6 @@ def build_trainer_section(
     """
     trainer_cfg = deepcopy(BASE_TRAINER)
     trainer_cfg.update(overrides)
-    trainer_cfg.setdefault("metric_for_best_model", "eval_accuracy")
     trainer_cfg["output_dir"] = str(base_output_dir / task_name)
     return trainer_cfg
 
@@ -303,7 +300,6 @@ def build_configs(args: BuildArgs) -> Dict[str, Dict[str, object]]:
     for task in args.tasks:
         spec = GLUE_TASK_SPECS[task]
         trainer_overrides: Dict[str, object] = {
-            "metric_for_best_model": f"eval_{spec.checkpoint_metric}",
             "eval_steps": spec.config_eval_steps,
         }
         if spec.config_logging_steps is not None:
