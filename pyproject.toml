@@ -55,7 +55,7 @@ testpaths = ["tests"]
 filterwarnings = [
     # Keep project warnings strict without failing on optional CUDA/third-party
     # runtime warnings such as PyTorch NVML initialization messages.
-    'error:::neobert(\.|$)',
+    'error::neobert.warnings.NeoBERTWarning',
 ]
 # Prevent accidental collection of scratch data/scripts and large artifacts.
 norecursedirs = [

@@ -6,6 +6,7 @@ import warnings
 
 from neobert.glue import trainer
 from neobert.glue.validation import load_validated_glue_config
+from neobert.warnings import NeoBERTWarning
 
 
 def main() -> None:
@@ -37,7 +38,7 @@ def main() -> None:
         output_dir=args.output_dir,
     )
     for message in validation_warnings:
-        warnings.warn(message, UserWarning, stacklevel=2)
+        warnings.warn(message, NeoBERTWarning, stacklevel=2)
 
     # Run the GLUE trainer
     trainer(config)

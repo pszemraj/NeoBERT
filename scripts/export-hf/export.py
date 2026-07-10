@@ -28,6 +28,7 @@ from neobert.checkpointing import (
 )
 from neobert.modeling_utils import swiglu_intermediate_size
 from neobert.tokenizer import align_tokenizer_vocab
+from neobert.warnings import NeoBERTWarning
 from safetensors.torch import save_file
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
@@ -392,7 +393,7 @@ def map_weights(
             message
             + "Proceeding because allow_decoder_bias_drop=True; decoder bias will be "
             "excluded from exported weights.",
-            UserWarning,
+            NeoBERTWarning,
             stacklevel=2,
         )
 

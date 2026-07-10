@@ -38,6 +38,7 @@ Manual script commands are in [tests/manual/README.md](../../tests/manual/README
 - Keep tests deterministic and local (avoid network where possible).
 - Disable external logging for training tests with `wandb.enabled: false`.
 - Guard GPU-only assertions with `torch.cuda.is_available()`.
+- Emit actionable project warnings as `NeoBERTWarning`; pytest treats that category as an error while leaving dependency warnings nonfatal.
 - For performance-sensitive paths (packing/compile), include regression tests for both correctness and expected control-flow behavior.
 
 ## Common Failures

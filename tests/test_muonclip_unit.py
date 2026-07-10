@@ -17,6 +17,7 @@ from torch.distributed.checkpoint.state_dict import (
 
 from neobert.model import NeoBERT, NeoBERTConfig, NeoBERTLMHead
 from neobert.optimizer import MuonClipConfig, MuonClipOptimizer
+from neobert.warnings import NeoBERTWarning
 
 
 def _neobert_polar_express_reference(
@@ -368,7 +369,7 @@ class TestMuonClipConfig:
 
     def test_warnings_for_suboptimal(self):
         """Test warnings for suboptimal settings."""
-        with pytest.warns(UserWarning):
+        with pytest.warns(NeoBERTWarning):
             MuonClipConfig(ns_steps=2)  # Too few iterations
 
     def test_orthogonalization_selection(self):
@@ -1808,7 +1809,7 @@ class TestMuonClipOptimizer:
         """Test QK-clipping actually modifies weights."""
         model_instance, config = model
 
-        with pytest.warns(UserWarning, match="clipping_threshold"):
+        with pytest.warns(NeoBERTWarning, match="clipping_threshold"):
             muon_config = MuonClipConfig(
                 lr=1e-3,
                 enable_clipping=True,

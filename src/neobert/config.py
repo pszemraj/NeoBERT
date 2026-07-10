@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional, Union, get_args, get_origin
 
 import yaml
 
+from neobert.warnings import NeoBERTWarning
+
 
 def round_up_to_multiple(x: int, N: int = 128) -> int:
     """Round an integer up to the nearest multiple of ``N``.
@@ -584,7 +586,7 @@ class ConfigLoader:
             tokens = ", ".join(sorted(unresolved_refs[location]))
             warnings.warn(
                 f"Unresolved variable token(s) at '{location}': {tokens}",
-                UserWarning,
+                NeoBERTWarning,
                 stacklevel=3,
             )
 
@@ -935,7 +937,7 @@ class ConfigLoader:
 
         :param str message: Warning message.
         """
-        warnings.warn(message, UserWarning, stacklevel=3)
+        warnings.warn(message, NeoBERTWarning, stacklevel=3)
 
     @staticmethod
     def _normalize_legacy_keys(cfg_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -1456,7 +1458,7 @@ class ConfigLoader:
                     "tokenizer.max_length is smaller than dataset.max_seq_length for "
                     f"{task}; syncing tokenizer.max_length from "
                     f"{config.tokenizer.max_length} to {config.dataset.max_seq_length}.",
-                    UserWarning,
+                    NeoBERTWarning,
                     stacklevel=2,
                 )
                 config.tokenizer.max_length = config.dataset.max_seq_length
@@ -1472,7 +1474,7 @@ class ConfigLoader:
                 "tokenizer.max_length does not match glue.max_seq_length; syncing "
                 f"tokenizer.max_length from {config.tokenizer.max_length} to "
                 f"{config.glue.max_seq_length}.",
-                UserWarning,
+                NeoBERTWarning,
                 stacklevel=2,
             )
             config.tokenizer.max_length = config.glue.max_seq_length
@@ -1703,7 +1705,7 @@ class ConfigLoader:
                 "Runtime backend selection is controlled by Accelerate launch config. "
                 "Install the optional legacy-checkpoints extra when DeepSpeed ZeRO "
                 "conversion is actually needed.",
-                UserWarning,
+                NeoBERTWarning,
                 stacklevel=2,
             )
         if errors:

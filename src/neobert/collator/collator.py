@@ -13,6 +13,7 @@ from transformers import (
 )
 
 from neobert.utils import additive_attention_mask
+from neobert.warnings import NeoBERTWarning
 
 
 # Adapted from https://github.com/huggingface/transformers/blob/125de4164364420854d7fe537a9bd2fdaf7369d4/src/transformers/data/data_collator.py#L828
@@ -470,6 +471,7 @@ def get_collator(
                         "Skipping packed_seqlens because attention_mask is not right-padded. "
                         "Use tokenizer.padding_side='right' or disable return_packed_seqlens "
                         "to avoid corrupting packed attention.",
+                        NeoBERTWarning,
                         stacklevel=2,
                     )
             # Float32 masks for softmax stability (bf16 can propagate NaNs).

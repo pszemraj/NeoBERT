@@ -21,6 +21,7 @@ from neobert.config import (
     TrainerConfig,
     load_config_from_args,
 )
+from neobert.warnings import NeoBERTWarning
 
 
 class TestConfigSystem(unittest.TestCase):
@@ -122,7 +123,7 @@ class TestConfigSystem(unittest.TestCase):
             path = f.name
 
         try:
-            with self.assertWarns(UserWarning):
+            with self.assertWarns(NeoBERTWarning):
                 loaded = ConfigLoader.load(path)
         finally:
             os.unlink(path)
@@ -418,6 +419,7 @@ optimizer:
             self.assertTrue(
                 any("Unresolved variable token(s)" in str(w.message) for w in caught)
             )
+            self.assertTrue(all(w.category is NeoBERTWarning for w in caught))
         finally:
             os.unlink(path)
 

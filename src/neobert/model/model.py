@@ -30,6 +30,7 @@ from neobert.modeling_utils import (
     packed_seqlens_to_tensor,
     swiglu_intermediate_size,
 )
+from neobert.warnings import NeoBERTWarning
 
 if TYPE_CHECKING:
     from neobert.config import ModelConfig
@@ -227,7 +228,7 @@ class NeoBERTConfig(PretrainedConfig):
             warnings.warn(
                 "NeoBERTConfig: 'flash_attention' is deprecated; use "
                 '\'attn_backend\' instead ("sdpa" or "flash_attn_varlen").',
-                UserWarning,
+                NeoBERTWarning,
                 stacklevel=2,
             )
             if isinstance(fa, bool):
@@ -252,7 +253,7 @@ class NeoBERTConfig(PretrainedConfig):
         if "dropout_prob" in kwargs and "dropout" not in kwargs:
             warnings.warn(
                 "NeoBERTConfig: 'dropout_prob' is deprecated; use 'dropout' instead.",
-                UserWarning,
+                NeoBERTWarning,
                 stacklevel=2,
             )
             dropout = kwargs["dropout_prob"]
@@ -281,7 +282,7 @@ class NeoBERTConfig(PretrainedConfig):
             warnings.warn(
                 "NeoBERTConfig: 'max_position_embeddings' is deprecated for the "
                 "training model; use 'max_length' when constructing configs.",
-                UserWarning,
+                NeoBERTWarning,
                 stacklevel=2,
             )
             self.max_length = int(kwargs["max_position_embeddings"])
@@ -843,6 +844,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
                 warnings.warn(
                     f"Sequence length {seq_len} exceeds max_length {self.config.max_length}; "
                     "using a transient RoPE cache for this forward. Consider truncating inputs.",
+                    NeoBERTWarning,
                     stacklevel=2,
                 )
                 freqs_cis = precompute_freqs_cis(
@@ -999,6 +1001,7 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
                 warnings.warn(
                     f"Sequence length {seq_len} exceeds max_length {self.config.max_length}; "
                     "using a transient RoPE cache for this forward. Consider truncating inputs.",
+                    NeoBERTWarning,
                     stacklevel=2,
                 )
                 freqs_cis = precompute_freqs_cis(

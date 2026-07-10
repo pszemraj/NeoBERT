@@ -25,6 +25,7 @@ from neobert.config import (
     normalize_muon_orthogonalization,
     normalize_muon_param_policy,
 )
+from neobert.warnings import NeoBERTWarning
 
 logger = logging.getLogger(__name__)
 
@@ -131,21 +132,21 @@ class MuonClipConfig:
             warnings.warn(
                 f"ns_steps={self.ns_steps} may not provide sufficient orthogonalization. "
                 "Recommended: 5-9",
-                UserWarning,
+                NeoBERTWarning,
                 stacklevel=2,
             )
         if self.clipping_threshold > 200:
             warnings.warn(
                 f"clipping_threshold={self.clipping_threshold} is very high. "
                 "You may not see clipping effects.",
-                UserWarning,
+                NeoBERTWarning,
                 stacklevel=2,
             )
         if self.clipping_threshold < 30:
             warnings.warn(
                 f"clipping_threshold={self.clipping_threshold} is very low. "
                 "Risk of over-constraining attention.",
-                UserWarning,
+                NeoBERTWarning,
                 stacklevel=2,
             )
 
@@ -162,7 +163,7 @@ class MuonClipConfig:
                 warnings.warn(
                     "Unsupported keys in clipping_layers_mapping: "
                     + ", ".join(sorted(unsupported)),
-                    UserWarning,
+                    NeoBERTWarning,
                     stacklevel=2,
                 )
             self.clipping_layers_mapping = normalised_mapping

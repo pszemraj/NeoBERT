@@ -14,6 +14,7 @@ from neobert.collator import (
     resolve_packed_token_limits,
 )
 from neobert.utils import additive_attention_mask
+from neobert.warnings import NeoBERTWarning
 from tests.tokenizer_utils import build_wordlevel_tokenizer
 
 
@@ -200,6 +201,7 @@ class TestCollatorPacking(unittest.TestCase):
         self.assertTrue(
             any("Skipping packed_seqlens" in str(w.message) for w in caught)
         )
+        self.assertTrue(all(w.category is NeoBERTWarning for w in caught))
         self.assertNotIn("packed_seqlens", batch)
 
     def test_mask_all_numpy_path_masks_without_801010_split(self):
