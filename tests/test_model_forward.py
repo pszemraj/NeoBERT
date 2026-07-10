@@ -190,35 +190,106 @@ class TestModelForward(unittest.TestCase):
             ),
         )
 
-    def test_packed_learned_position_forward_matches_standalone_segments(self):
-        """Packing must not change a document's learned-position representation."""
+    def test_packed_forward_matches_standalone_segments_for_all_positions(self):
+        """Packing preserves hidden states and MLM logits for learned and rotary positions."""
+        document_a = torch.tensor([[1, 11, 12, 2]])
+        document_b = torch.tensor([[1, 21, 22, 23, 2]])
+        for rope in (False, True):
+            with self.subTest(rope=rope):
+                torch.manual_seed(0)
+                config = NeoBERTConfig(
+                    hidden_size=16,
+                    num_hidden_layers=1,
+                    num_attention_heads=2,
+                    intermediate_size=32,
+                    dropout=0.0,
+                    vocab_size=64,
+                    max_length=16,
+                    attn_backend="sdpa",
+                    hidden_act="gelu",
+                    rope=rope,
+                )
+                model = NeoBERTLMHead(config).eval()
+
+                with torch.no_grad():
+                    output_a = model(document_a)
+                    output_b = model(document_b)
+                    packed_output = model(
+                        torch.cat((document_a, document_b), dim=1),
+                        packed_seqlens=torch.tensor([[4, 5]], dtype=torch.int32),
+                    )
+
+                for key in ("hidden_representation", "logits"):
+                    torch.testing.assert_close(
+                        packed_output[key][:, :4],
+                        output_a[key],
+                        rtol=1e-5,
+                        atol=1e-6,
+                    )
+                    torch.testing.assert_close(
+                        packed_output[key][:, 4:],
+                        output_b[key],
+                        rtol=1e-5,
+                        atol=1e-6,
+                    )
+
+    def test_hf_learned_positions_follow_zero_based_external_contract(self):
+        """Automatic HF positions equal explicit zero-based IDs for learned positions."""
+        from neobert.huggingface.modeling_neobert import (
+            NeoBERT as HFNeoBERT,
+            NeoBERTConfig as HFNeoBERTConfig,
+        )
+
         torch.manual_seed(0)
-        config = NeoBERTConfig(
+        config = HFNeoBERTConfig(
             hidden_size=16,
             num_hidden_layers=1,
             num_attention_heads=2,
             intermediate_size=32,
             dropout=0.0,
             vocab_size=64,
-            max_length=16,
-            attn_backend="sdpa",
+            max_length=8,
             hidden_act="gelu",
             rope=False,
         )
-        model = NeoBERT(config).eval()
-        document_a = torch.tensor([[1, 11, 12, 2]])
-        document_b = torch.tensor([[1, 21, 22, 23, 2]])
+        model = HFNeoBERT(config).eval()
+        input_ids = torch.tensor(
+            [
+                [1, 11, 12, 0],
+                [0, 1, 11, 12],
+            ]
+        )
+        explicit_positions = torch.tensor(
+            [
+                [0, 1, 2, 0],
+                [0, 0, 1, 2],
+            ]
+        )
 
         with torch.no_grad():
-            output_a = model(document_a)
-            output_b = model(document_b)
-            packed_output = model(
-                torch.cat((document_a, document_b), dim=1),
-                packed_seqlens=torch.tensor([[4, 5]], dtype=torch.int32),
-            )
+            automatic = model(input_ids=input_ids).last_hidden_state
+            explicit = model(
+                input_ids=input_ids,
+                position_ids=explicit_positions,
+            ).last_hidden_state
 
-        torch.testing.assert_close(packed_output[:, :4], output_a, rtol=1e-5, atol=1e-6)
-        torch.testing.assert_close(packed_output[:, 4:], output_b, rtol=1e-5, atol=1e-6)
+        torch.testing.assert_close(automatic, explicit, rtol=1e-5, atol=1e-6)
+
+    def test_hf_external_learned_positions_map_padding_to_zero(self):
+        """HF zero-based learned positions shift real tokens and preserve padding zero."""
+        from neobert.huggingface.modeling_neobert import (
+            _external_to_internal_learned_position_ids,
+        )
+
+        external = torch.tensor([[0, 1, 2, 3]])
+        keep_mask = torch.tensor([[False, True, True, False]])
+
+        internal = _external_to_internal_learned_position_ids(
+            external,
+            keep_mask=keep_mask,
+        )
+
+        torch.testing.assert_close(internal, torch.tensor([[0, 2, 3, 0]]))
 
     def test_packed_seqlens_conversion_is_canonical(self):
         """Ensure all packed-attention consumers share one metadata conversion."""
@@ -953,7 +1024,7 @@ class TestModelForward(unittest.TestCase):
         non_rope_model = NeoBERT(non_rope_config)
         non_rope_model.eval()
         input_ids = torch.tensor([[1, 2, 3, 4]])
-        position_ids = torch.tensor([[1, 2, 3, 5]])
+        position_ids = torch.tensor([[0, 1, 2, 4]])
 
         with self.assertRaisesRegex(
             ValueError, "position_ids exceed configured max_length"

@@ -144,6 +144,34 @@ precompute_freqs_cis = _import_symbol(
 )
 
 
+def _external_to_internal_learned_position_ids(
+    position_ids: torch.Tensor,
+    *,
+    keep_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Convert zero-based HF position IDs to the one-based learned table.
+
+    :param torch.Tensor position_ids: External zero-based position IDs.
+    :param torch.Tensor keep_mask: Boolean mask selecting non-padding tokens.
+    :raises ValueError: If shapes differ or a position ID is negative.
+    :return torch.Tensor: One-based IDs with zero reserved for padding.
+    """
+    if position_ids.shape != keep_mask.shape:
+        raise ValueError(
+            "position_ids and keep_mask must have identical shapes "
+            f"({tuple(position_ids.shape)} != {tuple(keep_mask.shape)})."
+        )
+    if torch.any(position_ids < 0):
+        raise ValueError("position_ids must be non-negative.")
+
+    internal_ids = position_ids.to(dtype=torch.long) + 1
+    return torch.where(
+        keep_mask.to(device=position_ids.device, dtype=torch.bool),
+        internal_ids,
+        torch.zeros_like(internal_ids),
+    )
+
+
 class NeoBERTConfig(PretrainedConfig):
     """Configuration class for NeoBERT model.
 
@@ -610,8 +638,9 @@ class NeoBERT(NeoBERTPreTrainedModel):
 
         Args:
             input_ids: Token indices of shape (batch_size, seq_len).
-            position_ids: Position indices of shape (batch_size, seq_len).
-                If None, positions are assumed to be consecutive starting from 0.
+            position_ids: Zero-based position indices of shape (batch_size, seq_len).
+                Learned-position models translate kept tokens to their internal
+                one-based table; RoPE consumes these IDs directly.
             attention_mask: Attention mask of shape (batch_size, seq_len).
                 HF convention: 1=keep, 0=mask. Also accepts additive masks (0/-inf).
             output_hidden_states: Whether to return hidden states from all layers.
@@ -661,17 +690,22 @@ class NeoBERT(NeoBERTPreTrainedModel):
         # Prepare key keep-mask for multi-head attention.
         # Shape: (batch, seq_len) -> (batch, 1, 1, seq_len).
         # SDPA expects a bool mask where True entries participate in attention.
+        if self.config.pad_token_id is None:
+            position_keep_mask = torch.ones_like(input_ids, dtype=torch.bool)
+        else:
+            position_keep_mask = input_ids.ne(self.config.pad_token_id)
+
         if attention_mask is not None:
-            attention_mask = self._normalize_attention_mask(attention_mask)
-            if attention_mask.shape != input_ids.shape:
+            key_keep_mask = self._normalize_attention_mask(attention_mask)
+            if key_keep_mask.shape != input_ids.shape:
                 raise ValueError(
                     "attention_mask must match input_ids shape for HF export "
-                    f"(got {attention_mask.shape} vs {input_ids.shape})."
+                    f"(got {key_keep_mask.shape} vs {input_ids.shape})."
                 )
             # Encoder-only key padding mask, broadcast across query positions.
             # Keep mask in (B, 1, 1, S) form to avoid O(S^2) materialization.
-            attention_mask = attention_mask.to(device=input_ids.device)
-            attention_mask = attention_mask[:, None, None, :]
+            key_keep_mask = key_keep_mask.to(device=input_ids.device)
+            attention_mask = key_keep_mask[:, None, None, :]
 
         # Get rotary position embeddings
         freqs_cis = None
@@ -705,14 +739,23 @@ class NeoBERT(NeoBERTPreTrainedModel):
         # Add learned positional embeddings if RoPE is disabled (ablations/tests).
         if not self.config.rope:
             if position_ids is not None:
-                pos_ids = position_ids
+                max_external_position = self.positional_embedding.num_embeddings - 2
+                if position_ids.numel() > 0:
+                    max_position_id = int(position_ids.max().item())
+                    if max_position_id > max_external_position:
+                        raise ValueError(
+                            "Zero-based position_ids exceed configured max_length for "
+                            "learned positional embeddings "
+                            f"({max_position_id} > {max_external_position})."
+                        )
+                pos_ids = _external_to_internal_learned_position_ids(
+                    position_ids,
+                    keep_mask=position_keep_mask,
+                )
             else:
                 # Content-based positions: padding stays at index 0, and left-padding
                 # does not shift token positions (padding-invariant positional IDs).
-                if self.config.pad_token_id is None:
-                    mask = torch.ones_like(input_ids, dtype=torch.int32)
-                else:
-                    mask = input_ids.ne(self.config.pad_token_id).int()
+                mask = position_keep_mask.to(dtype=torch.long)
                 incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask)) * mask
                 pos_ids = incremental_indices.long()
             if pos_ids.numel() > 0:

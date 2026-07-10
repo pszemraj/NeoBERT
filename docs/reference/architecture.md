@@ -30,6 +30,7 @@ NeoBERT is a transformer encoder with:
 - With `rope: false`, learned positional embeddings are used.
 - In learned-position mode, position IDs reserve `0` for padding and start real tokens at `1`.
 - In packed learned-position batches, position IDs restart at `1` for every segment so each document receives the same positional embeddings it would receive when processed alone.
+- The exported Hugging Face API accepts conventional zero-based explicit `position_ids`; learned-position models shift non-padding tokens by one internally while leaving padding at internal index `0`. RoPE consumes the external zero-based IDs directly.
 
 ## Attention Paths
 
