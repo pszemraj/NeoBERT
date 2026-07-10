@@ -79,9 +79,6 @@ class MuonClipConfig:
     clipping_qk_chunk_size: int = (
         1024  # Chunk size for QK max tiling to avoid S^2 peaks
     )
-    capture_last_microbatch_only: bool = (
-        True  # Capture activations only on last microbatch
-    )
 
     # Architecture adaptation
     clipping_layers_mapping: Dict[str, str] = field(default_factory=dict)
@@ -673,14 +670,7 @@ class MuonClipOptimizer(Optimizer):
             )
 
         should_clip = self.should_clip_update(int(update_step))
-        capture_last_only = bool(
-            getattr(self.config, "capture_last_microbatch_only", True)
-        )
-        capture_enabled = (
-            should_clip and bool(is_last_microbatch)
-            if capture_last_only
-            else should_clip
-        )
+        capture_enabled = should_clip and bool(is_last_microbatch)
         self.hook_system.set_enabled(capture_enabled, clear_cache_when_disabling=True)
         return capture_enabled
 

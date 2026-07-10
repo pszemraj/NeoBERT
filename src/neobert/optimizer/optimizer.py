@@ -167,7 +167,6 @@ def get_optimizer(
                 f"  - Clipping threshold: {muon_clip_cfg.clipping_threshold}\n"
                 f"  - Clipping interval: {muon_clip_cfg.clipping_interval}\n"
                 f"  - QK chunk size: {muon_clip_cfg.clipping_qk_chunk_size}\n"
-                f"  - Capture last microbatch only: {muon_clip_cfg.capture_last_microbatch_only}\n"
                 f"  - Newton-Schulz steps: {muon_clip_cfg.ns_steps}\n"
                 f"  - Nesterov: {muon_clip_cfg.nesterov}\n"
                 f"  - Alpha (Q/K balance): {muon_clip_cfg.clipping_alpha}\n"

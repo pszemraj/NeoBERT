@@ -1108,7 +1108,6 @@ class TestMuonClipOptimizer:
         muon_config = MuonClipConfig(
             enable_clipping=True,
             clipping_interval=1,
-            capture_last_microbatch_only=True,
         )
         optimizer = MuonClipOptimizer(model_instance, config, muon_config)
         hook_system = optimizer.hook_system

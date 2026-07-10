@@ -27,12 +27,11 @@ def _assert_replicated(tensor: torch.Tensor, world_size: int) -> None:
         torch.testing.assert_close(replica, gathered[0], rtol=0.0, atol=0.0)
 
 
-def _run_ddp_clipping_case(rank: int, world_size: int, capture_last_only: bool) -> None:
+def _run_ddp_clipping_case(rank: int, world_size: int) -> None:
     """Run two accumulated DDP updates and verify post-clip replica equality.
 
     :param int rank: Process rank.
     :param int world_size: Process-group size.
-    :param bool capture_last_only: MuonClip activation-capture policy.
     """
     torch.manual_seed(1234)
     config = NeoBERTConfig(
@@ -63,7 +62,6 @@ def _run_ddp_clipping_case(rank: int, world_size: int, capture_last_only: bool) 
             enable_clipping=True,
             clipping_threshold=0.01,
             clipping_interval=1,
-            capture_last_microbatch_only=capture_last_only,
             orthogonalization="newton_schulz",
             ns_steps=2,
         ),
@@ -116,8 +114,7 @@ def _distributed_muonclip_worker(rank: int, world_size: int, init_file: str) -> 
         replicated_weight.mul_(eta)
         _assert_replicated(replicated_weight, world_size)
 
-        for capture_last_only in (True, False):
-            _run_ddp_clipping_case(rank, world_size, capture_last_only)
+        _run_ddp_clipping_case(rank, world_size)
 
         for invalid_rank, invalid_value in (
             (0, float("nan")),

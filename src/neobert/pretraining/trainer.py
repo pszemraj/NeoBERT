@@ -2311,9 +2311,6 @@ def trainer(cfg: Config) -> None:
         logger.info(f"Clipping warmup steps: {muon_cfg.clipping_warmup_steps}")
         logger.info(f"Clipping interval: {muon_cfg.clipping_interval}")
         logger.info(f"QK chunk size: {muon_cfg.clipping_qk_chunk_size}")
-        logger.info(
-            f"Capture last microbatch only: {muon_cfg.capture_last_microbatch_only}"
-        )
         logger.info("=" * 60)
 
     optimizer = get_optimizer(

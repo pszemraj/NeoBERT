@@ -243,7 +243,6 @@ class MuonConfig:
     clipping_warmup_steps: int = 0
     clipping_interval: int = 10
     clipping_qk_chunk_size: int = 1024
-    capture_last_microbatch_only: bool = True
     detect_anomalies: bool = False
     orthogonalization: str = "polar_express"
     norm_factor: str = "neobert"

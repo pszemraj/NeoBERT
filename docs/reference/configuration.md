@@ -273,7 +273,6 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 | `clipping_warmup_steps`        | `int`            | `0`               | Disable clipping before this many steps.                     |
 | `clipping_interval`            | `int`            | `10`              | Apply clipping every N update steps.                         |
 | `clipping_qk_chunk_size`       | `int`            | `1024`            | Chunk size for logit-max computation.                        |
-| `capture_last_microbatch_only` | `bool`           | `true`            | Capture activations only for final microbatch in GA window.  |
 | `detect_anomalies`             | `bool`           | `false`           | Enable anomaly checks in optimizer step.                     |
 | `orthogonalization`            | `str`            | `"polar_express"` | Orthogonalization algorithm selector.                        |
 | `norm_factor`                  | `str`            | `"neobert"` | Post-orthogonalization normalization (`neobert`, `muon_reference`, `spectral`, `match_rms_adamw`, `none`). |
