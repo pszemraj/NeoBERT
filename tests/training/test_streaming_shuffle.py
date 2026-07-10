@@ -12,7 +12,6 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from neobert.config import Config
 from neobert.pretraining.trainer import (
-    _build_pretraining_dataloader_config,
     _maybe_wrap_streaming_dataset_for_retries,
     _maybe_shuffle_streaming_dataset,
     _load_streaming_split,
@@ -25,6 +24,7 @@ from neobert.streaming import (
     is_transient_streaming_error,
     peek_streaming_example,
 )
+from neobert.training_utils import build_dataloader_config
 from tests.streaming_test_utils import http_error
 
 
@@ -187,7 +187,10 @@ class TestStreamingShuffle(unittest.TestCase):
         cfg.datacollator.pack_sequences = False
         accelerator = Accelerator(
             cpu=True,
-            dataloader_config=_build_pretraining_dataloader_config(cfg),
+            dataloader_config=build_dataloader_config(
+                seed=cfg.seed,
+                dispatch_batches=None,
+            ),
         )
 
         def _prepared_loader():
@@ -222,7 +225,10 @@ class TestStreamingShuffle(unittest.TestCase):
         cfg.seed = 2718
         for packed, expected_dispatch in ((False, None), (True, False)):
             cfg.datacollator.pack_sequences = packed
-            dataloader_config = _build_pretraining_dataloader_config(cfg)
+            dataloader_config = build_dataloader_config(
+                seed=cfg.seed,
+                dispatch_batches=False if packed else None,
+            )
             self.assertTrue(dataloader_config.use_seedable_sampler)
             self.assertEqual(dataloader_config.data_seed, 2718)
             self.assertEqual(dataloader_config.dispatch_batches, expected_dispatch)

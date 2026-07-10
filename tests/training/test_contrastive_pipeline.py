@@ -14,7 +14,6 @@ from neobert.config import Config, ConfigLoader
 from neobert.contrastive.datasets import get_bsz
 from neobert.contrastive.loss import SupConLoss
 from neobert.contrastive.trainer import (
-    _PreemptionState,
     _contrastive_loss_for_backward,
     _load_contrastive_pretrained_backbone_weights,
     _normalize_contrastive_pretrained_checkpoint_root,
@@ -25,6 +24,7 @@ from neobert.contrastive.trainer import (
     _sync_contrastive_runtime_from_pretraining,
     trainer,
 )
+from neobert.training_utils import PreemptionState
 from neobert.model import NeoBERT, NeoBERTConfig
 from neobert.model.wrappers import NeoBERTLMHead
 from tests.tokenizer_utils import build_wordlevel_tokenizer
@@ -292,7 +292,7 @@ class TestContrastivePipeline:
                 assert reduction == "sum"
                 return value
 
-        state = _PreemptionState()
+        state = PreemptionState()
         state.request(signal.SIGTERM, None)
 
         assert state.requested_signum == signal.SIGTERM

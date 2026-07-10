@@ -301,11 +301,11 @@ class TestGLUETaskSpecific:
 
     def test_glue_dataloader_uses_epoch_seeded_sampler(self):
         """Ensure GLUE map-style shuffling can reconstruct a saved epoch order."""
-        from neobert.glue.train import _build_glue_dataloader_config
+        from neobert.training_utils import build_dataloader_config
 
         cfg = Config()
         cfg.seed = 123
-        dataloader_config = _build_glue_dataloader_config(cfg)
+        dataloader_config = build_dataloader_config(seed=cfg.seed)
 
         assert dataloader_config.use_seedable_sampler
         assert dataloader_config.data_seed == 123

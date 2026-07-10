@@ -2,21 +2,30 @@
 
 from collections.abc import Mapping
 from copy import deepcopy
+from dataclasses import dataclass
 import json
 import logging
 import os
 from pathlib import Path
+from types import FrameType
 from typing import Any, Callable, Iterable, Optional, Tuple
 
 import torch
+import wandb
 from accelerate import Accelerator
 from accelerate.state import AcceleratorState, GradientState
-from accelerate.utils import DistributedType
+from accelerate.utils import DataLoaderConfiguration, DistributedType
 
 from neobert.checkpointing import (
     OPTIMIZER_PARAM_NAMES_MANIFEST,
     checkpoint_resume_errors,
+    invalidate_checkpoint_completion,
+    is_step_checkpoint_name,
     is_resumable_checkpoint,
+    mark_checkpoint_complete,
+    optimizer_param_name_manifest_schema_errors,
+    save_accelerate_state,
+    save_portable_checkpoint_weights,
     strip_runtime_prefixes,
 )
 
@@ -37,6 +46,105 @@ except Exception:  # pragma: no cover - older torch builds without DTensor APIs
 _ACCELERATOR_STATE_REINIT_PREFIX = (
     "AcceleratorState has already been initialized and cannot be changed"
 )
+
+
+@dataclass
+class PreemptionState:
+    """Signal-safe termination intent synchronized at optimizer boundaries."""
+
+    requested_signum: int = 0
+
+    def request(self, signum: int, frame: FrameType | None) -> None:
+        """Record preemption intent without I/O, CUDA work, or collectives.
+
+        :param int signum: Received signal number.
+        :param FrameType | None frame: Interrupted Python frame.
+        """
+        del frame
+        self.requested_signum = int(signum)
+
+    def synchronize(self, accelerator: Any) -> bool:
+        """Return whether any rank requested preemption.
+
+        :param Any accelerator: Active Accelerator instance.
+        :return bool: True when at least one rank requested termination.
+        """
+        local_request = torch.tensor(
+            int(self.requested_signum != 0),
+            device=accelerator.device,
+            dtype=torch.int32,
+        )
+        requests = accelerator.reduce(local_request, reduction="sum")
+        return bool(int(requests.item()))
+
+
+def build_dataloader_config(
+    *,
+    seed: int,
+    dispatch_batches: bool | None = None,
+) -> DataLoaderConfiguration:
+    """Build deterministic Accelerate dataloader settings shared by trainers.
+
+    :param int seed: Global seed used by Accelerate's seedable sampler.
+    :param bool | None dispatch_batches: Optional dispatch policy override.
+    :return DataLoaderConfiguration: Deterministic dataloader configuration.
+    """
+    return DataLoaderConfiguration(
+        dispatch_batches=dispatch_batches,
+        use_seedable_sampler=True,
+        data_seed=int(seed),
+    )
+
+
+def initialize_wandb_trackers(
+    *,
+    cfg: Any,
+    accelerator: Any,
+    tracker_config: dict[str, Any],
+    log: logging.Logger,
+) -> None:
+    """Initialize W&B tracking and upload the source configuration when present.
+
+    :param Any cfg: Runtime configuration with a ``wandb`` section.
+    :param Any accelerator: Active Accelerator instance.
+    :param dict[str, Any] tracker_config: Resolved configuration payload.
+    :param logging.Logger log: Logger used for missing source-config warnings.
+    """
+    Path(cfg.wandb.dir).mkdir(parents=True, exist_ok=True)
+    accelerator.init_trackers(
+        project_name=cfg.wandb.project,
+        init_kwargs={
+            "wandb": {
+                "name": cfg.wandb.name,
+                "entity": cfg.wandb.entity,
+                "config": tracker_config,
+                "tags": cfg.wandb.tags,
+                "dir": cfg.wandb.dir,
+                "mode": cfg.wandb.mode,
+                "resume": cfg.wandb.resume,
+            }
+        },
+    )
+    if not accelerator.is_main_process or wandb.run is None:
+        return
+    wandb.run.config.update(tracker_config, allow_val_change=True)
+    config_path = getattr(cfg, "config_path", None)
+    if not config_path:
+        return
+    abs_config_path = Path(config_path).expanduser().resolve()
+    if not abs_config_path.is_file():
+        log.warning(
+            "Configured config_path '%s' not found; skipping wandb artifact upload",
+            config_path,
+        )
+        return
+    artifact = wandb.Artifact(
+        name=f"{wandb.run.id}-config",
+        type="config",
+        metadata={"source": str(abs_config_path)},
+    )
+    artifact.add_file(str(abs_config_path))
+    wandb.run.log_artifact(artifact)
 
 
 def resolve_runtime_mixed_precision_and_attn_backend(
@@ -1273,6 +1381,46 @@ def save_optimizer_param_name_manifest(
     return path
 
 
+def save_training_checkpoint(
+    *,
+    task: str,
+    checkpoint_path: str | Path,
+    accelerator: Any,
+    model: torch.nn.Module,
+    optimizer: Any,
+    save_metadata: Callable[[Path], None],
+) -> Path:
+    """Save one complete self-contained training checkpoint across all ranks.
+
+    ``save_metadata`` owns task-specific config/tokenizer artifacts and runs only
+    on the main process. All synchronization and completion-marker ordering stays
+    centralized here so trainers cannot drift on partial-checkpoint behavior.
+
+    :param str task: Checkpoint task recorded in the completion marker.
+    :param str | Path checkpoint_path: Destination step directory.
+    :param Any accelerator: Active Accelerator instance.
+    :param torch.nn.Module model: Prepared model to export.
+    :param Any optimizer: Prepared optimizer whose parameter manifest is saved.
+    :param Callable[[Path], None] save_metadata: Main-process metadata callback.
+    :return Path: Completed checkpoint step directory.
+    """
+    checkpoint_path = Path(checkpoint_path)
+    if accelerator.is_main_process:
+        invalidate_checkpoint_completion(checkpoint_path)
+    accelerator.wait_for_everyone()
+    save_accelerate_state(accelerator, checkpoint_path)
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        save_optimizer_param_name_manifest(optimizer, checkpoint_path)
+        save_metadata(checkpoint_path)
+    save_portable_checkpoint_weights(model, accelerator, checkpoint_path)
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        mark_checkpoint_complete(checkpoint_path, task=task)
+    accelerator.wait_for_everyone()
+    return checkpoint_path
+
+
 def validate_optimizer_param_name_manifest(
     optimizer: Any,
     checkpoint_path: str | Path,
@@ -1303,12 +1451,12 @@ def validate_optimizer_param_name_manifest(
         )
 
     saved = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(saved, dict) or "param_name_groups" not in saved:
+    schema_errors = optimizer_param_name_manifest_schema_errors(saved)
+    if schema_errors:
         raise RuntimeError(
-            f"{path} uses an outdated manifest schema without state-semantics "
-            "metadata; refusing to resume optimizer state written by an older "
-            "trainer. Start a new run, or re-save the checkpoint with a current "
-            "trainer."
+            f"{path} uses an outdated manifest schema ({'; '.join(schema_errors)}); "
+            "refusing to resume optimizer state written by an older trainer. Start "
+            "a new run, or re-save the checkpoint with a current trainer."
         )
 
     saved_semantics = saved.get("state_semantics")
@@ -1353,7 +1501,7 @@ def _resolve_resume_checkpoint(
     if isinstance(resume_from_checkpoint, str):
         resume_value = resume_from_checkpoint.strip()
         if resume_value.lower() not in {"true", "latest", "auto"}:
-            is_step_selector = resume_value.isdigit()
+            is_step_selector = is_step_checkpoint_name(resume_value)
             if is_step_selector:
                 resume_path = checkpoint_dir_path / resume_value
             else:
@@ -1368,7 +1516,7 @@ def _resolve_resume_checkpoint(
                     f"Checkpoint {resume_path} is not resumable: " + "; ".join(errors)
                 )
             base = resume_path.name
-            iteration = int(base) + 1 if base.isdigit() else 0
+            iteration = int(base) + 1 if is_step_checkpoint_name(base) else 0
             return str(resume_path), iteration
 
     if not checkpoint_dir_path.exists() or not any(checkpoint_dir_path.iterdir()):
@@ -1379,7 +1527,7 @@ def _resolve_resume_checkpoint(
     numeric_folders = [
         folder
         for folder in checkpoint_dir_path.iterdir()
-        if folder.is_dir() and folder.name.isdigit()
+        if folder.is_dir() and is_step_checkpoint_name(folder.name)
     ]
     folders = [folder for folder in numeric_folders if is_resumable_checkpoint(folder)]
     if not folders:

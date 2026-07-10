@@ -16,6 +16,7 @@ from neobert.checkpointing import (
     OPTIMIZER_PARAM_NAMES_MANIFEST,
     checkpoint_resume_errors,
     invalidate_checkpoint_completion,
+    is_step_checkpoint_name,
     is_resumable_checkpoint,
     load_deepspeed_fp32_state_dict,
     load_model_safetensors,
@@ -63,6 +64,18 @@ def _make_small_lm() -> NeoBERTLMHead:
         rms_norm=True,
     )
     return NeoBERTLMHead(config)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("0", True), ("00050", True), ("+5", False), ("²", False), ("step-5", False)],
+)
+def test_step_checkpoint_names_are_ascii_decimal(
+    value: str,
+    expected: bool,
+) -> None:
+    """All checkpoint selectors should agree on the numeric-directory grammar."""
+    assert is_step_checkpoint_name(value) is expected
 
 
 def test_checkpoint_completion_marker_validates_resume_artifacts(

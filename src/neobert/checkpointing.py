@@ -35,6 +35,37 @@ def _is_nonempty_file(path: Path) -> bool:
     return path.is_file() and path.stat().st_size > 0
 
 
+def is_step_checkpoint_name(value: object) -> bool:
+    """Return whether a value is an ASCII decimal checkpoint step name.
+
+    :param object value: Candidate directory name or selector.
+    :return bool: True for nonempty names containing only ASCII digits.
+    """
+    name = str(value)
+    return bool(name) and name.isascii() and name.isdigit()
+
+
+def optimizer_param_name_manifest_schema_errors(payload: object) -> list[str]:
+    """Return schema errors for an optimizer parameter-name manifest payload.
+
+    :param object payload: Decoded JSON manifest payload.
+    :return list[str]: Human-readable schema validation errors.
+    """
+    if not isinstance(payload, Mapping):
+        return ["manifest must be a JSON object"]
+    errors: list[str] = []
+    if payload.get("schema_version") != 1:
+        errors.append("schema_version must be 1")
+    if not isinstance(payload.get("state_semantics"), str):
+        errors.append("state_semantics must be a string")
+    param_groups = payload.get("param_name_groups")
+    if not isinstance(param_groups, list) or not all(
+        isinstance(group, list) for group in param_groups
+    ):
+        errors.append("param_name_groups must be a list of lists")
+    return errors
+
+
 def _checkpoint_resume_artifact_errors(checkpoint_path: Path) -> list[str]:
     """Return missing resume-critical artifacts other than the completion marker.
 
@@ -57,20 +88,7 @@ def _checkpoint_resume_artifact_errors(checkpoint_path: Path) -> list[str]:
         except (OSError, json.JSONDecodeError) as exc:
             errors.append(f"invalid {OPTIMIZER_PARAM_NAMES_MANIFEST}: {exc}")
         else:
-            param_groups = (
-                optimizer_manifest.get("param_name_groups")
-                if isinstance(optimizer_manifest, Mapping)
-                else None
-            )
-            valid_param_groups = isinstance(param_groups, list) and all(
-                isinstance(group, list) for group in param_groups
-            )
-            if (
-                not isinstance(optimizer_manifest, Mapping)
-                or optimizer_manifest.get("schema_version") != 1
-                or not isinstance(optimizer_manifest.get("state_semantics"), str)
-                or not valid_param_groups
-            ):
+            if optimizer_param_name_manifest_schema_errors(optimizer_manifest):
                 errors.append(f"invalid {OPTIMIZER_PARAM_NAMES_MANIFEST} schema")
     return errors
 
@@ -707,7 +725,7 @@ def resolve_step_checkpoint_selector(
         (
             path.name
             for path in checkpoint_root.iterdir()
-            if path.is_dir() and path.name.isdigit()
+            if path.is_dir() and is_step_checkpoint_name(path.name)
         ),
         key=int,
         reverse=True,
@@ -840,10 +858,9 @@ def prune_step_checkpoints(checkpoint_dir: str | Path, retention_limit: int) -> 
     for item_path in checkpoint_dir.iterdir():
         if not item_path.is_dir():
             continue
-        try:
-            checkpoints.append((int(item_path.name), item_path))
-        except ValueError:
+        if not is_step_checkpoint_name(item_path.name):
             continue
+        checkpoints.append((int(item_path.name), item_path))
 
     if len(checkpoints) <= retention_limit:
         return

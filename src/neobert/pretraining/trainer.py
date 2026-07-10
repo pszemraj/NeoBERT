@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import re
+import signal
 from collections.abc import Mapping
 from contextlib import contextmanager
 from copy import deepcopy
@@ -17,7 +18,6 @@ import torch
 import wandb
 from accelerate import Accelerator
 from accelerate.utils import (
-    DataLoaderConfiguration,
     DistributedDataParallelKwargs,
     DistributedType,
     ProjectConfiguration,
@@ -39,13 +39,9 @@ from tqdm import tqdm
 from transformers import BatchEncoding, PreTrainedTokenizerBase
 
 from neobert.checkpointing import (
-    invalidate_checkpoint_completion,
-    mark_checkpoint_complete,
     prune_step_checkpoints as _prune_step_checkpoints,
     resolve_accelerate_state_dir,
     resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
-    save_accelerate_state,
-    save_portable_checkpoint_weights as _save_portable_checkpoint_weights,
 )
 from neobert.collator import resolve_packed_token_limits
 from neobert.config import (
@@ -85,12 +81,15 @@ from neobert.training_utils import (
     _resolve_cuda_pin_memory,
     _resolve_resume_checkpoint,
     _update_global_norm_metric_for_logging,
+    PreemptionState,
     attach_optimizer_param_names,
+    build_dataloader_config,
     create_accelerator,
+    initialize_wandb_trackers,
     resolve_fsdp_version,
     resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
-    save_optimizer_param_name_manifest,
+    save_training_checkpoint,
     should_save_step_checkpoint,
     sync_resume_source_of_truth,
     validate_optimizer_param_name_manifest,
@@ -1620,17 +1619,37 @@ def _safe_len(dataloader: torch.utils.data.DataLoader) -> Optional[int]:
         return None
 
 
-def _build_pretraining_dataloader_config(cfg: Config) -> DataLoaderConfiguration:
-    """Build deterministic Accelerate dataloader settings for pretraining.
+def _save_pretraining_checkpoint_metadata(
+    cfg: Config,
+    tokenizer: PreTrainedTokenizerBase,
+    checkpoint_path: Path,
+) -> None:
+    """Save pretraining config and tokenizer metadata for one checkpoint.
 
-    :param Config cfg: Training configuration.
-    :return DataLoaderConfiguration: Dataloader configuration.
+    :param Config cfg: Runtime configuration.
+    :param PreTrainedTokenizerBase tokenizer: Runtime tokenizer.
+    :param Path checkpoint_path: Checkpoint step directory.
     """
-    packed = bool(cfg.datacollator.pack_sequences)
-    return DataLoaderConfiguration(
-        dispatch_batches=False if packed else None,
-        use_seedable_sampler=True,
-        data_seed=int(cfg.seed),
+    ConfigLoader.save(cfg, str(checkpoint_path / "config.yaml"))
+    tokenizer_info = {
+        "tokenizer_name": cfg.tokenizer.path or cfg.tokenizer.name,
+        "vocab_size": cfg.model.vocab_size,
+        "base_vocab_size": tokenizer.vocab_size,
+        "total_vocab_size": len(tokenizer),
+        "pad_token_id": tokenizer.pad_token_id,
+    }
+    with (checkpoint_path / "tokenizer_info.json").open(
+        "w", encoding="utf-8"
+    ) as handle:
+        json.dump(tokenizer_info, handle, indent=2)
+    tokenizer_dir = checkpoint_path / "tokenizer"
+    tokenizer_dir.mkdir(parents=True, exist_ok=True)
+    tokenizer.model_max_length = cfg.model.max_position_embeddings
+    tokenizer.save_pretrained(tokenizer_dir)
+    logger.info(
+        "Saved checkpoint to %s (includes Accelerate state, model weights, config, "
+        "and tokenizer artifacts).",
+        checkpoint_path,
     )
 
 
@@ -1692,7 +1711,10 @@ def trainer(cfg: Config) -> None:
     # Keep manual placement for packed mode only; in non-packed mode we use
     # Accelerate's device placement for better overlap.
     disable_dispatch = bool(cfg.datacollator.pack_sequences)
-    dataloader_config = _build_pretraining_dataloader_config(cfg)
+    dataloader_config = build_dataloader_config(
+        seed=cfg.seed,
+        dispatch_batches=False if disable_dispatch else None,
+    )
     if disable_dispatch:
         logger.info("Disabling Accelerate dispatch_batches for packed-sequence mode.")
 
@@ -1760,39 +1782,12 @@ def trainer(cfg: Config) -> None:
     # Initialise the wandb run and pass wandb parameters
     tracker_config_dict = prepare_wandb_config(cfg)
     if wandb_enabled:
-        Path(cfg.wandb.dir).mkdir(parents=True, exist_ok=True)
-        accelerator.init_trackers(
-            project_name=cfg.wandb.project,
-            init_kwargs={
-                "wandb": {
-                    "name": cfg.wandb.name,
-                    "entity": cfg.wandb.entity,
-                    "config": tracker_config_dict,
-                    "tags": cfg.wandb.tags,
-                    "dir": cfg.wandb.dir,
-                    "mode": cfg.wandb.mode,
-                    "resume": cfg.wandb.resume,
-                }
-            },
+        initialize_wandb_trackers(
+            cfg=cfg,
+            accelerator=accelerator,
+            tracker_config=tracker_config_dict,
+            log=logger,
         )
-        if accelerator.is_main_process and wandb.run is not None:
-            wandb.run.config.update(tracker_config_dict, allow_val_change=True)
-            config_path = getattr(cfg, "config_path", None)
-            if config_path:
-                abs_config_path = Path(config_path).expanduser().resolve()
-                if abs_config_path.is_file():
-                    artifact = wandb.Artifact(
-                        name=f"{wandb.run.id}-config",
-                        type="config",
-                        metadata={"source": str(abs_config_path)},
-                    )
-                    artifact.add_file(str(abs_config_path))
-                    wandb.run.log_artifact(artifact)
-                else:
-                    logger.warning(
-                        f"Configured config_path '{config_path}' not found; "
-                        "skipping wandb artifact upload"
-                    )
 
     # Set the seed
     set_seed(cfg.seed)
@@ -2537,6 +2532,10 @@ def trainer(cfg: Config) -> None:
             f"{checkpoint_dir}"
         )
 
+    preemption = PreemptionState()
+    previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, preemption.request)
+
     # Progress bar
     pbar = tqdm(
         desc="Train",
@@ -2861,61 +2860,35 @@ def trainer(cfg: Config) -> None:
                     and cfg.trainer.eval_steps > 0
                     and metrics["train/steps"] % cfg.trainer.eval_steps == 0
                 )
-                if should_save:
-                    step_tag = str(metrics["train/steps"])
-                    checkpoint_path = checkpoint_dir / step_tag
-                    if accelerator.is_main_process:
-                        invalidate_checkpoint_completion(checkpoint_path)
-                    accelerator.wait_for_everyone()
-                    save_accelerate_state(accelerator, checkpoint_path)
-                    accelerator.wait_for_everyone()
-                    if accelerator.is_main_process:
-                        save_optimizer_param_name_manifest(optimizer, checkpoint_path)
-                    _save_portable_checkpoint_weights(
-                        model, accelerator, checkpoint_path
+                preemption_requested = preemption.synchronize(accelerator)
+                if should_save or preemption_requested:
+                    save_training_checkpoint(
+                        task="pretraining",
+                        checkpoint_path=checkpoint_dir
+                        / str(int(metrics["train/steps"])),
+                        accelerator=accelerator,
+                        model=model,
+                        optimizer=optimizer,
+                        save_metadata=lambda path: (
+                            _save_pretraining_checkpoint_metadata(cfg, tokenizer, path)
+                        ),
                     )
-                    accelerator.wait_for_everyone()
-
-                    # Save export metadata alongside resumable state.
-                    if accelerator.is_main_process:
-                        config_path = checkpoint_path / "config.yaml"
-                        ConfigLoader.save(cfg, str(config_path))
-
-                        tokenizer_info = {
-                            "tokenizer_name": cfg.tokenizer.path or cfg.tokenizer.name,
-                            "vocab_size": cfg.model.vocab_size,
-                            "base_vocab_size": tokenizer.vocab_size,
-                            "total_vocab_size": len(tokenizer),
-                            "pad_token_id": tokenizer.pad_token_id,
-                        }
-                        tokenizer_info_path = checkpoint_path / "tokenizer_info.json"
-                        with tokenizer_info_path.open("w", encoding="utf-8") as f:
-                            json.dump(tokenizer_info, f, indent=2)
-
-                        tokenizer_dir = checkpoint_path / "tokenizer"
-                        tokenizer_dir.mkdir(parents=True, exist_ok=True)
-                        tokenizer.model_max_length = cfg.model.max_position_embeddings
-                        tokenizer.save_pretrained(tokenizer_dir)
-                        logger.info(
-                            "Saved checkpoint to "
-                            f"{checkpoint_path} (includes Accelerate state, model "
-                            "weights, config, and tokenizer artifacts)."
-                        )
-
-                    accelerator.wait_for_everyone()
-                    if accelerator.is_main_process:
-                        mark_checkpoint_complete(
-                            checkpoint_path,
-                            task="pretraining",
-                        )
-                    accelerator.wait_for_everyone()
-
                     if checkpoint_retention_limit > 0 and accelerator.is_main_process:
                         _prune_step_checkpoints(
                             checkpoint_dir,
                             checkpoint_retention_limit,
                         )
                     accelerator.wait_for_everyone()
+
+                if preemption_requested:
+                    accelerator.print(
+                        "SIGTERM received; saved a synchronized checkpoint at "
+                        f"completed optimizer step {metrics['train/steps']}."
+                    )
+                    pbar.close()
+                    signal.signal(signal.SIGTERM, previous_sigterm_handler)
+                    accelerator.end_training()
+                    raise SystemExit(128 + signal.SIGTERM)
 
                 if should_eval:
                     eval_metrics = _run_eval(
@@ -2938,6 +2911,7 @@ def trainer(cfg: Config) -> None:
                 # Log metrics
                 if metrics["train/steps"] >= cfg.trainer.max_steps:
                     pbar.close()
+                    signal.signal(signal.SIGTERM, previous_sigterm_handler)
                     return
 
         if not saw_batch_this_epoch and skipped_train_dataloader is not None:
@@ -2991,3 +2965,4 @@ def trainer(cfg: Config) -> None:
             )
 
     pbar.close()
+    signal.signal(signal.SIGTERM, previous_sigterm_handler)

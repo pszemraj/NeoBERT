@@ -751,6 +751,19 @@ def test_optimizer_param_name_manifest_rejects_outdated_schema(
     with pytest.raises(RuntimeError, match="outdated manifest schema"):
         validate_optimizer_param_name_manifest(optimizer, tmp_path)
 
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 0,
+                "state_semantics": "adamw-v1",
+                "param_name_groups": [["weight"]],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="schema_version must be 1"):
+        validate_optimizer_param_name_manifest(optimizer, tmp_path)
+
 
 def test_optimizer_param_name_manifest_rejects_changed_state_semantics(
     tmp_path: Path,

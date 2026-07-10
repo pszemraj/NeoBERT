@@ -18,6 +18,7 @@ from neobert.checkpointing import (
     OPTIMIZER_PARAM_NAMES_MANIFEST,
     load_model_safetensors,
     mark_checkpoint_complete,
+    save_portable_checkpoint_weights,
 )
 from neobert.config import Config, ConfigLoader
 from neobert.dataloader import get_dataloader
@@ -30,7 +31,6 @@ from neobert.pretraining.trainer import (
     _resolve_loader_perf_settings,
     _resolve_resume_checkpoint_and_eval_samples,
     _resolve_streaming_eval_budget,
-    _save_portable_checkpoint_weights,
     _should_use_loader_pin_memory,
     _run_masked_objective_step,
     _split_train_dataset_for_eval_samples,
@@ -303,7 +303,7 @@ class TestPretrainComponents:
             model = torch.nn.Linear(4, 3, bias=False)
             with tempfile.TemporaryDirectory() as tmpdir:
                 checkpoint_path = Path(tmpdir)
-                saved = _save_portable_checkpoint_weights(
+                saved = save_portable_checkpoint_weights(
                     model,
                     accelerator,
                     checkpoint_path,

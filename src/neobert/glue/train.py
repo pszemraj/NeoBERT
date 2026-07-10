@@ -16,7 +16,7 @@ import numpy as np
 import torch
 from accelerate import Accelerator
 from accelerate.logging import get_logger
-from accelerate.utils import DataLoaderConfiguration, ProjectConfiguration, set_seed
+from accelerate.utils import ProjectConfiguration, set_seed
 from datasets import ClassLabel, load_dataset
 from torch.nn import CrossEntropyLoss, MSELoss
 from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -60,6 +60,7 @@ from neobert.training_utils import (
     _resolve_resume_checkpoint,
     _unwrap_optimizer,
     attach_optimizer_param_names,
+    build_dataloader_config,
     create_accelerator,
     save_optimizer_param_name_manifest,
     sync_resume_source_of_truth,
@@ -854,18 +855,6 @@ def _prepare_glue_output_dir(
     output_dir.mkdir(parents=True, exist_ok=True)
 
 
-def _build_glue_dataloader_config(cfg: Config) -> DataLoaderConfiguration:
-    """Build deterministic Accelerate dataloader settings for GLUE.
-
-    :param Config cfg: Runtime GLUE configuration.
-    :return DataLoaderConfiguration: Seeded sampler configuration.
-    """
-    return DataLoaderConfiguration(
-        use_seedable_sampler=True,
-        data_seed=int(cfg.seed),
-    )
-
-
 def _glue_terminal_resume_reason(
     loop_state: GlueLoopState,
     *,
@@ -954,7 +943,7 @@ def trainer(cfg: Config) -> None:
         mixed_precision=mixed_precision,
         project_config=project_config,
         gradient_accumulation_steps=int(cfg.trainer.gradient_accumulation_steps),
-        dataloader_config=_build_glue_dataloader_config(cfg),
+        dataloader_config=build_dataloader_config(seed=cfg.seed),
     )
     loop_state = GlueLoopState(world_size=accelerator.num_processes)
     accelerator.register_for_checkpointing(loop_state)

@@ -5,9 +5,7 @@ import os
 import signal
 from contextlib import nullcontext
 from copy import deepcopy
-from dataclasses import dataclass
 from pathlib import Path
-from types import FrameType
 from typing import Any, Literal
 
 import numpy
@@ -27,16 +25,12 @@ from transformers import DataCollatorWithPadding
 # Configuration
 from neobert.checkpointing import (
     MODEL_WEIGHTS_NAME,
-    invalidate_checkpoint_completion,
     load_deepspeed_fp32_state_dict,
     load_step_checkpoint_state_dict,
-    mark_checkpoint_complete,
     prune_step_checkpoints as _prune_step_checkpoints,
     resolve_accelerate_state_dir,
     resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
     resolve_step_checkpoint_selector,
-    save_accelerate_state,
-    save_portable_checkpoint_weights as _save_portable_checkpoint_weights,
     strip_runtime_prefixes,
 )
 from neobert.collator.collator import (
@@ -55,11 +49,14 @@ from neobert.training_utils import (
     _resolve_cuda_pin_memory,
     _resolve_resume_checkpoint,
     _update_global_norm_metric_for_logging,
+    PreemptionState,
     attach_optimizer_param_names,
+    build_dataloader_config,
     create_accelerator,
+    initialize_wandb_trackers,
     resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
-    save_optimizer_param_name_manifest,
+    save_training_checkpoint,
     should_save_step_checkpoint,
     sync_resume_source_of_truth,
     validate_optimizer_param_name_manifest,
@@ -230,51 +227,16 @@ def _save_contrastive_step_checkpoint(
     :param int step: Completed optimizer step.
     :return Path: Completed step checkpoint directory.
     """
-    checkpoint_path = checkpoint_dir / str(int(step))
-    if accelerator.is_main_process:
-        invalidate_checkpoint_completion(checkpoint_path)
-    accelerator.wait_for_everyone()
-    save_accelerate_state(accelerator, checkpoint_path)
-    accelerator.wait_for_everyone()
-    if accelerator.is_main_process:
-        save_optimizer_param_name_manifest(optimizer, checkpoint_path)
-        _save_contrastive_checkpoint_metadata(cfg, tokenizer, checkpoint_path)
-    _save_portable_checkpoint_weights(model, accelerator, checkpoint_path)
-    accelerator.wait_for_everyone()
-    if accelerator.is_main_process:
-        mark_checkpoint_complete(checkpoint_path, task="contrastive")
-    accelerator.wait_for_everyone()
-    return checkpoint_path
-
-
-@dataclass
-class _PreemptionState:
-    """Signal-safe intent recorded until the next optimizer boundary."""
-
-    requested_signum: int = 0
-
-    def request(self, signum: int, frame: FrameType | None) -> None:
-        """Record preemption intent without I/O, CUDA work, or collectives.
-
-        :param int signum: Received signal number.
-        :param FrameType | None frame: Interrupted Python frame.
-        """
-        del frame
-        self.requested_signum = int(signum)
-
-    def synchronize(self, accelerator: Any) -> bool:
-        """Return whether any rank requested preemption.
-
-        :param Any accelerator: Active Accelerator instance.
-        :return bool: True when at least one rank requested termination.
-        """
-        local_request = torch.tensor(
-            int(self.requested_signum != 0),
-            device=accelerator.device,
-            dtype=torch.int32,
-        )
-        requests = accelerator.reduce(local_request, reduction="sum")
-        return bool(int(requests.item()))
+    return save_training_checkpoint(
+        task="contrastive",
+        checkpoint_path=checkpoint_dir / str(int(step)),
+        accelerator=accelerator,
+        model=model,
+        optimizer=optimizer,
+        save_metadata=lambda path: _save_contrastive_checkpoint_metadata(
+            cfg, tokenizer, path
+        ),
+    )
 
 
 def _sync_contrastive_runtime_from_pretraining(
@@ -705,6 +667,7 @@ def trainer(cfg: Config) -> None:
         gradient_accumulation_steps=cfg.trainer.gradient_accumulation_steps,
         log_with="wandb" if wandb_enabled else None,
         project_config=project_config,
+        dataloader_config=build_dataloader_config(seed=cfg.seed),
     )
     validate_distributed_runtime_policy(
         accelerator=accelerator,
@@ -728,39 +691,12 @@ def trainer(cfg: Config) -> None:
 
     # Initialise the wandb run and pass wandb parameters
     if wandb_enabled:
-        Path(cfg.wandb.dir).mkdir(parents=True, exist_ok=True)
-        accelerator.init_trackers(
-            project_name=cfg.wandb.project,
-            init_kwargs={
-                "wandb": {
-                    "name": cfg.wandb.name,
-                    "entity": cfg.wandb.entity,
-                    "config": tracker_config_dict,
-                    "tags": cfg.wandb.tags,
-                    "dir": cfg.wandb.dir,
-                    "mode": cfg.wandb.mode,
-                    "resume": cfg.wandb.resume,
-                }
-            },
+        initialize_wandb_trackers(
+            cfg=cfg,
+            accelerator=accelerator,
+            tracker_config=tracker_config_dict,
+            log=logger,
         )
-        if accelerator.is_main_process and wandb.run is not None:
-            wandb.run.config.update(tracker_config_dict, allow_val_change=True)
-            config_path = getattr(cfg, "config_path", None)
-            if config_path:
-                abs_config_path = Path(config_path).expanduser().resolve()
-                if abs_config_path.is_file():
-                    artifact = wandb.Artifact(
-                        name=f"{wandb.run.id}-config",
-                        type="config",
-                        metadata={"source": str(abs_config_path)},
-                    )
-                    artifact.add_file(str(abs_config_path))
-                    wandb.run.log_artifact(artifact)
-                else:
-                    logger.warning(
-                        f"Configured config_path '{config_path}' not found; "
-                        "skipping wandb artifact upload"
-                    )
 
     # Set the seed
     set_seed(cfg.seed)
@@ -1051,7 +987,7 @@ def trainer(cfg: Config) -> None:
                 f"{checkpoint_dir}"
             )
 
-    preemption = _PreemptionState()
+    preemption = PreemptionState()
     previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
     signal.signal(signal.SIGTERM, preemption.request)
 
