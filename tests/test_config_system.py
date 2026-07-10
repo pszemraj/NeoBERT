@@ -83,8 +83,8 @@ class TestConfigSystem(unittest.TestCase):
             with self.subTest(config=str(config_path.relative_to(config_root))):
                 ConfigLoader.load(config_path)
 
-    def test_saved_default_config_loads_without_legacy_none_conflicts(self):
-        """Saved configs should roundtrip even with null deprecated aliases."""
+    def test_saved_default_config_roundtrips(self):
+        """Saved default configs should roundtrip through the current schema."""
         config = Config()
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -116,20 +116,6 @@ class TestConfigSystem(unittest.TestCase):
 
         self.assertEqual(loaded.trainer.logging_steps, 5)
 
-    def test_legacy_wandb_log_interval_migrates_to_logging_steps(self):
-        """Old YAMLs using wandb.log_interval still map onto trainer.logging_steps."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            f.write("wandb:\n  log_interval: 50\n")
-            path = f.name
-
-        try:
-            with self.assertWarns(NeoBERTWarning):
-                loaded = ConfigLoader.load(path)
-        finally:
-            os.unlink(path)
-
-        self.assertEqual(loaded.trainer.logging_steps, 50)
-
     def test_cli_override_system(self):
         """Test CLI override functionality."""
         config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"
@@ -140,6 +126,8 @@ class TestConfigSystem(unittest.TestCase):
             str(config_path),
             "--model.hidden_size",
             "128",
+            "--model.classifier_init_range",
+            "0.01",
             "--optimizer.lr",
             "5e-4",
             "--trainer.per_device_train_batch_size",
@@ -183,6 +171,7 @@ class TestConfigSystem(unittest.TestCase):
 
             # Check that overrides were applied
             self.assertEqual(config.model.hidden_size, 128)  # Overridden from 64
+            self.assertEqual(config.model.classifier_init_range, 0.01)
             self.assertEqual(config.optimizer.lr, 5e-4)  # Overridden from 1e-4
             self.assertEqual(
                 config.trainer.per_device_train_batch_size, 4
@@ -215,7 +204,7 @@ class TestConfigSystem(unittest.TestCase):
         config_path = self.test_config_dir / "pretraining" / "test_tiny_pretrain.yaml"
         cases = [
             ("off", False, None),
-            ("ture", None, SystemExit),
+            ("ture", None, ValueError),
         ]
 
         for token, expected, expected_exc in cases:
@@ -558,77 +547,8 @@ optimizer:
             finally:
                 os.unlink(path)
 
-    def test_legacy_contrastive_key_migrations(self):
-        """Ensure legacy contrastive fields map cleanly and reject conflicts."""
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            cfg = ConfigLoader.dict_to_config(
-                {
-                    "task": "contrastive",
-                    "dataset": {"pretraining_prob": 0.45},
-                }
-            )
-        self.assertEqual(cfg.contrastive.pretraining_prob, 0.45)
-        self.assertTrue(
-            any(
-                "dataset.pretraining_prob" in str(w.message)
-                and "contrastive.pretraining_prob" in str(w.message)
-                for w in caught
-            )
-        )
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            with self.assertRaises(ValueError):
-                ConfigLoader.dict_to_config(
-                    {
-                        "task": "contrastive",
-                        "dataset": {"pretraining_prob": 0.4},
-                        "contrastive": {"pretraining_prob": 0.6},
-                    }
-                )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            pre_ckpt_dir = str(Path(tmpdir) / "pre_ckpts")
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                cfg = ConfigLoader.dict_to_config(
-                    {
-                        "task": "contrastive",
-                        "model": {
-                            "pretrained_checkpoint_dir": pre_ckpt_dir,
-                            "pretrained_checkpoint": "1234",
-                            "allow_random_weights": True,
-                        },
-                    }
-                )
-            self.assertEqual(cfg.contrastive.pretrained_checkpoint_dir, pre_ckpt_dir)
-            self.assertEqual(cfg.contrastive.pretrained_checkpoint, "1234")
-            self.assertTrue(cfg.contrastive.allow_random_weights)
-            self.assertTrue(
-                any(
-                    "model.pretrained_checkpoint_dir" in str(w.message)
-                    and "contrastive.pretrained_checkpoint_dir" in str(w.message)
-                    for w in caught
-                )
-            )
-
-            with self.assertRaises(ValueError):
-                ConfigLoader.dict_to_config(
-                    {
-                        "task": "contrastive",
-                        "model": {
-                            "pretrained_checkpoint_dir": str(
-                                Path(tmpdir) / "model_ckpts"
-                            )
-                        },
-                        "contrastive": {
-                            "pretrained_checkpoint_dir": str(
-                                Path(tmpdir) / "contrastive_ckpts"
-                            )
-                        },
-                    }
-                )
+        with self.assertRaisesRegex(ValueError, "mixed_precision"):
+            ConfigLoader.dict_to_config({"mixed_precision": "bf16"})
 
     def test_wandb_defaults_and_watch_validation(self):
         """Ensure W&B enablement and watch-mode validation semantics remain stable."""
@@ -736,19 +656,6 @@ optimizer:
                     for w in caught
                 )
                 self.assertEqual(found, expect_warning)
-
-    def test_unsupported_scheduler_field_is_ignored_with_warning(self):
-        """Ensure unsupported scheduler fields are ignored with a clear warning."""
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            cfg_scheduler = ConfigLoader.dict_to_config(
-                {"scheduler": {"name": "cosine", "num_cycles": 1.5}}
-            )
-        self.assertEqual(cfg_scheduler.scheduler.name, "cosine")
-        self.assertTrue(
-            any("scheduler.num_cycles" in str(w.message) for w in caught),
-            "Expected deprecation warning for scheduler.num_cycles",
-        )
 
     def test_config_value_validation_errors(self):
         """Ensure invalid scalar config values fail for known validation paths."""
