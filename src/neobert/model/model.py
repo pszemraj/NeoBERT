@@ -29,6 +29,7 @@ from neobert.modeling_utils import (
     is_torch_compiling,
     packed_seqlens_to_tensor,
     removed_model_config_fields,
+    right_padded_mask_lengths,
     swiglu_intermediate_size,
 )
 from neobert.warnings import NeoBERTWarning
@@ -96,16 +97,15 @@ def _infer_single_segment_packed_seqlens_from_pad_mask(
     if key_mask.shape[-1] != seq_len:
         return None
 
-    keep = torch.isfinite(key_mask) & (key_mask == 0)
-    keep_int = keep.to(torch.int)
-    if not torch.all(keep_int.cummin(dim=-1).values == keep_int):
+    lengths = right_padded_mask_lengths(key_mask, convention="additive")
+    if lengths is None:
         return None
 
-    lengths = keep_int.sum(dim=-1).clamp(max=seq_len).to(torch.int32)
+    lengths = lengths.clamp(max=seq_len)
     # Fully padded rows are not valid packed segments; keep additive-mask path.
     if (lengths <= 0).any():
         return None
-    return lengths.unsqueeze(1).cpu()
+    return lengths.cpu()
 
 
 def _normalize_packed_seqlens(

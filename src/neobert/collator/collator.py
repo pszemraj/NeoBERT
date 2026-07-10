@@ -12,6 +12,7 @@ from transformers import (
     PreTrainedTokenizerBase,
 )
 
+from neobert.modeling_utils import right_padded_mask_lengths
 from neobert.utils import additive_attention_mask
 from neobert.warnings import NeoBERTWarning
 
@@ -361,9 +362,7 @@ def _is_right_padded_mask(attention_mask: torch.Tensor) -> bool:
     mask = attention_mask
     if mask.is_cuda:
         mask = mask.cpu()
-    mask = (mask != 0).to(torch.int)
-    # For right padding, the mask must be non-increasing along the sequence.
-    return bool(torch.all(mask.cummin(dim=-1).values == mask))
+    return right_padded_mask_lengths(mask, convention="binary") is not None
 
 
 def attention_mask_to_packed_seqlens(
@@ -384,8 +383,9 @@ def attention_mask_to_packed_seqlens(
             "Packed seqlens should be derived before moving batches to CUDA."
         )
 
-    # packed_seqlens only encodes lengths, valid only for right padding.
-    lengths = attention_mask.sum(dim=1, keepdim=True).to(torch.int32)
+    lengths = right_padded_mask_lengths(attention_mask, convention="binary")
+    if lengths is None:
+        raise ValueError("attention_mask must use right padding")
     return lengths
 
 

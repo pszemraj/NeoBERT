@@ -313,6 +313,28 @@ class TestModelForward(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "Unsupported packed_seqlens type"):
             packed_seqlens_to_tensor((3, 2))
 
+    def test_right_padding_lengths_support_both_mask_conventions(self):
+        """Ensure binary and additive masks share right-padding derivation."""
+        from neobert.modeling_utils import right_padded_mask_lengths
+
+        binary = torch.tensor([[1, 1, 0], [1, 0, 0]])
+        additive = torch.where(
+            binary.bool(),
+            torch.tensor(0.0),
+            torch.tensor(float("-inf")),
+        )
+        expected = torch.tensor([[2], [1]], dtype=torch.int32)
+
+        torch.testing.assert_close(
+            right_padded_mask_lengths(binary, convention="binary"), expected
+        )
+        torch.testing.assert_close(
+            right_padded_mask_lengths(additive, convention="additive"), expected
+        )
+        self.assertIsNone(
+            right_padded_mask_lengths(torch.tensor([[0, 1, 0]]), convention="binary")
+        )
+
     def test_flash_metadata_is_reused_across_layers(self):
         """Ensure flash packed metadata is prepared once and reused in all layers."""
         import neobert.model.model as model_module

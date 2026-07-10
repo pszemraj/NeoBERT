@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import torch
 from torch.nn.functional import scaled_dot_product_attention
@@ -72,6 +72,35 @@ def packed_seqlens_to_tensor(
                 row, dtype=torch.int32, device=device
             )
     return tensor
+
+
+def right_padded_mask_lengths(
+    mask: torch.Tensor,
+    *,
+    convention: Literal["binary", "additive"],
+) -> Optional[torch.Tensor]:
+    """Return lengths when a rank-2 attention mask uses right padding.
+
+    :param torch.Tensor mask: Binary 0/1 or additive 0/-inf attention mask.
+    :param str convention: Mask convention, ``"binary"`` or ``"additive"``.
+    :raises ValueError: If the mask is not rank 2 or the convention is unknown.
+    :return torch.Tensor | None: ``int32`` lengths shaped ``[batch, 1]``, or ``None`` for non-right padding.
+    """
+    if mask.ndim != 2:
+        raise ValueError(
+            f"Expected attention mask rank-2 [B,S], got shape={tuple(mask.shape)}"
+        )
+    if convention == "binary":
+        keep = mask != 0
+    elif convention == "additive":
+        keep = torch.isfinite(mask) & (mask == 0)
+    else:  # pragma: no cover - guarded by the Literal annotation.
+        raise ValueError(f"Unknown attention mask convention: {convention!r}")
+
+    keep_int = keep.to(torch.int32)
+    if not torch.all(keep_int.cummin(dim=-1).values == keep_int):
+        return None
+    return keep_int.sum(dim=-1, keepdim=True, dtype=torch.int32)
 
 
 def swiglu_intermediate_size(intermediate_size: int, multiple_of: int = 8) -> int:
