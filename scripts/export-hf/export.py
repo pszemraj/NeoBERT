@@ -12,6 +12,7 @@ The script will create an hf/ directory in the parent folder with the exported m
 """
 
 import argparse
+import inspect
 import json
 import shutil
 import textwrap
@@ -26,11 +27,17 @@ from neobert.checkpointing import (
     load_deepspeed_fp32_state_dict,
     load_model_safetensors,
 )
-from neobert.modeling_utils import swiglu_intermediate_size
+from neobert.modeling_utils import (
+    removed_model_config_fields,
+    swiglu_intermediate_size,
+)
 from neobert.tokenizer import align_tokenizer_vocab
 from neobert.warnings import NeoBERTWarning
 from safetensors.torch import save_file
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
+
+from export_utils import REQUIRED_HF_CONFIG_FIELDS, has_packed_swiglu_weights
+from mlm_predict import clean_metaspace_before_mask
 
 
 def load_config(config_path: Path) -> Dict[str, Any]:
@@ -190,7 +197,7 @@ def validate_state_dict_layout(
     if "model.decoder.bias" in state_dict:
         _check_shape(state_dict, "model.decoder.bias", (vocab_size,))
 
-    if any(".ffn.w12." in key for key in state_dict.keys()):
+    if has_packed_swiglu_weights(state_dict):
         raise ValueError(
             "Packed SwiGLU weights (ffn.w12) found. Export expects unpacked "
             "w1/w2/w3 weights from training."
@@ -267,25 +274,9 @@ def run_forward_sanity_check(
 
 def validate_required_config_fields(model_config: Dict[str, Any]) -> None:
     """Validate that all required config fields are present."""
-    required_fields = [
-        "hidden_size",
-        "num_hidden_layers",
-        "num_attention_heads",
-        "intermediate_size",
-        "vocab_size",
-        "max_position_embeddings",
-        "norm_eps",
-        "pad_token_id",
-        # Architecture-affecting fields that must be explicit for correct export.
-        "rope",
-        "rms_norm",
-        "hidden_act",
+    missing_fields = [
+        field for field in REQUIRED_HF_CONFIG_FIELDS if field not in model_config
     ]
-
-    missing_fields = []
-    for field in required_fields:
-        if field not in model_config:
-            missing_fields.append(field)
 
     if missing_fields:
         raise ValueError(
@@ -317,11 +308,11 @@ def create_hf_config(
             f"Unsupported hidden_act '{hidden_act}' for HF export. Supported: swiglu, gelu."
         )
 
-    removed_fields = {"ngpt", "base_scale"}.intersection(model_config)
+    removed_fields = removed_model_config_fields(model_config)
     if removed_fields:
         raise ValueError(
             "Checkpoint uses removed NeoBERT model field(s): "
-            + ", ".join(sorted(removed_fields))
+            + ", ".join(removed_fields)
         )
 
     # Map our config to HF format - using the original HF model structure
@@ -680,10 +671,15 @@ def export_checkpoint(
     # Generate MLM example based on actual tokenizer
     if has_metaspace:
         # Include space token handling for Metaspace tokenizers
+        metaspace_cleanup_source = textwrap.dedent(
+            inspect.getsource(clean_metaspace_before_mask)
+        )
         mlm_example = f'''```python
 from transformers import AutoModelForMaskedLM, AutoTokenizer
+from typing import Any
 import torch
 
+{metaspace_cleanup_source}
 repo_id = "{repo_id}"  # Update this to your HF repo ID
 tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
 model = AutoModelForMaskedLM.from_pretrained(repo_id, trust_remote_code=True)
@@ -695,26 +691,7 @@ text = "NeoBERT is the most {mask_display} model of its kind!"
 text = text.replace("{mask_display}", tokenizer.mask_token)
 
 inputs = tokenizer(text, return_tensors="pt")
-
-# Handle Metaspace tokenizer quirk: remove extra space tokens before mask
-# Get the space token ID dynamically
-try:
-    space_token_id = tokenizer.convert_tokens_to_ids("▁")
-except:
-    space_token_id = None
-
-if space_token_id is not None:
-    input_ids = inputs["input_ids"][0].tolist()
-    cleaned_ids = []
-    for i, token_id in enumerate(input_ids):
-        # Skip space token if it's immediately before mask token
-        if token_id == space_token_id and i < len(input_ids) - 1 and input_ids[i + 1] == tokenizer.mask_token_id:
-            continue
-        cleaned_ids.append(token_id)
-
-    if len(cleaned_ids) != len(input_ids):
-        inputs["input_ids"] = torch.tensor([cleaned_ids])
-        inputs["attention_mask"] = torch.ones_like(inputs["input_ids"])
+inputs = clean_metaspace_before_mask(inputs, tokenizer)
 
 # Get predictions
 with torch.no_grad():

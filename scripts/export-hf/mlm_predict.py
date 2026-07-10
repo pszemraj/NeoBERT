@@ -61,7 +61,7 @@ def _resolve_device(device: str) -> torch.device:
     return torch.device(device)
 
 
-def _clean_metaspace_before_mask(inputs: dict, tokenizer: Any) -> dict:
+def clean_metaspace_before_mask(inputs: dict, tokenizer: Any) -> dict:
     """Remove SentencePiece metaspace tokens that appear directly before a mask token.
 
     :param dict inputs: Tokenized inputs.
@@ -130,7 +130,7 @@ def main() -> None:
 
     # Tokenize & forward
     inputs = tokenizer(text_norm, return_tensors="pt")
-    inputs = _clean_metaspace_before_mask(inputs, tokenizer)
+    inputs = clean_metaspace_before_mask(inputs, tokenizer)
     inputs = {k: v.to(device) if torch.is_tensor(v) else v for k, v in inputs.items()}
 
     with torch.inference_mode():
