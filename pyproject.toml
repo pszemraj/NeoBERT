@@ -9,11 +9,9 @@ description = "A state-of-the-art update of BERT"
 requires-python = ">= 3.10"
 dependencies = [
     "accelerate",
-    "aiohttp",
     "datasets",
     "einops",
     "evaluate",
-    "httpx",
     "liger-kernel>=0.6",
     "mteb",
     "numpy",
@@ -39,7 +37,7 @@ license = { text = "MIT License" }
 keywords = []
 
 [project.optional-dependencies]
-dev = ["ruff", "isort", "pytest", "pytest-cov", "pytest-clarity", "xeger"]
+dev = ["ruff", "pytest", "pytest-cov", "pytest-clarity"]
 flash = ["flash-attn>=2.5"]
 legacy-checkpoints = ["deepspeed"]
 

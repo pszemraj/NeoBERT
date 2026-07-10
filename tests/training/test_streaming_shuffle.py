@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Tests for streaming dataset shuffle helpers."""
 
+import errno
 import unittest
 from unittest.mock import MagicMock, patch
 
-import aiohttp
-import httpx
 import requests
 import torch
 from accelerate import Accelerator
@@ -552,52 +551,15 @@ class TestTransientErrorClassification(unittest.TestCase):
 
     def test_network_typed_errors_are_transient(self):
         """Typed network failures classify as transient without message checks."""
-        request = httpx.Request("GET", "https://example.invalid/data")
         transient_errors = (
             TimeoutError(),
             ConnectionError(),
             requests.exceptions.ConnectionError("boom"),
             http_error(503),
-            httpx.ReadTimeout("temporary timeout", request=request),
-            httpx.ConnectError("temporary failure", request=request),
-            httpx.RemoteProtocolError("peer disconnected", request=request),
-            aiohttp.ServerDisconnectedError(),
-            aiohttp.ClientPayloadError(),
         )
         for error in transient_errors:
             with self.subTest(error_type=type(error).__name__):
                 self.assertTrue(is_transient_streaming_error(error))
-
-    def test_transport_http_status_classification_is_strict(self):
-        """Only retryable httpx/aiohttp response statuses consume retry budget."""
-        for status_code, expected in ((503, True), (404, False)):
-            with self.subTest(client="httpx", status_code=status_code):
-                request = httpx.Request("GET", "https://example.invalid/data")
-                response = httpx.Response(status_code, request=request)
-                error = httpx.HTTPStatusError(
-                    "response error", request=request, response=response
-                )
-                self.assertEqual(is_transient_streaming_error(error), expected)
-
-            with self.subTest(client="aiohttp", status_code=status_code):
-                error = aiohttp.ClientResponseError(
-                    request_info=None,
-                    history=(),
-                    status=status_code,
-                    message="response error",
-                )
-                self.assertEqual(is_transient_streaming_error(error), expected)
-
-    def test_non_network_transport_errors_are_permanent(self):
-        """Malformed URLs and local protocol misuse must fail immediately."""
-        request = httpx.Request("GET", "https://example.invalid/data")
-        permanent_errors = (
-            httpx.UnsupportedProtocol("unsupported", request=request),
-            aiohttp.InvalidURL("not a URL"),
-        )
-        for error in permanent_errors:
-            with self.subTest(error_type=type(error).__name__):
-                self.assertFalse(is_transient_streaming_error(error))
 
     def test_non_transient_http_status_is_permanent(self):
         """Client errors such as 404 must not be retried."""
@@ -634,11 +596,9 @@ class TestTransientErrorClassification(unittest.TestCase):
 
     def test_transient_cause_inside_wrapper_exception_is_detected(self):
         """A permanent-looking wrapper with a transient network cause retries."""
-        request = httpx.Request("GET", "https://example.invalid/data")
         causes = (
             requests.exceptions.ConnectionError("reset"),
-            httpx.RemoteProtocolError("peer disconnected", request=request),
-            aiohttp.ServerDisconnectedError(),
+            OSError(errno.ECONNRESET, "connection reset"),
         )
         for cause in causes:
             with self.subTest(cause_type=type(cause).__name__):

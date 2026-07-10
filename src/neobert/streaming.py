@@ -7,8 +7,6 @@ from collections.abc import Callable, Iterator, Mapping
 from copy import deepcopy
 from typing import Any, TypeVar
 
-import aiohttp
-import httpx
 import requests
 import torch
 from datasets import IterableDataset as HuggingFaceIterableDataset
@@ -202,29 +200,6 @@ def is_transient_streaming_error(exc: BaseException) -> bool:
             response = getattr(candidate, "response", None)
             status_code = getattr(response, "status_code", None)
             if status_code in _TRANSIENT_HTTP_STATUS_CODES:
-                return True
-        if isinstance(
-            candidate,
-            (
-                httpx.TimeoutException,
-                httpx.NetworkError,
-                httpx.RemoteProtocolError,
-            ),
-        ):
-            return True
-        if isinstance(candidate, httpx.HTTPStatusError):
-            if candidate.response.status_code in _TRANSIENT_HTTP_STATUS_CODES:
-                return True
-        if isinstance(
-            candidate,
-            (
-                aiohttp.ClientConnectionError,
-                aiohttp.ClientPayloadError,
-            ),
-        ):
-            return True
-        if isinstance(candidate, aiohttp.ClientResponseError):
-            if candidate.status in _TRANSIENT_HTTP_STATUS_CODES:
                 return True
         if isinstance(candidate, OSError) and getattr(candidate, "errno", None) in (
             _TRANSIENT_OS_ERRNOS
