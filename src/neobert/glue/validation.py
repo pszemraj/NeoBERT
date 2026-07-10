@@ -1,13 +1,47 @@
 """Side-effect-free validation helpers for GLUE fine-tuning."""
 
+import warnings
 from pathlib import Path
 from typing import Any
 
+from neobert.config import Config, ConfigLoader
 from neobert.glue.tasks import SUPPORTED_GLUE_TASK_SPECS, get_glue_task_spec
 
 
 class GlueValidationError(Exception):
     """Raised when a GLUE configuration is invalid."""
+
+
+def load_validated_glue_config(
+    config_path: str | Path,
+    *,
+    task_name: str | None = None,
+    model_name_or_path: str | None = None,
+    output_dir: str | None = None,
+) -> tuple[Config, tuple[str, ...]]:
+    """Load, apply launch overrides, and validate one GLUE configuration.
+
+    :param str | Path config_path: YAML configuration path.
+    :param str | None task_name: Optional task-name override.
+    :param str | None model_name_or_path: Optional Hugging Face model override.
+    :param str | None output_dir: Optional output-directory override.
+    :return tuple[Config, tuple[str, ...]]: Validated config and warning messages.
+    """
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        cfg = ConfigLoader.load(config_path)
+
+    if task_name:
+        cfg.glue.task_name = task_name
+    if model_name_or_path:
+        cfg.model.name = model_name_or_path
+        cfg.model.from_hub = True
+    if output_dir:
+        cfg.trainer.output_dir = output_dir
+
+    glue_warnings = validate_glue_config(cfg)
+    config_warnings = tuple(str(item.message) for item in captured)
+    return cfg, config_warnings + glue_warnings
 
 
 def validate_glue_config(cfg: Any) -> tuple[str, ...]:
@@ -47,6 +81,7 @@ def validate_glue_config(cfg: Any) -> tuple[str, ...]:
     if hasattr(cfg, "model"):
         glue_cfg = getattr(cfg, "glue", None)
         allow_random = bool(getattr(glue_cfg, "allow_random_weights", False))
+        pretrained_model_path = getattr(glue_cfg, "pretrained_model_path", None)
         checkpoint_dir = getattr(glue_cfg, "pretrained_checkpoint_dir", None)
         checkpoint = getattr(glue_cfg, "pretrained_checkpoint", None)
 
@@ -54,13 +89,22 @@ def validate_glue_config(cfg: Any) -> tuple[str, ...]:
         from_hub = bool(getattr(model_cfg, "from_hub", False))
 
         if not allow_random and not from_hub:
-            if _is_missing(checkpoint_dir) or _is_missing(checkpoint):
+            if (
+                _is_missing(pretrained_model_path)
+                or _is_missing(checkpoint_dir)
+                or _is_missing(checkpoint)
+            ):
                 errors.append(
                     "GLUE requires pretrained weights. Specify "
+                    "'glue.pretrained_model_path', "
                     "'glue.pretrained_checkpoint_dir' and "
                     "'glue.pretrained_checkpoint' or set "
                     "'glue.allow_random_weights: true'. "
                     "Use model.from_hub=true for direct HF model fine-tuning."
+                )
+            elif not Path(str(pretrained_model_path)).is_file():
+                errors.append(
+                    f"Pretrained model config not found: {pretrained_model_path}"
                 )
             elif not Path(str(checkpoint_dir)).exists():
                 errors.append(f"Checkpoint directory not found: {checkpoint_dir}")

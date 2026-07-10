@@ -9,8 +9,11 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from neobert.config import ConfigLoader
 from neobert.glue.tasks import GLUE_TASK_SPECS
+from neobert.glue.validation import (
+    GlueValidationError,
+    load_validated_glue_config,
+)
 
 QUICK_TASKS = ("rte", "mrpc", "stsb", "cola")
 RUN_GLUE = Path(__file__).resolve().parent.parent / "run_glue.py"
@@ -112,14 +115,20 @@ def run_suite(args: argparse.Namespace) -> int:
             continue
 
         try:
-            config = ConfigLoader.load(config_path)
-        except (OSError, TypeError, ValueError) as exc:
+            config, validation_warnings = load_validated_glue_config(
+                config_path,
+                model_name_or_path=args.model_name_or_path,
+            )
+        except (OSError, TypeError, ValueError, GlueValidationError) as exc:
             print(f"FAIL {task}: invalid config: {exc}", file=sys.stderr)
             failed.append(task)
             outputs[task] = "(invalid config)"
             if args.suite == "quick":
                 break
             continue
+
+        for message in validation_warnings:
+            print(f"WARN {task}: {message}", file=sys.stderr)
 
         outputs[task] = str(config.trainer.output_dir)
         command = [sys.executable, str(RUN_GLUE), str(config_path)]

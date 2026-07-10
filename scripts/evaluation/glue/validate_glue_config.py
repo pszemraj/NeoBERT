@@ -3,11 +3,9 @@
 
 import argparse
 import sys
-import warnings
 from pathlib import Path
 
-from neobert.config import ConfigLoader
-from neobert.glue.validation import GlueValidationError, validate_glue_config
+from neobert.glue.validation import GlueValidationError, load_validated_glue_config
 
 
 def validate_config_file(config_path: Path) -> tuple[str, ...]:
@@ -20,11 +18,8 @@ def validate_config_file(config_path: Path) -> tuple[str, ...]:
     :raises GlueValidationError: If GLUE-specific validation fails.
     :return tuple[str, ...]: Validation warning messages.
     """
-    with warnings.catch_warnings(record=True) as captured:
-        warnings.simplefilter("always")
-        cfg = ConfigLoader.load(config_path)
-    glue_warnings = validate_glue_config(cfg)
-    return tuple(str(item.message) for item in captured) + glue_warnings
+    _, validation_warnings = load_validated_glue_config(config_path)
+    return validation_warnings
 
 
 def main() -> None:

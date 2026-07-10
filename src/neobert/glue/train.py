@@ -850,6 +850,11 @@ def trainer(cfg: Config) -> None:
     cfg.mode = getattr(cfg, "mode", "eval")  # Default to eval mode
     cfg.num_labels = cfg.glue.num_labels if hasattr(cfg, "glue") else 2
     cfg.max_seq_len = cfg.glue.max_seq_length if hasattr(cfg, "glue") else 128
+
+    # Fail before creating an Accelerator or mutating the output directory.
+    for warning in validate_glue_config(cfg):
+        _bootstrap_logger.warning(warning)
+
     output_dir = Path(cfg.trainer.output_dir)
     # Accelerator object
     project_config = ProjectConfiguration(

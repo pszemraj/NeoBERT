@@ -3,13 +3,14 @@
 
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from neobert.config import Config
+from neobert.config import Config, ConfigLoader
 
 
 class TestGLUETaskSpecific:
@@ -269,6 +270,8 @@ class TestGLUETaskSpecific:
         validate_glue_config(cfg)
 
         with tempfile.TemporaryDirectory() as checkpoint_dir:
+            pretrained_config = Path(checkpoint_dir) / "config.yaml"
+            pretrained_config.write_text("task: pretraining\n", encoding="utf-8")
             cfg = Config()
             cfg.task = "glue"
             cfg.glue.task_name = "sst2"
@@ -276,6 +279,7 @@ class TestGLUETaskSpecific:
             cfg.glue.allow_random_weights = False
             cfg.glue.pretrained_checkpoint_dir = checkpoint_dir
             cfg.glue.pretrained_checkpoint = 0
+            cfg.glue.pretrained_model_path = str(pretrained_config)
 
             validate_glue_config(cfg)
 
@@ -295,6 +299,39 @@ class TestGLUETaskSpecific:
 
         assert cfg.glue.num_labels == 3
         assert not (tmp_path / "not-created").exists()
+
+    def test_suite_dry_run_uses_production_validation(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Ensure suite dry-runs reject invalid configs after launch overrides."""
+        from scripts.evaluation.glue import run_glue_suite
+
+        cfg = Config()
+        cfg.task = "glue"
+        cfg.glue.task_name = "rte"
+        cfg.glue.num_labels = 2
+        cfg.glue.pretrained_checkpoint_dir = None
+        cfg.glue.pretrained_checkpoint = None
+        cfg.glue.pretrained_model_path = None
+        config_path = tmp_path / "rte.yaml"
+        ConfigLoader.save(cfg, config_path)
+
+        monkeypatch.setattr(run_glue_suite, "QUICK_TASKS", ("rte",))
+        args = SimpleNamespace(
+            config_dir=tmp_path,
+            suite="quick",
+            model_name_or_path=None,
+            log_dir=None,
+            dry_run=True,
+        )
+        assert run_glue_suite.run_suite(args) == 1
+        assert "GLUE requires pretrained weights" in capsys.readouterr().err
+
+        args.model_name_or_path = "example/model"
+        assert run_glue_suite.run_suite(args) == 0
+        output = capsys.readouterr()
+        assert "DRY-RUN rte" in output.out
+        assert "--model_name_or_path example/model" in output.out
 
     def test_task_registry_separates_selection_and_official_scores(self):
         """Ensure checkpoint selection never masquerades as an official GLUE score."""

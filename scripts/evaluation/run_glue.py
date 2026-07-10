@@ -2,9 +2,10 @@
 """Run GLUE evaluation."""
 
 import argparse
+import warnings
 
-from neobert.config import ConfigLoader
 from neobert.glue import trainer
+from neobert.glue.validation import load_validated_glue_config
 
 
 def main() -> None:
@@ -29,17 +30,14 @@ def main() -> None:
     if args.config is None:
         parser.error("config path is required (positional or --config)")
 
-    # Load base config
-    config = ConfigLoader.load(args.config)
-
-    # Override specific fields if provided
-    if args.task_name:
-        config.glue.task_name = args.task_name
-    if args.model_name_or_path:
-        config.model.name = args.model_name_or_path
-        config.model.from_hub = True
-    if args.output_dir:
-        config.trainer.output_dir = args.output_dir
+    config, validation_warnings = load_validated_glue_config(
+        args.config,
+        task_name=args.task_name,
+        model_name_or_path=args.model_name_or_path,
+        output_dir=args.output_dir,
+    )
+    for message in validation_warnings:
+        warnings.warn(message, UserWarning, stacklevel=2)
 
     # Run the GLUE trainer
     trainer(config)
