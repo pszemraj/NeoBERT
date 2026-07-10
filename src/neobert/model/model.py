@@ -4,7 +4,6 @@
 # different attention backends; keep core math consistent across both.
 
 import logging
-import math
 import warnings
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -195,8 +194,6 @@ class NeoBERTConfig(PretrainedConfig):
         attn_backend: str = "sdpa",
         kernel_backend: str = "auto",
         tie_word_embeddings: bool = True,
-        base_scale: float = 1.0 / (960.0**0.5),
-        ngpt: bool = False,
         **kwargs: Any,
     ):
         """Initialize the NeoBERT configuration.
@@ -218,10 +215,14 @@ class NeoBERTConfig(PretrainedConfig):
         :param str attn_backend: Attention backend (``"sdpa"`` or ``"flash_attn_varlen"``).
         :param str kernel_backend: Kernel backend (``"auto"``, ``"liger"``, or ``"torch"``).
         :param bool tie_word_embeddings: Whether to tie input/output embeddings.
-        :param float base_scale: Base scaling factor for NGPT.
-        :param bool ngpt: Whether to enable NGPT mode.
         :param Any kwargs: Additional configuration parameters.
         """
+        removed_fields = {"ngpt", "base_scale"}.intersection(kwargs)
+        if removed_fields:
+            raise TypeError(
+                "Unsupported removed NeoBERT config field(s): "
+                + ", ".join(sorted(removed_fields))
+            )
         # Legacy: accept flash_attention bool and map to attn_backend
         if "flash_attention" in kwargs:
             fa = kwargs.pop("flash_attention")
@@ -269,8 +270,6 @@ class NeoBERTConfig(PretrainedConfig):
             raise ValueError(
                 f"Unsupported hidden_act '{hidden_act}'. Supported: swiglu, gelu."
             )
-        if ngpt and normalized_act != "swiglu":
-            raise ValueError("ngpt=True requires hidden_act='swiglu'.")
         self.hidden_act = normalized_act
         self.vocab_size = vocab_size
         self.pad_token_id = pad_token_id
@@ -295,8 +294,6 @@ class NeoBERTConfig(PretrainedConfig):
 
         self.attn_backend = canonicalize_attn_backend(attn_backend)
         self.kernel_backend = canonicalize_kernel_backend(kernel_backend)
-        self.base_scale = base_scale
-        self.ngpt = ngpt
 
     @classmethod
     def from_model_config(
@@ -344,8 +341,6 @@ class NeoBERTConfig(PretrainedConfig):
             max_length=max_length,
             attn_backend=attn_backend,
             kernel_backend=model_config.kernel_backend,
-            base_scale=model_config.base_scale,
-            ngpt=model_config.ngpt,
             **runtime_kwargs,
         )
 
@@ -502,209 +497,6 @@ class EncoderBlock(nn.Module):
         return self.ffn_dropout(self.ffn(x))
 
 
-class NormEncoderBlock(nn.Module):
-    """Transformer encoder block."""
-
-    def __init__(self, config: NeoBERTConfig) -> None:
-        """Initialize the normalized encoder block.
-
-        :param NeoBERTConfig config: Model configuration.
-        """
-        super().__init__()
-
-        self.config = config
-
-        # Attention
-        self.qkv = nn.Linear(
-            in_features=config.hidden_size,
-            out_features=config.hidden_size * 3,
-            bias=False,
-        )
-        self.wo = nn.Linear(
-            in_features=config.hidden_size, out_features=config.hidden_size, bias=False
-        )
-        self.resid_dropout = nn.Dropout(config.dropout)
-
-        # Kernel backend for Liger/torch dispatch (resolved at forward time)
-        self._kb = getattr(config, "kernel_backend", "auto")
-
-        self.c_fc = nn.Linear(
-            config.hidden_size, 2 * config.intermediate_size, bias=False
-        )
-        self.mlp_c_proj = nn.Linear(
-            config.intermediate_size, config.hidden_size, bias=False
-        )
-        self.mlp_c_proj._ngpt_c_proj = True
-
-        self.ffn_dropout = nn.Dropout(config.dropout)
-
-        self.attn_alpha_init_value = 0.05
-        self.attn_alpha_init_scaling = config.base_scale
-        self.attn_alpha = torch.nn.Parameter(
-            self.attn_alpha_init_scaling * torch.ones(config.hidden_size)
-        )
-
-        self.mlp_alpha_init_value = 0.05
-        self.mlp_alpha_init_scaling = config.base_scale
-        self.mlp_alpha = torch.nn.Parameter(
-            self.mlp_alpha_init_scaling * torch.ones(config.hidden_size)
-        )
-
-        self.sqk_init_value = 1.0
-        self.sqk_init_scaling = config.base_scale
-        self.sqk = torch.nn.Parameter(
-            self.sqk_init_scaling * torch.ones(config.hidden_size)
-        )
-
-        self.suv_init_value = 1.0
-        self.suv_init_scaling = 1.0
-        self.suv = torch.nn.Parameter(
-            self.suv_init_scaling * torch.ones(2 * config.intermediate_size)
-        )
-
-    def justnorm(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply L2 normalization across the last dimension.
-
-        The norm reduces in fp32 via ``vector_norm(dtype=...)``, which avoids
-        materializing a full fp32 copy of ``x`` while keeping the reduction
-        numerically identical to ``x.float().norm(...)``.
-
-        :param torch.Tensor x: Input tensor.
-        :return torch.Tensor: Normalized tensor.
-        """
-        denom = torch.linalg.vector_norm(
-            x, dim=-1, keepdim=True, dtype=torch.float32
-        ).clamp_min(self.config.norm_eps)
-        return x / denom.to(dtype=x.dtype)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        pad_mask: torch.Tensor,
-        freqs_cis: torch.Tensor,
-        packed_seqlens: Optional[PackedSeqLens] = None,
-        packed_flash_meta: Optional[PackedFlashMetadata] = None,
-    ) -> torch.Tensor:
-        """Run the normalized encoder block forward pass.
-
-        :param torch.Tensor x: Input tensor.
-        :param torch.Tensor pad_mask: Additive attention mask.
-        :param torch.Tensor freqs_cis: Rotary embedding frequencies.
-        :param torch.Tensor | list[list[int]] | None packed_seqlens: Packed segment lengths.
-        :param PackedFlashMetadata | None packed_flash_meta: Cached flash varlen metadata.
-        :return torch.Tensor: Updated hidden states.
-        """
-        x_attn = self._att_block(
-            x,
-            pad_mask,
-            freqs_cis,
-            packed_seqlens,
-            packed_flash_meta,
-        )
-
-        lr = self.attn_alpha * (
-            self.attn_alpha_init_value / self.attn_alpha_init_scaling
-        )
-        lr = torch.abs(lr)
-
-        A_norm = self.justnorm(x)
-        B_norm = self.justnorm(x_attn)
-        x = self.justnorm(A_norm + lr * (B_norm - A_norm))
-
-        x_ff = self._ff_block(x)
-
-        lr = self.mlp_alpha * (self.mlp_alpha_init_value / self.mlp_alpha_init_scaling)
-        lr = torch.abs(lr)
-
-        A_norm = self.justnorm(x)
-        B_norm = self.justnorm(x_ff)
-        x = self.justnorm(A_norm + lr * (B_norm - A_norm))
-
-        return x
-
-    def _att_block(
-        self,
-        x: torch.Tensor,
-        pad_mask: torch.Tensor,
-        freqs_cis: torch.Tensor,
-        packed_seqlens: Optional[PackedSeqLens] = None,
-        packed_flash_meta: Optional[PackedFlashMetadata] = None,
-    ) -> torch.Tensor:
-        """Apply the attention sub-layer.
-
-        :param torch.Tensor x: Input tensor.
-        :param torch.Tensor pad_mask: Additive attention mask.
-        :param torch.Tensor freqs_cis: Rotary embedding frequencies.
-        :param torch.Tensor | list[list[int]] | None packed_seqlens: Packed segment lengths.
-        :param PackedFlashMetadata | None packed_flash_meta: Cached flash varlen metadata.
-        :return torch.Tensor: Attention output.
-        """
-        batch_size, seq_len, _ = x.shape
-
-        xq, xk, xv = (
-            self.qkv(x)
-            .view(
-                batch_size,
-                seq_len,
-                self.config.num_attention_heads,
-                self.config.dim_head * 3,
-            )
-            .chunk(3, dim=-1)
-        )
-
-        if self.config.rope:
-            xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
-
-        sqk = (self.sqk * (self.sqk_init_value / self.sqk_init_scaling)).view(
-            1,
-            1,
-            self.config.num_attention_heads,
-            self.config.hidden_size // self.config.num_attention_heads,
-        )
-        xq = sqk * self.justnorm(xq)
-        xk = sqk * self.justnorm(xk)
-
-        softmax_scale = (
-            self.config.hidden_size / self.config.num_attention_heads
-        ) ** 0.5
-
-        attn = attention_forward(
-            xq,
-            xk,
-            xv,
-            pad_mask=pad_mask,
-            packed_seqlens=packed_seqlens,
-            dropout_p=self.config.dropout if self.training else 0.0,
-            scale=softmax_scale,
-            attn_backend=self.config.attn_backend,
-            packed_flash_metadata=packed_flash_meta,
-        )
-
-        return self.resid_dropout(
-            self.wo(attn.reshape(batch_size, seq_len, self.config.hidden_size))
-        )
-
-    def _ff_block(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply the feed-forward sub-layer.
-
-        :param torch.Tensor x: Input tensor.
-        :return torch.Tensor: Feed-forward output.
-        """
-        uv = self.c_fc(x)
-        suv = self.suv * (
-            (self.suv_init_value / self.suv_init_scaling)
-            * (self.config.hidden_size**0.5)
-        )
-        uv = suv * uv
-
-        u, v = torch.chunk(uv, 2, dim=-1)
-        # gate=v, up=u: Liger computes silu(gate) * up
-        x = swiglu_forward(v, u, self._kb)
-        x = self.mlp_c_proj(x)
-
-        return self.ffn_dropout(x)
-
-
 class NeoBERTPreTrainedModel(PreTrainedModel):
     """Base class with NeoBERT weight initialization."""
 
@@ -718,17 +510,9 @@ class NeoBERTPreTrainedModel(PreTrainedModel):
         :param nn.Module module: Module to initialize.
         """
         if isinstance(module, nn.Linear):
-            if getattr(module, "_ngpt_c_proj", False):
-                torch.nn.init.normal_(
-                    module.weight,
-                    mean=0.0,
-                    std=self.config.base_scale
-                    / math.sqrt(2 * self.config.num_hidden_layers),
-                )
-            else:
-                module.weight.data.uniform_(
-                    -self.config.decoder_init_range, self.config.decoder_init_range
-                )
+            module.weight.data.uniform_(
+                -self.config.decoder_init_range, self.config.decoder_init_range
+            )
             if module.bias is not None:
                 module.bias.data.zero_()
         elif isinstance(module, nn.Embedding):
@@ -899,168 +683,3 @@ class NeoBERT(NeoBERTPreTrainedModel):
 
         x = self.layer_norm(x)
         return x
-
-
-class NormNeoBERT(NeoBERTPreTrainedModel):
-    """NeoBERT encoder with normalized residuals."""
-
-    config_class = NeoBERTConfig
-
-    def __init__(self, config: NeoBERTConfig) -> None:
-        """Initialize the normalized NeoBERT encoder.
-
-        :param NeoBERTConfig config: Model configuration.
-        """
-        super().__init__(config)
-
-        self.config = config
-
-        self.encoder = nn.Embedding(
-            config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id
-        )
-
-        if self.config.rope:
-            # Keep a fixed-size RoPE cache to avoid mutating buffers in forward().
-            self.register_buffer(
-                "freqs_cis",
-                precompute_freqs_cis(config.dim_head, config.max_length),
-                persistent=False,
-            )
-        else:
-            # Use a fixed padding index (0) for positional embeddings to decouple
-            # position IDs from token padding IDs.
-            self.positional_embedding = nn.Embedding(
-                # Positions are 1-indexed when using cumsum; reserve 0 for padding.
-                config.max_length + 1,
-                config.hidden_size,
-                padding_idx=0,
-            )
-
-        self.transformer_encoder = nn.ModuleList()
-        for _ in range(config.num_hidden_layers):
-            self.transformer_encoder.append(NormEncoderBlock(config))
-
-        # Initialize weights and apply final processing
-        self.post_init()
-        self.gradient_checkpointing = False
-
-    def forward(
-        self,
-        src: torch.Tensor,
-        pad_mask: Optional[torch.Tensor] = None,
-        packed_seqlens: Optional[PackedSeqLens] = None,
-    ) -> torch.Tensor:
-        """Run the normalized encoder forward pass.
-
-        :param torch.Tensor src: Input token IDs.
-        :param torch.Tensor | None pad_mask: Additive attention mask.
-        :param torch.Tensor | list[list[int]] | None packed_seqlens: Packed segment lengths.
-        :return torch.Tensor: Encoded hidden states.
-        """
-        seq_len = src.shape[1]
-        packed_seqlens = _normalize_packed_seqlens(packed_seqlens, seq_len=seq_len)
-
-        use_packed = self.config.attn_backend != "sdpa" or packed_seqlens is not None
-        if use_packed:
-            if (
-                packed_seqlens is None
-                and pad_mask is not None
-                and torch.is_tensor(pad_mask)
-            ):
-                packed_seqlens = _infer_single_segment_packed_seqlens_from_pad_mask(
-                    pad_mask, seq_len
-                )
-                if packed_seqlens is not None:
-                    pad_mask = None
-            if packed_seqlens is not None and pad_mask is not None:
-                logger.warning(
-                    "packed_seqlens provided; ignoring pad_mask for packed attention."
-                )
-                pad_mask = None
-
-        packed_flash_meta: Optional[PackedFlashMetadata] = None
-        if (
-            packed_seqlens is not None
-            and self.config.attn_backend == "flash_attn_varlen"
-            and not is_torch_compiling()
-        ):
-            packed_flash_meta = prepare_packed_flash_metadata(
-                packed_seqlens,
-                batch_size=src.shape[0],
-                seq_len=seq_len,
-                device=src.device,
-            )
-
-        # Normalize to broadcast-friendly shapes to avoid O(S^2) materialization.
-        if pad_mask is not None and torch.is_tensor(pad_mask):
-            pad_mask = _normalize_pad_mask(pad_mask)
-
-        # RoPE
-        freqs_cis = None
-        if self.config.rope:
-            seq_len = src.shape[1]
-            if seq_len > self.config.max_length:
-                warnings.warn(
-                    f"Sequence length {seq_len} exceeds max_length {self.config.max_length}; "
-                    "using a transient RoPE cache for this forward. Consider truncating inputs.",
-                    NeoBERTWarning,
-                    stacklevel=2,
-                )
-                freqs_cis = precompute_freqs_cis(
-                    self.config.dim_head, seq_len, device=src.device
-                )
-            else:
-                freqs_cis = self.freqs_cis
-                if freqs_cis.device != src.device:
-                    freqs_cis = freqs_cis.to(src.device)
-                freqs_cis = freqs_cis[:seq_len]
-
-        # Embedding
-        x = self.encoder(src)
-
-        # Positional embedding
-        if not self.config.rope:
-            mask = src.ne(self.config.pad_token_id).int()
-            incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask)) * mask
-            x += self.positional_embedding(incremental_indices.long())
-
-        # Transformer encoder
-        for layer in self.transformer_encoder:
-            if self.gradient_checkpointing and self.training:
-
-                def custom_forward(
-                    hidden_states: torch.Tensor, layer: NormEncoderBlock = layer
-                ) -> torch.Tensor:
-                    """Run one normalized encoder block for checkpointing.
-
-                    :param torch.Tensor hidden_states: Input hidden states.
-                    :param NormEncoderBlock layer: Bound layer instance.
-                    :return torch.Tensor: Updated hidden states.
-                    """
-                    return layer(
-                        hidden_states,
-                        pad_mask,
-                        freqs_cis,
-                        packed_seqlens,
-                        packed_flash_meta,
-                    )
-
-                x = checkpoint(
-                    custom_forward,
-                    x,
-                    preserve_rng_state=True,
-                    use_reentrant=False,
-                )
-            else:
-                x = layer(x, pad_mask, freqs_cis, packed_seqlens, packed_flash_meta)
-
-        return x
-
-
-def build_neobert_backbone(config: NeoBERTConfig) -> NeoBERT | NormNeoBERT:
-    """Build the encoder architecture selected by ``config.ngpt``.
-
-    :param NeoBERTConfig config: Runtime model configuration.
-    :return NeoBERT | NormNeoBERT: Standard or normalized encoder backbone.
-    """
-    return NormNeoBERT(config) if config.ngpt else NeoBERT(config)

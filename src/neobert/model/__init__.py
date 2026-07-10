@@ -5,17 +5,10 @@ __all__ = [
     "NeoBERTForSequenceClassification",
     "NeoBERTLMHead",
     "NeoBERT",
-    "NormNeoBERT",
     "NeoBERTConfig",
-    "build_neobert_backbone",
 ]
 
-from .model import (
-    NeoBERT,
-    NeoBERTConfig,
-    NormNeoBERT,
-    build_neobert_backbone,
-)
+from .model import NeoBERT, NeoBERTConfig
 from .classification import (
     NeoBERTForSequenceClassification,
 )

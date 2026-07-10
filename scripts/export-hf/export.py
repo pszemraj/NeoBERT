@@ -317,8 +317,12 @@ def create_hf_config(
             f"Unsupported hidden_act '{hidden_act}' for HF export. Supported: swiglu, gelu."
         )
 
-    if model_config.get("ngpt", False):
-        raise ValueError("ngpt/NormNeoBERT is not supported by the HF export path.")
+    removed_fields = {"ngpt", "base_scale"}.intersection(model_config)
+    if removed_fields:
+        raise ValueError(
+            "Checkpoint uses removed NeoBERT model field(s): "
+            + ", ".join(sorted(removed_fields))
+        )
 
     # Map our config to HF format - using the original HF model structure
     hf_config = {

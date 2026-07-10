@@ -196,8 +196,6 @@ def test_build_neobert_uses_runtime_config_fields(
         decoder_init_range=0.02,
         classifier_init_range=0.03,
         kernel_backend="torch",
-        ngpt=True,
-        base_scale=0.25,
         max_position_embeddings=128,
         pad_token_id=7,
     )
@@ -269,8 +267,6 @@ def test_build_neobert_uses_runtime_config_fields(
     assert captured.config.pad_token_id == 7
     assert captured.config.attn_backend == "sdpa"
     assert captured.config.kernel_backend == "torch"
-    assert captured.config.ngpt is True
-    assert captured.config.base_scale == 0.25
     assert captured.loaded_state_dict == expected_state_dict
     assert checkpoint_calls == [(tmp_path / "checkpoints", "10", "cpu")]
 

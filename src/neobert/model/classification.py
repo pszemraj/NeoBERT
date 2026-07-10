@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 import torch
 from torch import nn
 
-from .model import NeoBERTConfig, NeoBERTPreTrainedModel, build_neobert_backbone
+from .model import NeoBERT, NeoBERTConfig, NeoBERTPreTrainedModel
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ class _BaseSequenceClassifier(NeoBERTPreTrainedModel):
         self.num_labels = num_labels
         self.classifier_dropout = classifier_dropout
         self.classifier_init_range = classifier_init_range
-        self.model = build_neobert_backbone(config)
+        self.model = NeoBERT(config)
         self.dense = nn.Linear(self.config.hidden_size, self.config.hidden_size)
         self.dropout = nn.Dropout(self.classifier_dropout)
         self.classifier = nn.Linear(self.config.hidden_size, self.num_labels)

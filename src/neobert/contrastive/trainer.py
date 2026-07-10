@@ -45,7 +45,7 @@ from neobert.collator.collator import (
 )
 from neobert.config import Config, ConfigLoader, resolve_mixed_precision
 from neobert.kernels.attention import resolve_runtime_attn_backend
-from neobert.model import NeoBERTConfig, build_neobert_backbone
+from neobert.model import NeoBERT, NeoBERTConfig
 from neobert.optimizer import get_optimizer
 from neobert.scheduler import get_scheduler, resolve_scheduler_steps
 from neobert.tokenizer import get_tokenizer
@@ -306,8 +306,6 @@ def _sync_contrastive_runtime_from_pretraining(
         "norm_eps",
         "embedding_init_range",
         "decoder_init_range",
-        "ngpt",
-        "base_scale",
         "pad_token_id",
     )
     model_mismatches: list[str] = []
@@ -899,7 +897,7 @@ def trainer(cfg: Config) -> None:
         attn_backend=cfg.model.attn_backend if use_packed else "sdpa",
         pad_token_id=tokenizer.pad_token_id,
     )
-    model = build_neobert_backbone(model_config)
+    model = NeoBERT(model_config)
 
     if initialization_source == "pretrained":
         assert resolved_pretrained_checkpoint_dir is not None

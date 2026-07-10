@@ -910,8 +910,6 @@ def sync_resume_source_of_truth(
         "classifier_init_range",
         "attn_backend",
         "kernel_backend",
-        "ngpt",
-        "base_scale",
         "pad_token_id",
     ]
     tokenizer_forced = [

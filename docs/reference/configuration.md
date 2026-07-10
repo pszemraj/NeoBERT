@@ -94,8 +94,6 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 | `model.attn_backend`          | `str`   | `"sdpa"`             | Attention backend: `sdpa` or `flash_attn_varlen`. |
 | `model.kernel_backend`        | `str`   | `"auto"`             | Kernel backend: `auto`, `liger`, or `torch`.      |
 | `model.rope`                  | `bool`  | `true`               | Enable rotary positional encoding.                |
-| `model.ngpt`                  | `bool`  | `false`              | Enable [nGPT mode](architecture.md#ngpt-mode).     |
-| `model.base_scale`            | `float` | `1.0 / (960.0**0.5)` | nGPT scale constant.                              |
 | `model.pad_token_id`          | `int`   | `0`                  | Runtime-synced from tokenizer.                    |
 | `model.embedding_init_range`  | `float` | `0.02`               | Embedding init stddev.                            |
 | `model.decoder_init_range`    | `float` | `0.02`               | Decoder init stddev.                              |

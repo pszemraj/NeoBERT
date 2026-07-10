@@ -25,12 +25,7 @@ from neobert.contrastive.trainer import (
     _sync_contrastive_runtime_from_pretraining,
     trainer,
 )
-from neobert.model import (
-    NeoBERT,
-    NeoBERTConfig,
-    NormNeoBERT,
-    build_neobert_backbone,
-)
+from neobert.model import NeoBERT, NeoBERTConfig
 from neobert.model.wrappers import NeoBERTLMHead
 from tests.tokenizer_utils import build_wordlevel_tokenizer
 
@@ -308,11 +303,10 @@ class TestContrastivePipeline:
         tiny_contrastive_config_path: Path,
         tmp_path: Path,
     ):
-        """Ensure contrastive construction honors nGPT and optimizer metadata."""
+        """Ensure contrastive construction passes backbone metadata to MuonClip."""
         config = ConfigLoader.load(str(tiny_contrastive_config_path))
         config.dataset.path = str(tmp_path)
         config.optimizer.name = "muonclip"
-        config.model.ngpt = True
         config.model.hidden_act = "swiglu"
         config.contrastive.allow_random_weights = True
         config.trainer.max_steps = 0
@@ -356,7 +350,7 @@ class TestContrastivePipeline:
             trainer(config)
 
         assert captured.get("model_config") is not None
-        assert isinstance(captured.get("model"), NormNeoBERT)
+        assert isinstance(captured.get("model"), NeoBERT)
 
     def test_contrastive_loader_kwargs_keep_cuda_pin_memory(self):
         """Contrastive dataloaders should preserve pinned staging on CUDA."""
@@ -384,10 +378,7 @@ class TestContrastivePipeline:
         assert dataloader_kwargs["shuffle"] is True
         assert notes == []
 
-    @pytest.mark.parametrize("ngpt", [False, True])
-    def test_contrastive_pretrained_backbone_loader_strips_lm_head_prefix(
-        self, ngpt: bool
-    ):
+    def test_contrastive_pretrained_backbone_loader_strips_lm_head_prefix(self):
         """LM-head checkpoints should load the exact encoder backbone for contrastive."""
         cfg = NeoBERTConfig(
             hidden_size=32,
@@ -396,10 +387,9 @@ class TestContrastivePipeline:
             intermediate_size=64,
             vocab_size=128,
             max_length=16,
-            ngpt=ngpt,
         )
         source = NeoBERTLMHead(cfg)
-        target = build_neobert_backbone(cfg)
+        target = NeoBERT(cfg)
 
         for param in target.parameters():
             torch.nn.init.zeros_(param)

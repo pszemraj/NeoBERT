@@ -766,8 +766,13 @@ optimizer:
             )
         with self.assertRaisesRegex(ValueError, "datacollator.max_length"):
             ConfigLoader.dict_to_config({"datacollator": {"max_length": 0}})
-        with self.assertRaisesRegex(ValueError, "requires model.hidden_act='swiglu'"):
-            ConfigLoader.dict_to_config({"model": {"ngpt": True, "hidden_act": "gelu"}})
+
+    def test_removed_model_modes_are_rejected(self):
+        """Removed architecture selectors must fail instead of becoming no-ops."""
+        for field, value in (("ngpt", True), ("base_scale", 0.25)):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, f"model.{field}"):
+                    ConfigLoader.dict_to_config({"model": {field: value}})
 
     def test_glue_seq_length_syncs_tokenizer_max_length(self):
         """Ensure tokenizer.max_length is synced to glue.max_seq_length for GLUE."""

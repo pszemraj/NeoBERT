@@ -11,10 +11,7 @@ from neobert.model import (
     NeoBERTConfig,
     NeoBERTForSequenceClassification,
     NeoBERTLMHead,
-    NormNeoBERT,
-    build_neobert_backbone,
 )
-from neobert.model.model import NormEncoderBlock
 from neobert.huggingface import NeoBERTHFForSequenceClassification
 from neobert.kernels.attention import (
     prepare_packed_flash_metadata as _prepare_packed_flash_metadata_real,
@@ -37,7 +34,6 @@ class TestModelForward(unittest.TestCase):
             vocab_size=1000,
             max_length=128,
             attn_backend="sdpa",  # Use SDPA attention for CPU testing
-            ngpt=False,
             hidden_act="gelu",  # Use GELU instead of SwiGLU for CPU testing
         )
 
@@ -90,8 +86,10 @@ class TestModelForward(unittest.TestCase):
             NeoBERTConfig(attn_backend="bad_backend")
         with self.assertRaisesRegex(ValueError, "Unknown kernel_backend"):
             NeoBERTConfig(kernel_backend="bad_backend")
-        with self.assertRaisesRegex(ValueError, "requires hidden_act='swiglu'"):
-            NeoBERTConfig(ngpt=True, hidden_act="gelu")
+        for field, value in (("ngpt", True), ("base_scale", 0.25)):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(TypeError, "Unsupported removed"):
+                    NeoBERTConfig(**{field: value})
 
     def test_runtime_config_factory_preserves_fields_and_task_overrides(self):
         """Ensure typed model settings and explicit task overrides map canonically."""
@@ -114,8 +112,6 @@ class TestModelForward(unittest.TestCase):
             classifier_init_range=0.033,
             attn_backend="flash_attn_varlen",
             kernel_backend="torch",
-            ngpt=True,
-            base_scale=0.25,
             pad_token_id=1,
         )
 
@@ -138,8 +134,6 @@ class TestModelForward(unittest.TestCase):
         self.assertEqual(runtime.decoder_init_range, source.decoder_init_range)
         self.assertEqual(runtime.classifier_init_range, source.classifier_init_range)
         self.assertEqual(runtime.kernel_backend, source.kernel_backend)
-        self.assertEqual(runtime.ngpt, source.ngpt)
-        self.assertEqual(runtime.base_scale, source.base_scale)
         self.assertEqual(runtime.max_length, 128)
         self.assertEqual(runtime.pad_token_id, 7)
         self.assertEqual(runtime.attn_backend, "sdpa")
@@ -158,7 +152,6 @@ class TestModelForward(unittest.TestCase):
             vocab_size=256,
             max_length=32,
             attn_backend="sdpa",
-            ngpt=False,
             hidden_act="gelu",
         )
         model = NeoBERT(config)
@@ -221,7 +214,6 @@ class TestModelForward(unittest.TestCase):
             vocab_size=256,
             max_length=32,
             attn_backend="flash_attn_varlen",
-            ngpt=False,
             hidden_act="gelu",
         )
         model = NeoBERT(config)
@@ -263,7 +255,6 @@ class TestModelForward(unittest.TestCase):
                     vocab_size=256,
                     max_length=32,
                     attn_backend="sdpa",
-                    ngpt=False,
                     hidden_act="gelu",
                 )
 
@@ -333,72 +324,6 @@ class TestModelForward(unittest.TestCase):
             ).last_hidden_state
 
         self.assertTrue(torch.allclose(train_out, hf_out, atol=1e-6))
-
-    def test_norm_neobert_forward(self):
-        """Test NormNeoBERT (nGPT-style) forward pass."""
-        ngpt_config = NeoBERTConfig(
-            hidden_size=64,
-            num_hidden_layers=2,
-            num_attention_heads=2,
-            intermediate_size=128,
-            dropout=0.1,
-            vocab_size=1000,
-            max_length=128,
-            attn_backend="sdpa",
-            ngpt=True,  # Enable nGPT mode
-        )
-
-        model = NormNeoBERT(ngpt_config)
-        model.eval()
-
-        with torch.no_grad():
-            outputs = model(self.input_ids, self.pad_mask)
-
-        expected_shape = (self.batch_size, self.seq_length, ngpt_config.hidden_size)
-        self.assertEqual(outputs.shape, expected_shape)
-        self.assertFalse(torch.isnan(outputs).any())
-        self.assertFalse(torch.isinf(outputs).any())
-
-    def test_backbone_factory_selects_configured_architecture(self):
-        """Construct standard and normalized backbones from one config selector."""
-        for ngpt, expected_type in ((False, NeoBERT), (True, NormNeoBERT)):
-            with self.subTest(ngpt=ngpt):
-                config = NeoBERTConfig(
-                    hidden_size=32,
-                    num_hidden_layers=1,
-                    num_attention_heads=2,
-                    intermediate_size=64,
-                    vocab_size=32,
-                    max_length=8,
-                    attn_backend="sdpa",
-                    ngpt=ngpt,
-                    hidden_act="swiglu" if ngpt else "gelu",
-                )
-
-                model = build_neobert_backbone(config)
-
-                self.assertIsInstance(model, expected_type)
-
-    def test_norm_encoder_justnorm_uses_configured_eps_in_fp32(self):
-        """nGPT justnorm should clamp with config norm_eps in fp32."""
-        config = NeoBERTConfig(
-            hidden_size=8,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            intermediate_size=16,
-            vocab_size=32,
-            max_length=8,
-            norm_eps=1e-3,
-            ngpt=True,
-        )
-        block = NormEncoderBlock(config)
-        x = torch.full((1, 1, config.hidden_size), 1e-5, dtype=torch.bfloat16)
-
-        out = block.justnorm(x)
-
-        expected = x.float() / config.norm_eps
-        self.assertEqual(out.dtype, torch.bfloat16)
-        self.assertTrue(torch.allclose(out.float(), expected, atol=1e-4))
 
     def test_neobert_lm_head(self):
         """Test NeoBERT with language modeling head."""
@@ -478,7 +403,6 @@ class TestModelForward(unittest.TestCase):
                 vocab_size=1000,
                 max_length=128,
                 attn_backend="sdpa",
-                ngpt=False,
                 num_labels=2,
                 hidden_act="gelu",
             )
@@ -979,12 +903,16 @@ class TestModelForward(unittest.TestCase):
             with torch.no_grad():
                 non_rope_model(input_ids=input_ids, position_ids=position_ids)
 
-    def test_hf_flash_attention_is_rejected(self):
-        """Ensure the standalone config rejects a training-only no-op flag."""
+    def test_hf_config_rejects_unsupported_fields(self):
+        """Ensure the standalone config rejects removed and training-only fields."""
         from neobert.huggingface.modeling_neobert import NeoBERTConfig
 
         with self.assertRaisesRegex(TypeError, "does not support 'flash_attention'"):
             NeoBERTConfig(flash_attention=True)
+        for field, value in (("ngpt", True), ("base_scale", 0.25)):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(TypeError, "Unsupported removed"):
+                    NeoBERTConfig(**{field: value})
 
     def test_lm_head_tying_and_bias_behavior(self):
         """Ensure LM heads apply expected embedding tying and decoder-bias rules."""
@@ -1003,7 +931,6 @@ class TestModelForward(unittest.TestCase):
                 vocab_size=16,
                 max_length=8,
                 attn_backend="sdpa",
-                ngpt=False,
                 hidden_act="gelu",
                 tie_word_embeddings=True,
             )
@@ -1012,26 +939,6 @@ class TestModelForward(unittest.TestCase):
             train_tied.decoder.weight.data_ptr(),
             train_tied.model.encoder.weight.data_ptr(),
         )
-
-        train_ngpt = NeoBERTLMHead(
-            NeoBERTConfig(
-                hidden_size=32,
-                num_hidden_layers=1,
-                num_attention_heads=4,
-                intermediate_size=64,
-                vocab_size=16,
-                max_length=8,
-                attn_backend="sdpa",
-                ngpt=True,
-                hidden_act="swiglu",
-                tie_word_embeddings=True,
-            )
-        )
-        self.assertNotEqual(
-            train_ngpt.decoder.weight.data_ptr(),
-            train_ngpt.model.encoder.weight.data_ptr(),
-        )
-        self.assertFalse(train_ngpt.config.tie_word_embeddings)
 
         hf_model = HFNeoBERTLMHead(
             HFNeoBERTConfig(
@@ -1421,8 +1328,8 @@ class TestModelForward(unittest.TestCase):
                 f"({config.decoder_init_range}); _init_weights may be overwriting backbone.",
             )
 
-    def test_sequence_classification_backbone_selection(self):
-        """Ensure sequence-classification wrappers force SDPA and select backbone by ngpt."""
+    def test_sequence_classification_backbone_uses_sdpa(self):
+        """Ensure sequence-classification wrappers force the unpacked SDPA path."""
         cases = [
             (
                 "train_flash",
@@ -1441,23 +1348,6 @@ class TestModelForward(unittest.TestCase):
                 NeoBERT,
             ),
             (
-                "train_ngpt",
-                NeoBERTForSequenceClassification,
-                NeoBERTConfig(
-                    hidden_size=32,
-                    num_hidden_layers=1,
-                    num_attention_heads=2,
-                    intermediate_size=64,
-                    vocab_size=100,
-                    max_length=8,
-                    attn_backend="sdpa",
-                    ngpt=True,
-                    hidden_act="swiglu",
-                ),
-                {"num_labels": 2},
-                NormNeoBERT,
-            ),
-            (
                 "hf_flash",
                 NeoBERTHFForSequenceClassification,
                 NeoBERTConfig(
@@ -1474,32 +1364,14 @@ class TestModelForward(unittest.TestCase):
                 {},
                 NeoBERT,
             ),
-            (
-                "hf_ngpt",
-                NeoBERTHFForSequenceClassification,
-                NeoBERTConfig(
-                    hidden_size=32,
-                    num_hidden_layers=1,
-                    num_attention_heads=2,
-                    intermediate_size=64,
-                    vocab_size=100,
-                    max_length=8,
-                    attn_backend="sdpa",
-                    ngpt=True,
-                    hidden_act="swiglu",
-                    num_labels=3,
-                ),
-                {},
-                NormNeoBERT,
-            ),
         ]
         for _, model_cls, config, kwargs, expected_backbone in cases:
             model = model_cls(config, **kwargs)
             self.assertEqual(model.model.config.attn_backend, "sdpa")
             self.assertIsInstance(model.model, expected_backbone)
 
-    def test_mteb_encode_with_ngpt_backbone(self):
-        """Ensure MTEB honors nGPT and the model device with SDPA."""
+    def test_mteb_encode_uses_model_device(self):
+        """Ensure MTEB uses the model device with SDPA."""
         from neobert.model import NeoBERTConfig, NeoBERTForMTEB
 
         tokenizer = build_wordlevel_tokenizer(
@@ -1515,7 +1387,6 @@ class TestModelForward(unittest.TestCase):
             vocab_size=10,
             max_length=8,
             attn_backend="sdpa",
-            ngpt=True,
             hidden_act="swiglu",
         )
         model = NeoBERTForMTEB(
@@ -1527,7 +1398,7 @@ class TestModelForward(unittest.TestCase):
         )
         model.to("cpu")
         model.eval()
-        self.assertIsInstance(model.model, NormNeoBERT)
+        self.assertIsInstance(model.model, NeoBERT)
         with patch("torch.cuda.is_available", return_value=True):
             embeddings = model.encode(["hello world", "hello"])
         self.assertEqual(embeddings.shape[0], 2)
@@ -1560,7 +1431,6 @@ class TestModelForward(unittest.TestCase):
             vocab_size=10,
             max_length=8,
             attn_backend="sdpa",
-            ngpt=False,
             hidden_act="gelu",
         )
         model = NeoBERTForMTEB(
@@ -1625,7 +1495,6 @@ class TestModelForward(unittest.TestCase):
             vocab_size=10,
             max_length=8,
             attn_backend="flash_attn_varlen",
-            ngpt=False,
             hidden_act="gelu",
         )
         model = NeoBERTForMTEB(

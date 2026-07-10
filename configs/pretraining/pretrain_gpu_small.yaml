@@ -10,7 +10,6 @@ model:
   max_position_embeddings: 512
   attn_backend: flash_attn_varlen
   kernel_backend: auto
-  ngpt: false
   hidden_act: "swiglu"
   rope: true
   rms_norm: true

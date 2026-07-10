@@ -118,10 +118,6 @@ Actions:
 
 - Check checkpoint has `tokenizer/` directory with special tokens map and vocab files.
 
-### `model.ngpt` checkpoint export failure
-
-- HF export does not support `model.ngpt: true` checkpoints; see [nGPT Mode](../reference/architecture.md#ngpt-mode).
-
 ### Packed input mismatch at inference
 
 - Exported HF model does not support packed metadata inputs.

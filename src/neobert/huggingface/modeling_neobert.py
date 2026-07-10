@@ -161,8 +161,6 @@ class NeoBERTConfig(PretrainedConfig):
         vocab_size: Size of the vocabulary.
         pad_token_id: Token ID used for padding.
         max_length: Maximum sequence length the model can handle.
-        ngpt: Whether nGPT-style normalization is enabled (unsupported in HF export).
-        base_scale: Base scaling factor for nGPT (retained for config parity).
         **kwargs: Additional configuration parameters.
 
     Attributes:
@@ -189,8 +187,6 @@ class NeoBERTConfig(PretrainedConfig):
         hidden_act: str = "swiglu",
         dropout: float = 0.0,
         tie_word_embeddings: bool = True,
-        ngpt: bool = False,
-        base_scale: float = 1.0 / (960.0**0.5),
         **kwargs: Any,
     ) -> None:
         """Initialize the NeoBERT configuration.
@@ -210,10 +206,14 @@ class NeoBERTConfig(PretrainedConfig):
         :param str hidden_act: Activation name ("swiglu" or "gelu").
         :param float dropout: Dropout probability for residual/MLP blocks.
         :param bool tie_word_embeddings: Whether to tie input/output embeddings.
-        :param bool ngpt: Whether to enable nGPT-style normalization (unsupported here).
-        :param float base_scale: Base scaling factor for nGPT compatibility.
         :param Any kwargs: Additional configuration parameters.
         """
+        removed_fields = {"ngpt", "base_scale"}.intersection(kwargs)
+        if removed_fields:
+            raise TypeError(
+                "Unsupported removed NeoBERT config field(s): "
+                + ", ".join(sorted(removed_fields))
+            )
         if "flash_attention" in kwargs:
             raise TypeError(
                 "NeoBERTConfig does not support 'flash_attention'; the standalone "
@@ -246,8 +246,6 @@ class NeoBERTConfig(PretrainedConfig):
             )
         self.hidden_act = normalized_act
         self.dropout = dropout
-        self.ngpt = ngpt
-        self.base_scale = base_scale
         self.tie_word_embeddings = tie_word_embeddings
         self.vocab_size = vocab_size
         self.pad_token_id = pad_token_id
@@ -533,11 +531,6 @@ class NeoBERT(NeoBERTPreTrainedModel):
         super().__init__(config)
 
         self.config = config
-        if getattr(config, "ngpt", False):
-            raise ValueError(
-                "ngpt/NormNeoBERT is not supported in the HF export path. "
-                "Export a non-ngpt checkpoint or use the training model."
-            )
 
         # Token embeddings
         self.encoder = nn.Embedding(

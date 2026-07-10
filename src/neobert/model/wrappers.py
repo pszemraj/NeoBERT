@@ -1,6 +1,5 @@
 """Training-time LM and embedding wrappers built on the NeoBERT backbone."""
 
-import logging
 import warnings
 from contextlib import nullcontext
 from functools import partial
@@ -14,14 +13,8 @@ from transformers import DataCollatorWithPadding, PreTrainedTokenizerFast
 from neobert.training_utils import _pin_cpu_tensors
 from neobert.utils import additive_attention_mask
 
-from .model import (
-    NeoBERTConfig,
-    NeoBERTPreTrainedModel,
-    PackedSeqLens,
-    build_neobert_backbone,
-)
+from .model import NeoBERT, NeoBERTConfig, NeoBERTPreTrainedModel, PackedSeqLens
 
-logger = logging.getLogger(__name__)
 MTEB_POOLING_ALIASES = {"avg": "avg", "mean": "avg", "cls": "cls"}
 
 
@@ -56,18 +49,10 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
 
         self.config = config
 
-        self.model = build_neobert_backbone(config)
+        self.model = NeoBERT(config)
         self.decoder = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         should_tie = bool(getattr(self.config, "tie_word_embeddings", False))
-        if self.config.ngpt and should_tie:
-            logger.warning(
-                "Disabling tie_word_embeddings for ngpt=True. "
-                "NormNeoBERT emits unit-normalized hidden states, so tying decoder "
-                "weights to raw token embeddings is not a stable parameterization."
-            )
-            self.config.tie_word_embeddings = False
-            should_tie = False
 
         # ``post_init()`` applies HF-style init; explicit ``tie_weights()`` keeps
         # decoder/input embedding aliasing deterministic in this training module.
@@ -149,7 +134,7 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
         super().__init__(config)
 
         self.config = config
-        self.model = build_neobert_backbone(config)
+        self.model = NeoBERT(config)
 
         self.tokenizer = tokenizer
         self.max_length = max_length

@@ -10,8 +10,7 @@ NeoBERT is a transformer encoder with:
 - optional RoPE position encoding,
 - RMSNorm or LayerNorm,
 - SwiGLU or GELU feed-forward,
-- backend-selectable attention (`sdpa` or `flash_attn_varlen` for packed training),
-- optional nGPT-style normalized residual path (`model.ngpt: true`).
+- backend-selectable attention (`sdpa` or `flash_attn_varlen` for packed training).
 
 ## Source Files
 
@@ -47,7 +46,7 @@ NeoBERT is a transformer encoder with:
 
 ## Feed-Forward
 
-- `model.hidden_act: swiglu`: the standard encoder uses separate `w1/w2/w3` projections; nGPT uses a fused `c_fc` gate/up projection and a separate `mlp_c_proj` output projection.
+- `model.hidden_act: swiglu`: the encoder uses separate `w1/w2/w3` projections.
 - `model.hidden_act: gelu`: standard 2-layer GELU MLP.
 
 ## Normalization
@@ -55,16 +54,6 @@ NeoBERT is a transformer encoder with:
 - `model.rms_norm: true`: RMSNorm path.
 - `model.rms_norm: false`: LayerNorm path.
 - `model.kernel_backend` selects torch or Liger primitives where available.
-
-## nGPT Mode
-
-When `model.ngpt: true`, pretraining, contrastive training, MTEB evaluation, and native sequence-classification wrappers use `NormNeoBERT`:
-
-- normalized residual interpolation,
-- learned scaling parameters for attention/MLP branches,
-- custom normalization dynamics relative to standard encoder blocks.
-
-The nGPT block requires `model.hidden_act: swiglu`; GELU is rejected instead of being accepted as an inert selector. MuonClip treats the fused SwiGLU up/gate matrix as two independent projections during orthogonalization. All task wrappers construct their backbone from the checkpoint configuration, so strict checkpoint loading rejects standard/nGPT architecture mismatches. Hugging Face export does not support nGPT checkpoints.
 
 ## HF Export Model Differences
 
