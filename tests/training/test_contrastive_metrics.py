@@ -46,6 +46,26 @@ class _AcceleratorStub:
 class TestContrastiveMetrics(unittest.TestCase):
     """Unit tests for contrastive metric aggregation behavior."""
 
+    def test_checkpoint_state_is_versioned_and_round_trips(self) -> None:
+        """Contrastive resume cursors use the shared topology-bound schema."""
+        metrics = Metrics()
+        metrics["train/steps"] = 7
+        metrics["train/batches_in_epoch"] = 3
+
+        state = metrics.state_dict()
+        restored = Metrics()
+        restored.load_state_dict(state)
+
+        self.assertEqual(state["metrics_state_version"], 1)
+        self.assertEqual(state["world_size"], 1)
+        self.assertEqual(restored["train/steps"], 7)
+        self.assertEqual(restored["train/batches_in_epoch"], 3)
+
+    def test_checkpoint_state_rejects_unversioned_cursor(self) -> None:
+        """Bare dictionaries cannot prove contrastive rank-cursor alignment."""
+        with self.assertRaisesRegex(ValueError, "cannot prove"):
+            Metrics().load_state_dict({"train/steps": 7})
+
     def test_log_reduces_only_local_counters(self) -> None:
         """Already-global diagnostics must not participate in scalar reduction."""
         metrics = Metrics()

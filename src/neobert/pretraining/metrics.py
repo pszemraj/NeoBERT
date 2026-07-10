@@ -2,23 +2,12 @@
 
 import math
 import time
-from collections import defaultdict
 from typing import Any, Callable, Dict
 
 import torch
-import torch.distributed as dist
 from accelerate import Accelerator
 
-_METRICS_STATE_VERSION = 1
-_METRICS_STATE_VERSION_KEY = "metrics_state_version"
-_METRICS_STATE_WORLD_SIZE_KEY = "world_size"
-_METRICS_STATE_PAYLOAD_KEY = "metrics"
-_RESUME_POSITION_KEYS = (
-    "train/steps",
-    "train/epochs",
-    "train/batches_in_epoch",
-    "train/dataloader_batches_in_epoch",
-)
+from neobert.metrics import BaseTrainingMetrics
 
 
 def format_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
@@ -61,7 +50,7 @@ def format_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
     return formatted
 
 
-class Metrics(defaultdict):
+class Metrics(BaseTrainingMetrics):
     """Dictionary-like metrics container with distributed aggregation helpers."""
 
     # Internal counters that should never be emitted to experiment trackers.
@@ -86,76 +75,12 @@ class Metrics(defaultdict):
 
     def __init__(self):
         """Initialize metrics storage with integer defaults."""
-        super().__init__(int)
-        for key in self.LOCAL_COUNT_KEYS:
-            self[key] = 0
-        for key in self.LOCAL_FLOAT_KEYS:
-            self[key] = 0.0
+        super().__init__()
         self["train/compute_accuracy"] = 1
         self._last_log_time: float | None = None
 
-    def state_dict(self) -> Dict[str, Any]:
-        """Return versioned metrics after validating distributed resume position.
-
-        :raises RuntimeError: If distributed ranks have different resume cursors.
-        :return dict[str, Any]: Metrics state.
-        """
-        world_size = 1
-        if dist.is_available() and dist.is_initialized():
-            world_size = int(dist.get_world_size())
-            if world_size > 1:
-                local_position = {
-                    key: int(self.get(key, 0)) for key in _RESUME_POSITION_KEYS
-                }
-                rank_positions: list[dict[str, int] | None] = [None] * world_size
-                dist.all_gather_object(rank_positions, local_position)
-                if any(
-                    position != rank_positions[0] for position in rank_positions[1:]
-                ):
-                    raise RuntimeError(
-                        "Distributed pretraining ranks disagree on checkpoint resume "
-                        f"position: {rank_positions}. Refusing to persist a shared cursor."
-                    )
-
-        return {
-            _METRICS_STATE_VERSION_KEY: _METRICS_STATE_VERSION,
-            _METRICS_STATE_WORLD_SIZE_KEY: world_size,
-            _METRICS_STATE_PAYLOAD_KEY: dict(self),
-        }
-
-    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        """Load versioned metrics state for the current distributed topology.
-
-        :param dict[str, Any] state_dict: Metrics state to load.
-        :raises ValueError: If the schema or distributed world size differs.
-        """
-        version = state_dict.get(_METRICS_STATE_VERSION_KEY)
-        if version != _METRICS_STATE_VERSION:
-            raise ValueError(
-                "Unsupported pretraining metrics checkpoint version "
-                f"{version!r}; expected {_METRICS_STATE_VERSION}. Older loop state "
-                "cannot prove that distributed packed-data cursors were aligned."
-            )
-        checkpoint_world_size = int(state_dict.get(_METRICS_STATE_WORLD_SIZE_KEY, 0))
-        runtime_world_size = (
-            int(dist.get_world_size())
-            if dist.is_available() and dist.is_initialized()
-            else 1
-        )
-        if checkpoint_world_size != runtime_world_size:
-            raise ValueError(
-                "Cannot restore pretraining metrics with a different world size: "
-                f"checkpoint={checkpoint_world_size}, runtime={runtime_world_size}."
-            )
-        payload = state_dict.get(_METRICS_STATE_PAYLOAD_KEY)
-        if not isinstance(payload, dict):
-            raise ValueError(
-                "Pretraining metrics checkpoint payload must be a mapping."
-            )
-
-        self.clear()
-        for k, v in payload.items():
-            self[k] = v
+    def _after_load(self) -> None:
+        """Reset timing state after loading persisted counters."""
         self._last_log_time = None
 
     def log(
@@ -172,26 +97,7 @@ class Metrics(defaultdict):
         :param Callable[[str], None] | None console_fn: Optional console emit function.
         :return dict[str, Any]: Formatted metrics logged for this step.
         """
-        # Aggregate only the local counters using a fixed key order.
-        count_tensor = torch.tensor(
-            [self.get(k, 0) for k in self.LOCAL_COUNT_KEYS],
-            device=accelerator.device,
-            dtype=torch.long,
-        )
-        count_tensor = accelerator.reduce(count_tensor, reduction="sum")
-        float_tensor = torch.tensor(
-            [self.get(k, 0.0) for k in self.LOCAL_FLOAT_KEYS],
-            device=accelerator.device,
-            dtype=torch.float64,
-        )
-        float_tensor = accelerator.reduce(float_tensor, reduction="sum")
-
-        count_vals = count_tensor.detach().cpu().tolist()
-        float_vals = float_tensor.detach().cpu().tolist()
-        metrics_agg = {
-            **{k: int(v) for k, v in zip(self.LOCAL_COUNT_KEYS, count_vals)},
-            **{k: float(v) for k, v in zip(self.LOCAL_FLOAT_KEYS, float_vals)},
-        }
+        metrics_agg = self.reduce_local_counters(accelerator)
 
         # Update global values
         self["train/samples"] = (
@@ -263,8 +169,5 @@ class Metrics(defaultdict):
         self._last_log_time = now
 
         # Reset the local counters
-        for key in self.LOCAL_COUNT_KEYS:
-            self[key] = 0
-        for key in self.LOCAL_FLOAT_KEYS:
-            self[key] = 0.0
+        self.reset_local_counters()
         return formatted

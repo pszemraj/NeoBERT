@@ -1,40 +1,18 @@
 """Metric aggregation helpers for contrastive training."""
 
-from collections import defaultdict
 from typing import Any, Dict
 
-import torch
 from accelerate import Accelerator
 
+from neobert.metrics import BaseTrainingMetrics
 
-class Metrics(defaultdict):
+
+class Metrics(BaseTrainingMetrics):
     """Dictionary-like metrics container with distributed aggregation helpers."""
 
     LOCAL_COUNT_KEYS = ("train/local_samples",)
     LOCAL_FLOAT_KEYS = ("train/local_sum_loss",)
-
-    def __init__(self):
-        """Initialize metrics storage with stable numeric defaults."""
-        super().__init__(int)
-        for key in self.LOCAL_COUNT_KEYS:
-            self[key] = 0
-        for key in self.LOCAL_FLOAT_KEYS:
-            self[key] = 0.0
-
-    def state_dict(self) -> Dict[str, Any]:
-        """Return a serializable copy of the metrics.
-
-        :return dict[str, Any]: Metrics state.
-        """
-        return dict(self)
-
-    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        """Load metrics from a serialized state.
-
-        :param dict[str, Any] state_dict: Metrics state to load.
-        """
-        for k, v in state_dict.items():
-            self[k] = v
+    STATE_CONTEXT = "contrastive"
 
     def log(self, accelerator: Accelerator) -> None:
         """Aggregate local counters and log already-global diagnostics as-is.
@@ -45,33 +23,7 @@ class Metrics(defaultdict):
 
         :param Accelerator accelerator: Accelerator used for reduction/logging.
         """
-        count_tensor = torch.tensor(
-            [self.get(key, 0) for key in self.LOCAL_COUNT_KEYS],
-            device=accelerator.device,
-            dtype=torch.long,
-        )
-        count_tensor = accelerator.reduce(count_tensor, reduction="sum")
-        float_tensor = torch.tensor(
-            [self.get(key, 0.0) for key in self.LOCAL_FLOAT_KEYS],
-            device=accelerator.device,
-            dtype=torch.float64,
-        )
-        float_tensor = accelerator.reduce(float_tensor, reduction="sum")
-
-        metrics_agg = {
-            **{
-                key: int(value)
-                for key, value in zip(
-                    self.LOCAL_COUNT_KEYS, count_tensor.detach().cpu().tolist()
-                )
-            },
-            **{
-                key: float(value)
-                for key, value in zip(
-                    self.LOCAL_FLOAT_KEYS, float_tensor.detach().cpu().tolist()
-                )
-            },
-        }
+        metrics_agg = self.reduce_local_counters(accelerator)
 
         self["train/samples"] = (
             self["train/samples"] + metrics_agg["train/local_samples"]
@@ -95,7 +47,4 @@ class Metrics(defaultdict):
         metrics_log |= {key: value for key, value in self.items() if "batches" in key}
         accelerator.log(metrics_log, step=self["train/steps"])
 
-        for key in self.LOCAL_COUNT_KEYS:
-            self[key] = 0
-        for key in self.LOCAL_FLOAT_KEYS:
-            self[key] = 0.0
+        self.reset_local_counters()
