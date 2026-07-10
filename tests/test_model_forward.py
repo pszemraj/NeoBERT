@@ -484,6 +484,64 @@ class TestModelForward(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             hf_model(input_ids=self.input_ids, output_hidden_states=True)
 
+    def test_training_hf_adapter_rejects_ambiguous_input_semantics(self):
+        """Ensure the adapter follows HF masks and rejects unsupported positions."""
+        import types
+
+        model = NeoBERTHFForSequenceClassification(
+            NeoBERTConfig(
+                hidden_size=32,
+                num_hidden_layers=1,
+                num_attention_heads=2,
+                intermediate_size=64,
+                vocab_size=100,
+                max_length=16,
+                attn_backend="sdpa",
+                num_labels=2,
+            )
+        )
+        model.eval()
+        input_ids = torch.tensor([[1, 2, 3, 4]])
+        captured_masks: list[torch.Tensor] = []
+
+        def _capture_forward(self, src, pad_mask=None, packed_seqlens=None):
+            del packed_seqlens
+            captured_masks.append(pad_mask.clone())
+            return torch.zeros((src.shape[0], src.shape[1], self.config.hidden_size))
+
+        model.model.forward = types.MethodType(_capture_forward, model.model)
+        binary_masks = (
+            torch.tensor([[1, 1, 0, 0]], dtype=torch.long),
+            torch.tensor([[True, True, False, False]]),
+            torch.tensor([[1.0, 1.0, 0.0, 0.0]]),
+        )
+        with torch.no_grad():
+            for attention_mask in binary_masks:
+                model(input_ids=input_ids, attention_mask=attention_mask)
+
+            model(
+                input_ids=input_ids,
+                attention_mask=torch.zeros_like(input_ids, dtype=torch.float32),
+                token_type_ids=torch.zeros_like(input_ids),
+            )
+            explicit_additive = torch.tensor([[0.0, 0.0, float("-inf"), float("-inf")]])
+            model(input_ids=input_ids, attention_mask=explicit_additive)
+
+        torch.testing.assert_close(captured_masks[0], captured_masks[1])
+        torch.testing.assert_close(captured_masks[0], captured_masks[2])
+        self.assertTrue(torch.isneginf(captured_masks[3]).all())
+        torch.testing.assert_close(captured_masks[4], explicit_additive)
+
+        with self.assertRaisesRegex(NotImplementedError, "position_ids"):
+            model(input_ids=input_ids, position_ids=torch.arange(4).unsqueeze(0))
+        with self.assertRaisesRegex(NotImplementedError, "token-type embeddings"):
+            model(input_ids=input_ids, token_type_ids=torch.ones_like(input_ids))
+        with self.assertRaisesRegex(ValueError, "must not contain NaN"):
+            model(
+                input_ids=input_ids,
+                attention_mask=torch.tensor([[1.0, 1.0, float("nan"), 0.0]]),
+            )
+
     def test_hf_attention_mask_semantics_and_mode_equivalence(self):
         """Ensure HF mask normalization and SDPA/eager paths stay equivalent."""
         from neobert.huggingface.modeling_neobert import NeoBERT, NeoBERTConfig

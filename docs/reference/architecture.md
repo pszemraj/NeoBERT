@@ -70,7 +70,8 @@ Contrastive training and `NeoBERTForMTEB` currently instantiate the standard `Ne
 
 - Exported HF model is intentionally standard/unpacked.
 - It does not support packed-sequence inputs/metadata.
-- Attention-mask normalization in HF path accepts bool/additive/binary forms and normalizes internally for compatibility.
+- The training-time HF classifier adapter accepts binary bool/integer/float masks and explicit nonpositive additive masks. An all-zero float mask follows the HF binary convention and masks every token; pass `None` or all ones for an unmasked batch.
+- The training-time adapter rejects custom `position_ids` and nonzero `token_type_ids` because its backbone does not implement those semantics. The exported HF model supports explicit positions.
 
 ## Related Docs
 

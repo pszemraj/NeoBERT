@@ -58,9 +58,9 @@ class NeoBERTHFForSequenceClassification(_BaseSequenceClassifier):
         :param bool | None output_attentions: Whether to return attentions.
         :param bool | None output_hidden_states: Whether to return hidden states.
         :param bool | None return_dict: Whether to return dict outputs.
-        :raises NotImplementedError: If ``inputs_embeds``, ``output_attentions``,
-            or ``output_hidden_states`` is requested; the training-time backbone
-            exposes none of these. Use the export HF model for those features.
+        :raises NotImplementedError: If unsupported embeddings, positions,
+            segment IDs, attentions, or hidden states are requested.
+        :raises ValueError: If the attention mask is ambiguous or contains NaN.
         :return SequenceClassifierOutput | tuple: Model outputs.
         """
         if inputs_embeds is not None:
@@ -78,15 +78,33 @@ class NeoBERTHFForSequenceClassification(_BaseSequenceClassifier):
                 "NeoBERTHFForSequenceClassification does not expose all-layer hidden "
                 "states. Use the export HF model for output_hidden_states=True."
             )
-        del token_type_ids, position_ids
+        if position_ids is not None:
+            raise NotImplementedError(
+                "NeoBERTHFForSequenceClassification does not support custom "
+                "position_ids. Use the export HF model for position remapping."
+            )
+        if token_type_ids is not None and torch.any(token_type_ids != 0):
+            raise NotImplementedError(
+                "NeoBERTHFForSequenceClassification has no token-type embeddings; "
+                "only omitted or all-zero token_type_ids are supported."
+            )
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
         if attention_mask is not None:
-            if attention_mask.is_floating_point() and attention_mask.min() < 0:
-                # Already additive (0/-inf): converting again would invert it.
+            if attention_mask.is_floating_point() and torch.isnan(attention_mask).any():
+                raise ValueError("attention_mask must not contain NaN values.")
+            if attention_mask.is_floating_point() and torch.any(attention_mask < 0):
+                if torch.any(attention_mask > 0):
+                    raise ValueError(
+                        "A floating attention_mask containing negative additive "
+                        "values must not also contain positive binary values."
+                    )
+                # Explicit additive masks are nonpositive (normally 0/-inf).
                 additive_mask = attention_mask.to(torch.float32)
             else:
+                # HF convention: 1/True keeps and 0/False masks. In particular,
+                # an all-zero float mask means mask everything, not keep all.
                 additive_mask = additive_attention_mask(attention_mask)
         else:
             additive_mask = None
