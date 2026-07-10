@@ -171,7 +171,7 @@ Unknown paths and invalid value types fail fast with path-specific errors. Overr
 > [!NOTE]
 > `dataset.pretraining_prob` is deprecated and normalized to `contrastive.pretraining_prob`.
 >
-> Contrastive preprocessing accepts an omitted `dataset.name`, `dataset.name: ALL`, canonical registry keys such as `ALLNLI`, or common HF dataset IDs from the built-in wrapper registry (for example `sentence-transformers/all-nli`, `embedding-data/QQP_triplets`, or `WhereIsAI/github-issue-similarity`). When `dataset.load_all_from_disk=true`, cached split directories under `all/` are loaded only for the requested selection and missing splits fail fast. Subset preprocess refreshes preserve other cached split entries already present under `all/`.
+> Contrastive preprocessing accepts an omitted `dataset.name`, `dataset.name: ALL`, canonical registry keys such as `ALLNLI`, or common HF dataset IDs from the built-in wrapper registry (for example `sentence-transformers/all-nli`, `embedding-data/QQP_triplets`, or `WhereIsAI/github-issue-similarity`). Cached split directories under `all/` are loaded only for the requested selection, missing splits fail fast, and tokenization manifests are validated in both preprocessing and training, including when `dataset.load_all_from_disk=true`. Subset preprocess refreshes preserve other cached split entries already present under `all/`.
 
 ---
 

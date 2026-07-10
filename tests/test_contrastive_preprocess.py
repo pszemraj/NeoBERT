@@ -11,6 +11,8 @@ from datasets import Dataset, load_from_disk
 
 from neobert.contrastive.datasets import (
     CONTRASTIVE_DATASETS,
+    build_contrastive_tokenization_manifest,
+    load_cached_contrastive_datasets,
     resolve_contrastive_dataset_name,
 )
 from neobert.tokenization_cache import (
@@ -63,6 +65,33 @@ def _make_cfg(
             allow_special_token_rewrite=False,
         ),
     )
+
+
+def _save_cached_split(
+    all_dir: Path,
+    name: str,
+    tokenizer,
+    cfg,
+) -> None:
+    """Save one tokenized contrastive split with its manifest."""
+    dataset_dir = all_dir / name
+    dataset = Dataset.from_dict(
+        {
+            "input_ids_query": [[4]],
+            "attention_mask_query": [[1]],
+            "input_ids_corpus": [[5]],
+            "attention_mask_corpus": [[1]],
+        }
+    )
+    dataset.save_to_disk(dataset_dir)
+    manifest = build_contrastive_tokenization_manifest(
+        tokenizer,
+        dataset_name=name,
+        column_names=dataset.column_names,
+        max_length=cfg.tokenizer.max_length,
+        truncation=cfg.tokenizer.truncation,
+    )
+    write_tokenized_cache_manifest(dataset_dir, manifest)
 
 
 def test_resolve_dataset_names_accepts_hf_dataset_id_alias() -> None:
@@ -120,6 +149,7 @@ def test_resolve_dataset_names_treats_shared_default_as_all() -> None:
 
 
 def test_pipeline_load_all_from_disk_filters_selected_splits(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Cached reloads should honor the selected contrastive datasets."""
@@ -130,10 +160,10 @@ def test_pipeline_load_all_from_disk_filters_selected_splits(
         load_all_from_disk=True,
     )
     all_dir = tmp_path / "all"
-    Dataset.from_dict({"query": ["a"], "corpus": ["b"]}).save_to_disk(
-        all_dir / "ALLNLI"
-    )
-    Dataset.from_dict({"query": ["c"], "corpus": ["d"]}).save_to_disk(all_dir / "QQP")
+    tokenizer = build_wordlevel_tokenizer(vocab={"a": 4, "b": 5})
+    _save_cached_split(all_dir, "ALLNLI", tokenizer, cfg)
+    _save_cached_split(all_dir, "QQP", tokenizer, cfg)
+    monkeypatch.setattr(module, "get_tokenizer", lambda **_: tokenizer)
 
     dataset = module.pipeline(cfg)
 
@@ -141,17 +171,82 @@ def test_pipeline_load_all_from_disk_filters_selected_splits(
 
 
 def test_pipeline_load_all_from_disk_rejects_missing_requested_split(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Cached reloads should error when the requested split is absent."""
     module = _load_contrastive_preprocess_module()
     cfg = _make_cfg("ALLNLI", dataset_path=str(tmp_path), load_all_from_disk=True)
-    Dataset.from_dict({"query": ["c"], "corpus": ["d"]}).save_to_disk(
-        tmp_path / "all" / "QQP"
-    )
+    tokenizer = build_wordlevel_tokenizer(vocab={"a": 4, "b": 5})
+    _save_cached_split(tmp_path / "all", "QQP", tokenizer, cfg)
+    monkeypatch.setattr(module, "get_tokenizer", lambda **_: tokenizer)
 
     with pytest.raises(ValueError, match="missing requested splits"):
         module.pipeline(cfg)
+
+
+def test_pipeline_load_all_from_disk_rejects_missing_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The fast disk-only path still validates tokenizer provenance."""
+    module = _load_contrastive_preprocess_module()
+    cfg = _make_cfg("ALLNLI", dataset_path=str(tmp_path), load_all_from_disk=True)
+    dataset_dir = tmp_path / "all" / "ALLNLI"
+    Dataset.from_dict(
+        {
+            "input_ids_query": [[4]],
+            "attention_mask_query": [[1]],
+            "input_ids_corpus": [[5]],
+            "attention_mask_corpus": [[1]],
+        }
+    ).save_to_disk(dataset_dir)
+    tokenizer = build_wordlevel_tokenizer(vocab={"a": 4, "b": 5})
+    monkeypatch.setattr(module, "get_tokenizer", lambda **_: tokenizer)
+
+    with pytest.raises(RuntimeError, match="tokenization_manifest.json"):
+        module.pipeline(cfg)
+
+
+def test_cached_loader_rejects_same_size_different_vocabulary(tmp_path: Path) -> None:
+    """Training cannot consume IDs whose token-to-ID mapping changed."""
+    cfg = _make_cfg("ALLNLI", dataset_path=str(tmp_path), load_all_from_disk=True)
+    original = build_wordlevel_tokenizer(vocab={"a": 4, "b": 5})
+    reordered = build_wordlevel_tokenizer(vocab={"a": 5, "b": 4})
+    _save_cached_split(tmp_path / "all", "ALLNLI", original, cfg)
+
+    with pytest.raises(RuntimeError, match="different tokenizer"):
+        load_cached_contrastive_datasets(
+            tmp_path / "all",
+            selected_names=["ALLNLI"],
+            tokenizer=reordered,
+            max_length=cfg.tokenizer.max_length,
+            truncation=cfg.tokenizer.truncation,
+        )
+
+
+def test_cached_loader_rejects_token_ids_without_attention_mask(
+    tmp_path: Path,
+) -> None:
+    """Every cached token-ID view requires a matching attention mask."""
+    dataset_dir = tmp_path / "all" / "ALLNLI"
+    Dataset.from_dict(
+        {
+            "input_ids_query": [[4]],
+            "attention_mask_query": [[1]],
+            "input_ids_corpus": [[5]],
+        }
+    ).save_to_disk(dataset_dir)
+    tokenizer = build_wordlevel_tokenizer(vocab={"a": 4, "b": 5})
+
+    with pytest.raises(ValueError, match="attention_mask_corpus"):
+        load_cached_contrastive_datasets(
+            tmp_path / "all",
+            selected_names=["ALLNLI"],
+            tokenizer=tokenizer,
+            max_length=128,
+            truncation=True,
+        )
 
 
 def test_pipeline_subset_refresh_preserves_other_cached_manifest_entries(
@@ -183,7 +278,7 @@ def test_pipeline_subset_refresh_preserves_other_cached_manifest_entries(
             tokenizer,
             dataset_name=name,
             dataset_config=None,
-            dataset_path=cfg.dataset.path,
+            dataset_path=None,
             column_name=("query", "corpus"),
             max_length=cfg.tokenizer.max_length,
             truncation=cfg.tokenizer.truncation,

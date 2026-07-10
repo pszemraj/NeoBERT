@@ -733,6 +733,9 @@ def trainer(cfg: Config) -> None:
     dataset = load_cached_contrastive_datasets(
         dataset_path / "all",
         selected_names=selected_dataset_names,
+        tokenizer=tokenizer,
+        max_length=cfg.tokenizer.max_length,
+        truncation=cfg.tokenizer.truncation,
     )
     logger.info(
         "Loaded contrastive dataset selection %s from %s.",

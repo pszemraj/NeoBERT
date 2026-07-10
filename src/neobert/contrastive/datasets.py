@@ -13,6 +13,12 @@ from datasets import (
     load_dataset,
     load_from_disk,
 )
+from transformers import PreTrainedTokenizerBase
+
+from neobert.tokenization_cache import (
+    build_tokenization_manifest,
+    validate_tokenized_cache_manifest,
+)
 
 DATASET_TO_BSZ = {
     "ALLNLI": 2,
@@ -198,10 +204,79 @@ def discover_cached_contrastive_dataset_names(all_dir: str | Path) -> list[str]:
     return cached_names
 
 
+def resolve_contrastive_token_columns(column_names: Sequence[str]) -> tuple[str, ...]:
+    """Resolve tokenized contrastive fields and validate their attention masks.
+
+    :param Sequence[str] column_names: Dataset column names.
+    :return tuple[str, ...]: Logical tokenized field names in canonical order.
+    :raises ValueError: If tokenized field pairs are missing or incomplete.
+    """
+    columns = set(column_names)
+    tokenized_fields = tuple(
+        field
+        for field in ("query", "corpus", "negative")
+        if f"input_ids_{field}" in columns
+    )
+    logical_fields = tokenized_fields or tuple(
+        field for field in ("query", "corpus", "negative") if field in columns
+    )
+    if not {"query", "corpus"}.issubset(logical_fields):
+        raise ValueError(
+            "Contrastive datasets must contain query/corpus text or token-ID "
+            "fields. Found columns: "
+            f"{sorted(columns)}."
+        )
+    missing_masks = [
+        f"attention_mask_{field}"
+        for field in tokenized_fields
+        if f"attention_mask_{field}" not in columns
+    ]
+    if missing_masks:
+        raise ValueError(
+            "Cached contrastive token IDs are missing matching attention masks: "
+            f"{missing_masks}."
+        )
+    return logical_fields
+
+
+def build_contrastive_tokenization_manifest(
+    tokenizer: PreTrainedTokenizerBase,
+    *,
+    dataset_name: str,
+    column_names: Sequence[str],
+    max_length: int,
+    truncation: bool,
+) -> dict[str, Any]:
+    """Build the tokenization manifest for one cached contrastive split.
+
+    :param PreTrainedTokenizerBase tokenizer: Runtime tokenizer.
+    :param str dataset_name: Canonical contrastive dataset name.
+    :param Sequence[str] column_names: Cached dataset columns.
+    :param int max_length: Tokenization maximum length.
+    :param bool truncation: Whether tokenization truncates long examples.
+    :return dict[str, Any]: Expected tokenization manifest.
+    """
+    token_columns = resolve_contrastive_token_columns(column_names)
+    return build_tokenization_manifest(
+        tokenizer,
+        dataset_name=dataset_name,
+        dataset_config=None,
+        dataset_path=None,
+        column_name=token_columns,
+        max_length=max_length,
+        truncation=truncation,
+        add_special_tokens=True,
+        return_special_tokens_mask=False,
+    )
+
+
 def load_cached_contrastive_datasets(
     all_dir: str | Path,
     *,
     selected_names: Sequence[str],
+    tokenizer: PreTrainedTokenizerBase,
+    max_length: int,
+    truncation: bool,
 ) -> DatasetDict:
     """Load cached contrastive split directories for the requested selection.
 
@@ -211,6 +286,9 @@ def load_cached_contrastive_datasets(
 
     :param str | Path all_dir: Root ``all/`` directory containing cached split folders.
     :param Sequence[str] selected_names: Canonical split names requested for this run.
+    :param PreTrainedTokenizerBase tokenizer: Runtime tokenizer used to validate IDs.
+    :param int max_length: Runtime tokenization maximum length.
+    :param bool truncation: Runtime tokenization truncation behavior.
     :return DatasetDict: Loaded dataset dictionary in request order.
     :raises ValueError: If any requested split is missing from the cache.
     """
@@ -232,10 +310,19 @@ def load_cached_contrastive_datasets(
             f"{missing}. Available splits: {available}."
         )
 
-    dataset_dict = {
-        name: CONTRASTIVE_DATASETS[name].from_disk(str(cache_root / name)).dataset
-        for name in selected
-    }
+    dataset_dict = {}
+    for name in selected:
+        dataset_dir = cache_root / name
+        subdataset = CONTRASTIVE_DATASETS[name].from_disk(str(dataset_dir)).dataset
+        manifest = build_contrastive_tokenization_manifest(
+            tokenizer,
+            dataset_name=name,
+            column_names=subdataset.column_names,
+            max_length=max_length,
+            truncation=truncation,
+        )
+        validate_tokenized_cache_manifest(dataset_dir, manifest)
+        dataset_dict[name] = subdataset
     return DatasetDict(dataset_dict)
 
 

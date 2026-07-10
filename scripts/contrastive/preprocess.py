@@ -10,12 +10,13 @@ from datasets import DatasetDict
 from neobert.config import load_config_from_args
 from neobert.contrastive.datasets import (
     CONTRASTIVE_DATASETS,
+    build_contrastive_tokenization_manifest,
     discover_cached_contrastive_dataset_names,
     load_cached_contrastive_datasets,
+    resolve_contrastive_token_columns,
     resolve_contrastive_dataset_names,
 )
 from neobert.tokenization_cache import (
-    build_tokenization_manifest,
     validate_tokenized_cache_manifest,
     write_tokenized_cache_manifest,
 )
@@ -66,25 +67,28 @@ def pipeline(cfg: Any) -> DatasetDict:
     load_all_from_disk = bool(getattr(dataset_cfg, "load_all_from_disk", False))
     force_redownload = bool(getattr(dataset_cfg, "force_redownload", False))
     selected_names = _resolve_dataset_names(cfg)
+    tokenizer = get_tokenizer(
+        pretrained_model_name_or_path=getattr(cfg.tokenizer, "path", None)
+        or cfg.tokenizer.name,
+        max_length=getattr(cfg.tokenizer, "max_length", 512),
+        trust_remote_code=getattr(cfg.tokenizer, "trust_remote_code", False),
+        revision=getattr(cfg.tokenizer, "revision", None),
+        allow_special_token_rewrite=getattr(
+            cfg.tokenizer, "allow_special_token_rewrite", False
+        ),
+    )
 
     if load_all_from_disk:
         dataset = load_cached_contrastive_datasets(
             all_dir,
             selected_names=selected_names,
+            tokenizer=tokenizer,
+            max_length=getattr(cfg.tokenizer, "max_length", 512),
+            truncation=getattr(cfg.tokenizer, "truncation", True),
         )
 
     else:
         all_dir.mkdir(parents=True, exist_ok=True)
-        tokenizer = get_tokenizer(
-            pretrained_model_name_or_path=getattr(cfg.tokenizer, "path", None)
-            or cfg.tokenizer.name,
-            max_length=getattr(cfg.tokenizer, "max_length", 512),
-            trust_remote_code=getattr(cfg.tokenizer, "trust_remote_code", False),
-            revision=getattr(cfg.tokenizer, "revision", None),
-            allow_special_token_rewrite=getattr(
-                cfg.tokenizer, "allow_special_token_rewrite", False
-            ),
-        )
 
         # Load and tokenize subdatasets if necessary
         dataset_dict = {}
@@ -95,37 +99,19 @@ def pipeline(cfg: Any) -> DatasetDict:
             if reuse_cached:
                 print(f"Loading tokenized {name} from disk...")
                 subdataset = dataset_cls.from_disk(dataset_dir).dataset
-                token_columns = tuple(
-                    col.removeprefix("input_ids_")
-                    for col in subdataset.column_names
-                    if col.startswith("input_ids_")
-                )
             else:
                 if dataset_dir.is_dir():
                     shutil.rmtree(dataset_dir)
                 print(f"Loading {name} from huggingface and preprocessing...")
                 subdataset = dataset_cls().dataset
-                token_columns = tuple(
-                    col
-                    for col in subdataset.column_names
-                    if col in {"query", "corpus", "negative"}
-                )
-                if not token_columns:
-                    raise ValueError(
-                        f"{name} has no tokenizable columns in "
-                        f"{subdataset.column_names!r}."
-                    )
+            token_columns = resolve_contrastive_token_columns(subdataset.column_names)
 
-            manifest = build_tokenization_manifest(
+            manifest = build_contrastive_tokenization_manifest(
                 tokenizer,
                 dataset_name=name,
-                dataset_config=None,
-                dataset_path=dataset_path,
-                column_name=token_columns,
+                column_names=subdataset.column_names,
                 max_length=getattr(cfg.tokenizer, "max_length", 512),
                 truncation=getattr(cfg.tokenizer, "truncation", True),
-                add_special_tokens=True,
-                return_special_tokens_mask=False,
             )
             if reuse_cached:
                 validate_tokenized_cache_manifest(dataset_dir, manifest)
