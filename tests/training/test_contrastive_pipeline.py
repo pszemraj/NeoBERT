@@ -25,7 +25,12 @@ from neobert.contrastive.trainer import (
     _sync_contrastive_runtime_from_pretraining,
     trainer,
 )
-from neobert.model import NeoBERT, NeoBERTConfig
+from neobert.model import (
+    NeoBERT,
+    NeoBERTConfig,
+    NormNeoBERT,
+    build_neobert_backbone,
+)
 from neobert.model.wrappers import NeoBERTLMHead
 from tests.tokenizer_utils import build_wordlevel_tokenizer
 
@@ -298,15 +303,16 @@ class TestContrastivePipeline:
         assert state.requested_signum == signal.SIGTERM
         assert state.synchronize(LocalAccelerator()) is True
 
-    def test_muonclip_trainer_passes_model_config(
+    def test_muonclip_trainer_uses_configured_backbone_and_model_config(
         self,
         tiny_contrastive_config_path: Path,
         tmp_path: Path,
     ):
-        """Ensure MuonClip optimizer receives a model config in trainer."""
+        """Ensure contrastive construction honors nGPT and optimizer metadata."""
         config = ConfigLoader.load(str(tiny_contrastive_config_path))
         config.dataset.path = str(tmp_path)
         config.optimizer.name = "muonclip"
+        config.model.ngpt = True
         config.contrastive.allow_random_weights = True
         config.trainer.max_steps = 0
         config.wandb.mode = "disabled"
@@ -320,6 +326,7 @@ class TestContrastivePipeline:
         captured = {}
 
         def _fake_get_optimizer(model, distributed_type, model_config=None, **kwargs):
+            captured["model"] = model
             captured["model_config"] = model_config
             return torch.optim.Adam(model.parameters(), lr=1e-3)
 
@@ -348,6 +355,7 @@ class TestContrastivePipeline:
             trainer(config)
 
         assert captured.get("model_config") is not None
+        assert isinstance(captured.get("model"), NormNeoBERT)
 
     def test_contrastive_loader_kwargs_keep_cuda_pin_memory(self):
         """Contrastive dataloaders should preserve pinned staging on CUDA."""
@@ -375,7 +383,10 @@ class TestContrastivePipeline:
         assert dataloader_kwargs["shuffle"] is True
         assert notes == []
 
-    def test_contrastive_pretrained_backbone_loader_strips_lm_head_prefix(self):
+    @pytest.mark.parametrize("ngpt", [False, True])
+    def test_contrastive_pretrained_backbone_loader_strips_lm_head_prefix(
+        self, ngpt: bool
+    ):
         """LM-head checkpoints should load the exact encoder backbone for contrastive."""
         cfg = NeoBERTConfig(
             hidden_size=32,
@@ -384,9 +395,10 @@ class TestContrastivePipeline:
             intermediate_size=64,
             vocab_size=128,
             max_length=16,
+            ngpt=ngpt,
         )
         source = NeoBERTLMHead(cfg)
-        target = NeoBERT(cfg)
+        target = build_neobert_backbone(cfg)
 
         for param in target.parameters():
             torch.nn.init.zeros_(param)
@@ -412,7 +424,9 @@ class TestContrastivePipeline:
         broken_state = dict(source.state_dict())
         broken_state.pop("model.layer_norm.weight")
 
-        with pytest.raises(ValueError, match="does not match the NeoBERT encoder"):
+        with pytest.raises(
+            ValueError, match="does not match the configured NeoBERT backbone"
+        ):
             _load_contrastive_pretrained_backbone_weights(target, broken_state)
 
     def test_contrastive_runtime_sync_uses_checkpoint_metadata(self, tmp_path: Path):

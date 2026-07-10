@@ -45,7 +45,7 @@ from neobert.collator.collator import (
 )
 from neobert.config import Config, ConfigLoader, resolve_mixed_precision
 from neobert.kernels.attention import resolve_runtime_attn_backend
-from neobert.model import NeoBERT, NeoBERTConfig
+from neobert.model import NeoBERTConfig, build_neobert_backbone
 from neobert.optimizer import get_optimizer
 from neobert.scheduler import get_scheduler, resolve_scheduler_steps
 from neobert.tokenizer import get_tokenizer
@@ -375,7 +375,7 @@ def _sync_contrastive_runtime_from_pretraining(
 def _normalize_contrastive_pretrained_backbone_state_dict(
     state_dict: dict[str, torch.Tensor],
 ) -> dict[str, torch.Tensor]:
-    """Convert a checkpoint payload into an exact ``NeoBERT`` backbone state dict.
+    """Convert a checkpoint payload into an exact encoder-backbone state dict.
 
     Portable pretraining checkpoints are saved from ``NeoBERTLMHead``, so encoder
     weights live under ``model.*`` and the MLM head lives under ``decoder.*``.
@@ -408,7 +408,7 @@ def _load_contrastive_pretrained_backbone_weights(
 ) -> None:
     """Load an exact pretrained encoder backbone for contrastive training.
 
-    :param torch.nn.Module model: Target ``NeoBERT`` encoder.
+    :param torch.nn.Module model: Target encoder backbone.
     :param dict[str, torch.Tensor] state_dict: Loaded checkpoint tensor mapping.
     :raises ValueError: If the normalized checkpoint does not match the encoder.
     """
@@ -419,7 +419,7 @@ def _load_contrastive_pretrained_backbone_weights(
         model.load_state_dict(normalized_state_dict, strict=True)
     except RuntimeError as exc:
         raise ValueError(
-            "Pretrained checkpoint does not match the NeoBERT encoder backbone "
+            "Pretrained checkpoint does not match the configured NeoBERT backbone "
             "exactly after dropping the MLM decoder head. Check that the "
             "checkpoint comes from a compatible NeoBERT pretraining run and "
             "that tokenizer/model architecture settings match."
@@ -899,7 +899,7 @@ def trainer(cfg: Config) -> None:
         attn_backend=cfg.model.attn_backend if use_packed else "sdpa",
         pad_token_id=tokenizer.pad_token_id,
     )
-    model = NeoBERT(config=model_config)
+    model = build_neobert_backbone(model_config)
 
     if initialization_source == "pretrained":
         assert resolved_pretrained_checkpoint_dir is not None

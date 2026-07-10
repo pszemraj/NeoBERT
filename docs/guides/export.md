@@ -84,7 +84,7 @@ python scripts/export-hf/mlm_predict.py \
 
 ## Constraints
 
-The [architecture support matrix](../reference/architecture.md#ngpt-mode) covers nGPT task limitations. Exported models use ordinary Hugging Face batches and attention masks; packed training metadata is not supported.
+The [architecture reference](../reference/architecture.md#ngpt-mode) covers the nGPT export limitation. Exported models use ordinary Hugging Face batches and attention masks; packed training metadata is not supported.
 
 ## Troubleshooting
 

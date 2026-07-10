@@ -58,13 +58,13 @@ NeoBERT is a transformer encoder with:
 
 ## nGPT Mode
 
-When `model.ngpt: true`, LM pretraining and native sequence-classification wrappers use `NormNeoBERT`:
+When `model.ngpt: true`, pretraining, contrastive training, MTEB evaluation, and native sequence-classification wrappers use `NormNeoBERT`:
 
 - normalized residual interpolation,
 - learned scaling parameters for attention/MLP branches,
 - custom normalization dynamics relative to standard encoder blocks.
 
-Contrastive training and `NeoBERTForMTEB` currently instantiate the standard `NeoBERT` encoder regardless of `model.ngpt`; do not use nGPT configs for those tasks. Hugging Face export does not support nGPT checkpoints.
+All task wrappers construct their backbone from the checkpoint configuration, so strict checkpoint loading rejects standard/nGPT architecture mismatches. Hugging Face export does not support nGPT checkpoints.
 
 ## HF Export Model Differences
 

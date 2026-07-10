@@ -12,6 +12,7 @@ from neobert.model import (
     NeoBERTForSequenceClassification,
     NeoBERTLMHead,
     NormNeoBERT,
+    build_neobert_backbone,
 )
 from neobert.model.model import NormEncoderBlock
 from neobert.huggingface import NeoBERTHFForSequenceClassification
@@ -355,6 +356,26 @@ class TestModelForward(unittest.TestCase):
         self.assertEqual(outputs.shape, expected_shape)
         self.assertFalse(torch.isnan(outputs).any())
         self.assertFalse(torch.isinf(outputs).any())
+
+    def test_backbone_factory_selects_configured_architecture(self):
+        """Construct standard and normalized backbones from one config selector."""
+        for ngpt, expected_type in ((False, NeoBERT), (True, NormNeoBERT)):
+            with self.subTest(ngpt=ngpt):
+                config = NeoBERTConfig(
+                    hidden_size=32,
+                    num_hidden_layers=1,
+                    num_attention_heads=2,
+                    intermediate_size=64,
+                    vocab_size=32,
+                    max_length=8,
+                    attn_backend="sdpa",
+                    ngpt=ngpt,
+                    hidden_act="gelu",
+                )
+
+                model = build_neobert_backbone(config)
+
+                self.assertIsInstance(model, expected_type)
 
     def test_norm_encoder_justnorm_uses_configured_eps_in_fp32(self):
         """nGPT justnorm should clamp with config norm_eps in fp32."""
@@ -1475,8 +1496,8 @@ class TestModelForward(unittest.TestCase):
             self.assertEqual(model.model.config.attn_backend, "sdpa")
             self.assertIsInstance(model.model, expected_backbone)
 
-    def test_mteb_encode_with_sdpa_backend(self):
-        """Ensure SDPA MTEB encode honors model device even when CUDA is available."""
+    def test_mteb_encode_with_ngpt_backbone(self):
+        """Ensure MTEB honors nGPT and the model device with SDPA."""
         from neobert.model import NeoBERTConfig, NeoBERTForMTEB
 
         tokenizer = build_wordlevel_tokenizer(
@@ -1492,7 +1513,7 @@ class TestModelForward(unittest.TestCase):
             vocab_size=10,
             max_length=8,
             attn_backend="sdpa",
-            ngpt=False,
+            ngpt=True,
             hidden_act="gelu",
         )
         model = NeoBERTForMTEB(
@@ -1504,6 +1525,7 @@ class TestModelForward(unittest.TestCase):
         )
         model.to("cpu")
         model.eval()
+        self.assertIsInstance(model.model, NormNeoBERT)
         with patch("torch.cuda.is_available", return_value=True):
             embeddings = model.encode(["hello world", "hello"])
         self.assertEqual(embeddings.shape[0], 2)

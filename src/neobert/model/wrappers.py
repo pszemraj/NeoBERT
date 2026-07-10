@@ -15,11 +15,10 @@ from neobert.training_utils import _pin_cpu_tensors
 from neobert.utils import additive_attention_mask
 
 from .model import (
-    NeoBERT,
     NeoBERTConfig,
     NeoBERTPreTrainedModel,
-    NormNeoBERT,
     PackedSeqLens,
+    build_neobert_backbone,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,7 +56,7 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
 
         self.config = config
 
-        self.model = NormNeoBERT(config) if self.config.ngpt else NeoBERT(config)
+        self.model = build_neobert_backbone(config)
         self.decoder = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         should_tie = bool(getattr(self.config, "tie_word_embeddings", False))
@@ -150,7 +149,7 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
         super().__init__(config)
 
         self.config = config
-        self.model = NeoBERT(config)
+        self.model = build_neobert_backbone(config)
 
         self.tokenizer = tokenizer
         self.max_length = max_length

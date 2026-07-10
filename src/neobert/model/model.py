@@ -1050,3 +1050,12 @@ class NormNeoBERT(NeoBERTPreTrainedModel):
                 x = layer(x, pad_mask, freqs_cis, packed_seqlens, packed_flash_meta)
 
         return x
+
+
+def build_neobert_backbone(config: NeoBERTConfig) -> NeoBERT | NormNeoBERT:
+    """Build the encoder architecture selected by ``config.ngpt``.
+
+    :param NeoBERTConfig config: Runtime model configuration.
+    :return NeoBERT | NormNeoBERT: Standard or normalized encoder backbone.
+    """
+    return NormNeoBERT(config) if config.ngpt else NeoBERT(config)
