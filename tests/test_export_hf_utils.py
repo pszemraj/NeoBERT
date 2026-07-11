@@ -4,6 +4,7 @@ from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
 import torch
+from neobert.config import Config, ConfigLoader
 
 SCRIPT_DIR = Path(__file__).parents[1] / "scripts" / "export-hf"
 
@@ -21,11 +22,28 @@ def _load_script(name: str):
     return module
 
 
-def test_export_contracts_are_single_sourced() -> None:
-    """Shared export contracts should cover dropout and packed SwiGLU weights."""
+def test_hf_config_accepts_serialized_model_config(tmp_path: Path, monkeypatch) -> None:
+    """A serialized training config should satisfy the HF export contract."""
+    config = Config()
+    config.model.dropout_prob = 0.25
+    config_path = tmp_path / "config.yaml"
+    ConfigLoader.save(config, config_path)
+
+    monkeypatch.syspath_prepend(str(SCRIPT_DIR))
+    exporter = _load_script("export")
+
+    neobert_config = exporter.load_config(config_path)
+    hf_config = exporter.create_hf_config(neobert_config, {"weight": torch.zeros(1)})
+    validator = _load_script("validate")
+
+    assert hf_config["dropout"] == 0.25
+    assert validator._check_required_config_fields(hf_config) is None
+
+
+def test_packed_swiglu_detection_is_shared() -> None:
+    """Shared export contracts should detect packed SwiGLU weights."""
     helpers = _load_script("export_utils")
 
-    assert "dropout" in helpers.REQUIRED_HF_CONFIG_FIELDS
     assert helpers.has_packed_swiglu_weights({"model.0.ffn.w12.weight": object()})
     assert not helpers.has_packed_swiglu_weights({"model.0.ffn.w1.weight": object()})
 

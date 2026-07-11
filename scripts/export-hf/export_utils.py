@@ -2,7 +2,7 @@
 
 from collections.abc import Iterable
 
-REQUIRED_HF_CONFIG_FIELDS = (
+_SHARED_MODEL_CONFIG_FIELDS = (
     "hidden_size",
     "num_hidden_layers",
     "num_attention_heads",
@@ -14,8 +14,14 @@ REQUIRED_HF_CONFIG_FIELDS = (
     "rms_norm",
     "rope",
     "hidden_act",
-    "dropout",
 )
+
+REQUIRED_TRAINING_MODEL_CONFIG_FIELDS = (
+    *_SHARED_MODEL_CONFIG_FIELDS,
+    "dropout_prob",
+)
+
+REQUIRED_HF_CONFIG_FIELDS = (*_SHARED_MODEL_CONFIG_FIELDS, "dropout")
 
 
 def has_packed_swiglu_weights(keys: Iterable[str]) -> bool:

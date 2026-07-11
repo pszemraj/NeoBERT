@@ -77,6 +77,7 @@ python scripts/export-hf/mlm_predict.py \
 
 ## Mapping Notes
 
+- `model.dropout_prob` maps to the exported Hugging Face `dropout` setting.
 - Export supports `model.hidden_act: swiglu|gelu`.
 - Export expects unpacked SwiGLU weights (`w1/w2/w3`).
 - Export target LM head is biasless. If a checkpoint includes `decoder.bias`, export fails by default unless `--allow-decoder-bias-drop` is set.

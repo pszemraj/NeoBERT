@@ -36,7 +36,10 @@ from neobert.warnings import NeoBERTWarning
 from safetensors.torch import save_file
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-from export_utils import REQUIRED_HF_CONFIG_FIELDS, has_packed_swiglu_weights
+from export_utils import (
+    REQUIRED_TRAINING_MODEL_CONFIG_FIELDS,
+    has_packed_swiglu_weights,
+)
 from mlm_predict import clean_metaspace_before_mask
 
 
@@ -273,9 +276,11 @@ def run_forward_sanity_check(
 
 
 def validate_required_config_fields(model_config: Dict[str, Any]) -> None:
-    """Validate that all required config fields are present."""
+    """Validate that all required training model config fields are present."""
     missing_fields = [
-        field for field in REQUIRED_HF_CONFIG_FIELDS if field not in model_config
+        field
+        for field in REQUIRED_TRAINING_MODEL_CONFIG_FIELDS
+        if field not in model_config
     ]
 
     if missing_fields:
@@ -340,7 +345,7 @@ def create_hf_config(
         "rms_norm": model_config.get("rms_norm", True),
         "rope": model_config.get("rope", True),
         "hidden_act": hidden_act,
-        "dropout": model_config.get("dropout", model_config.get("dropout_prob", 0.0)),
+        "dropout": model_config["dropout_prob"],
         "pad_token_id": model_config["pad_token_id"],
         "torch_dtype": torch_dtype,
         "transformers_version": transformers.__version__,
