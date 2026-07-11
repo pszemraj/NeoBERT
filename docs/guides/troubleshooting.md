@@ -7,7 +7,7 @@ Common runtime and performance issues when training/evaluating NeoBERT.
 ### Unknown config keys or type errors
 
 - Config loading is strict; unknown keys raise.
-- Fix YAML field names/types against [Configuration Reference](../reference/configuration.md).
+- Fix YAML field names/types against the [YAML configuration reference](../reference/config_reference.yaml).
 
 ### Packed training is slow
 

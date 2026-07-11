@@ -14,4 +14,4 @@ These configs are computationally small, but direct entrypoint runs may still re
 
 - These are intentionally tiny and not representative of production throughput.
 - For production experiments, use configs under `configs/`.
-- Field semantics and defaults are in [docs/reference/configuration.md](../../docs/reference/configuration.md).
+- Field semantics and defaults are in [docs/reference/config_reference.yaml](../../docs/reference/config_reference.yaml).

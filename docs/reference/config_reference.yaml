@@ -1,0 +1,609 @@
+# NeoBERT configuration reference
+#
+# This is both valid YAML and the complete, hand-written reference for ConfigLoader.
+# Copy it, delete sections that do not apply to your task, and change the remaining values.
+# Every ordinary field is optional because the loader supplies the shown default; comments mark fields that become required for a particular task or feature.
+# Unknown keys are errors. YAML scalar types matter: use true/false for booleans, null for an unset optional value, and quote strings that YAML could parse as another type.
+
+# variables — mapping; default: absent. Optional preprocessing-only values removed before schema validation.
+# Exact "$variables.path" replacement preserves the value's type. "{$variables.path}" or "${variables.path}" interpolates into a string.
+# Nested references are allowed; cycles and unknown exact references are errors, while unresolved inline tokens warn and remain literal.
+variables: {}
+
+# task — string; default: "pretraining". One of: pretraining | glue | mteb | contrastive.
+# Selects semantic validation and the task-specific runtime; it does not infer a task from populated sections.
+task: pretraining
+
+# model — mapping; default: all ModelConfig defaults below. Architecture settings used to construct a new NeoBERT model.
+model:
+  # model.name — string | null; default: null. Optional model label/path metadata.
+  # Required when model.from_hub=true for GLUE; otherwise checkpoint/config fields determine the model source.
+  name: null
+
+  # model.hidden_size — integer; default: 768. Encoder width; must be divisible by model.num_attention_heads.
+  # When model.rope=true, the resulting per-head width must also be even.
+  hidden_size: 768
+
+  # model.num_hidden_layers — integer; default: 12. Number of encoder blocks; use a positive value.
+  num_hidden_layers: 12
+
+  # model.num_attention_heads — integer; default: 12. Attention heads per block; must divide model.hidden_size.
+  # model.hidden_size / this value must be even when model.rope=true.
+  num_attention_heads: 12
+
+  # model.intermediate_size — integer; default: 3072. Feed-forward hidden width; use a positive value.
+  intermediate_size: 3072
+
+  # model.max_position_embeddings — integer; default: 512. Model context limit; use a positive value.
+  # For pretraining/contrastive it must be >= dataset.max_seq_length. With learned positions (model.rope=false), GLUE and MTEB cannot exceed the trained value.
+  max_position_embeddings: 512
+
+  # model.vocab_size — integer; nominal default: 30522. Runtime-owned for new pretraining runs.
+  # Pretraining replaces it with len(tokenizer) rounded up to a multiple of 128 and adds inert tokens; resume restores checkpoint semantics. Do not use it to truncate a tokenizer.
+  vocab_size: 30522
+
+  # model.rope — boolean; default: true. true uses rotary positions; false uses learned absolute position embeddings.
+  # RoPE requires an even attention head width. Learned positions impose a hard trained context limit on downstream evaluation.
+  rope: true
+
+  # model.rms_norm — boolean; default: true. true uses RMSNorm; false uses LayerNorm.
+  rms_norm: true
+
+  # model.hidden_act — string; default: "swiglu". One of: swiglu | gelu (case-insensitive).
+  hidden_act: swiglu
+
+  # model.dropout_prob — float; default: 0.0. Dropout probability; must be in [0, 1].
+  # contrastive.pretraining_prob > 0 requires this to be > 0 so the two SimCSE views differ; the maintained contrastive recipe uses 0.1.
+  dropout_prob: 0.0
+
+  # model.norm_eps — float; default: 1e-5. Positive epsilon used by RMSNorm or LayerNorm.
+  norm_eps: 1.0e-5
+
+  # model.embedding_init_range — float; default: 0.02. Standard deviation for embedding initialization; use a non-negative value.
+  embedding_init_range: 0.02
+
+  # model.decoder_init_range — float; default: 0.02. Uniform half-range for MLM decoder initialization; use a non-negative value.
+  decoder_init_range: 0.02
+
+  # model.classifier_init_range — float; default: 0.02. Classifier initialization metadata retained in model/checkpoint configs.
+  # GLUE's native classifier uses glue.classifier_init_range instead.
+  classifier_init_range: 0.02
+
+  # model.attn_backend — string; default: "sdpa". One of: sdpa | flash_attn_varlen.
+  # flash_attn_varlen requires flash-attn and CUDA and is recommended for packed GPU pretraining. GLUE always forces sdpa; CPU or trainer.mixed_precision=no also falls back to sdpa.
+  attn_backend: sdpa
+
+  # model.kernel_backend — string; default: "auto". One of: auto | liger | torch.
+  # auto is recommended: it uses Liger when installed on CUDA and torch otherwise. Explicit liger errors if its package/kernel or CUDA is unavailable.
+  kernel_backend: auto
+
+  # model.pad_token_id — integer; nominal default: 0. Runtime-owned tokenizer metadata.
+  # Pretraining replaces it with tokenizer.pad_token_id and requires that token to exist; checkpoint-based evaluation requires an exact tokenizer/config match.
+  pad_token_id: 0
+
+  # model.from_hub — boolean; default: false. GLUE-only model-source switch.
+  # true loads model.name as a Hugging Face sequence classifier. With tokenizer.trust_remote_code=true, self-contained GLUE checkpoint/resume is unsupported unless saving is disabled.
+  from_hub: false
+
+# dataset — mapping; default: all DatasetConfig defaults below. Source, split, preprocessing, and loader settings.
+dataset:
+  # dataset.name — string, or list[string] in contrastive preprocessing/training; default: "refinedweb".
+  # Pretraining passes it to load_dataset and operationally requires a loadable Hub name unless dataset.path exists.
+  # Contrastive canonical selectors: ALLNLI | AMAZONQA | CONCURRENTQA | FEVER | GITHUBISSUE | GOOAQ | MSMARCO | PAQ | PUBMEDQA | QQP | SENTENCECOMP | STACKEXCHANGE | STACKOVERFLOW | STS12 | STSBENCHMARK | TRIVIAQA | WIKIHOW.
+  # Exact contrastive Hub aliases: sentence-transformers/all-nli | embedding-data/Amazon-QA | stanfordnlp/concurrentqa-retrieval | mteb/fever | WhereIsAI/github-issue-similarity | tomaarsen/gooaq-hard-negatives | mteb/msmarco | embedding-data/PAQ_pairs | sentence-transformers/pubmedqa.
+  # More exact aliases: embedding-data/QQP_triplets | embedding-data/sentence-compression | sentence-transformers/stackexchange-duplicates | mteb/stackoverflowdupquestions-reranking | mteb/sts12-sts | mteb/stsbenchmark-sts | sentence-transformers/trivia-qa-triplet | sentence-transformers/wikihow.
+  # Contrastive also accepts ALL/refinedweb/empty for every selector and case/punctuation-insensitive forms of canonical values/known aliases; an ordered list selects multiple sources.
+  name: refinedweb
+
+  # dataset.config — string | null; default: null. Optional Hugging Face dataset configuration/subset passed as load_dataset(name=...).
+  config: null
+
+  # dataset.path — string; default: "". Local dataset path.
+  # An existing path takes precedence over dataset.name in pretraining. Contrastive training requires a preprocessed path; its preprocessing script writes/reuses data here.
+  path: ""
+
+  # dataset.num_workers — integer; default: 16; must be >= 0. Pretraining DataLoader worker count.
+  # GLUE uses glue.num_workers and contrastive uses trainer.dataloader_num_workers instead. Tune to host CPU/storage; maintained GPU recipes commonly use 4.
+  num_workers: 16
+
+  # dataset.pin_memory — boolean; configured default: false. Pretraining/contrastive pinned CPU staging request.
+  # CUDA training computes an effective default of true even when false is configured; CPU keeps false.
+  pin_memory: false
+
+  # dataset.persistent_workers — boolean; default: true. Pretraining-only request to keep workers across epochs.
+  # Effective only when dataset.num_workers > 0; otherwise forced false.
+  persistent_workers: true
+
+  # dataset.prefetch_factor — integer | null; default: null. Pretraining batches prefetched per worker; when set it must be > 0.
+  # Ignored with dataset.num_workers=0. On CUDA with workers enabled, null computes to 4; on CPU, null leaves PyTorch's default behavior.
+  prefetch_factor: null
+
+  # dataset.streaming — boolean; default: true. Pretraining Hugging Face streaming mode.
+  # Streaming resume is best-effort batch skipping, not exact sample continuation; buffered/prefetched examples can move the boundary. dataset.validation_split is skipped in streaming mode.
+  streaming: true
+
+  # dataset.cache_dir — string | null; default: null. Optional Hugging Face datasets cache directory.
+  cache_dir: null
+
+  # dataset.trust_remote_code — boolean; default: false. Allows executable code supplied by a Hub dataset repository.
+  # Security warning: enable only for a repository/revision you trust; the dataset revision is not pinned by this schema.
+  trust_remote_code: false
+
+  # dataset.max_seq_length — integer; default: 512; must be > 0 and >= dataset.min_length.
+  # For pretraining/contrastive it must be <= model.max_position_embeddings. Keep tokenizer.max_length and datacollator.max_length aligned unless intentionally using their documented precedence.
+  max_seq_length: 512
+
+  # dataset.text_column — string | null; default: null. Preferred raw text field for pretraining tokenization.
+  # null auto-detects a supported text column; an incorrect explicit name fails when tokenization begins.
+  text_column: null
+
+  # dataset.validation_split — float | null; default: null. Fraction reserved from a non-streaming training dataset when no explicit eval split is selected.
+  # Use a fraction in (0, 1). Ignored with a warning for streaming data; dataset.eval_split takes precedence when present.
+  validation_split: null
+
+  # dataset.train_split — string | null; default: null. Explicit training split or Hugging Face slice expression.
+  # null loads the dataset's "train" split. For a local DatasetDict, this selects the named split; a local plain Dataset ignores it.
+  train_split: null
+
+  # dataset.eval_split — string | null; default: null. Explicit evaluation split.
+  # In streaming Hub pretraining, null attempts validation/test auto-detection. If still absent, dataset.eval_samples can reserve examples from the head of training data.
+  eval_split: null
+
+  # dataset.eval_samples — integer | null; default: null; when set must be > 0. Global cap/reservation size for pretraining evaluation.
+  # With no eval split, reserves this many head samples and excludes them from training. A streaming eval requires this or trainer.eval_max_batches as an explicit budget.
+  eval_samples: null
+
+  # dataset.streaming_read_retries — integer; default: 4; must be >= 0. Outer retries after the underlying Hub client exhausts a transient streaming read.
+  # 0 disables NeoBERT's outer retries.
+  streaming_read_retries: 4
+
+  # dataset.streaming_read_retry_backoff_seconds — float; default: 5.0; must be > 0. Initial exponential retry delay.
+  # Must be <= dataset.streaming_read_retry_max_backoff_seconds.
+  streaming_read_retry_backoff_seconds: 5.0
+
+  # dataset.streaming_read_retry_max_backoff_seconds — float; default: 60.0; must be > 0.
+  # Caps exponential retry delay and must be >= dataset.streaming_read_retry_backoff_seconds.
+  streaming_read_retry_max_backoff_seconds: 60.0
+
+  # dataset.num_proc — integer; default: 4; must be >= 0. Multiprocessing processes for non-streaming pretraining tokenization.
+  # Streaming tokenization does not use process mapping; GLUE uses glue.preprocessing_num_proc.
+  num_proc: 4
+
+  # dataset.shuffle_buffer_size — integer; default: 10000. Streaming pretraining shuffle buffer; <= 0 disables shuffling and 1 has no meaningful mixing.
+  # Larger buffers improve mixing but consume memory and can increase the number of buffered examples crossed by an approximate resume boundary.
+  shuffle_buffer_size: 10000
+
+  # dataset.load_all_from_disk — boolean; default: false. Contrastive-preprocessing-only cache mode.
+  # true reuses selected manifest-validated splits under <dataset.path>/all; missing requested splits fail instead of silently downloading.
+  load_all_from_disk: false
+
+  # dataset.force_redownload — boolean; default: false. Contrastive-preprocessing-only download/cache switch.
+  # true prevents reusing an existing selected split; it has no effect on the pretraining loader.
+  force_redownload: false
+
+  # dataset.min_length — integer; default: 5; must be > 0 and <= dataset.max_seq_length.
+  # Compatibility metadata preserved in resume source-of-truth checks; current trainers and contrastive preprocessing do not apply a min-length filter from this field.
+  min_length: 5
+
+  # dataset.alpha — float; default: 1.0; must be > 0. Contrastive dataset sampling exponent.
+  # 1.0 samples proportional to split size; values below 1 flatten the distribution and values above 1 favor larger datasets.
+  alpha: 1.0
+
+# tokenizer — mapping; default: all TokenizerConfig defaults below.
+tokenizer:
+  # tokenizer.name — string; default: "bert-base-uncased". Hugging Face tokenizer identifier or path.
+  # tokenizer.path takes precedence when non-null; checkpoint resume/downstream loading may replace this with the checkpoint-local tokenizer.
+  name: bert-base-uncased
+
+  # tokenizer.path — string | null; default: null. Explicit local tokenizer path, preferred over tokenizer.name.
+  # Resume may set it to the selected checkpoint's tokenizer directory.
+  path: null
+
+  # tokenizer.max_length — integer; default: 512. Requested tokenizer limit; use a positive value.
+  # For pretraining/contrastive, values below dataset.max_seq_length are raised to match it. GLUE always replaces it with glue.max_seq_length.
+  max_length: 512
+
+  # tokenizer.padding — string; default: "max_length". Compatibility metadata only; current tokenization is unpadded and collators perform dynamic padding/packing.
+  # Changing this field has no runtime effect.
+  padding: max_length
+
+  # tokenizer.truncation — boolean; default: true. Truncates raw inputs to the active tokenization limit.
+  # false can yield overlength samples that later fail or exceed the model context; keep true for maintained training workflows.
+  truncation: true
+
+  # tokenizer.vocab_size — integer | null; nominal default: null. Runtime/checkpoint metadata, not an input vocabulary limit.
+  # Pretraining replaces it with the effective tokenizer length rounded to a multiple of 128; resume validates it against the checkpoint.
+  vocab_size: null
+
+  # tokenizer.trust_remote_code — boolean; default: false. Allows executable tokenizer/model code from a Hub repository.
+  # Security warning: use only with a trusted, preferably pinned tokenizer.revision. Hub GLUE plus self-contained checkpointing rejects true.
+  trust_remote_code: false
+
+  # tokenizer.revision — string | null; default: null. Optional Hub branch, tag, or commit for tokenizer/model loading.
+  # Pin a commit for reproducible remote assets; null follows the repository's default revision.
+  revision: null
+
+  # tokenizer.allow_special_token_rewrite — boolean; default: false. Opt-in fallback for tokenizers without a mask token.
+  # true may rewrite special-token assignments; leave false unless you have inspected and accept the tokenizer mutation.
+  allow_special_token_rewrite: false
+
+# optimizer — mapping; default: all OptimizerConfig defaults below.
+optimizer:
+  # optimizer.name — string; default: "adamw". One of: adamw | adam | muonclip | muon-clip | muon_clip (case-insensitive).
+  # MuonClip requires model config and is FSDP2-only when distributed; DeepSpeed execution is unsupported.
+  name: adamw
+
+  # optimizer.lr — float; default: 1e-4; must be > 0. Base learning rate for all optimizer families.
+  # MuonClip additionally requires it to be < 1 at optimizer construction.
+  lr: 1.0e-4
+
+  # optimizer.weight_decay — float; default: 0.01; must be >= 0.
+  # AdamW applies it only to selected decay groups; Adam passes it through as optimizer weight_decay; MuonClip uses it for its Adam-routed parameters, while muon_config.muon_decay controls Muon-routed matrices.
+  weight_decay: 0.01
+
+  # optimizer.betas — list[float]; default: [0.9, 0.999]. Exactly two values, each in [0, 1).
+  # Used directly by Adam/AdamW and as MuonClip's Adam-routed betas; maintained MuonClip recipes use [0.9, 0.95].
+  betas: [0.9, 0.999]
+
+  # optimizer.eps — float; default: 1e-8; must be > 0. Adam-family numerical-stability epsilon, including MuonClip's Adam-routed parameters.
+  eps: 1.0e-8
+
+  # optimizer.muon_config — mapping | null; default: null. Used only by MuonClip; Adam/AdamW warn and ignore a non-null mapping.
+  # Replace null with the fully documented mapping below when overriding Muon defaults.
+  muon_config: null
+  # muon_config:
+  #   # optimizer.muon_config.muon_beta — float; default: 0.95; must be in [0, 1). Muon momentum coefficient.
+  #   muon_beta: 0.95
+  #   # optimizer.muon_config.nesterov — boolean; default: true. Uses the standard Muon Nesterov update when true.
+  #   nesterov: true
+  #   # optimizer.muon_config.muon_decay — float; default: 0.0; must be in [0, 1). Weight decay for Muon-routed matrices, independent of optimizer.weight_decay.
+  #   muon_decay: 0.0
+  #   # optimizer.muon_config.ns_steps — integer; default: 5; must be in [1, 20]. Values below 3 warn; the implementation recommends 5-9.
+  #   ns_steps: 5
+  #   # optimizer.muon_config.enable_clipping — boolean; default: true. Enables MuonClip Q/K activation clipping, separate from trainer.gradient_clipping.
+  #   # FSDP2 sharded Muon rejects true; set false explicitly for distributed Muon-only runs. Clipping stores latest-microbatch activations during accumulation.
+  #   enable_clipping: true
+  #   # optimizer.muon_config.clipping_threshold — float; default: 50.0; must be in (0, 1000]. Values < 30 warn about over-constraint; values > 200 warn clipping may have little effect.
+  #   clipping_threshold: 50.0
+  #   # optimizer.muon_config.clipping_alpha — float; default: 0.5; must be in [0, 1]. Q/K rescaling balance; 0.5 splits scaling equally.
+  #   clipping_alpha: 0.5
+  #   # optimizer.muon_config.clipping_warmup_steps — integer; default: 0. Disables clipping before this many update steps; use a non-negative value.
+  #   clipping_warmup_steps: 0
+  #   # optimizer.muon_config.clipping_interval — integer; default: 10; must be >= 1. Applies clipping every N optimizer updates.
+  #   clipping_interval: 10
+  #   # optimizer.muon_config.clipping_qk_chunk_size — integer; default: 1024; must be >= 1. Sequence chunk size used to bound QK logit-max memory.
+  #   clipping_qk_chunk_size: 1024
+  #   # optimizer.muon_config.detect_anomalies — boolean; default: false. Enables expensive optimizer anomaly diagnostics; use only while debugging.
+  #   detect_anomalies: false
+  #   # optimizer.muon_config.orthogonalization — string; default: "polar_express". One of: polar_express | newton_schulz; hyphens normalize to underscores.
+  #   orthogonalization: polar_express
+  #   # optimizer.muon_config.norm_factor — string; default: "neobert". One of: neobert | muon_reference | spectral | match_rms_adamw | none; hyphens normalize to underscores.
+  #   norm_factor: neobert
+  #   # optimizer.muon_config.param_policy — string; default: "hidden_2d". One of: hidden_2d | all_2d; hyphens normalize to underscores.
+  #   # hidden_2d is recommended and excludes embeddings/output matrices; all_2d is compatibility scope and materially increases FSDP2 communication.
+  #   param_policy: hidden_2d
+  #   # optimizer.muon_config.clipping_layers_mapping — mapping[string, string]; default: {}. Projection attribute overrides for non-fused attention blocks.
+  #   # Supported mapping keys: q_proj | k_proj | v_proj; unknown keys warn. Keep {} for NeoBERT's fused QKV blocks.
+  #   clipping_layers_mapping: {}
+
+# scheduler — mapping; default: all SchedulerConfig defaults below. Schedule phases do not change the trainer stop point.
+scheduler:
+  # scheduler.name — string; default: "cosine". One of: cosine | linear (case-insensitive).
+  name: cosine
+
+  # scheduler.warmup_steps — integer; default: 10000; must be >= 0. Absolute warmup length.
+  # Ignored when scheduler.warmup_percent is non-null; it is clamped to the resolved schedule total.
+  warmup_steps: 10000
+
+  # scheduler.total_steps — integer | null; default: null; when set must be > 0. Denominator for percentage phases and default decay end.
+  # null computes from trainer.max_steps. It does not cap training; after decay ends, LR stays at scheduler.final_lr_ratio.
+  total_steps: null
+
+  # scheduler.decay_steps — integer | null; default: null; when set must be > 0. Absolute update at which decay reaches the LR floor.
+  # Ignored when scheduler.decay_percent is non-null. Values before warmup completion are raised to warmup_end + 1.
+  decay_steps: null
+
+  # scheduler.final_lr_ratio — float; default: 0.1; must be >= 0. Final learning-rate multiplier after decay.
+  final_lr_ratio: 0.1
+
+  # scheduler.warmup_percent — float | null; default: null; when set must be in [0, 100]. Percentage of scheduler.total_steps, or trainer.max_steps when total_steps is null.
+  # Takes precedence over scheduler.warmup_steps.
+  warmup_percent: null
+
+  # scheduler.decay_percent — float | null; default: null; when set must be in [0, 100]. Percentage position of the decay end.
+  # Takes precedence over scheduler.decay_steps; this is an end position, not a decay duration.
+  decay_percent: null
+
+# trainer — mapping; default: all TrainerConfig defaults below.
+trainer:
+  # trainer.per_device_train_batch_size — integer; default: 16; must be > 0. Train microbatch size on each process/device.
+  # Effective examples per optimizer update are this value * gradient_accumulation_steps * process count, except packing can make local row counts variable.
+  per_device_train_batch_size: 16
+
+  # trainer.per_device_eval_batch_size — integer; default: 32; must be > 0. Evaluation microbatch size per process/device.
+  per_device_eval_batch_size: 32
+
+  # trainer.gradient_accumulation_steps — integer; default: 1; must be > 0. Microbatches per optimizer update.
+  gradient_accumulation_steps: 1
+
+  # trainer.max_steps — integer; default: 1000000. Optimizer-update stop point.
+  # Must be > 0 for pretraining/contrastive. In GLUE, <= 0 switches to trainer.num_train_epochs; > 0 takes precedence and recomputes the needed epoch count.
+  max_steps: 1000000
+
+  # trainer.save_steps — integer; default: 10000; must be >= 0 and > 0 when trainer.save_strategy=steps.
+  # Pretraining/contrastive save every interval and at the terminal step; GLUE applies it only with the steps strategy.
+  save_steps: 10000
+
+  # trainer.eval_steps — integer; default: 10000; must be >= 0 and > 0 when trainer.eval_strategy=steps.
+  # Pretraining/GLUE step evaluation interval. Contrastive has no evaluation loop; GLUE replaces it with one epoch when eval_strategy=epoch.
+  eval_steps: 10000
+
+  # trainer.eval_max_batches — integer | null; default: null; when set must be > 0. Global pretraining evaluation batch cap.
+  # Required for a streaming eval dataset unless dataset.eval_samples supplies the budget; ignored by GLUE/contrastive.
+  eval_max_batches: null
+
+  # trainer.logging_steps — integer; default: 100; must be > 0. Optimizer-update logging interval and W&B watch frequency.
+  logging_steps: 100
+
+  # trainer.enforce_full_packed_batches — boolean; default: false. Experimental pretraining-only buffering of undersized packed rows.
+  # Applies only when datacollator.pack_sequences=true and is rejected in multi-process runs because rank-local buffering can desynchronize collectives/resume cursors.
+  enforce_full_packed_batches: false
+
+  # trainer.log_train_accuracy — boolean; default: false. Pretraining-only masked-token train accuracy.
+  # Keep false for throughput; enable for focused diagnostics because it adds reductions/work on the hot path.
+  log_train_accuracy: false
+
+  # trainer.log_grad_norm — boolean; default: true. Logs the global pre-clip gradient norm at logging updates in pretraining/contrastive.
+  log_grad_norm: true
+
+  # trainer.output_dir — string; default: "./output". Run root for checkpoints, metrics, and task artifacts.
+  # Resumable step checkpoints live under <output_dir>/checkpoints/<step>.
+  output_dir: ./output
+
+  # trainer.overwrite_output_dir — boolean; default: true. GLUE fresh-run output policy; ignored by pretraining/contrastive.
+  # WARNING: true deletes every existing child of a nonempty GLUE output directory when not resuming. false fails instead; resume never clears the directory.
+  overwrite_output_dir: true
+
+  # trainer.gradient_checkpointing — boolean; default: false. Pretraining-only activation recomputation to reduce model memory at extra compute cost; ignored by GLUE/contrastive.
+  gradient_checkpointing: false
+
+  # trainer.gradient_clipping — float | null; default: null. In pretraining/contrastive, positive values clip the global gradient norm after accumulation; null or <= 0 disables it. GLUE ignores this field.
+  # Independent of optimizer.muon_config QK activation clipping.
+  gradient_clipping: null
+
+  # trainer.mixed_precision — string or boolean; default: "bf16". Accepted: bf16 | no | fp32 | true | false.
+  # fp32 normalizes to no; true to bf16; false to no. fp16 is explicitly unsupported. bf16 is recommended on compatible CUDA; no/FP32 forces flash attention back to sdpa.
+  mixed_precision: bf16
+
+  # trainer.masked_logits_only_loss — boolean; default: true. Pretraining-only MLM implementation selector.
+  # true is recommended and computes only selected-token logits. false is a legacy full-vocabulary-logits ablation/debug path with materially higher memory use.
+  masked_logits_only_loss: true
+
+  # trainer.torch_compile — boolean; default: false. Enables torch.compile for pretraining/contrastive/GLUE model execution.
+  # Compilation adds startup cost and can recompile on changing shapes; test the actual workload before relying on a speedup.
+  torch_compile: false
+
+  # trainer.torch_compile_dynamic — boolean | null; default: null. NeoBERT maps null to false, so both request static-shape compilation; true requests dynamic shapes.
+  # This differs from passing dynamic=null directly to PyTorch. Static is the project recommendation for packed training unless shape churn proves otherwise.
+  torch_compile_dynamic: null
+
+  # trainer.torch_compile_backend — string; default: "inductor". NeoBERT-supported values: inductor | aot_eager | eager.
+  # Used only when trainer.torch_compile=true. Unknown values warn and fall back to inductor; aot_eager/eager are primarily compiler-debugging backends.
+  torch_compile_backend: inductor
+
+  # trainer.resume_from_checkpoint — string | boolean | null; default: null. null or false disables resume; true and strings true/latest/auto select the newest complete numeric checkpoint.
+  # A numeric string selects <output_dir>/checkpoints/<step>; other strings are paths (relative paths try under output_dir first). Missing/incomplete state is an error.
+  # WARNING: resume restores checkpoint-owned model/tokenizer/objective/batch semantics. Non-streaming data resume requires unchanged corpus, seed, microbatch, and world size for ordered continuation; streaming continuity is approximate.
+  resume_from_checkpoint: null
+
+  # trainer.num_train_epochs — integer; default: 3. GLUE-only epoch budget used when trainer.max_steps <= 0; clamped to at least 1.
+  # Ignored by pretraining and contrastive, which are step-driven despite older recipes that may set this field.
+  num_train_epochs: 3
+
+  # trainer.eval_strategy — string; default: "steps". One of: steps | epoch.
+  # Used by pretraining and GLUE; contrastive has no eval loop. epoch evaluates after each traversed epoch and does not use eval_steps as a cadence.
+  eval_strategy: steps
+
+  # trainer.save_strategy — string; default: "steps". One of: steps | epoch | best | no.
+  # Pretraining/contrastive accept only steps or no. GLUE supports all four: best saves only metric improvements and requires evaluation; no disables scheduled/final model checkpoints.
+  save_strategy: steps
+
+  # trainer.save_total_limit — integer | null; default: 3; when set must be >= 0. Number of newest numeric checkpoints retained.
+  # 0 or null disables pruning and keeps all checkpoints; it does not disable saving. Use trainer.save_model=false or save_strategy=no for that.
+  save_total_limit: 3
+
+  # trainer.early_stopping — integer; default: 0. GLUE-only consecutive non-improving evaluation cycles before stopping.
+  # 0 disables early stopping; use a positive value with an evaluation strategy. Resume restores the counter.
+  early_stopping: 0
+
+  # trainer.save_model — boolean; default: true. Master switch for scheduled and terminal checkpoints in all trainers.
+  # false leaves no ordinary resumable/portable output, but pretraining/contrastive still write an emergency synchronized checkpoint on SIGTERM to preserve preempted work.
+  save_model: true
+
+  # trainer.disable_tqdm — boolean; default: false. Disables task progress bars.
+  disable_tqdm: false
+
+  # trainer.dataloader_num_workers — integer; default: 0; must be >= 0. Contrastive DataLoader workers.
+  # Ignored by pretraining (dataset.num_workers) and GLUE (glue.num_workers).
+  dataloader_num_workers: 0
+
+  # trainer.use_cpu — boolean; default: false. Forces Accelerate CPU execution.
+  # CPU execution forces model.attn_backend=sdpa; choose trainer.mixed_precision=no unless the CPU/runtime explicitly supports the requested policy.
+  use_cpu: false
+
+  # trainer.tf32 — boolean; default: true. Allows TF32 matmuls on supported CUDA GPUs; no effect on unsupported hardware/CPU.
+  tf32: true
+
+  # trainer.log_weight_norms — boolean; default: true. Logs global parameter L2 norm after optimizer updates in pretraining/contrastive.
+  # Disable if the extra parameter scan is undesirable at logging intervals.
+  log_weight_norms: true
+
+# datacollator — mapping; default: all DataCollatorConfig defaults below.
+datacollator:
+  # datacollator.mlm_probability — float; default: 0.15; must be in [0, 1]. Pretraining MLM selection probability.
+  # With mask_all=false, selected tokens use 80% mask / 10% random / 10% unchanged; with true, every selected token becomes the mask token.
+  mlm_probability: 0.15
+
+  # datacollator.pad_to_multiple_of — integer | null; default: null. Dynamic padding alignment for non-packed pretraining, contrastive, and GLUE batches.
+  # Use a positive value; maintained GPU recipes use 8. Ignored when datacollator.pack_sequences=true, where max_length determines row length.
+  pad_to_multiple_of: null
+
+  # datacollator.mask_all — boolean; default: false. Pretraining corruption mode.
+  # false uses standard 80/10/10 replacement; true replaces 100% of selected MLM tokens with the mask token.
+  mask_all: false
+
+  # datacollator.pack_sequences — boolean; default: false. Experimental pretraining sequence packing; ignored by GLUE/contrastive training.
+  # Packed inputs must omit outer special tokens. flash_attn_varlen is recommended on GPU; sdpa works via a slower per-segment fallback.
+  pack_sequences: false
+
+  # datacollator.max_length — integer | null; default: null; when set must be > 0. Packed/pretraining target length.
+  # Takes precedence over dataset.max_seq_length for tokenization and collation, but schema context validation still compares dataset.max_seq_length to the model limit; keep all three aligned to avoid hidden mismatches.
+  max_length: null
+
+# wandb — mapping; default: all WandbConfig defaults below. W&B runs are enabled only when both enabled=true and mode is not disabled.
+wandb:
+  # wandb.enabled — boolean; default: false. Enables W&B/Accelerate tracking; a populated section alone does not enable it.
+  enabled: false
+
+  # wandb.project — string; default: "neo-bert". W&B project name.
+  project: neo-bert
+
+  # wandb.entity — string | null; default: null. Optional W&B user/team; null uses the SDK/account default.
+  entity: null
+
+  # wandb.name — string | null; default: null. Optional display name; it is not a unique W&B run ID.
+  # Inline YAML variables are useful for sweep labels. This field cannot by itself make wandb.resume target an earlier run.
+  name: null
+
+  # wandb.tags — list[string]; default: []. Run tags.
+  tags: []
+
+  # wandb.mode — string; default: "online". One of: online | offline | disabled (case-insensitive).
+  # enabled=false bypasses tracking regardless of mode; disabled also bypasses it, while offline records locally without online watch.
+  mode: online
+
+  # wandb.watch — string; default: "gradients". One of: gradients | parameters | weights | all | off | none | disabled | false | 0.
+  # Pretraining/contrastive online mode only. WANDB_WATCH has precedence; weights normalizes to parameters and false-like values disable watching. GLUE does not call wandb.watch.
+  watch: gradients
+
+  # wandb.resume — string or boolean; default: "never". W&B SDK values: allow | never | must | auto | true | false.
+  # NeoBERT passes no explicit W&B run ID, and wandb.name is only a display name, so use trainer.resume_from_checkpoint for training continuity; must generally cannot identify a prior run without an external SDK/environment run ID.
+  resume: never
+
+  # wandb.dir — string; default: "logs/wandb". Local W&B run/artifact directory; created before tracker initialization.
+  dir: logs/wandb
+
+# glue — mapping; default: all GLUEConfig defaults below. Used only when task=glue.
+glue:
+  # glue.task_name — string; default: "cola". One of: allnli | cola | mnli | mrpc | qnli | qqp | rte | snli | sst2 | stsb | wnli.
+  task_name: cola
+
+  # glue.num_labels — integer; default: 2. Must match task_name: mnli/snli=3, stsb=1, and all other supported tasks=2.
+  # The runtime may synchronize it from loaded data/model state, but preflight validation rejects a mismatched configured value.
+  num_labels: 2
+
+  # glue.max_seq_length — integer; default: 128; must be > 0. GLUE tokenization/model length and the source of tokenizer.max_length.
+  # Values > 512 warn. For checkpoints with model.rope=false it must not exceed the checkpoint's model.max_position_embeddings.
+  max_seq_length: 128
+
+  # glue.pretrained_model_path — string | null; default: null. Path to the source pretraining config.yaml.
+  # Unless resuming, using model.from_hub=true, or opting into random weights, this, pretrained_checkpoint_dir, and pretrained_checkpoint are all required.
+  pretrained_model_path: null
+
+  # glue.pretrained_checkpoint_dir — string | null; default: null. Run/checkpoints root containing source weights.
+  # Required together with pretrained_model_path and pretrained_checkpoint for native checkpoint initialization; transfer_from_task also uses it as its search root.
+  pretrained_checkpoint_dir: null
+
+  # glue.pretrained_checkpoint — string | integer | null; default: null. Source step/tag selector, including "latest" where supported.
+  # Required with the other native source fields unless resuming, loading from Hub, or allow_random_weights=true.
+  pretrained_checkpoint: null
+
+  # glue.allow_random_weights — boolean; default: false. Explicitly permits a GLUE run without pretrained weights.
+  # Footgun: true turns fine-tuning/evaluation into a random-initialization experiment; intended for tests/ablations, not ordinary evaluation.
+  allow_random_weights: false
+
+  # glue.classifier_dropout — float; default: 0.1. Dropout probability in the native GLUE classifier head; use [0, 1].
+  classifier_dropout: 0.1
+
+  # glue.classifier_init_range — float; default: 0.02. Standard deviation for native GLUE classifier initialization; use a non-negative value.
+  classifier_init_range: 0.02
+
+  # glue.transfer_from_task — boolean; default: false. Enables task transfer search using glue.pretrained_checkpoint_dir and glue.pretrained_checkpoint.
+  # Available targets/sources: mrpc<-mnli, stsb<-mnli, mnli<-snli, qnli<-mnli, rte<-mnli, wnli<-allnli. Other tasks error; classifier/decoder keys are filtered, so this transfers the encoder.
+  transfer_from_task: false
+
+  # glue.num_workers — integer; default: 4; must be >= 0. GLUE train/eval DataLoader workers.
+  # Positive values enable persistent workers; pretraining/contrastive use different worker keys.
+  num_workers: 4
+
+  # glue.preprocessing_num_proc — integer; default: 4; must be >= 0. GLUE dataset-map preprocessing processes.
+  preprocessing_num_proc: 4
+
+# contrastive — mapping; default: all ContrastiveConfig defaults below. Used only when task=contrastive.
+contrastive:
+  # contrastive.temperature — float; default: 0.05. Divisor for cosine-similarity logits; use a positive value.
+  temperature: 0.05
+
+  # contrastive.pooling — string; default: "avg". One of: avg | cls | max (case-insensitive).
+  pooling: avg
+
+  # contrastive.pretraining_prob — float; default: 0.0; runtime requires [0, 1]. Fraction of steps drawn from the optional SimCSE anti-forgetting branch.
+  # Values > 0 require contrastive.pretraining_dataset_path and model.dropout_prob > 0.
+  pretraining_prob: 0.0
+
+  # contrastive.pretraining_dataset_path — string | null; default: null. Tokenized SimCSE source.
+  # Conditionally required when contrastive.pretraining_prob > 0; ignored when the probability is 0.
+  pretraining_dataset_path: null
+
+  # contrastive.pretrained_checkpoint_dir — string | null; default: null. Native pretraining run/checkpoint root used to initialize the encoder.
+  # Required unless trainer.resume_from_checkpoint resolves or allow_random_weights=true. Run roots and checkpoints roots are accepted; legacy model_checkpoints layouts are rejected.
+  pretrained_checkpoint_dir: null
+
+  # contrastive.pretrained_checkpoint — string | integer | null; default: null. Source step/tag under pretrained_checkpoint_dir.
+  # null falls back to top-level pretrained_checkpoint (default "latest").
+  pretrained_checkpoint: null
+
+  # contrastive.allow_random_weights — boolean; default: false. Explicitly permits training without resume/pretrained weights.
+  # Footgun: true starts a random encoder and is intended only for deliberate experiments/tests.
+  allow_random_weights: false
+
+# accelerate_config_file — string | null; default: null. Informational/logged metadata only; NeoBERT does not launch or configure Accelerate from this field.
+# Use the actual accelerate launch configuration/CLI for runtime backend selection.
+accelerate_config_file: null
+
+# mteb_task_type — string; default: "all". One of: all | classification | clustering | pair_classification | reranking | retrieval | sts | summarization.
+# Used only when task=mteb and no script-level --task_types override is supplied.
+mteb_task_type: all
+
+# mteb_batch_size — integer; default: 32; must be > 0 at MTEB encoding. Per-encode-call inference batch size; used only when task=mteb.
+mteb_batch_size: 32
+
+# mteb_pooling — string; default: "avg". One of: avg | mean | cls (case-insensitive); mean normalizes to avg.
+mteb_pooling: avg
+
+# mteb_overwrite_results — boolean; default: false. true allows MTEB to replace existing result files.
+# Leave false to protect completed evaluations unless intentionally rerunning them.
+mteb_overwrite_results: false
+
+# pretrained_checkpoint — string; default: "latest". Top-level MTEB checkpoint selector and contrastive fallback selector.
+# MTEB requires trainer.output_dir to identify a run/checkpoint root and resolves this selector there; contrastive uses it only when contrastive.pretrained_checkpoint is null.
+pretrained_checkpoint: latest
+
+# use_deepspeed — boolean; default: false. Legacy contrastive checkpoint-loading hint only; not a runtime backend switch.
+# Non-contrastive tasks warn when true. DeepSpeed execution is unsupported; legacy ZeRO conversion requires the optional legacy-checkpoints dependency.
+use_deepspeed: false
+
+# pretraining_metadata — mapping[string, any]; default: {}. Downstream provenance carried mainly by generated GLUE configs and W&B payloads.
+# Metadata does not configure pretraining behavior; arbitrary nested YAML-safe values are accepted.
+pretraining_metadata: {}
+
+# seed — integer; default: 0. Global task/data/model random seed.
+# Exact non-streaming resume assumes the same seed; streaming shuffle also derives epochs from it.
+seed: 0
+
+# debug — boolean; default: false. Enables extra local diagnostic prints (including tokenizer/model vocabulary details in pretraining).
+debug: false
+
+# config_path — string | null; default: null. Internal loader metadata; do not set in a YAML file.
+# load_config_from_args overwrites it with the source YAML path so W&B can upload that file; ConfigLoader.save intentionally omits it.
+config_path: null

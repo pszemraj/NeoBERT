@@ -59,4 +59,4 @@ Manual script commands are in [tests/manual/README.md](../../tests/manual/README
 
 - [tests/README.md](../../tests/README.md)
 - [tests/configs/README.md](../../tests/configs/README.md)
-- [Configuration](../reference/configuration.md)
+- [YAML configuration reference](../reference/config_reference.yaml)

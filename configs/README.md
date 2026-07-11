@@ -2,7 +2,7 @@
 
 Repository configs for training and evaluation workflows.
 
-Field definitions and defaults are in [docs/reference/configuration.md](../docs/reference/configuration.md).
+Field definitions, defaults, constraints, and interactions are in [docs/reference/config_reference.yaml](../docs/reference/config_reference.yaml).
 
 ## Layout
 

@@ -2,7 +2,7 @@
 
 This guide covers optimizer selection, MuonClip defaults, throughput tuning, and training metrics that matter when comparing runs.
 
-Field names and defaults live in [Configuration Reference](../reference/configuration.md).
+Field names and defaults live in the [YAML configuration reference](../reference/config_reference.yaml).
 
 ## MuonClip Defaults
 

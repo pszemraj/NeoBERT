@@ -122,7 +122,7 @@ python scripts/evaluation/pseudo_perplexity.py \
 
 ## Related Docs
 
-- [Configuration](../reference/configuration.md)
+- [YAML configuration reference](../reference/config_reference.yaml)
 - [Training](training.md)
 - [Training optimization](training-optimization.md)
 - [Troubleshooting](troubleshooting.md)

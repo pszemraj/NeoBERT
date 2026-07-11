@@ -1,6 +1,6 @@
 # NeoBERT Architecture
 
-Config defaults live in [Configuration Reference](configuration.md).
+Config defaults live in the [YAML configuration reference](config_reference.yaml).
 
 ## Overview
 

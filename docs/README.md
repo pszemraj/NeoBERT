@@ -11,7 +11,8 @@
 
 ## Reference
 
-- [Configuration](reference/configuration.md)
+- [Configuration reference (YAML)](reference/config_reference.yaml)
+- [Configuration loading and variables](reference/configuration.md)
 - [Architecture](reference/architecture.md)
 
 ## Development

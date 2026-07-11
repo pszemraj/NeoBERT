@@ -1,6 +1,6 @@
 # Training Guide
 
-This guide covers pretraining and contrastive workflows. Full field-level schema/defaults are in [Configuration Reference](../reference/configuration.md). Optimizer policy, Muon defaults, throughput tuning, and gradient/logging semantics are in [Training Optimization](training-optimization.md).
+This guide covers pretraining and contrastive workflows. The full field-level schema, defaults, and interactions are in the [YAML configuration reference](../reference/config_reference.yaml). Optimizer policy, Muon defaults, throughput tuning, and gradient/logging semantics are in [Training Optimization](training-optimization.md).
 
 ## Entry Points
 
@@ -14,7 +14,7 @@ This guide covers pretraining and contrastive workflows. Full field-level schema
 | `scripts/contrastive/preprocess.py`       | contrastive dataset preprocessing |
 | `scripts/contrastive/download.py`         | pre-download contrastive datasets |
 
-Contrastive dataset selection and cache-reuse rules are in the [Data Source reference](../reference/configuration.md#data-source).
+Contrastive dataset selection and cache-reuse rules are documented inline on the relevant keys in the [YAML configuration reference](../reference/config_reference.yaml).
 
 ## Pretraining
 
@@ -99,7 +99,7 @@ Runtime behavior:
 
 ## Mixed Precision and Compile
 
-Supported precision values, compile fields, defaults, and runtime adjustments are listed in [Configuration](../reference/configuration.md#training-loop). Use `bf16` on a compatible CUDA stack, `no` for FP32 execution, and static-shape compilation unless the workload requires dynamic shapes.
+Supported precision values, compile fields, defaults, and runtime adjustments are listed in the [YAML configuration reference](../reference/config_reference.yaml). Use `bf16` on a compatible CUDA stack, `no` for FP32 execution, and static-shape compilation unless the workload requires dynamic shapes.
 
 ## MLM Loss Path Selection
 
@@ -199,7 +199,7 @@ Set `dataset.path` to output from `scripts/contrastive/preprocess.py` and config
 
 ## Related Docs
 
-- [Configuration](../reference/configuration.md)
+- [YAML configuration reference](../reference/config_reference.yaml)
 - [Training optimization](training-optimization.md)
 - [Evaluation](evaluation.md)
 - [Troubleshooting](troubleshooting.md)
