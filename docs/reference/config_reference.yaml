@@ -100,7 +100,7 @@ dataset:
   config: null
 
   # dataset.path — string | null; default: "". Local dataset path; null and "" are both treated as unset.
-  # An existing path takes precedence over dataset.name in pretraining; a missing path warns and falls back to the Hub name. Contrastive training requires an existing preprocessed path; its preprocessing script writes/reuses data here.
+  # A configured path takes precedence over dataset.name and must exist; a missing path fails before tokenizer/dataset setup so local-only requests cannot silently train on the default Hub corpus. Use null or "" explicitly to load dataset.name instead. Contrastive training also requires an existing preprocessed path; its preprocessing script writes/reuses data here.
   # null is accepted from YAML/nested mappings; dot overrides follow the annotated string type, so use --dataset.path= to clear it rather than --dataset.path=null (which means a path literally named "null").
   path: ""
 
@@ -617,3 +617,137 @@ debug: false
 # config_path — string | null; default: null. Internal loader metadata; do not set in a YAML file.
 # load_config_from_args overwrites it with the source YAML path so W&B can upload that file; ConfigLoader.save intentionally omits it.
 config_path: null
+
+# Copy-paste examples
+#
+# Each example below is commented so this file remains one valid ConfigLoader document. Copy one block into a new YAML file and remove the leading `# ` markers. These are complete task configurations rather than replacements for the per-key contracts above; rotated validation cases deliberately use different architectures, tasks, and schedules.
+#
+# Example: fresh pretraining from a public streaming corpus
+#
+# task: pretraining
+# model:
+#   hidden_size: 384              # Must divide evenly by 6 heads; per-head width 64 is even for RoPE.
+#   num_hidden_layers: 6
+#   num_attention_heads: 6
+#   intermediate_size: 1536
+#   max_position_embeddings: 512
+#   rope: true
+# dataset:
+#   name: allenai/c4
+#   config: en                   # Exact, case-sensitive Hub subset.
+#   streaming: true
+#   train_split: train
+#   eval_split: validation
+#   eval_samples: 2000           # Bounds streaming evaluation.
+#   max_seq_length: 512
+# tokenizer:
+#   name: bert-base-uncased
+#   max_length: 512
+# optimizer:
+#   name: adamw
+#   lr: 3.0e-4
+#   weight_decay: 0.01
+# scheduler:
+#   name: cosine
+#   total_steps: 100000
+#   warmup_percent: 2.0
+# trainer:
+#   per_device_train_batch_size: 16
+#   max_steps: 100000
+#   save_strategy: steps
+#   save_steps: 5000
+#   save_total_limit: 3
+#   eval_strategy: steps
+#   eval_steps: 5000
+#   logging_steps: 100
+#   output_dir: ./output/pretrain-small
+#   mixed_precision: bf16
+# datacollator:
+#   mlm_probability: 0.15
+#   max_length: 512
+# wandb:
+#   enabled: false
+#   mode: disabled
+# seed: 17
+#
+# Example: continue a RoPE checkpoint on a new corpus and longer context
+#
+# task: pretraining
+# model:
+#   rope: true
+#   max_position_embeddings: 1024 # Launch-controlled only because both checkpoint and continuation use RoPE.
+# dataset:
+#   name: HuggingFaceTB/smollm-corpus
+#   config: fineweb-edu-dedup     # Case-sensitive; the earlier corpus cursor is reset.
+#   streaming: true
+#   train_split: train
+#   eval_split: null
+#   eval_samples: 2000            # Reserves and excludes head samples because this source has no named eval split.
+#   max_seq_length: 1024
+# tokenizer:
+#   max_length: 1024              # Identity comes from the checkpoint; evaluation/training length stays launch-controlled.
+# scheduler:
+#   total_steps: 100000           # Match the source horizon if percentage phases must continue rather than restart.
+# trainer:
+#   max_steps: 120000
+#   output_dir: ./output/pretrain-continued
+#   resume_from_checkpoint: /absolute/path/to/source/checkpoints/80000
+#   save_strategy: steps
+#   save_steps: 5000
+#   save_total_limit: 3
+#   mixed_precision: bf16
+# datacollator:
+#   max_length: 1024
+# wandb:
+#   enabled: false
+#   mode: disabled
+#
+# Example: direct Hub GLUE fine-tuning without checkpoint output
+#
+# task: glue
+# model:
+#   name: bert-base-uncased
+#   from_hub: true
+# tokenizer:
+#   name: bert-base-uncased
+#   max_length: 128               # Keep equal to glue.max_seq_length.
+# optimizer:
+#   name: adamw
+#   lr: 2.0e-5
+#   weight_decay: 0.01
+# scheduler:
+#   name: linear
+#   warmup_percent: 6.0
+# trainer:
+#   per_device_train_batch_size: 16
+#   per_device_eval_batch_size: 32
+#   max_steps: 0                  # Select the epoch budget below.
+#   num_train_epochs: 3
+#   eval_strategy: epoch
+#   save_strategy: "no"          # Quotes are required; bare YAML `no` is boolean false.
+#   save_model: false
+#   output_dir: ./output/glue-sst2
+#   overwrite_output_dir: false
+#   mixed_precision: bf16
+# glue:
+#   task_name: sst2
+#   num_labels: 2
+#   max_seq_length: 128
+# wandb:
+#   enabled: false
+#   mode: disabled
+# seed: 23
+#
+# Example: MTEB evaluation from a local pretraining run
+#
+# task: mteb
+# trainer:
+#   output_dir: /absolute/path/to/pretraining-run # Run root containing checkpoints/<step>.
+# tokenizer:
+#   max_length: 512                         # RoPE may change this; learned positions may not exceed their trained limit.
+# pretrained_checkpoint: latest
+# mteb_task_type: sts                       # Runs every registered English STS task; use another enumerated family as needed.
+# mteb_batch_size: 32
+# mteb_pooling: avg
+# mteb_overwrite_results: false
+# seed: 0

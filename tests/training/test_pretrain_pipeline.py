@@ -126,6 +126,13 @@ class TestPretrainPipeline:
                     trainer(fsdp_cfg)
                 mocked_tokenizer.assert_not_called()
 
+        missing_local_data_cfg = _base_config()
+        missing_local_data_cfg.dataset.path = str(tmp_path / "missing-local-data")
+        with patch("neobert.pretraining.trainer.get_tokenizer") as mocked_tokenizer:
+            with pytest.raises(FileNotFoundError, match="dataset.path does not exist"):
+                trainer(missing_local_data_cfg)
+            mocked_tokenizer.assert_not_called()
+
     def test_pretraining_one_step_local_smoke(
         self,
         tiny_pretrain_config_path: Path,

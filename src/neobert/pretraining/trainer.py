@@ -1766,6 +1766,11 @@ def trainer(cfg: Config) -> None:
     resume_checkpoint_path, iteration, eval_samples, resume_config_drift = (
         _resolve_resume_checkpoint_and_eval_samples(cfg, checkpoint_dir, output_dir)
     )
+    if cfg.dataset.path and not Path(cfg.dataset.path).exists():
+        raise FileNotFoundError(
+            f"Configured dataset.path does not exist: {cfg.dataset.path}. "
+            "Clear dataset.path explicitly to load dataset.name from the Hub."
+        )
 
     # Accelerator object - disable automatic checkpoint naming so the trainer can
     # control a single checkpoint tree (checkpoints/<step>).
@@ -1973,13 +1978,8 @@ def trainer(cfg: Config) -> None:
     train_dataset = None
     if cfg.dataset.path:
         dataset_path = Path(cfg.dataset.path)
-        if dataset_path.exists():
-            train_dataset = load_from_disk(dataset_path)
-            train_dataset = _select_train_split(train_dataset, cfg.dataset.train_split)
-        else:
-            logger.warning(
-                f"Dataset path {dataset_path} not found; falling back to load_dataset()."
-            )
+        train_dataset = load_from_disk(dataset_path)
+        train_dataset = _select_train_split(train_dataset, cfg.dataset.train_split)
 
     if train_dataset is None:
         if cfg.dataset.train_split:
