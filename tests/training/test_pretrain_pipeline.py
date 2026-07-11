@@ -178,13 +178,16 @@ class TestPretrainPipeline:
         config.model.intermediate_size = 64
         config.model.max_position_embeddings = 16
         config.model.vocab_size = len(tokenizer)
-        config.tokenizer.vocab_size = len(tokenizer)
+        # Exercise the documented fresh-run default: runtime derives this from
+        # the loaded tokenizer instead of requiring duplicated vocabulary metadata.
+        config.tokenizer.vocab_size = None
         config.scheduler.warmup_steps = 0
         config.scheduler.total_steps = 1
 
         trainer(config)
 
         assert not (tmp_path / "checkpoints").exists()
+        assert config.tokenizer.vocab_size == 128
 
 
 class TestPretrainComponents:

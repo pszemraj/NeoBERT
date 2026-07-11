@@ -96,6 +96,7 @@ dataset:
   name: refinedweb
 
   # dataset.config — string | null; default: null. Optional Hugging Face dataset configuration/subset passed as load_dataset(name=...).
+  # Hub subset identifiers are case-sensitive. For dataset.name=HuggingFaceTB/smollm-corpus, the available values are: cosmopedia-v2 | fineweb-edu-dedup | python-edu.
   config: null
 
   # dataset.path — string | null; default: "". Local dataset path; null and "" are both treated as unset.

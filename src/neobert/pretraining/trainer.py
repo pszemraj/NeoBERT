@@ -1929,7 +1929,9 @@ def trainer(cfg: Config) -> None:
         )
 
     prior_model_vocab_size = int(cfg.model.vocab_size)
-    prior_tokenizer_vocab_size = int(cfg.tokenizer.vocab_size)
+    prior_tokenizer_vocab_size = (
+        int(cfg.tokenizer.vocab_size) if cfg.tokenizer.vocab_size is not None else None
+    )
     original_vocab_size, resolved_vocab_size, added_tokens = (
         _sync_tokenizer_derived_config(
             cfg,
