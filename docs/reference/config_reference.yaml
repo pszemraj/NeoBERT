@@ -578,7 +578,7 @@ contrastive:
 accelerate_config_file: null
 
 # mteb_task_type — string; default: "all". One of: all | classification | clustering | pair_classification | reranking | retrieval | sts | summarization.
-# Used only when task=mteb and no script-level --task_types override is supplied.
+# Used only when task=mteb and no script-level --task_types override is supplied. Each value selects all registered English tasks in that family; the current MTEB runner is English-only and has no language config key.
 mteb_task_type: all
 
 # mteb_batch_size — integer; default: 32; must be > 0 at MTEB encoding. Per-encode-call inference batch size; used only when task=mteb.
