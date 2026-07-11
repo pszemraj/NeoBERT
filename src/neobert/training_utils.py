@@ -916,14 +916,18 @@ def sync_resume_source_of_truth(
 
     Two continuation knobs are likewise launch-controlled (the launch config
     wins, drift is warned but not reverted): the training corpus identity
-    (``dataset.name``/``config``/``path``/``cache_dir``/``text_column``), which
+    (``dataset.name``/``config``/``path``/``text_column``), which
     never touches checkpointed model or optimizer state, and - for RoPE models
     only - the context window (``model.max_position_embeddings``,
     ``tokenizer.max_length``, ``dataset.max_seq_length``), which RoPE makes
     weight-compatible. This supports continued pretraining (annealing to a new
     corpus, or extending context) without silently undoing the operator's
-    intent. Non-RoPE sequence length stays checkpoint-authoritative because it
-    sizes a learned positional table and would break the strict weight load.
+    intent. When pretraining switches corpus identity, its loader/split/eval
+    selection also stays launch-controlled because the data cursor is reset to
+    zero; restoring those fields from the old corpus could select nonexistent
+    splits on the new source. Non-RoPE sequence length stays
+    checkpoint-authoritative because it sizes a learned positional table and
+    would break the strict weight load.
 
     :param Any cfg: Mutable runtime config.
     :param str | Path | None resume_checkpoint_path: Resolved checkpoint step path.
@@ -963,6 +967,14 @@ def sync_resume_source_of_truth(
         getattr(checkpoint_cfg.model, "rope", False)
         and getattr(cfg.model, "rope", False)
     )
+    corpus_identity_fields = ("name", "config", "path", "text_column")
+    corpus_identity_drift = _report_launch_controlled_config_drift(
+        cfg.dataset,
+        checkpoint_cfg.dataset,
+        corpus_identity_fields,
+        section="dataset",
+    )
+    pretraining_corpus_changed = bool(task == "pretraining" and corpus_identity_drift)
 
     model_forced = [
         "hidden_size",
@@ -1003,6 +1015,19 @@ def sync_resume_source_of_truth(
         "min_length",
         "alpha",
     ]
+    corpus_selection_fields = (
+        "trust_remote_code",
+        "streaming",
+        "validation_split",
+        "train_split",
+        "eval_split",
+        "eval_samples",
+        "shuffle_buffer_size",
+    )
+    if pretraining_corpus_changed:
+        dataset_forced = [
+            field for field in dataset_forced if field not in corpus_selection_fields
+        ]
     if not rope_enabled:
         model_forced.append("max_position_embeddings")
         tokenizer_forced.append("max_length")
@@ -1155,6 +1180,15 @@ def sync_resume_source_of_truth(
             section="dataset",
         )
     )
+    if pretraining_corpus_changed:
+        operator_controlled.extend(
+            _report_launch_controlled_config_drift(
+                cfg.dataset,
+                checkpoint_cfg.dataset,
+                corpus_selection_fields,
+                section="dataset",
+            )
+        )
     if rope_enabled:
         operator_controlled.extend(
             _report_launch_controlled_config_drift(

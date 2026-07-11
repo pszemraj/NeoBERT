@@ -402,7 +402,7 @@ class TestGLUETaskSpecific:
         )
 
     def test_validate_glue_config_accepts_from_hub_and_zero_checkpoint(self):
-        """Ensure GLUE validation accepts from-hub and explicit checkpoint zero."""
+        """Accept valid sources and percentage warmup without a default warning."""
         from neobert.glue.validation import validate_glue_config
 
         cfg = Config()
@@ -411,7 +411,8 @@ class TestGLUETaskSpecific:
         cfg.model.from_hub = True
         cfg.glue.pretrained_checkpoint_dir = None
         cfg.glue.pretrained_checkpoint = None
-        validate_glue_config(cfg)
+        cfg.scheduler.warmup_percent = 10
+        assert validate_glue_config(cfg) == ()
 
         with tempfile.TemporaryDirectory() as checkpoint_dir:
             pretrained_config = Path(checkpoint_dir) / "config.yaml"

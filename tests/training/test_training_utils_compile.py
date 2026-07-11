@@ -559,6 +559,105 @@ def test_sync_resume_preserves_rope_packed_context_and_pretraining_batch_size(
     } <= drift
 
 
+def test_sync_resume_preserves_new_corpus_split_selection(tmp_path: Path) -> None:
+    """A corpus change must not inherit loader/split choices from the old source."""
+    checkpoint_dir = tmp_path / "checkpoints" / "10"
+    checkpoint_dir.mkdir(parents=True)
+    checkpoint_cfg = Config()
+    checkpoint_cfg.dataset.name = "old-corpus"
+    checkpoint_cfg.dataset.config = "old-subset"
+    checkpoint_cfg.dataset.streaming = False
+    checkpoint_cfg.dataset.train_split = "old-train"
+    checkpoint_cfg.dataset.eval_split = "old-validation"
+    checkpoint_cfg.dataset.validation_split = 0.1
+    checkpoint_cfg.dataset.eval_samples = 100
+    checkpoint_cfg.dataset.shuffle_buffer_size = 1000
+    ConfigLoader.save(checkpoint_cfg, checkpoint_dir / "config.yaml")
+
+    runtime_cfg = Config()
+    runtime_cfg.dataset.name = "new-corpus"
+    runtime_cfg.dataset.config = "new-subset"
+    runtime_cfg.dataset.streaming = True
+    runtime_cfg.dataset.train_split = "train"
+    runtime_cfg.dataset.eval_split = None
+    runtime_cfg.dataset.validation_split = None
+    runtime_cfg.dataset.eval_samples = 500
+    runtime_cfg.dataset.shuffle_buffer_size = 20000
+
+    drift = sync_resume_source_of_truth(
+        runtime_cfg,
+        checkpoint_dir,
+        task="pretraining",
+        log=logging.getLogger("test"),
+    )
+
+    assert runtime_cfg.dataset.name == "new-corpus"
+    assert runtime_cfg.dataset.config == "new-subset"
+    assert runtime_cfg.dataset.streaming is True
+    assert runtime_cfg.dataset.train_split == "train"
+    assert runtime_cfg.dataset.eval_split is None
+    assert runtime_cfg.dataset.validation_split is None
+    assert runtime_cfg.dataset.eval_samples == 500
+    assert runtime_cfg.dataset.shuffle_buffer_size == 20000
+    assert {
+        "dataset.name",
+        "dataset.config",
+        "dataset.streaming",
+        "dataset.train_split",
+        "dataset.eval_split",
+        "dataset.validation_split",
+        "dataset.eval_samples",
+        "dataset.shuffle_buffer_size",
+    } <= drift
+
+
+def test_sync_resume_restores_same_corpus_split_selection(tmp_path: Path) -> None:
+    """An unchanged corpus must retain checkpoint cursor and split semantics."""
+    checkpoint_dir = tmp_path / "checkpoints" / "10"
+    checkpoint_dir.mkdir(parents=True)
+    checkpoint_cfg = Config()
+    checkpoint_cfg.dataset.name = "same-corpus"
+    checkpoint_cfg.dataset.config = "same-subset"
+    checkpoint_cfg.dataset.streaming = True
+    checkpoint_cfg.dataset.train_split = "train"
+    checkpoint_cfg.dataset.eval_split = "validation"
+    checkpoint_cfg.dataset.eval_samples = 100
+    checkpoint_cfg.dataset.shuffle_buffer_size = 1000
+    ConfigLoader.save(checkpoint_cfg, checkpoint_dir / "config.yaml")
+
+    runtime_cfg = Config()
+    runtime_cfg.dataset.name = "same-corpus"
+    runtime_cfg.dataset.config = "same-subset"
+    runtime_cfg.dataset.streaming = False
+    runtime_cfg.dataset.train_split = "alternate-train"
+    runtime_cfg.dataset.eval_split = None
+    runtime_cfg.dataset.eval_samples = 500
+    runtime_cfg.dataset.shuffle_buffer_size = 20000
+
+    drift = sync_resume_source_of_truth(
+        runtime_cfg,
+        checkpoint_dir,
+        task="pretraining",
+        log=logging.getLogger("test"),
+    )
+
+    assert runtime_cfg.dataset.streaming is True
+    assert runtime_cfg.dataset.train_split == "train"
+    assert runtime_cfg.dataset.eval_split == "validation"
+    assert runtime_cfg.dataset.eval_samples == 100
+    assert runtime_cfg.dataset.shuffle_buffer_size == 1000
+    assert (
+        not {
+            "dataset.streaming",
+            "dataset.train_split",
+            "dataset.eval_split",
+            "dataset.eval_samples",
+            "dataset.shuffle_buffer_size",
+        }
+        & drift
+    )
+
+
 def test_sync_glue_resume_forces_task_and_cursor_geometry(tmp_path: Path) -> None:
     """GLUE continuation should reconstruct task semantics and sample geometry."""
     checkpoint_dir = tmp_path / "checkpoints" / "10"

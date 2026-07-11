@@ -202,6 +202,7 @@ tokenizer:
 
   # tokenizer.max_length — integer; default: 512. Requested tokenizer limit; use a positive value.
   # For pretraining/contrastive, values below dataset.max_seq_length are raised to match it; values above model.max_position_embeddings can overrun the model path, so keep them aligned. GLUE always replaces it with glue.max_seq_length.
+  # For MTEB this is the launch-controlled evaluation length: checkpoint-local tokenizer identity is retained, learned-position models reject lengths above their trained limit, and RoPE models may request a different length.
   max_length: 512
 
   # tokenizer.padding — string; default: "max_length". Compatibility metadata only; current tokenization is unpadded and collators perform dynamic padding/packing.
@@ -396,6 +397,7 @@ trainer:
   # trainer.resume_from_checkpoint — string | boolean | null; default: null. null or false disables resume; true and strings true/latest/auto select the newest complete numeric checkpoint.
   # A numeric string selects <output_dir>/checkpoints/<step>; other strings are paths (relative paths try under output_dir first). Missing/incomplete state is an error.
   # WARNING: resume restores checkpoint-owned model/tokenizer/objective/optimizer/scheduler semantics. It also restores pretraining microbatch size and GLUE microbatch/accumulation/seed; corpus identity and, with RoPE, context lengths remain launch-controlled.
+  # For same-corpus pretraining, checkpoint loader/split/eval selection is restored for cursor consistency. When corpus identity changes, the launch config keeps dataset.trust_remote_code/streaming/validation_split/train_split/eval_split/eval_samples/shuffle_buffer_size and resets the data cursor instead of inheriting choices from the old source.
   # Ordered non-streaming continuation requires unchanged corpus, seed, microbatch, and world size; corpus drift resets the data cursor, world-size drift is rejected where unsupported, and streaming continuity is approximate.
   resume_from_checkpoint: null
 
@@ -408,7 +410,7 @@ trainer:
   eval_strategy: steps
 
   # trainer.save_strategy — string; default: "steps". One of: steps | epoch | best | no.
-  # Pretraining/contrastive accept only steps or no. GLUE supports all four: best saves only metric improvements and requires evaluation; no disables scheduled/final model checkpoints.
+  # YAML footgun: write the disabled value as quoted "no"; bare no is parsed as boolean false and fails validation. Pretraining/contrastive accept only steps or "no". GLUE supports all four: best saves only metric improvements and requires evaluation; "no" disables scheduled/final model checkpoints.
   save_strategy: steps
 
   # trainer.save_total_limit — integer | null; default: 3; when set must be >= 0. Number of newest numeric checkpoints retained.
@@ -501,6 +503,7 @@ wandb:
 # glue — mapping; default: all GLUEConfig defaults below. Used only when task=glue.
 glue:
   # glue.task_name — string; default: "cola". One of: allnli | cola | mnli | mrpc | qnli | qqp | rte | snli | sst2 | stsb | wnli.
+  # Checkpoint-selection/early-stopping metric by task: cola=matthews_correlation; mrpc/qqp=f1; stsb=pearson; allnli/mnli/qnli/rte/snli/sst2/wnli=accuracy. MNLI uses matched accuracy for selection and also reports mismatched accuracy.
   task_name: cola
 
   # glue.num_labels — integer; default: 2. Must match task_name: mnli/snli=3, stsb=1, and all other supported tasks=2.
@@ -508,7 +511,7 @@ glue:
   num_labels: 2
 
   # glue.max_seq_length — integer; default: 128; must be > 0. GLUE tokenization/model length and the source of tokenizer.max_length.
-  # Values > 512 warn. For checkpoints with model.rope=false it must not exceed the checkpoint's model.max_position_embeddings.
+  # Also set tokenizer.max_length to this same value for a warning-free load; a mismatch is accepted but warns while being replaced. Values > 512 warn. For checkpoints with model.rope=false it must not exceed the checkpoint's model.max_position_embeddings.
   max_seq_length: 128
 
   # glue.pretrained_model_path — string | null; default: null. Path to the source pretraining config.yaml.

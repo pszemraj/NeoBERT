@@ -194,15 +194,6 @@ def validate_glue_config(
             f"Weight decay must be non-negative, got {cfg.optimizer.weight_decay}"
         )
 
-    if (
-        cfg.scheduler.warmup_percent is not None
-        and cfg.scheduler.warmup_steps is not None
-    ):
-        warnings.append(
-            "Both warmup_percent and warmup_steps specified. "
-            "warmup_percent will take precedence."
-        )
-
     if cfg.glue.max_seq_length > 512:
         warnings.append(
             f"max_seq_length={cfg.glue.max_seq_length} > 512 may cause issues "
