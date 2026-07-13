@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-PYTHON=(conda run --name neobert python)
+PYTHON=(conda run --name enc python)
 
 # GLUE evaluation - single task example
 "${PYTHON[@]}" scripts/evaluation/run_glue.py configs/glue/cola.yaml

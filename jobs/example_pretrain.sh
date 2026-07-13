@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-PYTHON=(conda run --name neobert python)
+PYTHON=(conda run --name enc python)
 
 # ----------------------------
 # 1) Small smoke test (safe)
