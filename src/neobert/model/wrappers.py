@@ -40,6 +40,7 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
     """NeoBERT with a language modeling head."""
 
     config_class = NeoBERTConfig
+    _tied_weights_keys = {"decoder.weight": "model.encoder.weight"}
 
     def __init__(self, config: NeoBERTConfig) -> None:
         """Initialize the language modeling head.
