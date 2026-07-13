@@ -21,6 +21,7 @@ def test_align_tokenizer_vocab_adds_deterministic_inert_placeholders() -> None:
     """Alignment should preserve IDs and assign deterministic placeholder IDs."""
     tokenizer = build_wordlevel_tokenizer()
     original_vocab = tokenizer.get_vocab()
+    original_special_ids = set(tokenizer.all_special_ids)
     original_size = len(tokenizer)
     target_size = original_size + 4
 
@@ -28,12 +29,13 @@ def test_align_tokenizer_vocab_adds_deterministic_inert_placeholders() -> None:
 
     assert added == 4
     assert len(tokenizer) == target_size
-    assert tokenizer.additional_special_tokens == []
+    assert set(tokenizer.all_special_ids) == original_special_ids
     for token, token_id in original_vocab.items():
         assert tokenizer.convert_tokens_to_ids(token) == token_id
     for token_id in range(original_size, target_size):
         token = f"<|neobert_extra_token_{token_id}|>"
         assert tokenizer.convert_tokens_to_ids(token) == token_id
+        assert token_id not in tokenizer.all_special_ids
 
 
 def test_align_tokenizer_vocab_rejects_shrinking() -> None:
