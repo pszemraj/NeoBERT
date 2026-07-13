@@ -250,6 +250,7 @@ def evaluate_mteb(cfg: Any) -> None:
                 evaluation_task,
                 cache=result_cache,
                 co2_tracker=False,
+                encode_kwargs={"batch_size": mteb_batch_size},
                 overwrite_strategy=overwrite_strategy,
             )
 

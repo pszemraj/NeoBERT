@@ -154,6 +154,7 @@ def test_mteb_uses_checkpoint_local_model_and_tokenizer(
     launch_cfg.task_types = ["STS12"]
     launch_cfg.output_folder = tmp_path / "results"
     launch_cfg.tokenizer.max_length = 32
+    launch_cfg.mteb_batch_size = 7
     launch_cfg.model.hidden_size = 999
 
     class _Tokenizer:
@@ -263,5 +264,6 @@ def test_mteb_uses_checkpoint_local_model_and_tokenizer(
     assert captured["run_kwargs"] == {
         "cache": captured["cache"],
         "co2_tracker": False,
+        "encode_kwargs": {"batch_size": 7},
         "overwrite_strategy": "only-missing",
     }
