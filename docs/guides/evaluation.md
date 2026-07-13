@@ -80,7 +80,7 @@ python scripts/evaluation/run_mteb.py \
 - `mteb_pooling` defaults to mask-aware average pooling (`avg`; `mean` is accepted as an alias). Set it to `cls` for first-token pooling.
 - Output defaults to the MTEB result cache rooted at `outputs/<run>/mteb/<ckpt>/<max_length>/`; task files live below its `results/` directory. Pass `--output_folder` to choose another cache root.
 - Local checkpoint evaluation requires `config.yaml` and `tokenizer/` inside the resolved step. Model architecture and token-to-ID identity come from those artifacts; launch configuration controls only evaluation settings such as task selection, pooling, batch size, and requested context length.
-- `NeoBERTForMTEB.encode()` honors `num_workers` and `pin_memory` overrides; on CUDA it keeps loader-side pinned staging enabled for overlapped host-to-device copies.
+- MTEB owns evaluation batching: `mteb_batch_size` sizes the `DataLoader` passed to `NeoBERTForMTEB.encode()`, which tokenizes each supplied text batch and uses pinned token staging for non-blocking CUDA transfers.
 
 ### Aggregate MTEB results
 

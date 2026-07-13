@@ -1,20 +1,25 @@
 """Training-time LM and embedding wrappers built on the NeoBERT backbone."""
 
-import warnings
-from contextlib import nullcontext
-from functools import partial
-from typing import Any, Dict, List, Optional
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import numpy as np
 import torch
 from torch import nn
-from transformers import DataCollatorWithPadding, PreTrainedTokenizerFast
+from transformers import PreTrainedTokenizerFast
 
 from neobert.collator import attention_mask_to_packed_seqlens
 from neobert.training_utils import _pin_cpu_tensors
 from neobert.utils import additive_attention_mask
 
 from .model import NeoBERT, NeoBERTConfig, NeoBERTPreTrainedModel, PackedSeqLens
+
+if TYPE_CHECKING:
+    from torch.utils.data import DataLoader
+
+    from mteb.abstasks.task_metadata import TaskMetadata
+    from mteb.types import BatchedInput, PromptType
 
 MTEB_POOLING_ALIASES = {"avg": "avg", "mean": "avg", "cls": "cls"}
 
@@ -143,192 +148,142 @@ class NeoBERTForMTEB(NeoBERTPreTrainedModel):
         self.batch_size = batch_size
         self.pooling = normalize_mteb_pooling(pooling)
 
-    def encode_queries(self, queries: List[str], **kwargs: Any) -> np.ndarray:
-        """Encode a list of queries.
+    @staticmethod
+    def similarity(
+        embeddings1: np.ndarray | torch.Tensor,
+        embeddings2: np.ndarray | torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute all-pairs cosine similarity between two embedding collections.
 
-        :param list[str] queries: Query strings to encode.
-        :param Any kwargs: Additional encoding arguments.
-        :return np.ndarray: Encoded query embeddings.
+        :param np.ndarray | torch.Tensor embeddings1: First embedding collection.
+        :param np.ndarray | torch.Tensor embeddings2: Second embedding collection.
+        :raises ValueError: If the inputs are not vectors or matrices with matching dimensions.
+        :return torch.Tensor: Pairwise cosine-similarity matrix.
         """
-        if "instructions" in kwargs:
-            if kwargs["instructions"] is not None:
-                queries = [
-                    (query + " " + kwargs["instructions"][query]).strip()
-                    for query in queries
-                ]
-            new_kwargs = {
-                k: v for k, v in kwargs.items() if k not in ["instructions", "qid"]
-            }
-        else:
-            new_kwargs = kwargs
+        left = torch.as_tensor(embeddings1, dtype=torch.float32)
+        right = torch.as_tensor(embeddings2, dtype=torch.float32, device=left.device)
+        if left.ndim == 1:
+            left = left.unsqueeze(0)
+        if right.ndim == 1:
+            right = right.unsqueeze(0)
+        if left.ndim != 2 or right.ndim != 2 or left.shape[1] != right.shape[1]:
+            raise ValueError(
+                "Cosine similarity expects vectors or matrices with matching embedding dimensions."
+            )
+        left = torch.nn.functional.normalize(left, p=2, dim=-1)
+        right = torch.nn.functional.normalize(right, p=2, dim=-1)
+        return left @ right.transpose(0, 1)
 
-        return self.encode(
-            queries,
-            **new_kwargs,
-        )
+    @staticmethod
+    def similarity_pairwise(
+        embeddings1: np.ndarray | torch.Tensor,
+        embeddings2: np.ndarray | torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute cosine similarity between corresponding embedding pairs.
 
-    def encode_corpus(
-        self,
-        corpus: List[Dict[str, str]] | Dict[str, List[str]],
-        batch_size: int | None = None,
-        **kwargs: Any,
-    ) -> np.ndarray:
-        """Encode a corpus of documents.
-
-        :param list[dict[str, str]] | dict[str, list[str]] corpus: Corpus inputs.
-        :param int | None batch_size: Optional encoding batch-size override.
-        :param Any kwargs: Additional encoding arguments.
-        :return np.ndarray: Encoded corpus embeddings.
+        :param np.ndarray | torch.Tensor embeddings1: First embedding collection.
+        :param np.ndarray | torch.Tensor embeddings2: Second embedding collection.
+        :raises ValueError: If the input shapes do not match.
+        :return torch.Tensor: Pairwise cosine-similarity scores.
         """
-        if isinstance(corpus, dict):
-            sentences = [
-                (corpus["title"][i] + " " + corpus["text"][i]).strip()
-                if "title" in corpus
-                else corpus["text"][i].strip()
-                for i in range(len(corpus["text"]))
-            ]
-        else:
-            if isinstance(corpus[0], dict):
-                sentences = [
-                    (doc["title"] + " " + doc["text"]).strip()
-                    if "title" in doc
-                    else doc["text"].strip()
-                    for doc in corpus
-                ]
-            else:
-                sentences = corpus
-
-        if "instructions" in kwargs:  # not used on the doc side
-            new_kwargs = {
-                k: v for k, v in kwargs.items() if k not in ["instructions", "qid"]
-            }
-        else:
-            new_kwargs = kwargs
-        if batch_size is not None:
-            new_kwargs["batch_size"] = batch_size
-
-        return self.encode(
-            sentences,
-            **new_kwargs,
-        )
+        left = torch.as_tensor(embeddings1, dtype=torch.float32)
+        right = torch.as_tensor(embeddings2, dtype=torch.float32, device=left.device)
+        if left.ndim == 1:
+            left = left.unsqueeze(0)
+        if right.ndim == 1:
+            right = right.unsqueeze(0)
+        if left.ndim != 2 or left.shape != right.shape:
+            raise ValueError(
+                "Pairwise cosine similarity expects identically shaped vectors or matrices."
+            )
+        return torch.nn.functional.cosine_similarity(left, right, dim=-1)
 
     @torch.no_grad()
-    def encode(self, sentences: list[str], **kwargs: Any) -> torch.Tensor:
-        """Encode the given sentences using the encoder.
+    def encode(
+        self,
+        inputs: DataLoader[BatchedInput],
+        *,
+        task_metadata: TaskMetadata,
+        hf_split: str,
+        hf_subset: str,
+        prompt_type: PromptType | None = None,
+        **kwargs: Any,
+    ) -> np.ndarray:
+        """Encode text batches supplied by MTEB.
 
-        :param list[str] sentences: The sentences to encode.
-        :param Any kwargs: Optional DataLoader overrides — ``num_workers``
-            (int, default 0) and ``pin_memory`` (bool | None, defaults to
-            ``True`` on CUDA devices, otherwise ``False``).
-        :return torch.Tensor: Encoded sentence embeddings.
+        :param DataLoader inputs: MTEB dataloader whose batches contain standardized ``text`` inputs.
+        :param TaskMetadata task_metadata: Metadata for the active MTEB task.
+        :param str hf_split: Active Hugging Face dataset split.
+        :param str hf_subset: Active Hugging Face dataset subset.
+        :param PromptType | None prompt_type: Whether inputs are queries or documents.
+        :param Any kwargs: Additional MTEB encoding arguments.
+        :return np.ndarray: Encoded sentence embeddings.
         """
-        from datasets import Dataset
-        from torch.utils.data import DataLoader
         from tqdm import tqdm
 
+        del task_metadata, hf_split, hf_subset, prompt_type
         # Respect the model's current device to avoid CPU/GPU mismatches.
         param = next(self.parameters())
         device = param.device
         # Keep additive masks in float32 for numerical stability (match training).
         mask_dtype = torch.float32
-        batch_size = int(kwargs.pop("batch_size", self.batch_size))
-        if batch_size < 1:
-            raise ValueError(f"batch_size must be positive, got {batch_size}.")
-        num_workers = int(kwargs.pop("num_workers", 0))
-        pin_memory = kwargs.pop("pin_memory", None)
-        if pin_memory is None:
-            pin_memory = device.type == "cuda"
-        pin_memory = bool(pin_memory)
-
-        def _transform_func(
-            tokenizer: PreTrainedTokenizerFast, x: Dict[str, List]
-        ) -> Dict[str, List]:
-            """Tokenize a batch of input texts.
-
-            :param PreTrainedTokenizerFast tokenizer: Tokenizer to apply.
-            :param dict[str, list] x: Batch with ``input_texts``.
-            :return dict[str, list]: Tokenized batch.
-            """
-            batch_dict = tokenizer(
-                x["input_texts"],
-                truncation=True,
-                max_length=self.max_length,
-                padding=False,
-                return_token_type_ids=False,
-            )
-
-            return batch_dict
-
-        dataset: Dataset = Dataset.from_dict({"input_texts": sentences})
-        dataset.set_transform(partial(_transform_func, self.tokenizer))
-
-        data_collator = DataCollatorWithPadding(self.tokenizer, pad_to_multiple_of=8)
-        dataloader = DataLoader(
-            dataset,
-            collate_fn=data_collator,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            shuffle=False,
-            pin_memory=pin_memory,
-        )
-
+        # MTEB uses batch_size to build inputs, then forwards it to encode again.
+        kwargs.pop("batch_size", None)
+        show_progress_bar = bool(kwargs.pop("show_progress_bar", True))
+        pin_memory = bool(kwargs.pop("pin_memory", device.type == "cuda"))
         non_blocking = bool(pin_memory and device.type == "cuda")
         encodings = []
-        warning_context = nullcontext()
-        if non_blocking:
-            # Torch's current DataLoader pin-memory path still calls the
-            # deprecated ``Tensor.pin_memory(device=...)`` signature internally.
-            # Keep loader-side pinning for overlap, but silence that transient
-            # upstream warning until PyTorch removes the deprecated call.
-            warning_context = warnings.catch_warnings()
 
-        with warning_context:
+        for batch in tqdm(
+            inputs,
+            desc="encoding",
+            mininterval=10,
+            disable=not show_progress_bar,
+        ):
+            if "text" not in batch:
+                raise TypeError("NeoBERTForMTEB only supports text inputs.")
+            tokenized = self.tokenizer(
+                list(batch["text"]),
+                truncation=True,
+                max_length=self.max_length,
+                padding=True,
+                pad_to_multiple_of=8,
+                return_tensors="pt",
+                return_token_type_ids=False,
+            )
             if non_blocking:
-                warnings.filterwarnings(
-                    "ignore",
-                    message=r"The argument 'device' of Tensor\..* is deprecated\.",
-                    category=DeprecationWarning,
+                tokenized = _pin_cpu_tensors(tokenized)
+            input_ids = tokenized["input_ids"].to(device, non_blocking=non_blocking)
+            int_mask = tokenized["attention_mask"]
+
+            if self.config.attn_backend != "sdpa":
+                # Packed path: compute packed_seqlens on CPU to avoid CUDA sync,
+                # then pass pad_mask=None so the model uses packed attention.
+                packed_seqlens = attention_mask_to_packed_seqlens(int_mask)
+                outputs = self.model(input_ids, None, packed_seqlens=packed_seqlens)
+                pool_mask = int_mask.to(
+                    device=device,
+                    dtype=mask_dtype,
+                    non_blocking=non_blocking,
                 )
+            else:
+                pool_mask = int_mask.to(
+                    device=device,
+                    dtype=mask_dtype,
+                    non_blocking=non_blocking,
+                )
+                additive_mask = additive_attention_mask(pool_mask, dtype=mask_dtype)
+                outputs = self.model(input_ids, additive_mask)
 
-            for batch in tqdm(
-                dataloader,
-                desc="encoding",
-                mininterval=10,
-                disable=len(sentences) < 128,
-            ):
-                if non_blocking:
-                    batch = _pin_cpu_tensors(batch)
-                input_ids = batch["input_ids"].to(device, non_blocking=non_blocking)
-                int_mask = batch["attention_mask"]
+            if self.pooling == "avg":
+                outputs = outputs * pool_mask.unsqueeze(-1).expand(
+                    -1, -1, outputs.shape[-1]
+                )
+                denominator = pool_mask.sum(dim=1).clamp_min(1).unsqueeze(-1)
+                outputs = outputs.sum(dim=1) / denominator
+            else:
+                outputs = outputs[:, 0, :]
 
-                if self.config.attn_backend != "sdpa":
-                    # Packed path: compute packed_seqlens on CPU to avoid CUDA sync,
-                    # then pass pad_mask=None so the model uses packed attention.
-                    packed_seqlens = attention_mask_to_packed_seqlens(int_mask)
-                    outputs = self.model(input_ids, None, packed_seqlens=packed_seqlens)
-                    pool_mask = int_mask.to(
-                        device=device,
-                        dtype=mask_dtype,
-                        non_blocking=non_blocking,
-                    )
-                else:
-                    pool_mask = int_mask.to(
-                        device=device,
-                        dtype=mask_dtype,
-                        non_blocking=non_blocking,
-                    )
-                    additive_mask = additive_attention_mask(pool_mask, dtype=mask_dtype)
-                    outputs = self.model(input_ids, additive_mask)
-
-                if self.pooling == "avg":
-                    outputs = outputs * pool_mask.unsqueeze(-1).expand(
-                        -1, -1, outputs.shape[-1]
-                    )
-                    denominator = pool_mask.sum(dim=1).clamp_min(1).unsqueeze(-1)
-                    outputs = outputs.sum(dim=1) / denominator
-                else:
-                    outputs = outputs[:, 0, :]
-
-                encodings.append(outputs.cpu().numpy())
+            encodings.append(outputs.detach().float().cpu().numpy())
 
         return np.concatenate(encodings, axis=0)

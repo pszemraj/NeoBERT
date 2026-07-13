@@ -1548,8 +1548,10 @@ class TestModelForward(unittest.TestCase):
             self.assertEqual(model.model.config.attn_backend, "sdpa")
             self.assertIsInstance(model.model, expected_backbone)
 
-    def test_mteb_encode_uses_model_device(self):
-        """Ensure MTEB uses the model device with SDPA."""
+    def test_mteb_encode_consumes_batched_input_dataloader(self):
+        """Ensure MTEB batched inputs are encoded directly on the model device."""
+        from torch.utils.data import DataLoader
+
         from neobert.model import NeoBERTConfig, NeoBERTForMTEB
 
         tokenizer = build_wordlevel_tokenizer(
@@ -1577,8 +1579,19 @@ class TestModelForward(unittest.TestCase):
         model.to("cpu")
         model.eval()
         self.assertIsInstance(model.model, NeoBERT)
+        inputs = DataLoader(
+            [{"text": "hello world"}, {"text": "hello"}],
+            batch_size=2,
+            shuffle=False,
+        )
         with patch("torch.cuda.is_available", return_value=True):
-            embeddings = model.encode(["hello world", "hello"])
+            embeddings = model.encode(
+                inputs,
+                task_metadata=object(),
+                hf_split="test",
+                hf_subset="default",
+                show_progress_bar=False,
+            )
         self.assertEqual(embeddings.shape[0], 2)
         self.assertEqual(embeddings.shape[1], config.hidden_size)
 
@@ -1592,8 +1605,10 @@ class TestModelForward(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unsupported MTEB pooling"):
             normalize_mteb_pooling("first")
 
-    def test_mteb_encode_corpus_batch_size_is_optional(self):
-        """Retrieval hooks work when MTEB omits its batch-size override."""
+    def test_mteb_encoder_protocol_uses_cosine_similarity(self):
+        """Ensure retrieval accepts the wrapper and uses cosine similarity."""
+        from mteb import EncoderProtocol
+
         from neobert.model import NeoBERTConfig, NeoBERTForMTEB
 
         tokenizer = build_wordlevel_tokenizer(
@@ -1618,84 +1633,30 @@ class TestModelForward(unittest.TestCase):
             batch_size=2,
             pooling="avg",
         )
-        embeddings = torch.empty(1, config.hidden_size).numpy()
-        corpus = [{"title": "title", "text": "text"}]
+        model.mteb_model_meta = object()
+        self.assertIsInstance(model, EncoderProtocol)
 
-        with patch.object(
-            NeoBERTForMTEB,
-            "encode",
-            autospec=True,
-            return_value=embeddings,
-        ) as encode:
-            self.assertIs(model.encode_corpus(corpus), embeddings)
-            encode.assert_called_once_with(model, ["title text"])
+        left = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        right = torch.tensor([[1.0, 0.0], [1.0, 1.0]])
+        expected_matrix = torch.tensor([[1.0, 2**-0.5], [0.0, 2**-0.5]])
+        expected_pairwise = torch.tensor([1.0, 2**-0.5])
 
-            encode.reset_mock()
-            self.assertIs(model.encode_corpus(corpus, batch_size=3), embeddings)
-            encode.assert_called_once_with(model, ["title text"], batch_size=3)
-
-    def test_mteb_encode_propagates_pin_memory_to_dataloader(self):
-        """Ensure MTEB encode forwards the requested pin_memory setting."""
-        from neobert.model import NeoBERTConfig, NeoBERTForMTEB
-
-        tokenizer = build_wordlevel_tokenizer(
-            vocab={"hello": 2, "world": 3},
-            include_mask=False,
-            include_sep=False,
+        self.assertTrue(
+            torch.allclose(model.similarity(left.numpy(), right), expected_matrix)
         )
-        config = NeoBERTConfig(
-            hidden_size=32,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            intermediate_size=64,
-            vocab_size=10,
-            max_length=8,
-            attn_backend="sdpa",
-            hidden_act="gelu",
-        )
-        model = NeoBERTForMTEB(
-            config=config,
-            tokenizer=tokenizer,
-            max_length=8,
-            batch_size=2,
-            pooling="avg",
-        )
-        model.to("cpu")
-        model.eval()
-
-        captured: dict[str, object] = {}
-
-        class _FakeDataLoader(list):
-            def __init__(self, *args, **kwargs):
-                captured["kwargs"] = kwargs
-                super().__init__(
-                    [
-                        {
-                            "input_ids": torch.tensor([[2, 3], [2, 0]]),
-                            "attention_mask": torch.tensor([[1, 1], [0, 0]]),
-                        }
-                    ]
-                )
-
-        with patch("torch.utils.data.DataLoader", _FakeDataLoader):
-            embeddings = model.encode(
-                ["hello world", "hello"],
-                batch_size=1,
-                num_workers=2,
-                pin_memory=True,
+        self.assertTrue(
+            torch.allclose(
+                model.similarity_pairwise(left, right.numpy()), expected_pairwise
             )
-
-        self.assertTrue(captured["kwargs"]["pin_memory"])
-        self.assertEqual(captured["kwargs"]["batch_size"], 1)
-        self.assertEqual(embeddings.shape[0], 2)
-        self.assertEqual(embeddings.shape[1], config.hidden_size)
-        self.assertTrue(torch.isfinite(torch.from_numpy(embeddings)).all())
+        )
 
     @unittest.skipUnless(
         torch.cuda.is_available(), "CUDA required for flash_attn_varlen MTEB test"
     )
     def test_mteb_encode_flash_attn_varlen_no_crash(self):
         """Ensure MTEB encode does not crash with attn_backend='flash_attn_varlen' on CUDA."""
+        from torch.utils.data import DataLoader
+
         from neobert.model import NeoBERTConfig, NeoBERTForMTEB
         from neobert.kernels.attention import FLASH_ATTN_AVAILABLE
 
@@ -1729,7 +1690,18 @@ class TestModelForward(unittest.TestCase):
         )
         model.to(device=device, dtype=torch.bfloat16)
         model.eval()
-        embeddings = model.encode(["hello world", "hello"])
+        inputs = DataLoader(
+            [{"text": "hello world"}, {"text": "hello"}],
+            batch_size=2,
+            shuffle=False,
+        )
+        embeddings = model.encode(
+            inputs,
+            task_metadata=object(),
+            hf_split="test",
+            hf_subset="default",
+            show_progress_bar=False,
+        )
         self.assertEqual(embeddings.shape[0], 2)
         self.assertEqual(embeddings.shape[1], config.hidden_size)
 
