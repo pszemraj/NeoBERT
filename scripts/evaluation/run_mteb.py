@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from mteb import MTEB
 
 from neobert.checkpointing import load_step_checkpoint_state_dict
 from neobert.config import ConfigLoader
@@ -23,6 +22,16 @@ from neobert.model import NeoBERTForMTEB
 logging.basicConfig(level=logging.INFO)
 
 logger = logging.getLogger("main")
+
+
+def _get_mteb_module() -> Any:
+    """Load MTEB only when benchmark execution begins.
+
+    :return Any: Installed MTEB module.
+    """
+    import mteb
+
+    return mteb
 
 
 def _resolve_mteb_tasks(cfg: Any) -> list[str]:
@@ -215,16 +224,33 @@ def evaluate_mteb(cfg: Any) -> None:
     model.eval()
 
     # Evaluate
+    mteb = _get_mteb_module()
+    model.mteb_model_meta = mteb.models.ModelMeta.create_empty(
+        {
+            "name": "no_model_name_available",
+            "revision": "no_revision_available",
+            "framework": ["PyTorch"],
+            "max_tokens": requested_max_length,
+            "embed_dim": resolved.model_config.hidden_size,
+        }
+    )
+    result_cache = mteb.ResultCache(cache_path=output_folder)
+    overwrite_strategy = "always" if mteb_overwrite_results else "only-missing"
     for task in selected_tasks:
         logger.info(f"Running task: {task}")
         eval_splits = [MTEB_TASK_SPECS_BY_EXECUTION_NAME[task].evaluation_split]
-        evaluation = MTEB(tasks=[task], task_langs=["en"])
+        evaluation_task = mteb.get_task(
+            task,
+            languages=["eng"],
+            eval_splits=eval_splits,
+        )
         with torch.autocast(device_type=device, dtype=torch.bfloat16):
-            evaluation.run(
+            mteb.evaluate(
                 model,
-                output_folder=output_folder,
-                eval_splits=eval_splits,
-                overwrite_results=mteb_overwrite_results,
+                evaluation_task,
+                cache=result_cache,
+                co2_tracker=False,
+                overwrite_strategy=overwrite_strategy,
             )
 
 

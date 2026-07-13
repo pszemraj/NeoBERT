@@ -181,14 +181,33 @@ def test_mteb_uses_checkpoint_local_model_and_tokenizer(
         def eval(self):
             return self
 
-    class _MTEB:
-        def __init__(self, *, tasks, task_langs):
-            captured["tasks"] = tasks
-            captured["task_langs"] = task_langs
-
+    class _ModelMeta:
         @staticmethod
-        def run(_model, **kwargs):
-            captured["run_kwargs"] = kwargs
+        def create_empty(overwrites):
+            captured["model_meta"] = overwrites
+            return "model-meta"
+
+    class _ResultCache:
+        def __init__(self, *, cache_path):
+            captured["cache"] = self
+            captured["cache_path"] = cache_path
+
+    def _get_task(name, **kwargs):
+        captured["task"] = name
+        captured["task_kwargs"] = kwargs
+        return "evaluation-task"
+
+    def _evaluate(model, task, **kwargs):
+        captured["evaluated_model"] = model
+        captured["evaluated_task"] = task
+        captured["run_kwargs"] = kwargs
+
+    mteb_module = SimpleNamespace(
+        ResultCache=_ResultCache,
+        evaluate=_evaluate,
+        get_task=_get_task,
+        models=SimpleNamespace(ModelMeta=_ModelMeta),
+    )
 
     tokenizer = _Tokenizer()
     model_config = NeoBERTConfig.from_model_config(
@@ -218,7 +237,7 @@ def test_mteb_uses_checkpoint_local_model_and_tokenizer(
     monkeypatch.setattr(
         run_mteb, "load_step_checkpoint_state_dict", lambda *_a, **_k: {}
     )
-    monkeypatch.setattr(run_mteb, "MTEB", _MTEB)
+    monkeypatch.setattr(run_mteb, "_get_mteb_module", lambda: mteb_module)
     monkeypatch.setattr(run_mteb.torch.cuda, "is_available", lambda: False)
 
     run_mteb.evaluate_mteb(launch_cfg)
@@ -226,4 +245,23 @@ def test_mteb_uses_checkpoint_local_model_and_tokenizer(
     model_config = captured["model_config"]
     assert model_config.hidden_size == checkpoint_cfg.model.hidden_size
     assert captured["resolver_kwargs"] == {"max_length": 32}
-    assert captured["run_kwargs"]["eval_splits"] == ["test"]
+    assert captured["model_meta"] == {
+        "name": "no_model_name_available",
+        "revision": "no_revision_available",
+        "framework": ["PyTorch"],
+        "max_tokens": 32,
+        "embed_dim": checkpoint_cfg.model.hidden_size,
+    }
+    assert captured["cache_path"] == tmp_path / "results"
+    assert captured["task"] == "STS12"
+    assert captured["task_kwargs"] == {
+        "languages": ["eng"],
+        "eval_splits": ["test"],
+    }
+    assert captured["evaluated_model"].mteb_model_meta == "model-meta"
+    assert captured["evaluated_task"] == "evaluation-task"
+    assert captured["run_kwargs"] == {
+        "cache": captured["cache"],
+        "co2_tracker": False,
+        "overwrite_strategy": "only-missing",
+    }

@@ -78,7 +78,7 @@ python scripts/evaluation/run_mteb.py \
 - Omitting `--task_types` preserves `mteb_task_type`; explicitly passing `--task_types all` always selects the full registry.
 - Task split metadata comes from the shared registry. MSMARCO runs and aggregates its `dev` score; other registered tasks currently use `test`.
 - `mteb_pooling` defaults to mask-aware average pooling (`avg`; `mean` is accepted as an alias). Set it to `cls` for first-token pooling.
-- Output defaults to `outputs/<run>/mteb/<ckpt>/<max_length>/`; pass `--output_folder` to choose another result directory.
+- Output defaults to the MTEB result cache rooted at `outputs/<run>/mteb/<ckpt>/<max_length>/`; task files live below its `results/` directory. Pass `--output_folder` to choose another cache root.
 - Local checkpoint evaluation requires `config.yaml` and `tokenizer/` inside the resolved step. Model architecture and token-to-ID identity come from those artifacts; launch configuration controls only evaluation settings such as task selection, pooling, batch size, and requested context length.
 - `NeoBERTForMTEB.encode()` honors `num_workers` and `pin_memory` overrides; on CUDA it keeps loader-side pinned staging enabled for overlapped host-to-device copies.
 

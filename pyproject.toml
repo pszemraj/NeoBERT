@@ -13,7 +13,7 @@ dependencies = [
     "einops",
     "evaluate",
     "liger-kernel>=0.6",
-    "mteb",
+    "mteb>=2.18",
     "numpy",
     "pyyaml",
     "requests",
