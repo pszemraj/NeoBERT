@@ -11,6 +11,8 @@ These wrap [scripts](../scripts/README.md) and [configs](../configs/README.md).
 
 ## Example Launches
 
+Activate the Python environment containing your NeoBERT installation using your preferred environment manager, then run the launchers from the repository root:
+
 ```bash
 bash jobs/example_pretrain.sh
 RUN_FULL=1 bash jobs/example_pretrain.sh
