@@ -857,6 +857,7 @@ class TestStreamingRetryHelpers(unittest.TestCase):
             batch_size=None,
             num_workers=1,
             persistent_workers=True,
+            multiprocessing_context="spawn",
         )
 
         self.assertEqual(list(loader), [0])

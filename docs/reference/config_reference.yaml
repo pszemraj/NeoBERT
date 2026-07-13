@@ -168,7 +168,7 @@ dataset:
   streaming_read_retry_max_backoff_seconds: 60.0
 
   # dataset.num_proc — integer; default: 4; must be >= 0. Multiprocessing processes for non-streaming pretraining tokenization.
-  # 0 computes a worker count from CPU affinity rather than disabling multiprocessing; distributed runs reduce the count per rank. Streaming tokenization does not use process mapping; GLUE uses glue.preprocessing_num_proc.
+  # 0 computes a worker count from CPU affinity; 1 runs mapping inline without forking; distributed runs reduce the count per rank. Streaming tokenization does not use process mapping; GLUE uses glue.preprocessing_num_proc.
   num_proc: 4
 
   # dataset.shuffle_buffer_size — integer; default: 10000. Streaming pretraining shuffle buffer; <= 0 disables shuffling and 1 has no meaningful mixing.

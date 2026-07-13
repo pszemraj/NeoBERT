@@ -1254,13 +1254,13 @@ def _resolve_tokenize_num_proc(
     requested: Optional[int],
     num_processes: int,
     is_main_process: bool,
-) -> int:
+) -> Optional[int]:
     """Resolve per-rank num_proc for dataset tokenization.
 
     :param int | None requested: Requested num_proc from config (or None).
     :param int num_processes: Number of distributed processes.
     :param bool is_main_process: Whether the caller is the main process.
-    :return int: Effective num_proc for this rank.
+    :return int | None: Effective worker count, or ``None`` for in-process mapping.
     """
     if requested is None or requested <= 0:
         if hasattr(os, "sched_getaffinity"):
@@ -1274,7 +1274,8 @@ def _resolve_tokenize_num_proc(
         requested = max(1, requested // num_processes)
         if not is_main_process:
             requested = 1
-    return max(1, requested)
+    requested = max(1, requested)
+    return None if requested == 1 else requested
 
 
 def _select_train_split(

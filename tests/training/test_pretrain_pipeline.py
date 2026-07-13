@@ -755,6 +755,19 @@ class TestPretrainComponents:
 
         assert resolved == 8
 
+    def test_resolve_tokenize_num_proc_runs_single_process_inline(self):
+        """A single tokenization process should not fork a redundant worker."""
+        from neobert.pretraining.trainer import _resolve_tokenize_num_proc
+
+        assert (
+            _resolve_tokenize_num_proc(
+                requested=1,
+                num_processes=1,
+                is_main_process=True,
+            )
+            is None
+        )
+
     def test_eval_budget_resolution_helpers(self):
         """Ensure eval max-batch/sample budget helpers normalize consistently."""
         from neobert.pretraining.trainer import _resolve_eval_max_batches
