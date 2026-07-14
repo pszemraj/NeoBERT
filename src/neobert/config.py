@@ -989,7 +989,10 @@ class ConfigLoader:
             raise ValueError(
                 "Unknown configuration keys detected: "
                 + ", ".join(unknown_keys)
-                + ". Update your config or remove unused fields."
+                + ". Update your config or remove unused fields. This repository "
+                "does not support pre-stable config-schema compatibility; recreate "
+                "older checkpoint configs against the current reference or use the "
+                "matching historical code revision."
             )
 
     @staticmethod

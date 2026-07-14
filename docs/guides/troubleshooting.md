@@ -98,6 +98,10 @@ Actions:
 - `Optimizer state semantics changed`: the optimizer's update rule changed since the checkpoint was written. If a MuonClip selector (`norm_factor`, `param_policy`, `orthogonalization`, `nesterov`, or `clipping`) drifted, re-pin the checkpoint's value explicitly in the launch config. If the implementation or clipping reduction contract changed, the old optimizer buffers are not safely resumable; start a new run or continue from portable model weights only.
 - `Optimizer parameter order changed`: the model's parameter registration order differs from the checkpoint; PyTorch optimizer state is positional, so a silent load would hand buffers to the wrong parameters.
 
+### Checkpoint config reports unknown configuration keys
+
+Pre-stable checkpoint configs are intentionally not schema-compatible with current code. Recreate the configuration against [the current reference](../reference/config_reference.yaml), or use the historical code revision that produced the checkpoint; portable model weights can still be used when their architecture matches.
+
 ### Resume fails because the Accelerate state directory is missing
 
 - Full resume requires `<step>/accelerate/`. A checkpoint written before that layout may still contain portable `model.safetensors`, but it cannot restore optimizer, scheduler, random, or custom trainer state. Start a current run from the portable model weights or start fresh.

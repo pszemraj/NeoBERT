@@ -75,6 +75,8 @@ class TestConfigSystem(unittest.TestCase):
         config_paths = sorted(
             path
             for path in config_root.rglob("*.yaml")
+            # Generated GLUE configs are ignored build artifacts; generator tests
+            # validate their schema independently from maintained examples.
             if "accelerate" not in path.parts and "generated" not in path.parts
         )
 
@@ -678,7 +680,10 @@ optimizer:
         """Removed architecture selectors must fail instead of becoming no-ops."""
         for field, value in (("ngpt", True), ("base_scale", 0.25)):
             with self.subTest(field=field):
-                with self.assertRaisesRegex(ValueError, f"model.{field}"):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    rf"model\.{field}.*pre-stable config-schema compatibility",
+                ):
                     ConfigLoader.dict_to_config({"model": {field: value}})
 
     def test_glue_seq_length_syncs_tokenizer_max_length(self):
