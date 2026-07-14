@@ -112,9 +112,14 @@ Pre-stable checkpoint configs are intentionally not schema-compatible with curre
 
 ## Evaluation Issues
 
-### GLUE backend errors
+### GLUE loads the wrong weights or produces flat metrics
 
-- GLUE uses SDPA classifier wrappers and requires pretrained weights unless `glue.allow_random_weights: true` or `model.from_hub: true`. See [GLUE](evaluation.md#glue).
+- Verify `glue.pretrained_checkpoint_dir`, `glue.pretrained_checkpoint`, and `glue.pretrained_model_path`, then confirm pretrained weights were loaded unless random weights are intentional.
+- GLUE uses its SDPA classifier path; packed flash attention is a pretraining optimization. See [Important GLUE behavior](evaluation.md#important-glue-behavior) for the runtime contract.
+
+### Evaluation runs out of memory
+
+- Reduce the evaluation batch size or sequence length.
 
 ### MTEB task filtering is not what you expected
 

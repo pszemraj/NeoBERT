@@ -114,13 +114,6 @@ python scripts/evaluation/pseudo_perplexity.py \
   --max_length 512
 ```
 
-## Common Evaluation Pitfalls
-
-- Wrong checkpoint path: verify `glue.pretrained_checkpoint_dir`, `glue.pretrained_checkpoint`, and `glue.pretrained_model_path`.
-- Flat or random GLUE metrics: confirm pretrained weights were loaded or intentionally set `glue.allow_random_weights: true`.
-- Evaluation OOM: reduce evaluation batch size or sequence length.
-- Attention backend confusion: GLUE uses SDPA; packed flash varlen is a training optimization.
-
 ## Related Docs
 
 - [YAML configuration reference](../reference/config_reference.yaml)
