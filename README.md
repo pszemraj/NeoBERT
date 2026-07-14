@@ -45,10 +45,9 @@ See [docs/guides/troubleshooting.md](docs/guides/troubleshooting.md) for environ
 ```bash
 # Deterministic one-step local pretraining smoke
 pytest -q tests/training/test_pretrain_pipeline.py::TestPretrainPipeline::test_pretraining_one_step_local_smoke
-
-# Full test suite
-pytest -q
 ```
+
+See [Testing](docs/guides/testing.md) for the full suite and targeted test commands.
 
 ## Documentation
 

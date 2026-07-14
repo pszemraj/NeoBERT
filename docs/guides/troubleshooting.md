@@ -58,11 +58,11 @@ Actions:
 
 ### MuonClip QK clipping rejected under FSDP2
 
-- Set `optimizer.muon_config.enable_clipping: false` for FSDP2 Muon, or use an unsharded run for QK clipping. See [Clipping](training-optimization.md#clipping).
+- Use the supported topology and configuration combinations in [Clipping](training-optimization.md#clipping).
 
 ### Full packed batches rejected in distributed training
 
-- Leave `trainer.enforce_full_packed_batches: false` for distributed runs. Rank-local packing can produce different row counts, so buffering until each rank independently has a full batch can desynchronize model calls and resume cursors. Variable local packed microbatches are supported and normalized by the global masked-token count; see [Packed Training](training-optimization.md#packed-training).
+- Leave `trainer.enforce_full_packed_batches: false`; distributed packed-batch behavior is described in [Packed Training](training-optimization.md#packed-training).
 
 ### Accelerate launch warnings about mixed precision or dynamo
 
@@ -84,7 +84,7 @@ Actions:
 
 ### Streaming resume is slow or not exact
 
-- Streaming resume replays consumed batches, so late checkpoints can take time to reach their saved position and shuffled streams do not preserve exact sample order. Use a non-streaming dataset for deterministic continuation. See [Checkpointing and Resume](training.md#checkpointing-and-resume) and [streaming recovery](training-optimization.md#dataloader-and-streaming-throughput).
+- See [Checkpointing and Resume](training.md#checkpointing-and-resume) for cross-restart behavior and [streaming recovery](training-optimization.md#dataloader-and-streaming-throughput) for in-process retry behavior. Use a non-streaming dataset when deterministic continuation is required.
 
 ### Streaming eval budget error
 
@@ -106,9 +106,9 @@ Pre-stable checkpoint configs are intentionally not schema-compatible with curre
 
 - Full resume requires `<step>/accelerate/`. A checkpoint written before that layout may still contain portable `model.safetensors`, but it cannot restore optimizer, scheduler, random, or custom trainer state. Start a current run from the portable model weights or start fresh.
 
-### Contrastive job exits with status 143 after SIGTERM
+### Training job exits with status 143 after SIGTERM
 
-- This is the expected preemption path. The trainer synchronizes the termination request at the next completed optimizer update, writes a complete checkpoint under `checkpoints/<step>/`, and exits with `128 + SIGTERM`. Resume from `latest`; do not treat the nonzero status as an incomplete save unless the completion marker is absent.
+- This is the expected preemption path for pretraining and contrastive jobs; see [Checkpointing and Resume](training.md#checkpointing-and-resume). Treat the save as incomplete only when its completion marker is absent.
 
 ## Evaluation Issues
 
@@ -124,9 +124,8 @@ Pre-stable checkpoint configs are intentionally not schema-compatible with curre
 
 ### Export fails with missing tokenizer files
 
-- Check checkpoint has `tokenizer/` directory with special tokens map and vocab files.
+- Check the required [export inputs](export.md#supported-inputs).
 
 ### Packed input mismatch at inference
 
-- Exported HF model does not support packed metadata inputs.
-- Use standard HF batches + attention masks.
+- Use the input contract in [HF Export Model Differences](../reference/architecture.md#hf-export-model-differences).

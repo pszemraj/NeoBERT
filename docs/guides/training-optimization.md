@@ -17,8 +17,6 @@ These are repo defaults, not attempts to mirror reference Muon exactly.
 
 ### Parameter routing
 
-`hidden_2d` is the shipped default.
-
 - Muon applies to hidden transformer matrices.
 - Embeddings, output/unembedding weights, biases, and norm parameters stay on Adam-style fallback groups.
 - This matches the usual Muon guidance and keeps FSDP2 owner-compute costs bounded.
@@ -90,9 +88,7 @@ Single-process throughput control:
 
 - `trainer.enforce_full_packed_batches: true` buffers undersized packed outputs into full microbatches, usually at some cost to step rate. Distributed runs reject this option because each rank packs different examples and could otherwise skip a different number of model calls. Distributed packed training uses variable local microbatch sizes and normalizes gradients by the global masked-token count.
 
-`model.attn_backend: sdpa` still works for packed runs but uses the slower segmented fallback path.
-
-Packing preserves document semantics across both position systems: RoPE attention is invariant to each segment's constant offset, while learned absolute position IDs restart at one at every segment boundary.
+Backend fallback and position behavior are described in [Attention Paths](../reference/architecture.md#attention-paths).
 
 ## Dataloader and Streaming Throughput
 
@@ -134,17 +130,3 @@ The maintained distributed Muon path is:
 Do not combine MuonClip with tensor parallelism, context parallelism, or other multi-axis DTensor layouts.
 
 Before long multi-rank runs, use the commands in [Manual Validation Scripts](../../tests/manual/README.md).
-
-## Choosing a Mode
-
-Use `neobert` when:
-
-- you want the repo's recommended training behavior,
-- you care about reproducing current branch baselines,
-- you are running normal single-GPU or FSDP2 encoder pretraining.
-
-Use `muon_reference` when:
-
-- you want reference-Muon semantics for comparison,
-- you are comparing against PyTorch/OpenAI/Keller-style Muon implementations,
-- you are running a focused optimizer ablation rather than the repo default.

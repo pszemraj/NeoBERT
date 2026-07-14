@@ -1,7 +1,5 @@
 # Deferred Work
 
-Register of improvements that were consciously deferred rather than forgotten. Each entry records why it was deferred and what finishing it requires, so it can be picked up without re-deriving the context. Remove entries when they land.
-
 ## Optimizer
 
 ### Batch fused-QKV orthogonalization
@@ -24,7 +22,7 @@ The `optimizer_param_names.json` manifest fails fast when optimizer parameter or
 
 ### Exact streaming resume via a stateful-dataloader boundary
 
-Trainer-level streaming resume is approximate (skip-based): on resume it re-advances the stream by the consumed batch count instead of restoring a cursor. Checkpointing the raw `train_dataset` cursor is unsafe because the dataset is consumed through an Accelerate-prepared `DataLoader` whose adapter (`DataLoaderShard`/`DataLoaderDispatcher`) iterates one batch ahead (and dispatch mode can prefetch `num_processes` batches) before yielding the batch the trainer optimizes - so the raw cursor at checkpoint time is ahead of the last trained batch, and trusting it would silently drop prefetched-but-untrained examples (regression: `tests/training/test_streaming_shuffle.py::TestStreamingRetryHelpers::test_prepared_dataloader_advances_raw_cursor_past_trained_batch`).
+Current cross-restart behavior and the unsafe raw-dataset cursor boundary are described in [Checkpointing and Resume](guides/training.md#checkpointing-and-resume).
 
 Deferred because the correct boundary is the prepared dataloader, not the dataset, and wiring that up is a focused piece of work of its own. Completing it requires:
 

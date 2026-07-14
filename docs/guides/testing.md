@@ -28,9 +28,7 @@ pytest -k compile -q
 
 ## Manual Validation Scripts
 
-`tests/manual/` contains opt-in distributed validation scripts and is excluded from default `pytest -q` discovery.
-
-Manual script commands are in [tests/manual/README.md](../../tests/manual/README.md).
+Run the opt-in distributed checks from [tests/manual/README.md](../../tests/manual/README.md); they are excluded from default `pytest -q` discovery.
 
 ## Test Authoring Guidelines
 

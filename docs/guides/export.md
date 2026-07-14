@@ -86,13 +86,7 @@ python scripts/export-hf/mlm_predict.py \
 
 ## Constraints
 
-Exported models use ordinary Hugging Face batches and attention masks; packed training metadata is not supported.
-
-## Troubleshooting
-
-- Missing tokenizer: ensure checkpoint has `tokenizer/`.
-- Config mismatch: ensure `config.yaml` and checkpoint weights match dimensions.
-- Missing weights: verify checkpoint folder contains expected model files.
+See [HF Export Model Differences](../reference/architecture.md#hf-export-model-differences) for exported input and attention behavior.
 
 ## Related Docs
 
