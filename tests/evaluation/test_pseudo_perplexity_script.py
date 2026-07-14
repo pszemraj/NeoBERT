@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import builtins
 import importlib.util
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -89,36 +90,82 @@ def test_module_imports_without_deepspeed(monkeypatch: pytest.MonkeyPatch) -> No
     assert hasattr(module, "load_step_checkpoint_state_dict")
 
 
-def test_load_hub_masked_lm_preserves_learned_embeddings(
+def test_build_hub_masked_lm_pins_resolved_commit_and_preserves_embeddings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Hub loading must not replace learned position embeddings with random weights."""
+    """Hub model and tokenizer loading must share one immutable source commit."""
     module = _load_pseudo_perplexity_module()
     embeddings = object()
+    commit = "a" * 40
     model = SimpleNamespace(
-        config=SimpleNamespace(max_position_embeddings=512),
+        config=SimpleNamespace(
+            max_position_embeddings=512,
+            _commit_hash=commit,
+        ),
         roberta=SimpleNamespace(embeddings=embeddings),
     )
-    calls: list[tuple[str, bool, str | None]] = []
+    tokenizer = SimpleNamespace(model_max_length=None)
+    model_calls: list[tuple[str, bool, str | None]] = []
+    tokenizer_calls: list[tuple[str, bool, str | None]] = []
 
-    def _from_pretrained(
+    def _load_model(
         model_name: str,
         *,
         trust_remote_code: bool = False,
         revision: str | None = None,
     ):
-        calls.append((model_name, trust_remote_code, revision))
+        model_calls.append((model_name, trust_remote_code, revision))
         return model
 
-    monkeypatch.setattr(
-        module.AutoModelForMaskedLM, "from_pretrained", _from_pretrained
+    def _load_tokenizer(
+        model_name: str,
+        *,
+        trust_remote_code: bool = False,
+        revision: str | None = None,
+    ):
+        tokenizer_calls.append((model_name, trust_remote_code, revision))
+        return tokenizer
+
+    monkeypatch.setattr(module.AutoModelForMaskedLM, "from_pretrained", _load_model)
+    monkeypatch.setattr(module.AutoTokenizer, "from_pretrained", _load_tokenizer)
+
+    source = module._build_hub_masked_lm(
+        "roberta-base",
+        max_length=512,
+        revision="main",
     )
 
-    assert module._load_hub_masked_lm("roberta-base", max_length=512) is model
-    assert calls == [("roberta-base", True, None)]
+    assert source.model is model
+    assert source.tokenizer is tokenizer
+    assert source.checkpoint_label == commit
+    assert source.provenance == {
+        "kind": "hub",
+        "model": "roberta-base",
+        "requested_revision": "main",
+        "commit": commit,
+    }
+    assert model_calls == [("roberta-base", True, "main")]
+    assert tokenizer_calls == [("roberta-base", True, commit)]
+    assert tokenizer.model_max_length == 512
     assert model.roberta.embeddings is embeddings
     with pytest.raises(ValueError, match="exceeds.*position limit"):
-        module._load_hub_masked_lm("roberta-base", max_length=1024)
+        module._build_hub_masked_lm("roberta-base", max_length=1024)
+
+
+def test_hub_model_without_resolved_commit_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutable Hub provenance must never enter a resumable run manifest."""
+    module = _load_pseudo_perplexity_module()
+    model = SimpleNamespace(config=SimpleNamespace(max_position_embeddings=512))
+    monkeypatch.setattr(
+        module.AutoModelForMaskedLM,
+        "from_pretrained",
+        lambda *_args, **_kwargs: model,
+    )
+
+    with pytest.raises(RuntimeError, match="immutable Hub commit"):
+        module._build_hub_masked_lm("roberta-base", max_length=512)
 
 
 def test_prepare_dataset_uses_one_consistent_length_window() -> None:
@@ -163,6 +210,19 @@ def test_local_data_path_loads_saved_dataset(
 
     assert loaded["text"] == ["example"]
     assert label == "local-corpus_train"
+    original_fingerprint = module._dataset_fingerprint(loaded)
+
+    replacement = Dataset.from_dict({"text": ["different"]})
+    shutil.rmtree(data_path)
+    replacement.save_to_disk(data_path)
+    replaced, _ = module._load_evaluation_dataset(
+        data_path=data_path,
+        dataset_name="ignored",
+        dataset_config=None,
+        split="train",
+    )
+
+    assert module._dataset_fingerprint(replaced) != original_fingerprint
 
 
 def test_model_source_cli_is_exclusive_and_local_requires_checkpoint() -> None:

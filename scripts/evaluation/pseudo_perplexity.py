@@ -20,19 +20,20 @@ from neobert.evaluation_utils import resolve_checkpoint_model_source
 from neobert.model import NeoBERTLMHead
 
 
-def _load_hub_masked_lm(
+def _build_hub_masked_lm(
     model_name: str,
     *,
     max_length: int,
     revision: str | None = None,
-) -> Any:
-    """Load a Hub masked-language model without modifying its learned embeddings.
+) -> _ResolvedModelSource:
+    """Build a Hub masked LM and tokenizer from one immutable commit.
 
     :param str model_name: Hub model identifier/path.
     :param int max_length: Requested evaluation context length.
     :param str | None revision: Optional Hub revision.
+    :raises RuntimeError: If the loaded source has no immutable Hub commit.
     :raises ValueError: If the requested length exceeds the model's position limit.
-    :return Any: Loaded masked-language-model instance.
+    :return _ResolvedModelSource: Resolved Hub model source.
     """
     model = AutoModelForMaskedLM.from_pretrained(
         model_name,
@@ -45,7 +46,33 @@ def _load_hub_masked_lm(
             f"Requested max_length={max_length} exceeds {model_name}'s learned "
             f"position limit ({position_limit})."
         )
-    return model
+    commit = getattr(model.config, "_commit_hash", None)
+    if (
+        not isinstance(commit, str)
+        or len(commit) != 40
+        or any(character not in "0123456789abcdef" for character in commit.lower())
+    ):
+        raise RuntimeError(
+            f"Could not resolve {model_name!r} to an immutable Hub commit."
+        )
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        trust_remote_code=True,
+        revision=commit,
+    )
+    tokenizer.model_max_length = max_length
+    return _ResolvedModelSource(
+        model=model,
+        tokenizer=tokenizer,
+        model_label=model_name.replace("/", "_"),
+        checkpoint_label=commit,
+        provenance={
+            "kind": "hub",
+            "model": model_name,
+            "requested_revision": revision,
+            "commit": commit,
+        },
+    )
 
 
 class _ResolvedModelSource:
@@ -73,6 +100,22 @@ class _ResolvedModelSource:
         self.model_label = model_label
         self.checkpoint_label = checkpoint_label
         self.provenance = provenance
+
+
+def _dataset_fingerprint(dataset: Any) -> str:
+    """Return the concrete Hugging Face dataset fingerprint.
+
+    :param Any dataset: Loaded or prepared Hugging Face dataset.
+    :raises RuntimeError: If the dataset exposes no usable fingerprint.
+    :return str: Dataset content/transformation fingerprint.
+    """
+    fingerprint = getattr(dataset, "_fingerprint", None)
+    if not isinstance(fingerprint, str) or not fingerprint:
+        raise RuntimeError(
+            "Loaded evaluation dataset has no fingerprint; resumable scoring "
+            "cannot safely identify its contents."
+        )
+    return fingerprint
 
 
 def _build_neobert_masked_lm(
@@ -375,35 +418,22 @@ def main(argv: Sequence[str] | None = None) -> None:
         parser.error("--batch_size and --max_length must be positive")
 
     if args.hub_model is not None:
-        model = _load_hub_masked_lm(
+        source = _build_hub_masked_lm(
             args.hub_model,
             max_length=args.max_length,
             revision=args.revision,
         )
-        tokenizer = AutoTokenizer.from_pretrained(
-            args.hub_model,
-            trust_remote_code=True,
-            revision=args.revision,
-        )
-        tokenizer.model_max_length = args.max_length
-        model_label = args.hub_model.replace("/", "_")
-        checkpoint_label = "hub"
-        model_provenance = {
-            "kind": "hub",
-            "model": args.hub_model,
-            "revision": args.revision,
-        }
     else:
         source = _build_neobert_masked_lm(
             checkpoint_path=args.checkpoint_path,
             checkpoint=args.checkpoint,
             max_length=args.max_length,
         )
-        model = source.model
-        tokenizer = source.tokenizer
-        model_label = source.model_label
-        checkpoint_label = source.checkpoint_label
-        model_provenance = source.provenance
+    model = source.model
+    tokenizer = source.tokenizer
+    model_label = source.model_label
+    checkpoint_label = source.checkpoint_label
+    model_provenance = source.provenance
 
     dataset, dataset_label = _load_evaluation_dataset(
         data_path=args.data_path,
@@ -421,6 +451,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         shard_index=args.dataset_shard_index,
         seed=args.seed,
     )
+    dataset_fingerprint = _dataset_fingerprint(dataset)
 
     device = torch.device(args.device)
     model.to(device)
@@ -436,7 +467,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         f"{args.dataset_shard_index}-of-{args.num_dataset_shards}.csv"
     )
     manifest = {
-        "schema_version": 2,
+        "schema_version": 3,
         "model": model_provenance,
         "dataset": {
             "data_path": str(args.data_path.resolve()) if args.data_path else None,
@@ -444,6 +475,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             "dataset_config": args.dataset_config,
             "dataset_split": args.dataset_split,
             "dataset_label": dataset_label,
+            "fingerprint": dataset_fingerprint,
             "text_column": args.text_column,
             "id_column": args.id_column,
             "min_chars": args.min_chars,
