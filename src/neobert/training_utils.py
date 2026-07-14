@@ -934,9 +934,10 @@ def sync_resume_source_of_truth(
     optimizer/scheduler construction, and task/head semantics so loaded state
     and the saved epoch/microbatch cursor retain their meaning.
 
-    Two continuation knobs are likewise launch-controlled (the launch config
+    Continuation data sources are likewise launch-controlled (the launch config
     wins, drift is warned but not reverted): the training corpus identity
-    (``dataset.name``/``config``/``path``/``text_column``), which
+    (``dataset.name``/``config``/``path``/``text_column``) and the optional
+    contrastive SimCSE source (``contrastive.pretraining_dataset_path``), which
     never touches checkpointed model or optimizer state, and - for RoPE models
     only - the context window (``model.max_position_embeddings``,
     ``tokenizer.max_length``, ``dataset.max_seq_length``), which RoPE makes
@@ -1200,6 +1201,15 @@ def sync_resume_source_of_truth(
             section="dataset",
         )
     )
+    if task == "contrastive":
+        operator_controlled.extend(
+            _report_launch_controlled_config_drift(
+                cfg.contrastive,
+                checkpoint_cfg.contrastive,
+                ("pretraining_dataset_path",),
+                section="contrastive",
+            )
+        )
     if pretraining_corpus_changed:
         operator_controlled.extend(
             _report_launch_controlled_config_drift(

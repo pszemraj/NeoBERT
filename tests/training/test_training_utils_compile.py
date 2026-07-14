@@ -440,6 +440,7 @@ def test_sync_resume_source_of_truth_uses_checkpoint_config(
     checkpoint_cfg.datacollator.pack_sequences = True
     checkpoint_cfg.contrastive.pooling = "max"
     checkpoint_cfg.contrastive.pretraining_prob = 0.4
+    checkpoint_cfg.contrastive.pretraining_dataset_path = "checkpoint-simcse"
     checkpoint_cfg.trainer.per_device_train_batch_size = 8
     checkpoint_cfg.trainer.gradient_accumulation_steps = 4
     checkpoint_cfg.optimizer.name = "adamw"
@@ -463,6 +464,7 @@ def test_sync_resume_source_of_truth_uses_checkpoint_config(
     runtime_cfg.datacollator.pack_sequences = False
     runtime_cfg.contrastive.pooling = "avg"
     runtime_cfg.contrastive.pretraining_prob = 0.0
+    runtime_cfg.contrastive.pretraining_dataset_path = "runtime-simcse"
     runtime_cfg.trainer.per_device_train_batch_size = 32
     runtime_cfg.trainer.gradient_accumulation_steps = 1
     runtime_cfg.optimizer.name = "adam"
@@ -472,7 +474,7 @@ def test_sync_resume_source_of_truth_uses_checkpoint_config(
     runtime_cfg.trainer.gradient_checkpointing = False
     runtime_cfg.trainer.torch_compile = False
 
-    sync_resume_source_of_truth(
+    drift = sync_resume_source_of_truth(
         runtime_cfg,
         checkpoint_dir,
         task="contrastive",
@@ -488,6 +490,8 @@ def test_sync_resume_source_of_truth_uses_checkpoint_config(
     assert runtime_cfg.datacollator.pack_sequences is True
     assert runtime_cfg.contrastive.pooling == "max"
     assert runtime_cfg.contrastive.pretraining_prob == 0.4
+    assert runtime_cfg.contrastive.pretraining_dataset_path == "runtime-simcse"
+    assert "contrastive.pretraining_dataset_path" in drift
     # Corpus identity is operator-controlled (launch config wins on resume).
     assert runtime_cfg.dataset.name == "runtime-dataset"
     assert runtime_cfg.dataset.path == "runtime-data"

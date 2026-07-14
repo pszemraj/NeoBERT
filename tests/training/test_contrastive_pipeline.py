@@ -128,15 +128,23 @@ class TestContrastivePipeline:
             ),
         ):
             trainer(config)
+            resumed = pretraining_prob == 1.0 and save_steps == 2
+            if resumed:
+                config.trainer.resume_from_checkpoint = "latest"
+                config.trainer.max_steps = 2
+                trainer(config)
         assert signal.getsignal(signal.SIGTERM) == previous_sigterm_handler
 
-        cached_loader.assert_called_once()
+        expected_runs = 2 if resumed else 1
+        assert cached_loader.call_count == expected_runs
         if pretraining_prob > 0:
-            pretraining_loader.assert_called_once_with(str(tmp_path / "pretraining"))
+            assert pretraining_loader.call_count == expected_runs
+            pretraining_loader.assert_called_with(str(tmp_path / "pretraining"))
         else:
             pretraining_loader.assert_not_called()
         assert cached_loader.call_args.kwargs["selected_names"] == ["ALLNLI"]
-        step_dir = tmp_path / "checkpoints" / str(max_steps)
+        expected_step = 2 if resumed else max_steps
+        step_dir = tmp_path / "checkpoints" / str(expected_step)
         assert step_dir.is_dir()
         assert (step_dir / "model.safetensors").is_file()
         assert (step_dir / "config.yaml").is_file()
