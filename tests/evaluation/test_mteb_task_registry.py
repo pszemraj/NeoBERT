@@ -131,6 +131,33 @@ def test_explicit_all_overrides_narrower_config_selection() -> None:
     assert run_mteb._resolve_mteb_tasks(config) == list(MTEB_ALL_EXECUTION_TASKS)
 
 
+def test_mteb_cache_identity_covers_checkpoint_and_scoring_contract(
+    tmp_path: Path,
+) -> None:
+    """Only identical checkpoints and scoring settings may share MTEB results."""
+    run_mteb = _load_script("run_mteb")
+    training_config = SimpleNamespace(model=SimpleNamespace(name="tiny"))
+
+    def _identity(checkpoint: str, pooling: str, max_length: int) -> tuple[str, str]:
+        return run_mteb._mteb_cache_identity(
+            SimpleNamespace(
+                checkpoint_dir=tmp_path / "run" / "checkpoints" / checkpoint,
+                checkpoint_tag=checkpoint,
+                training_config=training_config,
+            ),
+            pooling=pooling,
+            max_length=max_length,
+        )
+
+    baseline = _identity("10", "avg", 32)
+
+    assert baseline == _identity("10", "avg", 32)
+    assert baseline[0] == "NeoBERT/tiny"
+    assert baseline != _identity("20", "avg", 32)
+    assert baseline != _identity("10", "cls", 32)
+    assert baseline != _identity("10", "avg", 64)
+
+
 def test_mteb_uses_checkpoint_local_model_and_tokenizer(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -247,9 +274,18 @@ def test_mteb_uses_checkpoint_local_model_and_tokenizer(
     model_config = captured["model_config"]
     assert model_config.hidden_size == checkpoint_cfg.model.hidden_size
     assert captured["resolver_kwargs"] == {"max_length": 32}
+    model_name, model_revision = run_mteb._mteb_cache_identity(
+        SimpleNamespace(
+            checkpoint_dir=checkpoint_dir,
+            checkpoint_tag="10",
+            training_config=checkpoint_cfg,
+        ),
+        pooling="avg",
+        max_length=32,
+    )
     assert captured["model_meta"] == {
-        "name": "no_model_name_available",
-        "revision": "no_revision_available",
+        "name": model_name,
+        "revision": model_revision,
         "framework": ["PyTorch"],
         "max_tokens": 32,
         "embed_dim": checkpoint_cfg.model.hidden_size,

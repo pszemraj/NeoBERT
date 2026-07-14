@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -12,6 +14,7 @@ from neobert.checkpointing import load_step_checkpoint_state_dict
 from neobert.config import ConfigLoader
 from neobert.evaluation_utils import resolve_checkpoint_model_source
 from neobert.model import NeoBERTForMTEB
+from neobert.model.wrappers import normalize_mteb_pooling
 from neobert.mteb_tasks import (
     MTEB_ALL_EXECUTION_TASKS,
     MTEB_EXECUTION_TASKS_BY_TYPE,
@@ -22,6 +25,39 @@ from neobert.mteb_tasks import (
 logging.basicConfig(level=logging.INFO)
 
 logger = logging.getLogger("main")
+
+
+def _mteb_cache_identity(
+    resolved: Any,
+    *,
+    pooling: str,
+    max_length: int,
+) -> tuple[str, str]:
+    """Build a stable MTEB cache identity for one local scoring contract.
+
+    :param Any resolved: Resolved checkpoint model source.
+    :param str pooling: Canonical embedding pooling strategy.
+    :param int max_length: Evaluation context length.
+    :return tuple[str, str]: MTEB model name and contract revision.
+    """
+    checkpoint_dir = resolved.checkpoint_dir.resolve()
+    run_name = (
+        checkpoint_dir.parent.parent.name
+        if checkpoint_dir.parent.name == "checkpoints"
+        else checkpoint_dir.parent.name
+    )
+    configured_name = getattr(resolved.training_config.model, "name", None)
+    model_name = str(configured_name or run_name)
+    contract = {
+        "checkpoint": str(checkpoint_dir),
+        "checkpoint_tag": str(resolved.checkpoint_tag),
+        "max_length": max_length,
+        "pooling": pooling,
+    }
+    revision = hashlib.sha256(
+        json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"NeoBERT/{model_name}", revision
 
 
 def _get_mteb_module() -> Any:
@@ -171,7 +207,7 @@ def evaluate_mteb(cfg: Any) -> None:
     """
     # Get MTEB-specific config (kept at top-level Config for now)
     mteb_batch_size = getattr(cfg, "mteb_batch_size", 32)
-    mteb_pooling = getattr(cfg, "mteb_pooling", "avg")
+    mteb_pooling = normalize_mteb_pooling(getattr(cfg, "mteb_pooling", "avg"))
     mteb_overwrite_results = getattr(cfg, "mteb_overwrite_results", False)
     pretrained_checkpoint = getattr(cfg, "pretrained_checkpoint", "latest")
     pretrained_checkpoint_dir = Path(cfg.trainer.output_dir)
@@ -225,10 +261,15 @@ def evaluate_mteb(cfg: Any) -> None:
 
     # Evaluate
     mteb = _get_mteb_module()
+    model_name, model_revision = _mteb_cache_identity(
+        resolved,
+        pooling=mteb_pooling,
+        max_length=requested_max_length,
+    )
     model.mteb_model_meta = mteb.models.ModelMeta.create_empty(
         {
-            "name": "no_model_name_available",
-            "revision": "no_revision_available",
+            "name": model_name,
+            "revision": model_revision,
             "framework": ["PyTorch"],
             "max_tokens": requested_max_length,
             "embed_dim": resolved.model_config.hidden_size,
