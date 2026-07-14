@@ -64,6 +64,12 @@ def test_preserve_sigterm_handler_restores_after_exception() -> None:
     finally:
         signal.signal(signal.SIGTERM, original_handler)
 
+    from neobert.contrastive.trainer import trainer as contrastive_trainer
+    from neobert.pretraining.trainer import trainer as pretraining_trainer
+
+    assert hasattr(contrastive_trainer, "__wrapped__")
+    assert hasattr(pretraining_trainer, "__wrapped__")
+
 
 def _write_complete_checkpoint_shell(
     checkpoint_path: Path,

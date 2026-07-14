@@ -286,6 +286,7 @@ class TestContrastivePipeline:
 
         class LocalAccelerator:
             device = torch.device("cpu")
+            num_processes = 2
 
             @staticmethod
             def reduce(value, reduction):
@@ -296,6 +297,23 @@ class TestContrastivePipeline:
         state.request(signal.SIGTERM, None)
 
         assert state.requested_signum == signal.SIGTERM
+        assert state.synchronize(LocalAccelerator()) is True
+
+    def test_preemption_single_process_avoids_collective(self):
+        """Single-process polling should stay local and avoid a host sync."""
+
+        class LocalAccelerator:
+            num_processes = 1
+
+            @staticmethod
+            def reduce(value, reduction):
+                del value, reduction
+                raise AssertionError("single-process preemption must not reduce")
+
+        state = PreemptionState()
+        assert state.synchronize(LocalAccelerator()) is False
+
+        state.request(signal.SIGTERM, None)
         assert state.synchronize(LocalAccelerator()) is True
 
     def test_muonclip_trainer_uses_configured_backbone_and_model_config(

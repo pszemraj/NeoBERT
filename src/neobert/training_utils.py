@@ -65,6 +65,11 @@ class PreemptionState:
         :param Any accelerator: Active Accelerator instance.
         :return bool: True when at least one rank requested termination.
         """
+        if accelerator.num_processes == 1:
+            return self.requested_signum != 0
+
+        # Every rank must participate on every completed update: gating this
+        # collective on local state would deadlock when only one rank receives SIGTERM.
         local_request = torch.tensor(
             int(self.requested_signum != 0),
             device=accelerator.device,
