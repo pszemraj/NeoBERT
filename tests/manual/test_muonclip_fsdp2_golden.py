@@ -21,13 +21,13 @@ import tempfile
 from pathlib import Path
 
 import torch
-import torch.distributed.checkpoint as dist_cp
 import torch.distributed as dist
-from torch.distributed.fsdp import fully_shard
+import torch.distributed.checkpoint as dist_cp
 from torch.distributed.checkpoint.state_dict import (
     get_optimizer_state_dict,
     set_optimizer_state_dict,
 )
+from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor
 
 from neobert.model import NeoBERT, NeoBERTConfig

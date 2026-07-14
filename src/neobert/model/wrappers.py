@@ -16,10 +16,9 @@ from neobert.utils import additive_attention_mask
 from .model import NeoBERT, NeoBERTConfig, NeoBERTPreTrainedModel, PackedSeqLens
 
 if TYPE_CHECKING:
-    from torch.utils.data import DataLoader
-
     from mteb.abstasks.task_metadata import TaskMetadata
     from mteb.types import BatchedInput, PromptType
+    from torch.utils.data import DataLoader
 
 MTEB_POOLING_ALIASES = {"avg": "avg", "mean": "avg", "cls": "cls"}
 

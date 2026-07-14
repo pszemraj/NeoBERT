@@ -6,15 +6,15 @@ from unittest.mock import PropertyMock, patch
 
 import torch
 
+from neobert.huggingface import NeoBERTHFForSequenceClassification
+from neobert.kernels.attention import (
+    prepare_packed_flash_metadata as _prepare_packed_flash_metadata_real,
+)
 from neobert.model import (
     NeoBERT,
     NeoBERTConfig,
     NeoBERTForSequenceClassification,
     NeoBERTLMHead,
-)
-from neobert.huggingface import NeoBERTHFForSequenceClassification
-from neobert.kernels.attention import (
-    prepare_packed_flash_metadata as _prepare_packed_flash_metadata_real,
 )
 from tests.tokenizer_utils import build_wordlevel_tokenizer
 
@@ -237,6 +237,8 @@ class TestModelForward(unittest.TestCase):
         """Automatic HF positions equal explicit zero-based IDs for learned positions."""
         from neobert.huggingface.modeling_neobert import (
             NeoBERT as HFNeoBERT,
+        )
+        from neobert.huggingface.modeling_neobert import (
             NeoBERTConfig as HFNeoBERTConfig,
         )
 
@@ -1061,6 +1063,8 @@ class TestModelForward(unittest.TestCase):
         """Ensure LM heads apply expected embedding tying and decoder-bias rules."""
         from neobert.huggingface.modeling_neobert import (
             NeoBERTConfig as HFNeoBERTConfig,
+        )
+        from neobert.huggingface.modeling_neobert import (
             NeoBERTLMHead as HFNeoBERTLMHead,
         )
         from neobert.model import NeoBERTConfig, NeoBERTLMHead
@@ -1308,10 +1312,14 @@ class TestModelForward(unittest.TestCase):
         """Ensure training and HF rotary helpers stay numerically aligned."""
         from neobert.huggingface.rotary import (
             apply_rotary_emb as hf_apply_rotary_emb,
+        )
+        from neobert.huggingface.rotary import (
             precompute_freqs_cis as hf_precompute_freqs_cis,
         )
         from neobert.model.rotary import (
             apply_rotary_emb as train_apply_rotary_emb,
+        )
+        from neobert.model.rotary import (
             precompute_freqs_cis as train_precompute_freqs_cis,
         )
 
@@ -1368,6 +1376,8 @@ class TestModelForward(unittest.TestCase):
 
         from neobert.huggingface.modeling_neobert import (
             NeoBERT as HFNeoBERT,
+        )
+        from neobert.huggingface.modeling_neobert import (
             NeoBERTConfig as HFNeoBERTConfig,
         )
 
@@ -1475,6 +1485,8 @@ class TestModelForward(unittest.TestCase):
         """Ensure HF classifier initialization is explicitly limited to its head."""
         from neobert.huggingface.modeling_neobert import (
             NeoBERTConfig as HFNeoBERTConfig,
+        )
+        from neobert.huggingface.modeling_neobert import (
             NeoBERTForSequenceClassification as HFSequenceClassifier,
         )
 
@@ -1646,8 +1658,8 @@ class TestModelForward(unittest.TestCase):
         """Ensure MTEB encode does not crash with attn_backend='flash_attn_varlen' on CUDA."""
         from torch.utils.data import DataLoader
 
-        from neobert.model import NeoBERTConfig, NeoBERTForMTEB
         from neobert.kernels.attention import FLASH_ATTN_AVAILABLE
+        from neobert.model import NeoBERTConfig, NeoBERTForMTEB
 
         if not FLASH_ATTN_AVAILABLE:
             self.skipTest(

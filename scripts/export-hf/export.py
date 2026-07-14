@@ -23,6 +23,14 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 import transformers
 import yaml
+from export_utils import (
+    REQUIRED_TRAINING_MODEL_CONFIG_FIELDS,
+    has_packed_swiglu_weights,
+)
+from mlm_predict import clean_metaspace_before_mask
+from safetensors.torch import save_file
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
+
 from neobert.checkpointing import (
     load_deepspeed_fp32_state_dict,
     load_model_safetensors,
@@ -33,14 +41,6 @@ from neobert.modeling_utils import (
 )
 from neobert.tokenizer import align_tokenizer_vocab
 from neobert.warnings import NeoBERTWarning
-from safetensors.torch import save_file
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
-
-from export_utils import (
-    REQUIRED_TRAINING_MODEL_CONFIG_FIELDS,
-    has_packed_swiglu_weights,
-)
-from mlm_predict import clean_metaspace_before_mask
 
 
 def load_config(config_path: Path) -> Dict[str, Any]:

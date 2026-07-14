@@ -3,16 +3,17 @@
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import SimpleNamespace
+
 import pytest
 
 from neobert.config import Config
+from neobert.model import NeoBERTConfig
 from neobert.mteb_tasks import (
     CQADUPSTACK_TASKS,
     MTEB_ALL_EXECUTION_TASKS,
     MTEB_TASK_GROUPS_BY_KEY,
     expand_mteb_task_name,
 )
-from neobert.model import NeoBERTConfig
 
 SCRIPT_DIR = Path(__file__).resolve().parents[2] / "scripts" / "evaluation"
 

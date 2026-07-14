@@ -11,9 +11,9 @@ import pytest
 import torch
 from datasets import Dataset
 
+from neobert import evaluation_utils
 from neobert.checkpointing import save_state_dict_safetensors
 from neobert.config import Config, ConfigLoader
-from neobert import evaluation_utils
 from neobert.model import NeoBERTConfig, NeoBERTLMHead
 from tests.tokenizer_utils import build_wordlevel_tokenizer
 

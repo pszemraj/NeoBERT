@@ -74,3 +74,6 @@ norecursedirs = [
     ".venv",
     "build",
 ]
+
+[tool.ruff.lint]
+extend-select = ["I"]

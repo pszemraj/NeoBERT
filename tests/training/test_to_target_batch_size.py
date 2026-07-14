@@ -5,14 +5,14 @@ import unittest
 
 import torch
 
+from neobert.pretraining.metrics import Metrics
 from neobert.pretraining.trainer import (
-    _CheckpointableBatchBuffer,
     _append_to_stored_batch,
+    _CheckpointableBatchBuffer,
     _has_stored_batch,
     _reset_data_position_for_corpus_change,
     to_target_batch_size,
 )
-from neobert.pretraining.metrics import Metrics
 
 
 class TestToTargetBatchSizeDevice(unittest.TestCase):

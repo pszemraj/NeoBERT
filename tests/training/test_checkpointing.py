@@ -16,8 +16,8 @@ from neobert.checkpointing import (
     OPTIMIZER_PARAM_NAMES_MANIFEST,
     checkpoint_resume_errors,
     invalidate_checkpoint_completion,
-    is_step_checkpoint_name,
     is_resumable_checkpoint,
+    is_step_checkpoint_name,
     load_deepspeed_fp32_state_dict,
     load_model_safetensors,
     load_step_checkpoint_state_dict,
@@ -184,6 +184,7 @@ def test_accelerate_resume_state_coexists_with_portable_weights(
     """
     from accelerate import Accelerator
     from accelerate.state import AcceleratorState
+
     from neobert.checkpointing import save_portable_checkpoint_weights
 
     AcceleratorState._reset_state(True)

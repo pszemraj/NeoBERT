@@ -34,13 +34,16 @@ from datasets import (
     load_dataset_builder,
     load_from_disk,
 )
-
 from tqdm import tqdm
 from transformers import BatchEncoding, PreTrainedTokenizerBase
 
 from neobert.checkpointing import (
     prune_step_checkpoints as _prune_step_checkpoints,
+)
+from neobert.checkpointing import (
     resolve_accelerate_state_dir,
+)
+from neobert.checkpointing import (
     resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
 )
 from neobert.config import (
@@ -60,6 +63,9 @@ from neobert.pretraining.masked_objective import (
     MaskedObjectiveOut,
     MaskedPositionsOnlyMLMObjective,
 )
+
+# Our metric object and model
+from neobert.pretraining.metrics import Metrics, format_metrics
 from neobert.scheduler import get_scheduler, resolve_scheduler_steps
 from neobert.streaming import (
     RetryingStreamingDataset,
@@ -75,13 +81,13 @@ from neobert.tokenizer import (
     tokenize_pretraining_dataset,
 )
 from neobert.training_utils import (
+    PreemptionState,
     _maybe_compile_model,
     _maybe_prepare_for_forward,
     _pin_cpu_tensors,
     _resolve_cuda_pin_memory,
     _resolve_resume_checkpoint,
     _update_global_norm_metric_for_logging,
-    PreemptionState,
     attach_optimizer_param_names,
     build_dataloader_config,
     create_accelerator,
@@ -93,10 +99,10 @@ from neobert.training_utils import (
     save_training_checkpoint,
     should_save_step_checkpoint,
     sync_resume_source_of_truth,
-    validate_optimizer_param_name_manifest,
     validate_distributed_runtime_policy,
     validate_muon_distributed_compatibility,
     validate_muon_runtime_topology,
+    validate_optimizer_param_name_manifest,
 )
 from neobert.utils import (
     configure_tf32,
@@ -104,9 +110,6 @@ from neobert.utils import (
     model_summary,
     prepare_wandb_config,
 )
-
-# Our metric object and model
-from neobert.pretraining.metrics import Metrics, format_metrics
 
 # Set up logger
 logger = logging.getLogger(__name__)

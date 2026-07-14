@@ -24,9 +24,9 @@ from neobert.contrastive.trainer import (
     _sync_contrastive_runtime_from_pretraining,
     trainer,
 )
-from neobert.training_utils import PreemptionState
 from neobert.model import NeoBERT, NeoBERTConfig
 from neobert.model.wrappers import NeoBERTLMHead
+from neobert.training_utils import PreemptionState
 from tests.tokenizer_utils import build_wordlevel_tokenizer
 
 

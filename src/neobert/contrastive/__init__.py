@@ -31,20 +31,15 @@ __all__ = [
 from .datasets import (
     ALLNLI,
     AMAZONQA,
-    CONTRASTIVE_DATASETS,
     CONCURRENTQA,
-    discover_cached_contrastive_dataset_names,
+    CONTRASTIVE_DATASETS,
     FEVER,
     GITHUBISSUE,
     GOOAQ,
-    load_cached_contrastive_datasets,
     MSMARCO,
-    normalize_contrastive_dataset_name_token,
     PAQ,
     PUBMEDQA,
     QQP,
-    resolve_contrastive_dataset_name,
-    resolve_contrastive_dataset_names,
     SENTENCECOMP,
     STACKEXCHANGE,
     STACKOVERFLOW,
@@ -52,6 +47,11 @@ from .datasets import (
     STSBENCHMARK,
     TRIVIAQA,
     WIKIHOW,
+    discover_cached_contrastive_dataset_names,
+    load_cached_contrastive_datasets,
+    normalize_contrastive_dataset_name_token,
+    resolve_contrastive_dataset_name,
+    resolve_contrastive_dataset_names,
 )
 from .loss import SupConLoss
 from .trainer import trainer

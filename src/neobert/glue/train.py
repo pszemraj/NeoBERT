@@ -32,14 +32,14 @@ from transformers import (
 from neobert.checkpointing import (
     MODEL_WEIGHTS_NAME,
     load_step_checkpoint_state_dict,
-    prune_step_checkpoints as _prune_step_checkpoints,
     resolve_accelerate_state_dir,
+)
+from neobert.checkpointing import (
+    prune_step_checkpoints as _prune_step_checkpoints,
+)
+from neobert.checkpointing import (
     resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
 )
-from neobert.kernels.attention import canonicalize_attn_backend
-from neobert.model import NeoBERTConfig, NeoBERTForSequenceClassification
-from neobert.tokenizer import get_tokenizer
-
 from neobert.config import Config, ConfigLoader, resolve_mixed_precision
 from neobert.glue.process import process_function
 from neobert.glue.state import GlueLoopState
@@ -48,8 +48,12 @@ from neobert.glue.tasks import (
     get_checkpoint_selection_score,
     get_glue_task_spec,
 )
+from neobert.glue.validation import GlueValidationError, validate_glue_config
+from neobert.kernels.attention import canonicalize_attn_backend
+from neobert.model import NeoBERTConfig, NeoBERTForSequenceClassification
 from neobert.optimizer import get_optimizer
 from neobert.scheduler import get_scheduler, resolve_scheduler_steps
+from neobert.tokenizer import get_tokenizer
 from neobert.training_utils import (
     _maybe_compile_model,
     _maybe_prepare_for_forward,
@@ -58,12 +62,14 @@ from neobert.training_utils import (
     attach_optimizer_param_names,
     build_dataloader_config,
     create_accelerator,
-    save_training_checkpoint as _save_shared_training_checkpoint,
     sync_resume_source_of_truth,
     validate_distributed_runtime_policy,
     validate_muon_distributed_compatibility,
     validate_muon_runtime_topology,
     validate_optimizer_param_name_manifest,
+)
+from neobert.training_utils import (
+    save_training_checkpoint as _save_shared_training_checkpoint,
 )
 from neobert.utils import (
     additive_attention_mask,
@@ -71,7 +77,6 @@ from neobert.utils import (
     format_resolved_config,
     prepare_wandb_config,
 )
-from neobert.glue.validation import GlueValidationError, validate_glue_config
 
 logger = get_logger(__name__)
 _bootstrap_logger = logging.getLogger(__name__)

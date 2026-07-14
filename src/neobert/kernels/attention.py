@@ -1,8 +1,8 @@
 """Attention backend dispatch: PyTorch SDPA + flash_attn_varlen."""
 
-from dataclasses import dataclass
 import logging
 import math
+from dataclasses import dataclass
 from typing import Literal, Optional
 
 import torch
@@ -37,7 +37,9 @@ FLASH_ATTN_ERROR: Optional[str] = None
 _flash_attn_varlen_func = None
 
 try:
-    from flash_attn import flash_attn_varlen_func as _flash_attn_varlen_func  # type: ignore[no-redef]
+    from flash_attn import (
+        flash_attn_varlen_func as _flash_attn_varlen_func,  # type: ignore[no-redef]
+    )
 
     FLASH_ATTN_AVAILABLE = True
 except (ImportError, RuntimeError) as exc:

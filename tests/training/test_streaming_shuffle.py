@@ -2,8 +2,8 @@
 """Tests for streaming dataset shuffle helpers."""
 
 import errno
-from http.client import IncompleteRead
 import unittest
+from http.client import IncompleteRead
 from unittest.mock import MagicMock, patch
 
 import requests
@@ -14,9 +14,9 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from neobert.config import Config
 from neobert.pretraining.trainer import (
-    _maybe_wrap_streaming_dataset_for_retries,
-    _maybe_shuffle_streaming_dataset,
     _load_streaming_split,
+    _maybe_shuffle_streaming_dataset,
+    _maybe_wrap_streaming_dataset_for_retries,
     _prepare_resume_dataloader,
     _validate_packed_batch_buffering_policy,
 )

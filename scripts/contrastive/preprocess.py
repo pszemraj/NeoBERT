@@ -13,8 +13,8 @@ from neobert.contrastive.datasets import (
     build_contrastive_tokenization_manifest,
     discover_cached_contrastive_dataset_names,
     load_cached_contrastive_datasets,
-    resolve_contrastive_token_columns,
     resolve_contrastive_dataset_names,
+    resolve_contrastive_token_columns,
 )
 from neobert.tokenization_cache import (
     validate_tokenized_cache_manifest,

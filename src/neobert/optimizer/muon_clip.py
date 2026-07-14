@@ -13,15 +13,14 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tupl
 import torch
 import torch.distributed as dist
 from torch.optim import Optimizer
+from torch.utils.hooks import RemovableHandle
 
+from neobert.config import MuonConfig
+from neobert.distributed import DTensor, Shard, is_dtensor_like
 from neobert.optimizer.parameter_groups import (
     embedding_parameter_ids,
     uses_weight_decay,
 )
-from neobert.distributed import DTensor, Shard, is_dtensor_like
-from torch.utils.hooks import RemovableHandle
-
-from neobert.config import MuonConfig
 from neobert.warnings import NeoBERTWarning
 
 logger = logging.getLogger(__name__)

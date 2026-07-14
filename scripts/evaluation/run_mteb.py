@@ -11,13 +11,13 @@ import torch
 from neobert.checkpointing import load_step_checkpoint_state_dict
 from neobert.config import ConfigLoader
 from neobert.evaluation_utils import resolve_checkpoint_model_source
+from neobert.model import NeoBERTForMTEB
 from neobert.mteb_tasks import (
     MTEB_ALL_EXECUTION_TASKS,
     MTEB_EXECUTION_TASKS_BY_TYPE,
     MTEB_TASK_SPECS_BY_EXECUTION_NAME,
     expand_mteb_task_name,
 )
-from neobert.model import NeoBERTForMTEB
 
 logging.basicConfig(level=logging.INFO)
 

@@ -5,15 +5,14 @@ from __future__ import annotations
 import json
 import logging
 import math
-from pathlib import Path
 import signal
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
 from accelerate.utils import DataLoaderConfiguration, DistributedType
 
-from neobert.config import Config, ConfigLoader
 from neobert.checkpointing import (
     ACCELERATE_STATE_DIR,
     CHECKPOINT_COMPLETE_NAME,
@@ -21,6 +20,7 @@ from neobert.checkpointing import (
     checkpoint_resume_errors,
     mark_checkpoint_complete,
 )
+from neobert.config import Config, ConfigLoader
 from neobert.model import NeoBERT, NeoBERTConfig
 from neobert.optimizer import get_optimizer
 from neobert.training_utils import (
@@ -38,10 +38,10 @@ from neobert.training_utils import (
     save_optimizer_param_name_manifest,
     should_save_step_checkpoint,
     sync_resume_source_of_truth,
-    validate_optimizer_param_name_manifest,
     validate_distributed_runtime_policy,
     validate_muon_distributed_compatibility,
     validate_muon_runtime_topology,
+    validate_optimizer_param_name_manifest,
 )
 
 

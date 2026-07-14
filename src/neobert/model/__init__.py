@@ -8,8 +8,8 @@ __all__ = [
     "NeoBERTConfig",
 ]
 
-from .model import NeoBERT, NeoBERTConfig
 from .classification import (
     NeoBERTForSequenceClassification,
 )
+from .model import NeoBERT, NeoBERTConfig
 from .wrappers import NeoBERTForMTEB, NeoBERTLMHead

@@ -10,7 +10,6 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import torch
 import torch.nn as nn
 
-
 _TASK_CONFIG_FIELDS: dict[str, tuple[str, ...]] = {
     "pretraining": (
         "task",

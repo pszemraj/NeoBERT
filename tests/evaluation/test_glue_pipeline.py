@@ -125,8 +125,8 @@ class TestGLUETaskSpecific:
         state corruption; GLUE saves lacked it (unlike pretraining/contrastive),
         so this also pins that each kept checkpoint carries the manifest.
         """
-        from neobert.glue.train import save_training_checkpoint
         from neobert.checkpointing import MODEL_WEIGHTS_NAME
+        from neobert.glue.train import save_training_checkpoint
         from neobert.training_utils import (
             OPTIMIZER_PARAM_NAMES_MANIFEST,
             attach_optimizer_param_names,

@@ -24,9 +24,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
-from transformers import AutoModel, AutoModelForMaskedLM, AutoTokenizer
-
 from export_utils import REQUIRED_HF_CONFIG_FIELDS, has_packed_swiglu_weights
+from transformers import AutoModel, AutoModelForMaskedLM, AutoTokenizer
 
 
 def _load_config(model_path: Path) -> Dict[str, Any]:

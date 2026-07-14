@@ -1,8 +1,7 @@
 """Data collators used for pretraining and packing."""
 
-from typing import Any, Callable, Optional, Tuple
-
 import warnings
+from typing import Any, Callable, Optional, Tuple
 
 import numpy as np
 import torch
