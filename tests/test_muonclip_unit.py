@@ -909,6 +909,58 @@ class TestMuonClipOptimizer:
         view[:, : config.dim_head].mul_(eta.view(-1, 1, 1))
         assert torch.allclose(qkv_param, expected)
 
+    @pytest.mark.parametrize("projection_layout", ["fused", "separate"])
+    def test_projection_failures_abort_clipping(
+        self,
+        model,
+        monkeypatch: pytest.MonkeyPatch,
+        projection_layout: str,
+    ):
+        """Projection failures must not become rank-local clipping skips."""
+        model_instance, config = model
+        optimizer = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(enable_clipping=False),
+        )
+        inputs = torch.zeros(1, 2, config.hidden_size)
+        qkv_param = model_instance.transformer_encoder[0].qkv.weight
+
+        def _fail_matmul(*args, **kwargs):
+            del args, kwargs
+            raise RuntimeError("projection failed")
+
+        monkeypatch.setattr(torch, "matmul", _fail_matmul)
+        with pytest.raises(RuntimeError, match="refusing to skip rank-local"):
+            if projection_layout == "fused":
+                optimizer._compute_eta_for_fused(inputs, qkv_param, None, None, None)
+            else:
+                projection = torch.nn.Parameter(
+                    torch.zeros(config.hidden_size, config.hidden_size)
+                )
+                optimizer._compute_eta_for_separate(
+                    inputs,
+                    projection,
+                    projection,
+                    None,
+                    None,
+                    None,
+                )
+
+    def test_single_rank_partial_capture_fails_fast(self, model):
+        """Partial layer capture is invalid even without distributed replicas."""
+        model_instance, config = model
+        optimizer = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(enable_clipping=True),
+        )
+        assert optimizer.hook_system is not None
+        optimizer.hook_system.layer_inputs[0] = torch.zeros(1, 2, config.hidden_size)
+
+        with pytest.raises(RuntimeError, match="captured=1/1, complete=0/1"):
+            optimizer._synchronize_capture_readiness()
+
     def test_fused_qkv_muon_splits_projections_before_orthogonalization(self):
         """Fused QKV updates should apply Muon separately to Q, K, and V."""
         torch.manual_seed(0)

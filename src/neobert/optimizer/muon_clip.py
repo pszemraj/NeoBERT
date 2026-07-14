@@ -2008,8 +2008,10 @@ class MuonClipOptimizer(Optimizer):
             inputs = inputs.to(device=param.device, dtype=param.dtype)
             projections = torch.matmul(inputs, param.transpose(0, 1))
         except RuntimeError as exc:
-            logger.error(f"Failed to compute fused QKV projections: {exc}")
-            return None, None
+            raise RuntimeError(
+                "Failed to compute fused QKV projections for MuonClip; refusing "
+                "to skip rank-local Q/K clipping."
+            ) from exc
 
         batch, seq_len, _ = projections.shape
         expected = 3 * self.model_config.hidden_size
@@ -2061,8 +2063,10 @@ class MuonClipOptimizer(Optimizer):
             q_proj = torch.matmul(inputs_q, q_param.transpose(0, 1))
             k_proj = torch.matmul(inputs_k, k_param.transpose(0, 1))
         except RuntimeError as exc:
-            logger.error(f"Failed to compute separate Q/K projections: {exc}")
-            return None, None
+            raise RuntimeError(
+                "Failed to compute separate Q/K projections for MuonClip; refusing "
+                "to skip rank-local Q/K clipping."
+            ) from exc
 
         batch, seq_len, _ = q_proj.shape
         head_dim = self.model_config.dim_head

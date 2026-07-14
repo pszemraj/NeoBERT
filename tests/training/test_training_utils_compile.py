@@ -1368,7 +1368,9 @@ def test_compute_l2_norm_for_logging_uses_dtensor_owner_for_gradients() -> None:
     assert reduce_calls == [(100.0, "sum")]
 
 
-def test_get_optimizer_rejects_muonclip_clipping_under_fsdp() -> None:
+def test_get_optimizer_rejects_muonclip_clipping_under_fsdp(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """FSDP MuonClip with clipping must fail fast, not silently downgrade."""
     model_cfg = NeoBERTConfig(
         hidden_size=32,
@@ -1410,6 +1412,20 @@ def test_get_optimizer_rejects_muonclip_clipping_under_fsdp() -> None:
     )
     assert hasattr(optimizer, "config")
     assert not optimizer.config.enable_clipping
+
+    with caplog.at_level(logging.WARNING):
+        get_optimizer(
+            model,
+            DistributedType.FSDP,
+            model_config=model_cfg,
+            name="muonclip",
+            lr=1e-4,
+            weight_decay=0.0,
+            betas=(0.9, 0.95),
+            eps=1e-8,
+            muon_config={"enable_clipping": False, "param_policy": "all_2d"},
+        )
+    assert "materially higher communication cost" in caplog.text
 
 
 def test_get_optimizer_rejects_muonclip_under_deepspeed() -> None:
