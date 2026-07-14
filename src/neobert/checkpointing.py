@@ -725,7 +725,7 @@ def resolve_step_checkpoint_selector(
             for path in checkpoint_root.iterdir()
             if path.is_dir() and is_step_checkpoint_name(path.name)
         ),
-        key=int,
+        key=lambda tag: (int(tag), tag),
         reverse=True,
     )
     for tag in candidates:
@@ -748,9 +748,8 @@ def resolve_step_checkpoint_dir(
     :param str | Path checkpoint_path: User-provided checkpoint path.
     :param str | int checkpoint: Requested checkpoint tag/step.
     :return Path: Resolved candidate checkpoint directory.
-    :raises FileNotFoundError:
-        If an explicit checkpoint tag is missing beneath a direct checkpoint path
-        that already contains portable weights.
+    :raises FileNotFoundError: If an explicit checkpoint tag is missing beneath a
+        direct checkpoint path or a root containing numbered checkpoints.
     """
     checkpoint_root = Path(checkpoint_path)
     requested_tag = str(checkpoint).strip()
@@ -765,6 +764,21 @@ def resolve_step_checkpoint_dir(
             f"{checkpoint_root}. Refusing to silently load portable weights from "
             "the root path instead."
         )
+    if checkpoint_root.is_dir():
+        available_tags = sorted(
+            (
+                path.name
+                for path in checkpoint_root.iterdir()
+                if path.is_dir() and is_step_checkpoint_name(path.name)
+            ),
+            key=lambda tag: (int(tag), tag),
+        )
+        if available_tags:
+            raise FileNotFoundError(
+                f"Requested checkpoint '{requested_tag}' was not found under "
+                f"{checkpoint_root}. Available numbered checkpoints: "
+                f"{', '.join(available_tags)}."
+            )
     return checkpoint_root
 
 
@@ -863,7 +877,7 @@ def prune_step_checkpoints(checkpoint_dir: str | Path, retention_limit: int) -> 
     if len(checkpoints) <= retention_limit:
         return
 
-    checkpoints.sort(key=lambda item: item[0])
+    checkpoints.sort(key=lambda item: (item[0], item[1].name))
     for _, old_path in checkpoints[: len(checkpoints) - retention_limit]:
         try:
             shutil.rmtree(old_path)

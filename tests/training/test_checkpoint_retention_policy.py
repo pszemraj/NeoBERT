@@ -49,3 +49,15 @@ def test_prune_step_checkpoints_keeps_latest_numeric_dirs(
     for step in steps:
         assert (checkpoint_dir / str(step)).exists() is (step in expected_kept)
     assert (checkpoint_dir / "notes").exists()
+
+
+def test_prune_step_checkpoints_breaks_numeric_ties_by_name(tmp_path: Path) -> None:
+    """Retention must use the same deterministic alias tie-break as resume."""
+    checkpoint_dir = tmp_path / "checkpoints"
+    for tag in ("50", "050"):
+        (checkpoint_dir / tag).mkdir(parents=True, exist_ok=True)
+
+    prune_step_checkpoints(checkpoint_dir, retention_limit=1)
+
+    assert (checkpoint_dir / "50").is_dir()
+    assert not (checkpoint_dir / "050").exists()

@@ -383,6 +383,20 @@ def test_resolve_step_checkpoint_selector_keeps_zero_padded_step_names(
     assert resolved == "00050"
 
 
+def test_resolve_step_checkpoint_selector_breaks_numeric_ties_by_name(
+    tmp_path: Path,
+) -> None:
+    """Equal numeric steps must resolve consistently with training resume."""
+    for tag in ("50", "050"):
+        step_dir = tmp_path / tag
+        step_dir.mkdir()
+        (step_dir / MODEL_WEIGHTS_NAME).touch()
+
+    resolved = resolve_step_checkpoint_selector(tmp_path, "latest")
+
+    assert resolved == "50"
+
+
 def test_resolve_step_checkpoint_selector_accepts_direct_step_dir_for_latest(
     tmp_path: Path,
 ) -> None:
@@ -416,6 +430,20 @@ def test_resolve_step_checkpoint_dir_rejects_mismatched_direct_portable_weights(
 
     with pytest.raises(FileNotFoundError, match="Requested checkpoint '456'"):
         resolve_step_checkpoint_dir(checkpoint_dir, "456")
+
+
+def test_resolve_step_checkpoint_dir_rejects_missing_tag_under_step_root(
+    tmp_path: Path,
+) -> None:
+    """Missing explicit steps should list available numbered checkpoints."""
+    for tag in ("200", "100"):
+        (tmp_path / tag).mkdir()
+
+    with pytest.raises(
+        FileNotFoundError,
+        match=r"checkpoint '999'.*Available numbered checkpoints: 100, 200",
+    ):
+        resolve_step_checkpoint_dir(tmp_path, "999")
 
 
 def test_load_step_checkpoint_state_dict_prefers_portable_weights(
