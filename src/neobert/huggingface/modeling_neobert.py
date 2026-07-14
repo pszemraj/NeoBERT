@@ -581,13 +581,13 @@ class NeoBERT(NeoBERTPreTrainedModel):
             return attention_mask
         if attention_mask.numel() == 0:
             return attention_mask.to(torch.bool)
-        # Float masks are ambiguous between binary (1/0) and additive (0/-inf).
-        # Treat all-nonpositive float masks (including all-zero) as additive so
-        # 0/-inf callers on unpadded inputs keep all keys.
+        # Float masks are binary unless a negative value explicitly selects
+        # additive 0/-inf semantics. Thus all-zero floats follow the HF binary
+        # convention and mask every key; use None or all ones to keep every key.
         if attention_mask.is_floating_point():
             if torch.isnan(attention_mask).any():
                 raise ValueError("attention_mask must not contain NaN values.")
-            if attention_mask.min() < 0 or attention_mask.max() <= 0:
+            if attention_mask.min() < 0:
                 return attention_mask >= 0
         return attention_mask != 0
 

@@ -307,6 +307,9 @@ def test_attention_mask_parity(
             torch.tensor(float("-inf")),
         )
         additive_mask = additive_mask.to(torch.float32)
+        zero_int_mask = torch.zeros_like(int_mask)
+        zero_bool_mask = zero_int_mask.bool()
+        zero_float_mask = zero_int_mask.to(torch.float32)
 
         with torch.no_grad():
             out_none = model(input_ids=input_ids).last_hidden_state
@@ -332,11 +335,25 @@ def test_attention_mask_parity(
                 input_ids=input_ids,
                 attention_mask=additive_mask,
             ).last_hidden_state
+            out_zero_int = model(
+                input_ids=input_ids,
+                attention_mask=zero_int_mask,
+            ).last_hidden_state
+            out_zero_bool = model(
+                input_ids=input_ids,
+                attention_mask=zero_bool_mask,
+            ).last_hidden_state
+            out_zero_float = model(
+                input_ids=input_ids,
+                attention_mask=zero_float_mask,
+            ).last_hidden_state
 
         checks = [
             ("none_vs_ones", out_none, out_ones, atol, rtol),
             ("int_vs_bool", out_int_sdpa, out_bool, atol, rtol),
             ("int_vs_additive", out_int_sdpa, out_add, atol, rtol),
+            ("zero_int_vs_bool", out_zero_int, out_zero_bool, atol, rtol),
+            ("zero_int_vs_float", out_zero_int, out_zero_float, atol, rtol),
             # Eager softmax and SDPA can differ slightly on full-sized models.
             ("sdpa_vs_eager", out_int_sdpa, out_int_eager, 2e-5, rtol),
         ]

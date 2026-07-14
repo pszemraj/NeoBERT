@@ -713,7 +713,6 @@ class TestModelForward(unittest.TestCase):
 
         no_pad_ids = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
         all_ones = torch.ones_like(no_pad_ids)
-        zero_additive = torch.zeros_like(no_pad_ids, dtype=torch.float32)
         for output_attentions in (False, True):
             with torch.no_grad():
                 outputs_none = model(
@@ -726,11 +725,6 @@ class TestModelForward(unittest.TestCase):
                     attention_mask=all_ones,
                     output_attentions=output_attentions,
                 )
-                outputs_zero = model(
-                    input_ids=no_pad_ids,
-                    attention_mask=zero_additive,
-                    output_attentions=output_attentions,
-                )
             self.assertTrue(
                 torch.allclose(
                     outputs_none.last_hidden_state,
@@ -739,18 +733,13 @@ class TestModelForward(unittest.TestCase):
                     rtol=1e-5,
                 )
             )
-            self.assertTrue(
-                torch.allclose(
-                    outputs_none.last_hidden_state,
-                    outputs_zero.last_hidden_state,
-                    atol=1e-6,
-                    rtol=1e-5,
-                )
-            )
 
         all_false = torch.zeros_like(no_pad_ids, dtype=torch.bool)
         normalized = model._normalize_attention_mask(all_false)
         self.assertFalse(normalized.any().item())
+        zero_float = torch.zeros_like(no_pad_ids, dtype=torch.float32)
+        normalized_zero_float = model._normalize_attention_mask(zero_float)
+        self.assertTrue(torch.equal(normalized_zero_float, normalized))
         keep_all = torch.ones_like(no_pad_ids, dtype=torch.bool)
         normalized_keep_all = model._normalize_attention_mask(keep_all)
         self.assertTrue(normalized_keep_all.all().item())
