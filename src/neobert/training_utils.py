@@ -1,12 +1,14 @@
 """Shared helpers for training loops (pretraining, GLUE, contrastive)."""
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 import json
 import logging
 import os
 from pathlib import Path
+import signal
 from types import FrameType
 from typing import Any, Callable, Iterable, Optional, Tuple
 
@@ -70,6 +72,19 @@ class PreemptionState:
         )
         requests = accelerator.reduce(local_request, reduction="sum")
         return bool(int(requests.item()))
+
+
+@contextmanager
+def preserve_sigterm_handler() -> Iterator[None]:
+    """Restore the process SIGTERM handler after a training entry point exits.
+
+    :return collections.abc.Iterator[None]: Context-managed trainer execution.
+    """
+    previous_handler = signal.getsignal(signal.SIGTERM)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous_handler)
 
 
 def build_dataloader_config(

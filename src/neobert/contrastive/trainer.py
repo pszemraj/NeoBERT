@@ -54,6 +54,7 @@ from neobert.training_utils import (
     build_dataloader_config,
     create_accelerator,
     initialize_wandb_trackers,
+    preserve_sigterm_handler,
     resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
     save_training_checkpoint,
@@ -539,6 +540,7 @@ def _prepare_contrastive_components(
     return dataloaders, model, optimizer, scheduler
 
 
+@preserve_sigterm_handler()
 def trainer(cfg: Config) -> None:
     """Run contrastive training loop.
 
@@ -981,7 +983,6 @@ def trainer(cfg: Config) -> None:
             )
 
     preemption = PreemptionState()
-    previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
     signal.signal(signal.SIGTERM, preemption.request)
 
     # Progress bar
@@ -1302,7 +1303,6 @@ def trainer(cfg: Config) -> None:
                     f"completed optimizer step {metrics['train/steps']}."
                 )
                 pbar.close()
-                signal.signal(signal.SIGTERM, previous_sigterm_handler)
                 accelerator.end_training()
                 raise SystemExit(128 + signal.SIGTERM)
 
@@ -1317,5 +1317,4 @@ def trainer(cfg: Config) -> None:
 
     # Make sure that the wandb tracker finishes correctly and close the progress bar
     pbar.close()
-    signal.signal(signal.SIGTERM, previous_sigterm_handler)
     accelerator.end_training()

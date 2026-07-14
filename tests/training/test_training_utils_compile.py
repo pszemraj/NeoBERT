@@ -6,6 +6,7 @@ import json
 import logging
 import math
 from pathlib import Path
+import signal
 from types import SimpleNamespace
 
 import pytest
@@ -31,6 +32,7 @@ from neobert.training_utils import (
     attach_optimizer_param_names,
     create_accelerator,
     optimizer_state_semantics,
+    preserve_sigterm_handler,
     resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
     save_optimizer_param_name_manifest,
@@ -41,6 +43,26 @@ from neobert.training_utils import (
     validate_muon_distributed_compatibility,
     validate_muon_runtime_topology,
 )
+
+
+def test_preserve_sigterm_handler_restores_after_exception() -> None:
+    """Training failures must not leak their SIGTERM handler into the process."""
+    original_handler = signal.getsignal(signal.SIGTERM)
+
+    def replacement_handler(signum: int, frame: object) -> None:
+        del signum, frame
+
+    @preserve_sigterm_handler()
+    def fail_after_installing_handler() -> None:
+        signal.signal(signal.SIGTERM, replacement_handler)
+        raise RuntimeError("training failed")
+
+    try:
+        with pytest.raises(RuntimeError, match="training failed"):
+            fail_after_installing_handler()
+        assert signal.getsignal(signal.SIGTERM) == original_handler
+    finally:
+        signal.signal(signal.SIGTERM, original_handler)
 
 
 def _write_complete_checkpoint_shell(
