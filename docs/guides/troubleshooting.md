@@ -108,7 +108,7 @@ Pre-stable checkpoint configs are intentionally not schema-compatible with curre
 
 ### Training job exits with status 143 after SIGTERM
 
-- This is the expected preemption path for pretraining and contrastive jobs; see [Checkpointing and Resume](training.md#checkpointing-and-resume). Treat the save as incomplete only when its completion marker is absent.
+- This is the expected preemption path for pretraining and contrastive jobs. Resume from `latest`; [checkpoint validation](training.md#checkpointing-and-resume) rejects missing or damaged artifacts.
 
 ## Evaluation Issues
 

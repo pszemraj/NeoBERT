@@ -38,7 +38,7 @@ pip install -e .[flash] --no-build-isolation
 pip install -e .[legacy-checkpoints]
 ```
 
-See [docs/guides/troubleshooting.md](docs/guides/troubleshooting.md) for environment issues.
+See [Troubleshooting](docs/guides/troubleshooting.md) for environment issues.
 
 ## Verify Setup
 

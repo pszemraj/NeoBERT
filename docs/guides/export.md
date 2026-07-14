@@ -65,7 +65,7 @@ Generated folder contains:
 python scripts/export-hf/validate.py outputs/<run>/hf/<export_name>
 ```
 
-Validator checks file presence, model/tokenizer loading, MLM forward pass, basic output sanity, and attention-mask parity across no-mask, all-ones, integer, boolean, and additive forms.
+Validator checks file presence, model/tokenizer loading, MLM forward pass, basic output sanity, and the [HF attention-mask contract](../reference/architecture.md#hf-export-model-differences), including all-zero integer, boolean, and float parity.
 
 Run a masked-token prediction against a local export or Hub model:
 

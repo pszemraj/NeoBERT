@@ -1,7 +1,5 @@
 # Training Optimization
 
-This guide covers optimizer selection, MuonClip defaults, throughput tuning, and training metrics that matter when comparing runs.
-
 Field names and defaults live in the [YAML configuration reference](../reference/config_reference.yaml).
 
 ## MuonClip Defaults
@@ -107,8 +105,8 @@ NeoBERT keeps pinned CPU staging enabled on CUDA. When Accelerate owns device pl
 For hub-backed streaming datasets:
 
 - Hugging Face iterable streams are detected as streaming datasets before DataLoader construction, adapted to PyTorch's iterable API when needed, and not given map-style options such as DataLoader-level `shuffle`,
-- NeoBERT retries transient read failures while inspecting schemas and during long-running stream iteration; only typed network-layer failures from built-in sockets and the `requests` transport used by the Hugging Face data stack (timeouts, connection errors, retryable HTTP statuses, and socket errnos) classify as transient, so permanent errors such as auth/config failures fail fast instead of consuming the retry budget,
-- retry recovery resumes from the last yielded example when the underlying HF iterable dataset supports `state_dict()/load_state_dict()`; the wrapper remains visible to streaming detection and eval-budget checks, but its raw cursor is not checkpointed because the prepared dataloader is the safe resume boundary,
+- NeoBERT retries transient schema and metadata reads; only typed network-layer failures from built-in sockets and the `requests` transport used by the Hugging Face data stack (timeouts, connection and chunked-transfer errors, retryable HTTP statuses, and socket errnos) classify as transient, so permanent errors such as auth/config failures fail fast instead of consuming the retry budget,
+- long-running iteration retries require an underlying HF iterable dataset with `state_dict()/load_state_dict()`; streams without those hooks warn and remain unwrapped because restarting them could skip or duplicate examples. Recovery resumes from the last yielded example, and the wrapper remains visible to streaming detection and eval-budget checks, but its raw cursor is not checkpointed because the prepared dataloader is the safe resume boundary,
 - shuffled streams lose the in-memory shuffle buffer on retry recovery because HF `state_dict()` does not serialize buffer contents: the cursor rewinds correctly, but up to `dataset.shuffle_buffer_size` buffered-but-unyielded examples are skipped and the buffer refills from new data. The wrapper logs a warning whenever such a lossy recovery happens; unshuffled streams recover exactly-once.
 
 ## Contrastive Objective Details

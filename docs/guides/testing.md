@@ -1,6 +1,6 @@
 # Testing Guide
 
-This guide covers running and extending the NeoBERT regression suite.
+Use the regression suite for model, training, configuration, and evaluation changes.
 
 ## Run Tests
 
@@ -29,6 +29,15 @@ pytest -k compile -q
 ## Manual Validation Scripts
 
 Run the opt-in distributed checks from [tests/manual/README.md](../../tests/manual/README.md); they are excluded from default `pytest -q` discovery.
+
+## Lint and Format
+
+```bash
+ruff check --fix .
+ruff format .
+```
+
+Ruff enforces import sorting with its normal lint pass.
 
 ## Test Authoring Guidelines
 
