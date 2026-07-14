@@ -2,11 +2,13 @@
 """Tests for streaming dataset shuffle helpers."""
 
 import errno
+from http.client import IncompleteRead
 import unittest
 from unittest.mock import MagicMock, patch
 
 import requests
 import torch
+import urllib3
 from accelerate import Accelerator
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -570,6 +572,16 @@ class TestTransientErrorClassification(unittest.TestCase):
     def test_non_transient_http_status_is_permanent(self):
         """Client errors such as 404 must not be retried."""
         self.assertFalse(is_transient_streaming_error(http_error(404)))
+
+    def test_chunked_encoding_error_is_transient(self):
+        """Mid-transfer disconnects raised by Requests must be retried."""
+        protocol_error = urllib3.exceptions.ProtocolError(
+            "Connection broken",
+            IncompleteRead(b"partial", 10),
+        )
+        chunked_error = requests.exceptions.ChunkedEncodingError(protocol_error)
+
+        self.assertTrue(is_transient_streaming_error(chunked_error))
 
     def test_message_match_requires_network_exception_type(self):
         """Network-sounding text in arbitrary exception types must fail fast."""

@@ -191,6 +191,7 @@ def is_transient_streaming_error(exc: BaseException) -> bool:
         if isinstance(
             candidate,
             (
+                requests.exceptions.ChunkedEncodingError,
                 requests.exceptions.Timeout,
                 requests.exceptions.ConnectionError,
             ),
