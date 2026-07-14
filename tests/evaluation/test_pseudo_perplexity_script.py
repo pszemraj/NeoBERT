@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import builtins
+import csv
 import importlib.util
+import json
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -445,3 +447,60 @@ def test_existing_results_require_matching_run_manifest(tmp_path: Path) -> None:
             {"schema_version": 1, "model": {"checkpoint_tag": "20"}},
             results_exist=True,
         )
+
+
+def test_completed_ids_repair_incomplete_csv_tail(tmp_path: Path) -> None:
+    """A truncated append must be discarded so its sample is recomputed."""
+    module = _load_pseudo_perplexity_module()
+    output_file = tmp_path / "scores.csv"
+    with output_file.open("w", newline="", encoding="utf-8") as file:
+        csv.writer(file).writerow(module.RESULT_FIELDS)
+    module._write_score(output_file, "0:complete", [0.25, 0.75])
+    with output_file.open("a", encoding="utf-8") as file:
+        file.write('1:interrupted,2.0,0.5,"[0.25')
+
+    with pytest.warns(RuntimeWarning, match="Discarding incomplete"):
+        completed = module._read_completed_ids(output_file)
+
+    assert completed == {"0:complete"}
+    with output_file.open(newline="", encoding="utf-8") as file:
+        rows = list(csv.DictReader(file))
+    assert [row["sample_id"] for row in rows] == ["0:complete"]
+
+    module._write_score(output_file, "1:interrupted", [0.5])
+    assert module._read_completed_ids(output_file) == {
+        "0:complete",
+        "1:interrupted",
+    }
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        ["", "1.0", "0.0", "[0.0]"],
+        ["0:sample"],
+        ["0:sample", "invalid", "0.0", "[0.0]"],
+        ["0:sample", "1.0", "invalid", "[0.0]"],
+        ["0:sample", "1.0", "0.0", "not-json"],
+        ["0:sample", "1.0", "0.5", "[0.0]"],
+        ["0:sample", "1.0", "0.0", json.dumps([float("nan")])],
+    ],
+)
+def test_completed_ids_reject_malformed_score_fields(
+    tmp_path: Path,
+    row: list[str],
+) -> None:
+    """Every persisted field must be valid before a sample counts as complete."""
+    module = _load_pseudo_perplexity_module()
+    output_file = tmp_path / "scores.csv"
+    with output_file.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.writer(file)
+        writer.writerow(module.RESULT_FIELDS)
+        writer.writerow(row)
+
+    with pytest.warns(RuntimeWarning, match="Discarding incomplete"):
+        assert module._read_completed_ids(output_file) == set()
+
+    assert output_file.read_text(encoding="utf-8").splitlines() == [
+        ",".join(module.RESULT_FIELDS)
+    ]

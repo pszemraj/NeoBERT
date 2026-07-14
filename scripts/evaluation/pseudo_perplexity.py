@@ -5,6 +5,10 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
+import stat
+import tempfile
+import warnings
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
@@ -18,6 +22,13 @@ from transformers import AutoModelForMaskedLM, AutoTokenizer
 from neobert.checkpointing import load_step_checkpoint_state_dict
 from neobert.evaluation_utils import resolve_checkpoint_model_source
 from neobert.model import NeoBERTLMHead
+
+RESULT_FIELDS = (
+    "sample_id",
+    "pseudo_perplexity",
+    "mean_cross_entropy",
+    "token_losses",
+)
 
 
 def _build_hub_masked_lm(
@@ -303,15 +314,140 @@ def _iter_masked_batches(
 
 
 def _read_completed_ids(output_file: Path) -> set[str]:
-    """Read completed sample IDs from an existing result file.
+    """Read valid completed IDs and atomically discard an incomplete tail.
 
     :param Path output_file: CSV result path.
+    :raises RuntimeError: If an existing result file has an unexpected header.
     :return set[str]: Completed sample IDs.
     """
     if not output_file.exists():
         return set()
+
+    completed: set[str] = set()
+    valid_rows: list[dict[str, str]] = []
+    invalid_record: int | None = None
     with output_file.open(newline="", encoding="utf-8") as file:
-        return {row["sample_id"] for row in csv.DictReader(file)}
+        reader = csv.DictReader(file, strict=True)
+        if reader.fieldnames is None:
+            invalid_record = 1
+        elif tuple(reader.fieldnames) != RESULT_FIELDS:
+            raise RuntimeError(
+                f"Existing pseudo-perplexity results have an invalid CSV header: "
+                f"{output_file}"
+            )
+        else:
+            try:
+                for record_number, row in enumerate(reader, start=2):
+                    try:
+                        sample_id = _validate_result_row(row)
+                    except (TypeError, ValueError):
+                        invalid_record = record_number
+                        break
+                    if sample_id in completed:
+                        invalid_record = record_number
+                        break
+                    completed.add(sample_id)
+                    valid_rows.append({field: row[field] for field in RESULT_FIELDS})
+            except csv.Error:
+                invalid_record = max(2, reader.line_num)
+
+    if invalid_record is not None:
+        warnings.warn(
+            f"Discarding incomplete pseudo-perplexity CSV records from record "
+            f"{invalid_record} onward: {output_file}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        _replace_result_rows(output_file, valid_rows)
+    return completed
+
+
+def _validate_result_row(row: dict[str | None, str | list[str] | None]) -> str:
+    """Validate one persisted pseudo-perplexity result row.
+
+    :param dict row: CSV row keyed by result field.
+    :raises ValueError: If any field is missing, malformed, or inconsistent.
+    :return str: Validated sample identifier.
+    """
+    if set(row) != set(RESULT_FIELDS) or any(
+        not isinstance(row[field], str) for field in RESULT_FIELDS
+    ):
+        raise ValueError("Result row does not contain exactly the required fields.")
+
+    sample_id = row["sample_id"]
+    if not sample_id:
+        raise ValueError("Result row has no sample ID.")
+
+    pseudo_perplexity = float(row["pseudo_perplexity"])
+    mean_cross_entropy = float(row["mean_cross_entropy"])
+    token_losses = json.loads(row["token_losses"])
+    if (
+        not math.isfinite(pseudo_perplexity)
+        or pseudo_perplexity <= 0
+        or not math.isfinite(mean_cross_entropy)
+        or mean_cross_entropy < 0
+        or not isinstance(token_losses, list)
+        or not token_losses
+        or any(
+            isinstance(loss, bool) or not isinstance(loss, int | float)
+            for loss in token_losses
+        )
+    ):
+        raise ValueError("Result row contains invalid score values.")
+
+    losses = np.asarray(token_losses, dtype=np.float64)
+    if not np.isfinite(losses).all() or (losses < 0).any():
+        raise ValueError("Result row contains non-finite token losses.")
+    expected_mean = float(np.mean(losses))
+    try:
+        expected_perplexity = math.exp(expected_mean)
+    except OverflowError:
+        expected_perplexity = math.inf
+    if not math.isfinite(expected_perplexity) or not math.isclose(
+        mean_cross_entropy,
+        expected_mean,
+        rel_tol=1e-12,
+        abs_tol=1e-12,
+    ):
+        raise ValueError("Result row mean cross-entropy is inconsistent.")
+    if not math.isclose(
+        pseudo_perplexity,
+        expected_perplexity,
+        rel_tol=1e-12,
+        abs_tol=1e-12,
+    ):
+        raise ValueError("Result row pseudo-perplexity is inconsistent.")
+    return sample_id
+
+
+def _replace_result_rows(
+    output_file: Path,
+    rows: Sequence[dict[str, str]],
+) -> None:
+    """Atomically replace a result CSV with a validated row prefix.
+
+    :param Path output_file: CSV result path.
+    :param Sequence[dict[str, str]] rows: Valid result rows to preserve.
+    """
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        newline="",
+        encoding="utf-8",
+        dir=output_file.parent,
+        prefix=f".{output_file.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as file:
+        temporary_path = Path(file.name)
+        writer = csv.DictWriter(file, fieldnames=RESULT_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+    try:
+        if output_file.exists():
+            temporary_path.chmod(stat.S_IMODE(output_file.stat().st_mode))
+        temporary_path.replace(output_file)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def _write_score(output_file: Path, sample_id: str, losses: Sequence[float]) -> None:
@@ -321,10 +457,23 @@ def _write_score(output_file: Path, sample_id: str, losses: Sequence[float]) -> 
     :param str sample_id: Dataset sample identifier.
     :param Sequence[float] losses: Per-token cross-entropy values.
     """
-    mean_loss = float(np.mean(losses))
+    numeric_losses = [float(loss) for loss in losses]
+    if (
+        not sample_id
+        or not numeric_losses
+        or any(not math.isfinite(loss) or loss < 0 for loss in numeric_losses)
+    ):
+        raise ValueError("Cannot persist an incomplete or non-finite score row.")
+    mean_loss = float(np.mean(numeric_losses))
+    try:
+        pseudo_perplexity = math.exp(mean_loss)
+    except OverflowError:
+        pseudo_perplexity = math.inf
+    if not math.isfinite(mean_loss) or not math.isfinite(pseudo_perplexity):
+        raise ValueError("Cannot persist an incomplete or non-finite score row.")
     with output_file.open("a", newline="", encoding="utf-8") as file:
         csv.writer(file).writerow(
-            [sample_id, float(np.exp(mean_loss)), mean_loss, json.dumps(losses)]
+            [sample_id, pseudo_perplexity, mean_loss, json.dumps(numeric_losses)]
         )
 
 
@@ -498,10 +647,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     completed_ids = _read_completed_ids(output_file)
     if not output_file.exists():
-        with output_file.open("w", newline="", encoding="utf-8") as file:
-            csv.writer(file).writerow(
-                ["sample_id", "pseudo_perplexity", "mean_cross_entropy", "token_losses"]
-            )
+        _replace_result_rows(output_file, [])
 
     batches = _iter_masked_batches(
         dataset,
