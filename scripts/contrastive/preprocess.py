@@ -1,11 +1,11 @@
 """Preprocess and tokenize contrastive datasets."""
 
-import json
 import shutil
 from pathlib import Path
 from typing import Any
 
 from datasets import DatasetDict
+from filelock import FileLock
 
 from neobert.config import load_config_from_args
 from neobert.contrastive.datasets import (
@@ -18,6 +18,7 @@ from neobert.contrastive.datasets import (
 )
 from neobert.tokenization_cache import (
     validate_tokenized_cache_manifest,
+    write_json_atomic,
     write_tokenized_cache_manifest,
 )
 from neobert.tokenizer import get_tokenizer, tokenize
@@ -41,13 +42,12 @@ def _write_cached_dataset_manifest(all_dir: Path) -> list[str]:
     :return list[str]: Manifest split names that were written.
     """
     cached_names = discover_cached_contrastive_dataset_names(all_dir)
-    with (all_dir / "dataset_dict.json").open("w", encoding="utf-8") as handle:
-        json.dump({"splits": cached_names}, handle, indent=2)
+    write_json_atomic(all_dir / "dataset_dict.json", {"splits": cached_names})
     return cached_names
 
 
-def pipeline(cfg: Any) -> DatasetDict:
-    """Run dataset preprocessing and tokenization.
+def _pipeline_locked(cfg: Any) -> DatasetDict:
+    """Run preprocessing while the dataset-root cache lock is held.
 
     :param Any cfg: Configuration object with dataset/tokenizer settings.
     :return DatasetDict: Prepared dataset dictionary.
@@ -142,6 +142,25 @@ def pipeline(cfg: Any) -> DatasetDict:
         )
 
     return dataset
+
+
+def pipeline(cfg: Any) -> DatasetDict:
+    """Run dataset preprocessing under a root-scoped interprocess lock.
+
+    :param Any cfg: Configuration object with dataset/tokenizer settings.
+    :return DatasetDict: Prepared dataset dictionary.
+    """
+    dataset_cfg = getattr(cfg, "dataset", None)
+    dataset_path = getattr(dataset_cfg, "path", None)
+    if not dataset_path:
+        raise ValueError(
+            "Contrastive preprocessing requires dataset.path pointing to a dataset root."
+        )
+    dataset_root = Path(dataset_path)
+    dataset_root.mkdir(parents=True, exist_ok=True)
+    lock_path = dataset_root / ".contrastive-preprocess.lock"
+    with FileLock(str(lock_path)):
+        return _pipeline_locked(cfg)
 
 
 def main() -> None:

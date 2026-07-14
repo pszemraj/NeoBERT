@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +17,7 @@ from neobert.contrastive.datasets import (
     resolve_contrastive_dataset_name,
 )
 from neobert.tokenization_cache import (
+    TOKENIZATION_MANIFEST_NAME,
     write_tokenized_cache_manifest,
 )
 from tests.tokenizer_utils import build_wordlevel_tokenizer
@@ -102,6 +104,69 @@ def test_resolve_dataset_names_accepts_hf_dataset_id_alias() -> None:
     )
 
     assert module._resolve_dataset_names(cfg) == ["ALLNLI"]
+
+
+def test_tokenization_manifest_replacement_is_atomic(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed atomic replacement must preserve the previous manifest."""
+    import neobert.tokenization_cache as cache_module
+
+    manifest_path = tmp_path / TOKENIZATION_MANIFEST_NAME
+    previous = {"generation": "previous"}
+    manifest_path.write_text(json.dumps(previous), encoding="utf-8")
+
+    def _fail_replace(*_args: object) -> None:
+        raise OSError("replace failed")
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(cache_module.os, "replace", _fail_replace)
+        with pytest.raises(OSError, match="replace failed"):
+            write_tokenized_cache_manifest(tmp_path, {"generation": "new"})
+
+    assert json.loads(manifest_path.read_text(encoding="utf-8")) == previous
+    assert not list(tmp_path.glob(f".{TOKENIZATION_MANIFEST_NAME}.*.tmp"))
+
+    current = {"generation": "complete", "values": [1, 2, 3]}
+    write_tokenized_cache_manifest(tmp_path, current)
+    assert json.loads(manifest_path.read_text(encoding="utf-8")) == current
+
+
+def test_pipeline_holds_dataset_root_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The complete standalone cache operation must run inside its file lock."""
+    module = _load_contrastive_preprocess_module()
+    cfg = _make_cfg("ALLNLI", dataset_path=str(tmp_path))
+    events: list[str] = []
+    lock_paths: list[str] = []
+    expected = object()
+
+    class _RecordingLock:
+        def __init__(self, path: str) -> None:
+            lock_paths.append(path)
+
+        def __enter__(self):
+            events.append("enter")
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            del exc_type, exc, traceback
+            events.append("exit")
+
+    def _locked_operation(received_cfg):
+        assert received_cfg is cfg
+        events.append("operation")
+        return expected
+
+    monkeypatch.setattr(module, "FileLock", _RecordingLock)
+    monkeypatch.setattr(module, "_pipeline_locked", _locked_operation)
+
+    assert module.pipeline(cfg) is expected
+    assert events == ["enter", "operation", "exit"]
+    assert lock_paths == [str(tmp_path / ".contrastive-preprocess.lock")]
 
 
 @pytest.mark.parametrize(

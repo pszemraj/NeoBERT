@@ -12,6 +12,7 @@ dependencies = [
     "datasets",
     "einops",
     "evaluate",
+    "filelock",
     "liger-kernel>=0.6",
     "mteb>=2.18",
     "numpy",

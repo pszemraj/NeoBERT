@@ -4,12 +4,45 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
+import tempfile
 from typing import Any
 
 from transformers import PreTrainedTokenizerBase
 
 TOKENIZATION_MANIFEST_NAME = "tokenization_manifest.json"
+
+
+def write_json_atomic(path: str | Path, payload: Any) -> Path:
+    """Atomically replace a JSON file with a complete serialized payload.
+
+    :param str | Path path: Destination JSON path.
+    :param Any payload: JSON-serializable payload.
+    :return Path: Destination path after replacement.
+    """
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, destination)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+    return destination
 
 
 def _jsonable(value: Any) -> Any:
@@ -158,8 +191,4 @@ def write_tokenized_cache_manifest(
     :return Path: Written manifest path.
     """
     manifest_path = Path(cache_dir) / TOKENIZATION_MANIFEST_NAME
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    return manifest_path
+    return write_json_atomic(manifest_path, manifest)
