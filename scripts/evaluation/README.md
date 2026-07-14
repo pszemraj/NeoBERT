@@ -1,12 +1,12 @@
 # Evaluation Scripts
 
-Utilities for GLUE/MTEB evaluation and result analysis.
+Utilities for GLUE, MTEB, and masked-LM pseudo-perplexity evaluation.
 
 ## Files
 
 - `run_glue.py` - run GLUE task from config
 - `run_mteb.py` - run MTEB benchmark against a pretraining run directory
-- `pseudo_perplexity.py` - pseudo-perplexity helper for MLM checkpoints
+- `pseudo_perplexity.py` - score pseudo-perplexity for local NeoBERT checkpoints or Hub masked LMs
 - `avg_mteb.py` - aggregate MTEB results
 - `glue/` - GLUE automation scripts
 

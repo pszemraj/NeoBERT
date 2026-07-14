@@ -56,7 +56,7 @@ NeoBERT is a transformer encoder with:
 
 - `model.rms_norm: true`: RMSNorm path.
 - `model.rms_norm: false`: LayerNorm path.
-- `model.kernel_backend` selects torch or Liger primitives where available.
+- `model.kernel_backend: auto` selects Liger primitives when they are installed on CUDA and otherwise uses torch; explicit `liger` and `torch` select one backend.
 
 ## HF Export Model Differences
 
@@ -70,3 +70,4 @@ NeoBERT is a transformer encoder with:
 - [Training](../guides/training.md)
 - [Training Optimization](../guides/training-optimization.md)
 - [Evaluation](../guides/evaluation.md)
+- [Export](../guides/export.md)

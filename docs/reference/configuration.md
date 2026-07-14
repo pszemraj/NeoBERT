@@ -14,7 +14,7 @@ trainer.max_steps=2000
 --trainer.max_steps 2000
 ```
 
-Override values use the target field's type. Booleans accept `true/false`, `1/0`, `yes/no`, or `on/off`; optional values accept `null`, `none`, or `~`; lists and mappings use YAML syntax. Unknown paths and invalid values fail with the full field path.
+Dot-path override values use the current target field's type. Booleans accept `true/false`, `1/0`, `yes/no`, or `on/off`; fields annotated as optional accept `null`, `none`, or `~` only when their current value is unset; lists and mappings use YAML syntax. String-backed fields keep these tokens as literal text, so follow the per-field clearing instructions in the YAML reference. Unknown paths and invalid values fail with the full field path.
 
 In Python, `ConfigLoader.load(path, overrides=...)` accepts either the same list of tokens or a nested mapping. A mapping is merged before validation; a token list is applied to the hydrated config and then revalidated.
 
