@@ -100,7 +100,7 @@ Select exactly one model source: use `--hub_model <model-id>` for a Hub masked L
 
 The default dataset is `wikipedia` (`20220301.en`, `train`). Override it with `--dataset_name`, `--dataset_config`, and `--dataset_split`, or pass `--data_path` for a dataset saved with `Dataset.save_to_disk()`. The utility applies one inclusive `--min_chars`/`--max_chars` filter, then deterministic shuffling and optional `--num_dataset_shards`/`--dataset_shard_index` sharding.
 
-Results default to `results/pseudo_perplexity/<model>/<checkpoint>/...csv`; `--output_path` changes the root. Each CSV has a manifest recording the concrete model/config/tokenizer source, dataset selection and sharding, length filters, seed, batch size, and context length. Reruns skip completed sample IDs only when that manifest matches exactly; stale or mixed-checkpoint CSVs fail closed. Use `--device`, `--bf16`, and `--compile` to control execution.
+Results default to `results/pseudo_perplexity/<model>/<checkpoint>/...csv`; `--output_path` changes the root. Each CSV has a manifest recording the concrete model/config/tokenizer source, dataset selection and sharding, length filters, seed, batch size, context length, and precision. Reruns skip completed sample IDs only when that manifest matches exactly; stale or mixed-checkpoint CSVs fail closed. Evaluation uses bf16 autocast by default; pass `--no-bf16` for fp32, and use `--device` and `--compile` to control placement and compilation.
 
 ```bash
 python scripts/evaluation/pseudo_perplexity.py \

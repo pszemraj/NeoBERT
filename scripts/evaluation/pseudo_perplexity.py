@@ -335,7 +335,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--compile", action="store_true")
-    parser.add_argument("--bf16", action="store_true")
+    parser.add_argument(
+        "--bf16",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable bf16 autocast; use --no-bf16 for fp32 evaluation",
+    )
     parser.add_argument("--max_length", type=int, default=512)
 
     data_source = parser.add_mutually_exclusive_group()
@@ -431,7 +436,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         f"{args.dataset_shard_index}-of-{args.num_dataset_shards}.csv"
     )
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "model": model_provenance,
         "dataset": {
             "data_path": str(args.data_path.resolve()) if args.data_path else None,
@@ -451,6 +456,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "scoring": {
             "max_length": args.max_length,
             "batch_size": args.batch_size,
+            "bf16": args.bf16,
         },
     }
     _ensure_run_manifest(

@@ -176,6 +176,11 @@ def test_model_source_cli_is_exclusive_and_local_requires_checkpoint() -> None:
         parser.parse_args(
             ["--hub_model", "bert-base-uncased", "--checkpoint_path", "x"]
         )
+    assert parser.parse_args(["--hub_model", "bert-base-uncased"]).bf16 is True
+    assert (
+        parser.parse_args(["--hub_model", "bert-base-uncased", "--no-bf16"]).bf16
+        is False
+    )
     with pytest.raises(SystemExit):
         module.main(["--checkpoint", "10"])
 
