@@ -665,6 +665,10 @@ optimizer:
             ConfigLoader.dict_to_config(
                 {"task": "contrastive", "dataset": {"alpha": 0.0}}
             )
+        with self.assertRaisesRegex(ValueError, "contrastive.temperature"):
+            ConfigLoader.dict_to_config(
+                {"task": "contrastive", "contrastive": {"temperature": 0.0}}
+            )
         with self.assertRaises(ValueError):
             ConfigLoader.dict_to_config(
                 {

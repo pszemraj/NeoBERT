@@ -393,6 +393,7 @@ class TestMuonClipConfig:
             {"lr": -0.1},
             {"clipping_threshold": 0},
             {"clipping_threshold": 2000},
+            {"clipping_warmup_steps": -1},
             {"clipping_interval": 0},
             {"clipping_interval": -3},
             {"clipping_qk_chunk_size": 0},

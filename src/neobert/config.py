@@ -251,7 +251,11 @@ class MuonConfig:
     clipping_layers_mapping: Dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Normalize enum-like fields."""
+        """Validate numeric fields and normalize enum-like fields."""
+        if self.clipping_warmup_steps < 0:
+            raise ValueError(
+                f"clipping_warmup_steps must be >= 0, got {self.clipping_warmup_steps}"
+            )
         self.orthogonalization = normalize_muon_orthogonalization(
             self.orthogonalization
         )
@@ -1028,6 +1032,11 @@ class ConfigLoader:
             )
         if config.dataset.alpha <= 0.0:
             errors.append(f"dataset.alpha must be > 0, got {config.dataset.alpha}.")
+        if config.contrastive.temperature <= 0.0:
+            errors.append(
+                "contrastive.temperature must be > 0, got "
+                f"{config.contrastive.temperature}."
+            )
         if config.dataset.num_workers < 0:
             errors.append(
                 f"dataset.num_workers must be >= 0, got {config.dataset.num_workers}."
