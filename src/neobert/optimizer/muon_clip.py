@@ -1482,6 +1482,9 @@ class MuonClipOptimizer(Optimizer):
         # TODO(phase3): pipeline or batch these owner-compute collectives across
         # Muon parameters so multi-node runs do not serialize one gather/scatter
         # pair per matrix update.
+        # ``group_dst`` and ``group_src`` are supported from PyTorch 2.6,
+        # NeoBERT's minimum. ``owner_rank`` is group-relative, so keep these
+        # keywords instead of interpreting a mesh rank as a global rank.
         dist.gather(
             tensor=local_padded,
             gather_list=gather_list,
