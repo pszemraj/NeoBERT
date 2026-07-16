@@ -89,7 +89,7 @@ model:
 # dataset — mapping; default: all DatasetConfig defaults below. Source, split, preprocessing, and loader settings.
 dataset:
   # dataset.name — string; contrastive also accepts null | list[string]; default: "refinedweb".
-  # Pretraining passes it to load_dataset and operationally requires a loadable Hub name unless dataset.path exists.
+  # Pretraining passes it to load_dataset and operationally requires a loadable Hub name unless dataset.path exists. The config-driven preprocessor treats the exact value wikibook as a repository alias for the BookCorpus train split plus the text-only Wikipedia 20220301.en train split, concatenated and shuffled with seed 0; the trainer itself does not expand this alias, so train from the preprocessor's dataset.path output.
   # Contrastive canonical selectors: ALLNLI | AMAZONQA | CONCURRENTQA | FEVER | GITHUBISSUE | GOOAQ | MSMARCO | PAQ | PUBMEDQA | QQP | SENTENCECOMP | STACKEXCHANGE | STACKOVERFLOW | STS12 | STSBENCHMARK | TRIVIAQA | WIKIHOW.
   # Exact contrastive Hub aliases: sentence-transformers/all-nli | embedding-data/Amazon-QA | stanfordnlp/concurrentqa-retrieval | mteb/fever | WhereIsAI/github-issue-similarity | tomaarsen/gooaq-hard-negatives | mteb/msmarco | embedding-data/PAQ_pairs | sentence-transformers/pubmedqa.
   # More exact aliases: embedding-data/QQP_triplets | embedding-data/sentence-compression | sentence-transformers/stackexchange-duplicates | mteb/stackoverflowdupquestions-reranking | mteb/sts12-sts | mteb/stsbenchmark-sts | sentence-transformers/trivia-qa-triplet | sentence-transformers/wikihow.

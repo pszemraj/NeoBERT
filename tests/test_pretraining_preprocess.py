@@ -5,9 +5,29 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from datasets import Dataset
 
 from neobert.tokenizer import tokenize_pretraining_dataset
-from scripts.pretraining.preprocess import preprocess
+from scripts.pretraining.preprocess import _load_pretraining_dataset, preprocess
+
+
+def test_wikibook_preprocessing_combines_supported_sources() -> None:
+    """The wikibook selector should build the historical text-only union."""
+    bookcorpus = Dataset.from_dict({"text": ["book"]})
+    wikipedia = Dataset.from_dict({"text": ["wiki"], "title": ["article"]})
+
+    with patch(
+        "scripts.pretraining.preprocess.load_dataset",
+        side_effect=(bookcorpus, wikipedia),
+    ) as load_dataset_mock:
+        dataset = _load_pretraining_dataset("wikibook")
+
+    assert load_dataset_mock.call_args_list == [
+        (("bookcorpus",), {"split": "train"}),
+        (("wikipedia", "20220301.en"), {"split": "train"}),
+    ]
+    assert dataset.column_names == ["text"]
+    assert sorted(dataset["text"]) == ["book", "wiki"]
 
 
 @pytest.mark.parametrize(
