@@ -1436,9 +1436,34 @@ def save_training_checkpoint(
     accelerator.wait_for_everyone()
     save_accelerate_state(accelerator, checkpoint_path)
     accelerator.wait_for_everyone()
+    metadata_exception: Exception | None = None
     if accelerator.is_main_process:
-        save_optimizer_param_name_manifest(optimizer, checkpoint_path)
-        save_metadata(checkpoint_path)
+        try:
+            save_optimizer_param_name_manifest(optimizer, checkpoint_path)
+            save_metadata(checkpoint_path)
+        except Exception as exc:
+            metadata_exception = exc
+
+    reduce_fn = getattr(accelerator, "reduce", None)
+    if callable(reduce_fn):
+        failed = torch.tensor(
+            int(metadata_exception is not None),
+            device=accelerator.device,
+            dtype=torch.int32,
+        )
+        metadata_failure_count = int(reduce_fn(failed, reduction="sum").item())
+    else:
+        metadata_failure_count = int(metadata_exception is not None)
+    if metadata_failure_count:
+        message = (
+            f"failed to save checkpoint metadata at {checkpoint_path}: "
+            f"{metadata_exception}"
+            if metadata_exception is not None
+            else "checkpoint metadata save failed on another rank; inspect the "
+            "main-rank error for details"
+        )
+        raise RuntimeError(message) from metadata_exception
+
     save_portable_checkpoint_weights(model, accelerator, checkpoint_path)
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:

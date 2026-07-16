@@ -32,6 +32,7 @@ from neobert.checkpointing import (
     save_state_dict_safetensors,
 )
 from neobert.model import NeoBERTConfig, NeoBERTLMHead
+from neobert.training_utils import save_training_checkpoint
 
 
 class _CompiledLikeWrapper(nn.Module):
@@ -206,6 +207,80 @@ def test_accelerate_resume_state_coexists_with_portable_weights(
         accelerator.load_state(str(resolve_accelerate_state_dir(step_dir)))
     finally:
         AcceleratorState._reset_state(True)
+
+
+@pytest.mark.parametrize(
+    ("is_main_process", "expected_local_failure"),
+    [(True, 1), (False, 0)],
+    ids=["main-rank", "worker-rank"],
+)
+def test_training_checkpoint_synchronizes_metadata_failure_before_export(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    is_main_process: bool,
+    expected_local_failure: int,
+) -> None:
+    """Every rank should raise before portable export when metadata saving fails."""
+
+    class FakeAccelerator:
+        """Record the distributed failure-reduction contract for one rank."""
+
+        device = torch.device("cpu")
+
+        def __init__(self) -> None:
+            """Initialize rank identity and collective observations."""
+            self.is_main_process = is_main_process
+            self.failure_flags: list[int] = []
+
+        def wait_for_everyone(self) -> None:
+            """Model a completed barrier."""
+
+        def reduce(self, value: torch.Tensor, reduction: str) -> torch.Tensor:
+            """Model a two-rank reduction where the main-rank callback failed."""
+            assert reduction == "sum"
+            self.failure_flags.append(int(value.item()))
+            return value.new_tensor(1)
+
+    accelerator = FakeAccelerator()
+    metadata_calls = 0
+
+    def _save_metadata(_checkpoint_path: Path) -> None:
+        nonlocal metadata_calls
+        metadata_calls += 1
+        raise OSError("tokenizer write failed")
+
+    def _unexpected_portable_export(*args, **kwargs) -> None:
+        del args, kwargs
+        raise AssertionError("portable export must not run after metadata failure")
+
+    monkeypatch.setattr(
+        "neobert.training_utils.save_accelerate_state",
+        lambda *_args, **_kwargs: tmp_path / "accelerate",
+    )
+    monkeypatch.setattr(
+        "neobert.training_utils.save_optimizer_param_name_manifest",
+        lambda *_args, **_kwargs: tmp_path / OPTIMIZER_PARAM_NAMES_MANIFEST,
+    )
+    monkeypatch.setattr(
+        "neobert.training_utils.save_portable_checkpoint_weights",
+        _unexpected_portable_export,
+    )
+
+    expected_message = (
+        "tokenizer write failed" if is_main_process else "failed on another rank"
+    )
+    with pytest.raises(RuntimeError, match=expected_message):
+        save_training_checkpoint(
+            task="pretraining",
+            checkpoint_path=tmp_path / "100",
+            accelerator=accelerator,
+            model=nn.Linear(2, 2),
+            optimizer=object(),
+            save_metadata=_save_metadata,
+        )
+
+    assert accelerator.failure_flags == [expected_local_failure]
+    assert metadata_calls == int(is_main_process)
 
 
 def test_resolve_accelerate_state_dir_requires_canonical_layout(
