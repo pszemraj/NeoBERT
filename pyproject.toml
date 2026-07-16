@@ -13,6 +13,7 @@ dependencies = [
     "einops",
     "evaluate",
     "filelock",
+    "httpx",
     "liger-kernel>=0.6",
     "mteb>=2.18",
     "numpy",

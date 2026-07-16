@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterator, Mapping
 from copy import deepcopy
 from typing import Any, TypeVar
 
+import httpx
 import requests
 import torch
 from datasets import IterableDataset as HuggingFaceIterableDataset
@@ -14,6 +15,11 @@ from datasets import IterableDataset as HuggingFaceIterableDataset
 logger = logging.getLogger(__name__)
 
 _TRANSIENT_HTTP_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
+_TRANSIENT_HTTPX_EXCEPTIONS = (
+    httpx.TimeoutException,
+    httpx.NetworkError,
+    httpx.RemoteProtocolError,
+)
 _TRANSIENT_OS_ERRNOS = frozenset(
     {
         errno.ECONNABORTED,
@@ -188,6 +194,8 @@ def is_transient_streaming_error(exc: BaseException) -> bool:
     for candidate in _iter_exception_chain(exc):
         if isinstance(candidate, (TimeoutError, ConnectionError)):
             return True
+        if isinstance(candidate, _TRANSIENT_HTTPX_EXCEPTIONS):
+            return True
         if isinstance(
             candidate,
             (
@@ -198,6 +206,11 @@ def is_transient_streaming_error(exc: BaseException) -> bool:
         ):
             return True
         if isinstance(candidate, requests.exceptions.HTTPError):
+            response = getattr(candidate, "response", None)
+            status_code = getattr(response, "status_code", None)
+            if status_code in _TRANSIENT_HTTP_STATUS_CODES:
+                return True
+        if isinstance(candidate, httpx.HTTPStatusError):
             response = getattr(candidate, "response", None)
             status_code = getattr(response, "status_code", None)
             if status_code in _TRANSIENT_HTTP_STATUS_CODES:

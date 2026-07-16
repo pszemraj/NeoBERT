@@ -6,6 +6,7 @@ import unittest
 from http.client import IncompleteRead
 from unittest.mock import MagicMock, patch
 
+import httpx
 import requests
 import torch
 import urllib3
@@ -572,6 +573,36 @@ class TestTransientErrorClassification(unittest.TestCase):
     def test_non_transient_http_status_is_permanent(self):
         """Client errors such as 404 must not be retried."""
         self.assertFalse(is_transient_streaming_error(http_error(404)))
+
+    def test_httpx_transport_errors_are_transient(self):
+        """HTTPX timeouts, network errors, and remote protocol failures retry."""
+        transient_errors = (
+            httpx.ReadTimeout("read timed out"),
+            httpx.ConnectError("connection failed"),
+            httpx.RemoteProtocolError("peer disconnected"),
+        )
+        for error in transient_errors:
+            with self.subTest(error_type=type(error).__name__):
+                self.assertTrue(is_transient_streaming_error(error))
+
+    def test_httpx_status_retries_only_transient_codes(self):
+        """HTTPX status errors follow the shared retryable-status allowlist."""
+        request = httpx.Request("GET", "https://example.invalid/dataset")
+        for status_code, expected in ((503, True), (404, False)):
+            response = httpx.Response(status_code, request=request)
+            error = httpx.HTTPStatusError(
+                f"HTTP {status_code}",
+                request=request,
+                response=response,
+            )
+            with self.subTest(status_code=status_code):
+                self.assertEqual(is_transient_streaming_error(error), expected)
+
+    def test_httpx_local_protocol_errors_are_permanent(self):
+        """Local request-construction failures must not consume retry budget."""
+        self.assertFalse(
+            is_transient_streaming_error(httpx.LocalProtocolError("invalid request"))
+        )
 
     def test_chunked_encoding_error_is_transient(self):
         """Mid-transfer disconnects raised by Requests must be retried."""
