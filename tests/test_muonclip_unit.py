@@ -10,15 +10,18 @@ from pathlib import Path
 import pytest
 import torch
 import torch.distributed.checkpoint as dist_cp
+import torch.nn.functional as F
 from torch.distributed.checkpoint.state_dict import (
     get_optimizer_state_dict,
     set_optimizer_state_dict,
 )
 
+from neobert.collator import get_collator
 from neobert.config import MuonConfig
 from neobert.model import NeoBERT, NeoBERTConfig, NeoBERTLMHead
 from neobert.optimizer import MuonClipConfig, MuonClipOptimizer
 from neobert.warnings import NeoBERTWarning
+from tests.tokenizer_utils import build_wordlevel_tokenizer
 
 
 def _max_param_diff(
@@ -39,31 +42,23 @@ def _max_param_diff(
 
 
 def _neobert_polar_express_reference(
-    grad: torch.Tensor,
+    muon_input: torch.Tensor,
     *,
     steps: int = 5,
-    beta: float = 0.95,
-    nesterov: bool = True,
     eps: float = 1e-7,
 ) -> torch.Tensor:
-    """Reproduce NeoBERT's default local Polar Express Muon update."""
-    if grad.ndim != 2:
-        return grad
-
-    momentum = grad.clone()
-    if nesterov:
-        grad = grad + beta * momentum
-    else:
-        grad = momentum
+    """Reproduce NeoBERT's Polar Express transform for one Muon direction."""
+    if muon_input.ndim != 2:
+        return muon_input
 
     steps = max(1, int(steps))
-    is_transpose = grad.size(0) > grad.size(1)
-    working = grad.T if is_transpose else grad
+    is_transpose = muon_input.size(0) > muon_input.size(1)
+    working = muon_input.T if is_transpose else muon_input
 
     original_dtype = working.dtype
     spectral_norm = torch.linalg.norm(working)
     if spectral_norm == 0 or not torch.isfinite(spectral_norm):
-        return torch.zeros_like(grad)
+        return torch.zeros_like(muon_input)
 
     working = working / (spectral_norm * 1.01 + eps)
 
@@ -103,6 +98,21 @@ def _neobert_polar_express_reference(
     if working.dtype != original_dtype:
         working = working.to(original_dtype)
     return working.T if is_transpose else working
+
+
+def _muon_update_reference(
+    grad: torch.Tensor,
+    momentum_buffer: torch.Tensor,
+    *,
+    steps: int = 5,
+    beta: float = 0.95,
+    nesterov: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute an independent heavy-ball recurrence and transformed Muon update."""
+    next_buffer = beta * momentum_buffer + grad
+    muon_input = grad + beta * next_buffer if nesterov else next_buffer
+    update = _neobert_polar_express_reference(muon_input, steps=steps)
+    return update, next_buffer
 
 
 def _split_interleaved_qkv_reference(
@@ -601,8 +611,29 @@ class TestMuonClipOptimizer:
             "|orthogonalization=polar_express|nesterov=True|clipping=False"
         )
 
-    def test_resume_manifest_rejects_changed_norm_factor(self, model, tmp_path):
-        """A drifted norm_factor (e.g. a new repo default) must fail resume."""
+    @pytest.mark.parametrize(
+        ("selector", "saved_value", "resume_value"),
+        [
+            pytest.param("norm_factor", "spectral", "neobert", id="norm-factor"),
+            pytest.param("param_policy", "hidden_2d", "all_2d", id="param-policy"),
+            pytest.param(
+                "orthogonalization",
+                "polar_express",
+                "newton_schulz",
+                id="orthogonalization",
+            ),
+            pytest.param("nesterov", True, False, id="nesterov"),
+        ],
+    )
+    def test_resume_manifest_rejects_changed_update_rule_selector(
+        self,
+        model,
+        tmp_path,
+        selector,
+        saved_value,
+        resume_value,
+    ):
+        """A drifted update-rule selector must fail resume."""
         from neobert.training_utils import (
             attach_optimizer_param_names,
             save_optimizer_param_name_manifest,
@@ -610,24 +641,64 @@ class TestMuonClipOptimizer:
         )
 
         model_instance, config = model
-        spectral = MuonClipOptimizer(
+        saved = MuonClipOptimizer(
             model_instance,
             config,
-            MuonClipConfig(enable_clipping=False, norm_factor="spectral"),
+            MuonClipConfig(enable_clipping=False, **{selector: saved_value}),
         )
-        attach_optimizer_param_names(model_instance, spectral)
-        save_optimizer_param_name_manifest(spectral, tmp_path)
-        validate_optimizer_param_name_manifest(spectral, tmp_path)
+        attach_optimizer_param_names(model_instance, saved)
+        save_optimizer_param_name_manifest(saved, tmp_path)
+        validate_optimizer_param_name_manifest(saved, tmp_path)
 
-        rescaled = MuonClipOptimizer(
+        drifted = MuonClipOptimizer(
             model_instance,
             config,
-            MuonClipConfig(enable_clipping=False, norm_factor="neobert"),
+            MuonClipConfig(enable_clipping=False, **{selector: resume_value}),
         )
-        attach_optimizer_param_names(model_instance, rescaled)
+        attach_optimizer_param_names(model_instance, drifted)
 
         with pytest.raises(RuntimeError, match="state semantics changed"):
-            validate_optimizer_param_name_manifest(rescaled, tmp_path)
+            validate_optimizer_param_name_manifest(drifted, tmp_path)
+
+    @pytest.mark.parametrize(
+        ("tunable", "saved_value", "resume_value"),
+        [
+            pytest.param("lr", 1e-4, 3e-4, id="learning-rate"),
+            pytest.param("muon_beta", 0.95, 0.8, id="momentum"),
+        ],
+    )
+    def test_resume_manifest_accepts_changed_tunable(
+        self,
+        model,
+        tmp_path,
+        tunable,
+        saved_value,
+        resume_value,
+    ):
+        """Tunables that do not reinterpret optimizer state may change on resume."""
+        from neobert.training_utils import (
+            attach_optimizer_param_names,
+            save_optimizer_param_name_manifest,
+            validate_optimizer_param_name_manifest,
+        )
+
+        model_instance, config = model
+        saved = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(enable_clipping=False, **{tunable: saved_value}),
+        )
+        attach_optimizer_param_names(model_instance, saved)
+        save_optimizer_param_name_manifest(saved, tmp_path)
+
+        resumed = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(enable_clipping=False, **{tunable: resume_value}),
+        )
+        attach_optimizer_param_names(model_instance, resumed)
+
+        validate_optimizer_param_name_manifest(resumed, tmp_path)
 
     def test_resume_manifest_rejects_changed_clipping_mode(self, model, tmp_path):
         """Resuming a clipping run as Muon-only (or vice versa) must fail fast."""
@@ -842,8 +913,9 @@ class TestMuonClipOptimizer:
                 param.grad = torch.zeros_like(param)
         target.grad = grad.clone()
 
-        expected_update = _neobert_polar_express_reference(
+        expected_update, _ = _muon_update_reference(
             grad,
+            torch.zeros_like(grad),
             steps=muon_config.ns_steps,
             beta=muon_config.muon_beta,
             nesterov=muon_config.nesterov,
@@ -852,6 +924,63 @@ class TestMuonClipOptimizer:
 
         optimizer.step()
         assert torch.allclose(target, expected, atol=1e-6, rtol=1e-6)
+
+    @pytest.mark.parametrize("nesterov", [True, False])
+    def test_muon_momentum_matches_multistep_reference_from_nonzero_buffer(
+        self, nesterov: bool
+    ):
+        """Muon momentum should follow the heavy-ball recurrence across updates."""
+        torch.manual_seed(7)
+        config = NeoBERTConfig(
+            hidden_size=8,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=16,
+            vocab_size=32,
+            max_length=8,
+            attn_backend="sdpa",
+            hidden_act="gelu",
+            rope=False,
+        )
+        model = NeoBERT(config)
+        muon_config = MuonClipConfig(
+            lr=2e-3,
+            muon_beta=0.8,
+            nesterov=nesterov,
+            muon_decay=0.0,
+            adam_decay=0.0,
+            ns_steps=5,
+            enable_clipping=False,
+            orthogonalization="polar_express",
+        )
+        optimizer = MuonClipOptimizer(model, config, muon_config)
+        target = model.transformer_encoder[0].wo.weight
+        momentum = torch.randn_like(target)
+        optimizer.state[target] = {
+            "momentum_buffer": momentum.clone(),
+            "step": 4,
+        }
+        expected_param = target.detach().clone()
+        grads = [torch.randn_like(target) for _ in range(3)]
+
+        for grad in grads:
+            target.grad = grad.clone()
+            expected_update, momentum = _muon_update_reference(
+                grad,
+                momentum,
+                steps=muon_config.ns_steps,
+                beta=muon_config.muon_beta,
+                nesterov=nesterov,
+            )
+            expected_param.add_(expected_update, alpha=-muon_config.lr)
+
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+
+            torch.testing.assert_close(
+                optimizer.state[target]["momentum_buffer"], momentum
+            )
+            torch.testing.assert_close(target, expected_param, atol=1e-6, rtol=1e-6)
 
     def test_muon_reference_norm_factor_matches_reference_scale(self):
         """Reference Muon scaling should match the OpenAI/PyTorch shape rule."""
@@ -1000,20 +1129,14 @@ class TestMuonClipOptimizer:
             _neobert_polar_express_reference(
                 q_grad,
                 steps=optimizer.config.ns_steps,
-                beta=optimizer.config.muon_beta,
-                nesterov=optimizer.config.nesterov,
             ),
             _neobert_polar_express_reference(
                 k_grad,
                 steps=optimizer.config.ns_steps,
-                beta=optimizer.config.muon_beta,
-                nesterov=optimizer.config.nesterov,
             ),
             _neobert_polar_express_reference(
                 v_grad,
                 steps=optimizer.config.ns_steps,
-                beta=optimizer.config.muon_beta,
-                nesterov=optimizer.config.nesterov,
             ),
             num_heads=config.num_attention_heads,
             head_dim=config.dim_head,
@@ -1112,6 +1235,73 @@ class TestMuonClipOptimizer:
         metrics = optimizer.get_metrics()
         if muon_config.enable_clipping:
             assert "train/max_attention_logit" in metrics
+
+    def test_real_packed_collator_batch_runs_clipped_muon_step(self):
+        """Packed MLM batches should retain clipping metadata through MuonClip."""
+        tokenizer = build_wordlevel_tokenizer(
+            vocab={"alpha": 5, "beta": 6, "gamma": 7},
+            include_cls=True,
+            include_sep=True,
+        )
+        collator = get_collator(
+            tokenizer,
+            mlm_probability=1.0,
+            mask_all=True,
+            pack_sequences=True,
+            max_length=8,
+        )
+        features = [
+            {"input_ids": tokenizer.encode("alpha beta", add_special_tokens=False)},
+            {"input_ids": tokenizer.encode("gamma", add_special_tokens=False)},
+        ]
+        batch = collator(features)
+        packed_seqlens = batch["packed_seqlens"]
+        assert packed_seqlens[0, :2].tolist() == [4, 3]
+
+        config = NeoBERTConfig(
+            hidden_size=8,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=16,
+            vocab_size=len(tokenizer),
+            max_length=8,
+            pad_token_id=tokenizer.pad_token_id,
+            attn_backend="sdpa",
+            hidden_act="gelu",
+            dropout=0.0,
+            rope=False,
+            tie_word_embeddings=False,
+        )
+        model = NeoBERTLMHead(config)
+        optimizer = MuonClipOptimizer(
+            model,
+            config,
+            MuonClipConfig(
+                lr=1e-3,
+                enable_clipping=True,
+                clipping_threshold=50.0,
+            ),
+        )
+        qkv_weight = model.model.transformer_encoder[0].qkv.weight
+        initial_qkv = qkv_weight.detach().clone()
+
+        assert optimizer.prepare_for_forward(update_step=0, is_last_microbatch=True)
+        logits = model(
+            batch["input_ids"],
+            pad_mask=None,
+            packed_seqlens=packed_seqlens,
+        )["logits"]
+        loss = F.cross_entropy(
+            logits.flatten(0, 1),
+            batch["labels"].flatten(),
+            ignore_index=-100,
+        )
+        loss.backward()
+        optimizer.step()
+
+        assert torch.isfinite(loss)
+        assert not torch.equal(qkv_weight, initial_qkv)
+        assert "train/max_attention_logit" in optimizer.get_metrics()
 
     def test_hook_capture_gating_last_microbatch_only(self, model):
         """Hooks should only capture on the last microbatch when enabled."""

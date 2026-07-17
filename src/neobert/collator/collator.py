@@ -25,14 +25,19 @@ class CustomCollatorForMLM(DataCollatorForLanguageModeling):
     """
 
     def torch_mask_tokens(
-        self, inputs: Any, special_tokens_mask: Optional[Any] = None
+        self,
+        inputs: Any,
+        special_tokens_mask: Optional[Any] = None,
+        offset_mapping: Optional[Any] = None,
     ) -> Tuple[Any, Any]:
         """Prepare masked tokens/labels for MLM (100% mask).
 
         :param Any inputs: Input token IDs.
         :param Any | None special_tokens_mask: Optional mask of special tokens to ignore.
+        :param Any | None offset_mapping: Unused tokenizer offsets accepted for Transformers compatibility.
         :return tuple[Any, Any]: Masked inputs and labels.
         """
+        del offset_mapping
         labels = inputs.clone()
         probability_matrix = torch.full(labels.shape, self.mlm_probability)
         if special_tokens_mask is None:
@@ -56,14 +61,19 @@ class CustomCollatorForMLM(DataCollatorForLanguageModeling):
         return inputs, labels
 
     def numpy_mask_tokens(
-        self, inputs: Any, special_tokens_mask: Optional[Any] = None
+        self,
+        inputs: Any,
+        special_tokens_mask: Optional[Any] = None,
+        offset_mapping: Optional[Any] = None,
     ) -> Tuple[Any, Any]:
         """Prepare masked tokens/labels for MLM numpy path (100% mask).
 
         :param Any inputs: Input token IDs.
         :param Any | None special_tokens_mask: Optional special-token mask.
+        :param Any | None offset_mapping: Unused tokenizer offsets accepted for Transformers compatibility.
         :return tuple[Any, Any]: Masked inputs and labels.
         """
+        del offset_mapping
         labels = inputs.copy()
         probability_matrix = np.full(
             labels.shape, self.mlm_probability, dtype=np.float32
