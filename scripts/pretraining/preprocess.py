@@ -64,6 +64,7 @@ def preprocess(cfg: Any) -> None:
     )
 
     pack_sequences = bool(cfg.datacollator.pack_sequences)
+    # Match the trainer/collator target length; tokenizer.max_length is metadata and a safety ceiling.
     max_length = cfg.dataset.max_seq_length
     if pack_sequences:
         max_length = cfg.datacollator.max_length or max_length
