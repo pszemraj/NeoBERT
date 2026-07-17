@@ -2,16 +2,9 @@
 
 Field names and defaults live in the [YAML configuration reference](../reference/config_reference.yaml).
 
-## MuonClip Defaults
+## MuonClip Policy
 
-NeoBERT ships MuonClip with:
-
-- `param_policy=hidden_2d`
-- `norm_factor=neobert`
-- `nesterov=true`
-- `orthogonalization=polar_express`
-
-These are repo defaults, not attempts to mirror reference Muon exactly.
+Selector defaults and accepted values are defined under `optimizer.muon_config` in the [YAML configuration reference](../reference/config_reference.yaml). The maintained recipe is tuned for encoder training rather than exact reference-Muon parity.
 
 ### Parameter routing
 

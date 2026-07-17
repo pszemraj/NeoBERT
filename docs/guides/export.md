@@ -75,18 +75,14 @@ python scripts/export-hf/mlm_predict.py \
   --text "NeoBERT is a [MASK] encoder."
 ```
 
-## Mapping Notes
+## Checkpoint Mapping
 
 - `model.dropout_prob` maps to the exported Hugging Face `dropout` setting.
 - Export supports `model.hidden_act: swiglu|gelu`.
 - Export expects unpacked SwiGLU weights (`w1/w2/w3`).
 - Export target LM head is biasless. If a checkpoint includes `decoder.bias`, export fails by default unless `--allow-decoder-bias-drop` is set.
-- Exported HF models use their standalone standard attention implementation; training-only attention backend settings are not serialized.
-- Exported models accept conventional zero-based explicit `position_ids`; learned-position index translation and padding behavior are described in [Embeddings and Positions](../reference/architecture.md#embeddings-and-positions).
 
-## Constraints
-
-See [HF Export Model Differences](../reference/architecture.md#hf-export-model-differences) for exported input and attention behavior.
+Exported input, attention, and position behavior is defined in [HF Export Model Differences](../reference/architecture.md#hf-export-model-differences).
 
 ## Related Docs
 
