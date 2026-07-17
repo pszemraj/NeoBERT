@@ -1547,6 +1547,9 @@ def trainer(cfg: Config) -> None:
     epoch = starting_epoch
     last_train_metrics = deepcopy(loop_state.last_train_metrics)
     last_val_metrics = deepcopy(loop_state.last_val_metrics)
+    # Train metrics cover every local microbatch since the previous evaluation.
+    # These diagnostic samples are not checkpoint state, so continuation starts
+    # a fresh window while uninterrupted checkpoint saves preserve the window.
     train_predictions_buffer: list[torch.Tensor] = []
     train_references_buffer: list[torch.Tensor] = []
     evaluate_split = partial(
@@ -1873,12 +1876,6 @@ def trainer(cfg: Config) -> None:
                             accelerator,
                             completed_steps,
                         )
-                        # A checkpoint is also a train-metric window boundary.
-                        # Resume cannot restore rank-local pending predictions,
-                        # so clearing them in uninterrupted runs keeps logged
-                        # train metrics trajectory-equivalent after continuation.
-                        train_predictions_buffer.clear()
-                        train_references_buffer.clear()
 
             if completed_steps >= cfg.trainer.max_steps or early_stop:
                 break

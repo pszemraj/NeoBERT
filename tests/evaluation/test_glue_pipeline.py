@@ -217,6 +217,118 @@ class TestGLUETaskSpecific:
                         assert (step_dir / "checkpoint_complete.json").exists()
                 assert not (Path(tmpdir) / "model_checkpoints").exists()
 
+    def test_checkpoint_does_not_truncate_pending_train_metric_window(self, tmp_path):
+        """Train metrics should retain pre-checkpoint batches until evaluation."""
+        from datasets import Dataset as HFDataset
+        from datasets import DatasetDict
+
+        from neobert.glue.train import trainer
+
+        class TinyTokenizer:
+            pad_token_id = 0
+
+            def __len__(self):
+                return 32
+
+            def __call__(self, sentences, *args, **kwargs):
+                del args, kwargs
+                return {
+                    "input_ids": [[1, 2, 3, 4] for _ in sentences],
+                    "attention_mask": [[1, 1, 1, 1] for _ in sentences],
+                }
+
+        class CountingMetric:
+            def __init__(self):
+                self.pending = 0
+                self.compute_counts = []
+
+            def add_batch(self, *, predictions, references):
+                assert predictions.shape == references.shape
+                self.pending += int(references.shape[0])
+
+            def compute(self):
+                self.compute_counts.append(self.pending)
+                self.pending = 0
+                return {"matthews_correlation": 0.0}
+
+        def collate(examples):
+            return {
+                key: torch.tensor([example[key] for example in examples])
+                for key in ("input_ids", "attention_mask", "labels")
+            }
+
+        raw_datasets = DatasetDict(
+            {
+                "train": HFDataset.from_dict(
+                    {
+                        "sentence": [f"train-{index}" for index in range(6)],
+                        "label": [0, 1, 0, 1, 0, 1],
+                    }
+                ),
+                "validation": HFDataset.from_dict(
+                    {
+                        "sentence": [f"eval-{index}" for index in range(4)],
+                        "label": [0, 1, 0, 1],
+                    }
+                ),
+            }
+        )
+        train_metric = CountingMetric()
+        eval_metric = CountingMetric()
+
+        cfg = Config()
+        cfg.task = "glue"
+        cfg.model.hidden_size = 16
+        cfg.model.num_hidden_layers = 1
+        cfg.model.num_attention_heads = 2
+        cfg.model.intermediate_size = 32
+        cfg.model.max_position_embeddings = 8
+        cfg.model.vocab_size = 32
+        cfg.model.hidden_act = "gelu"
+        cfg.model.kernel_backend = "torch"
+        cfg.dataset.max_seq_length = 8
+        cfg.tokenizer.max_length = 8
+        cfg.glue.task_name = "cola"
+        cfg.glue.num_labels = 2
+        cfg.glue.max_seq_length = 8
+        cfg.glue.allow_random_weights = True
+        cfg.glue.num_workers = 0
+        cfg.glue.preprocessing_num_proc = 0
+        cfg.trainer.output_dir = str(tmp_path)
+        cfg.trainer.max_steps = 3
+        cfg.trainer.num_train_epochs = 1
+        cfg.trainer.per_device_train_batch_size = 2
+        cfg.trainer.per_device_eval_batch_size = 2
+        cfg.trainer.eval_steps = 3
+        cfg.trainer.save_steps = 2
+        cfg.trainer.save_strategy = "steps"
+        cfg.trainer.save_model = True
+        cfg.trainer.mixed_precision = "no"
+        cfg.trainer.use_cpu = True
+        cfg.trainer.tf32 = False
+        cfg.trainer.disable_tqdm = True
+        cfg.scheduler.warmup_steps = 0
+
+        with (
+            mock.patch(
+                "neobert.glue.train.get_tokenizer", return_value=TinyTokenizer()
+            ),
+            mock.patch("neobert.glue.train.load_dataset", return_value=raw_datasets),
+            mock.patch(
+                "neobert.glue.train._create_glue_data_collator",
+                return_value=collate,
+            ),
+            mock.patch(
+                "neobert.glue.train._load_glue_metric",
+                side_effect=(train_metric, eval_metric),
+            ),
+            mock.patch("neobert.glue.train.save_training_checkpoint") as save_mock,
+        ):
+            trainer(cfg)
+
+        save_mock.assert_called_once()
+        assert train_metric.compute_counts == [6]
+
     def test_glue_loop_state_preserves_negative_best_score_and_resume_counters(self):
         """Ensure first negative task scores improve and state roundtrips exactly."""
         from neobert.glue.state import GlueLoopState
