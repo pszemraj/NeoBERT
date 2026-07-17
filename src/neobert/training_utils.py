@@ -1541,7 +1541,7 @@ def _resolve_resume_checkpoint(
     :param str | None resume_from_checkpoint: Configured resume value.
     :param str checkpoint_dir: Default checkpoint directory to scan for latest.
     :param str output_dir: Output directory for relative path resolution.
-    :return tuple[str | None, int]: Resolved checkpoint path and iteration.
+    :return tuple[str | None, int]: Resolved checkpoint path and iteration, or the fresh-run sentinel for automatic resume without candidates.
     """
     if not resume_from_checkpoint:
         return None, 0
@@ -1571,9 +1571,7 @@ def _resolve_resume_checkpoint(
             return str(resume_path), iteration
 
     if not checkpoint_dir_path.exists() or not any(checkpoint_dir_path.iterdir()):
-        raise FileNotFoundError(
-            f"No checkpoints found under requested resume root {checkpoint_dir_path}."
-        )
+        return None, 0
 
     numeric_folders = [
         folder
@@ -1594,10 +1592,7 @@ def _resolve_resume_checkpoint(
                 f"No complete resumable checkpoints found under {checkpoint_dir_path} "
                 f"({details})."
             )
-        raise FileNotFoundError(
-            "No numbered checkpoints found under requested resume root "
-            f"{checkpoint_dir_path}."
-        )
+        return None, 0
 
     latest_folder = max(folders, key=lambda folder: (int(folder.name), folder.name))
     latest_step = int(latest_folder.name)

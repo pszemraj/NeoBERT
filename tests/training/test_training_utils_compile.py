@@ -143,6 +143,36 @@ def test_latest_resume_preserves_zero_padding_and_skips_incomplete(
     assert iteration == 51
 
 
+@pytest.mark.parametrize("selector", ["auto", "latest", "true"])
+@pytest.mark.parametrize(
+    "checkpoint_root_state",
+    ["missing", "empty", "no-numbered-checkpoints"],
+)
+def test_automatic_resume_starts_fresh_without_checkpoints(
+    tmp_path: Path,
+    selector: str,
+    checkpoint_root_state: str,
+) -> None:
+    """Automatic resume selectors must permit a job's first launch."""
+    output_dir = tmp_path / "run"
+    checkpoint_dir = output_dir / "checkpoints"
+    if checkpoint_root_state != "missing":
+        checkpoint_dir.mkdir(parents=True)
+    if checkpoint_root_state == "no-numbered-checkpoints":
+        (checkpoint_dir / "notes.txt").write_text(
+            "no checkpoints yet\n", encoding="utf-8"
+        )
+
+    resume_path, iteration = _resolve_resume_checkpoint(
+        selector,
+        str(checkpoint_dir),
+        str(output_dir),
+    )
+
+    assert resume_path is None
+    assert iteration == 0
+
+
 @pytest.mark.parametrize(
     "marker_payload",
     [None, []],
