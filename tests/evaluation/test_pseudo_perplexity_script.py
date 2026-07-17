@@ -279,6 +279,41 @@ def test_masked_batches_exclude_special_tokens() -> None:
     assert labels.tolist() == [[-100, 10, -100, -100], [-100, -100, 11, -100]]
 
 
+def test_masked_batches_skip_zero_content_rows() -> None:
+    """Rows with no scorable tokens should warn and not abort later samples."""
+    module = _load_pseudo_perplexity_module()
+    dataset = Dataset.from_dict({"id": ["empty", "content"], "text": ["", "hello"]})
+
+    class _Tokenizer:
+        mask_token_id = 99
+
+        def __call__(self, text: str, **_kwargs):
+            if not text:
+                return {
+                    "input_ids": torch.tensor([[101, 102]]),
+                    "special_tokens_mask": torch.tensor([[1, 1]]),
+                }
+            return {
+                "input_ids": torch.tensor([[101, 10, 102]]),
+                "special_tokens_mask": torch.tensor([[1, 0, 1]]),
+            }
+
+    with pytest.warns(RuntimeWarning, match="0:empty.*no non-special tokens"):
+        batches = list(
+            module._iter_masked_batches(
+                dataset,
+                _Tokenizer(),
+                text_column="text",
+                id_column="id",
+                batch_size=2,
+                max_length=8,
+            )
+        )
+
+    assert len(batches) == 1
+    assert batches[0][0] == "1:content"
+
+
 def test_build_neobert_uses_runtime_config_fields(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

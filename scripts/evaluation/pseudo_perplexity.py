@@ -304,6 +304,14 @@ def _iter_masked_batches(
         input_ids = tokenized["input_ids"]
         special_mask = tokenized["special_tokens_mask"].to(torch.bool)
         positions = (~special_mask[0]).nonzero(as_tuple=False).flatten()
+        if positions.numel() == 0:
+            warnings.warn(
+                f"Skipping sample {sample_id!r}: tokenization produced no "
+                "non-special tokens to score.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            continue
         for position_batch in positions.split(batch_size):
             masked_inputs = input_ids.repeat(len(position_batch), 1)
             labels = torch.full_like(masked_inputs, -100)

@@ -23,6 +23,7 @@ from neobert.pretraining.trainer import (
 )
 from neobert.streaming import (
     RetryingStreamingDataset,
+    compute_retry_backoff_seconds,
     is_streaming_dataset,
     is_transient_streaming_error,
     peek_streaming_example,
@@ -658,6 +659,19 @@ class TestTransientErrorClassification(unittest.TestCase):
 
 class TestStreamingRetryHelpers(unittest.TestCase):
     """Validate retry helpers for transient streaming read failures."""
+
+    def test_retry_backoff_grows_exponentially_and_caps(self):
+        """Backoff should double from the base delay without exceeding its cap."""
+        delays = [
+            compute_retry_backoff_seconds(
+                attempt,
+                base_backoff_seconds=1.5,
+                max_backoff_seconds=5.0,
+            )
+            for attempt in range(5)
+        ]
+
+        self.assertEqual(delays, [0.0, 1.5, 3.0, 5.0, 5.0])
 
     def test_is_streaming_dataset_recognizes_huggingface_marker(self):
         """Ensure legacy Hugging Face stream markers are treated as streaming."""
