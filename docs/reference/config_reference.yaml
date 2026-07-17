@@ -316,7 +316,7 @@ scheduler:
   final_lr_ratio: 0.1
 
   # scheduler.warmup_percent — float | null; default: null; when set must be in [0, 100]. Percentage of scheduler.total_steps, or trainer.max_steps when total_steps is null.
-  # Takes precedence over scheduler.warmup_steps.
+  # Takes precedence over scheduler.warmup_steps; explicitly configuring both emits a NeoBERTWarning so the shadowed absolute value is visible.
   warmup_percent: null
 
   # scheduler.decay_percent — float | null; default: null; when set must be in [0, 100]. Percentage position of the decay end.

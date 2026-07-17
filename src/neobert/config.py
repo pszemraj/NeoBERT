@@ -1348,6 +1348,20 @@ class ConfigLoader:
         cfg_dict = cfg_dict or {}
         ConfigLoader._validate_config_keys(cfg_dict)
 
+        scheduler_cfg = cfg_dict.get("scheduler", {})
+        if (
+            isinstance(scheduler_cfg, dict)
+            and scheduler_cfg.get("warmup_percent") is not None
+            and scheduler_cfg.get("warmup_steps") is not None
+        ):
+            warnings.warn(
+                "Both scheduler.warmup_percent and scheduler.warmup_steps are "
+                "explicitly configured; warmup_percent takes precedence and "
+                "warmup_steps will be ignored.",
+                NeoBERTWarning,
+                stacklevel=2,
+            )
+
         config = Config()
 
         # Update model config
@@ -1488,12 +1502,18 @@ class ConfigLoader:
         :param str | Path path: Destination path for the YAML file.
         """
         # Convert dataclasses to dict
+        scheduler_dict = asdict(config.scheduler)
+        if config.scheduler.warmup_percent is not None:
+            # Serialize the effective schedule contract without the shadowed
+            # absolute value. This keeps checkpoint-generated configs distinct
+            # from user-authored configs that explicitly set both controls.
+            scheduler_dict.pop("warmup_steps")
         config_dict = {
             "model": asdict(config.model),
             "dataset": asdict(config.dataset),
             "tokenizer": asdict(config.tokenizer),
             "optimizer": asdict(config.optimizer),
-            "scheduler": asdict(config.scheduler),
+            "scheduler": scheduler_dict,
             "trainer": asdict(config.trainer),
             "datacollator": asdict(config.datacollator),
             "wandb": asdict(config.wandb),

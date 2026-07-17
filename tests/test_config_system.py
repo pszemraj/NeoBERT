@@ -659,6 +659,44 @@ optimizer:
                 )
                 self.assertEqual(found, expect_warning)
 
+    def test_scheduler_warmup_precedence_warns_for_explicit_values(self):
+        """Ensure an explicitly shadowed warmup step count remains visible."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cfg = ConfigLoader.dict_to_config(
+                {
+                    "scheduler": {
+                        "warmup_percent": 10.0,
+                        "warmup_steps": 500,
+                    }
+                }
+            )
+
+        self.assertEqual(cfg.scheduler.warmup_percent, 10.0)
+        self.assertEqual(cfg.scheduler.warmup_steps, 500)
+        self.assertTrue(
+            any(
+                "warmup_percent takes precedence" in str(warning.message)
+                and warning.category is NeoBERTWarning
+                for warning in caught
+            )
+        )
+
+        checkpoint_cfg = Config()
+        checkpoint_cfg.scheduler.warmup_percent = 10.0
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            path = f.name
+        try:
+            ConfigLoader.save(checkpoint_cfg, path)
+            with open(path, "r") as f:
+                serialized = yaml.safe_load(f)
+            reloaded = ConfigLoader.load(path)
+        finally:
+            os.unlink(path)
+
+        self.assertNotIn("warmup_steps", serialized["scheduler"])
+        self.assertEqual(reloaded.scheduler.warmup_percent, 10.0)
+
     def test_config_value_validation_errors(self):
         """Ensure invalid scalar config values fail for known validation paths."""
         with self.assertRaises(ValueError):
