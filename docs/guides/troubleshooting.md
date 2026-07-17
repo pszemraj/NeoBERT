@@ -95,7 +95,7 @@ Actions:
 
 - `optimizer_param_names.json is missing`: the checkpoint predates the optimizer resume manifest, so parameter order and state semantics cannot be verified. Start a new run or continue from model weights only; this repo does not carry checkpoint back-compat before a stable release.
 - `outdated manifest schema`: the manifest was written before state-semantics tracking. Start a current run from the portable model weights or start fresh.
-- `Optimizer state semantics changed`: the optimizer's update rule changed since the checkpoint was written. If a MuonClip selector (`norm_factor`, `param_policy`, `orthogonalization`, `nesterov`, or `clipping`) drifted, re-pin the checkpoint's value explicitly in the launch config. If the implementation or clipping reduction contract changed, the old optimizer buffers are not safely resumable; start a new run or continue from portable model weights only.
+- `Optimizer state semantics changed`: the saved manifest and the optimizer reconstructed from checkpoint-owned configuration no longer describe the same update rule. Launch-time optimizer overrides cannot repair this because resume restores optimizer selectors from `config.yaml` before validation. Use the code revision that produced the checkpoint, start a new run, or continue from portable model weights without optimizer state.
 - `Optimizer parameter order changed`: the model's parameter registration order differs from the checkpoint; PyTorch optimizer state is positional, so a silent load would hand buffers to the wrong parameters.
 
 ### Checkpoint config reports unknown configuration keys

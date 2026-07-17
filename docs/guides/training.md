@@ -126,7 +126,7 @@ Step checkpoints (resume + export assets) share one layout across pretraining, c
 
 The top-level `model.safetensors` is the portable export/eval payload and intentionally materializes tied tensors under every expected key. Accelerate's resume state lives under `accelerate/` so its strictly-loaded model file cannot collide with the portable payload; checkpoints without that state directory cannot be resumed as full training runs. Every current trainer bundles its resolved config and tokenizer. GLUE also saves the instantiated Hugging Face model configuration when applicable.
 
-A bare step selector such as `--trainer.resume_from_checkpoint 100` resolves to `<output_dir>/checkpoints/100`; `latest` scans the same checkpoint root, while absolute paths and existing output-relative paths remain available for explicit selection.
+A bare step selector such as `--trainer.resume_from_checkpoint 100` resolves to `<output_dir>/checkpoints/100`, while absolute paths and existing output-relative paths remain available for explicit selection. The automatic selectors `true`, `latest`, and `auto` scan the checkpoint root and start fresh when it is missing, empty, or contains no numbered checkpoint directories. If numbered directories exist but none is complete and resumable, automatic selection fails with their validation errors instead of silently starting over; explicit selectors always fail when their target is missing or incomplete.
 
 Pretraining and contrastive runs save on `trainer.save_steps` ticks and always save the terminal step when `trainer.save_strategy: steps` and `trainer.save_model: true`. `trainer.save_total_limit: 0` or `null` disables pruning. GLUE applies its own `steps`, `epoch`, `best`, or `no` save strategy.
 

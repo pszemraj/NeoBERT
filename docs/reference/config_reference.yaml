@@ -401,7 +401,7 @@ trainer:
   # Used only when trainer.torch_compile=true. Unknown values warn and fall back to inductor; aot_eager/eager are primarily compiler-debugging backends.
   torch_compile_backend: inductor
 
-  # trainer.resume_from_checkpoint — string | boolean | null; default: null. null or false disables resume; true and strings true/latest/auto select the newest complete numeric checkpoint.
+  # trainer.resume_from_checkpoint — string | boolean | null; default: null. null or false disables resume; automatic selectors are true and the strings true/latest/auto. Resolution rules are in docs/guides/training.md#checkpointing-and-resume.
   # A numeric string selects <output_dir>/checkpoints/<step>; other strings are paths (relative paths try under output_dir first). Resume accepts only a complete current version-2 self-contained checkpoint with its completion inventory, config, tokenizer, portable model weights, Accelerate model/optimizer/scheduler/RNG state, exact task custom-state count, and optimizer manifests; older or partial checkpoints are errors.
   # WARNING: resume restores checkpoint-owned model/tokenizer/objective/optimizer/scheduler semantics. It also restores pretraining microbatch size and GLUE microbatch/accumulation/seed; corpus identity and, with RoPE, context lengths remain launch-controlled.
   # For same-corpus pretraining, the checkpoint restores dataset.trust_remote_code/streaming/validation_split/train_split/eval_split/eval_samples/shuffle_buffer_size/load_all_from_disk/min_length/alpha. Worker, pinning, prefetch, cache, retry, num_proc, and top-level seed settings remain launch-controlled. When corpus identity changes, the launch keeps the first seven source/cursor fields listed above and resets the data cursor.

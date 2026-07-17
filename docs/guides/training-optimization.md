@@ -6,6 +6,8 @@ Field names and defaults live in the [YAML configuration reference](../reference
 
 Selector defaults and accepted values are defined under `optimizer.muon_config` in the [YAML configuration reference](../reference/config_reference.yaml). The maintained recipe is tuned for encoder training rather than exact reference-Muon parity.
 
+Muon momentum updates `buffer = beta * buffer + grad`. With Nesterov enabled, orthogonalization receives `grad + beta * buffer`; otherwise it receives the updated buffer.
+
 ### Parameter routing
 
 - Muon applies to hidden transformer matrices.
