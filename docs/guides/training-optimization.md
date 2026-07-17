@@ -6,8 +6,6 @@ Field names and defaults live in the [YAML configuration reference](../reference
 
 Selector defaults and accepted values are defined under `optimizer.muon_config` in the [YAML configuration reference](../reference/config_reference.yaml). The maintained recipe is tuned for encoder training rather than exact reference-Muon parity.
 
-Muon momentum updates `buffer = beta * buffer + grad`. With Nesterov enabled, orthogonalization receives `grad + beta * buffer`; otherwise it receives the updated buffer.
-
 ### Parameter routing
 
 - Muon applies to hidden transformer matrices.
@@ -16,26 +14,13 @@ Muon momentum updates `buffer = beta * buffer + grad`. With Nesterov enabled, or
 
 `all_2d` remains available for explicit compatibility or ablation runs.
 
-### Normalization modes
-
-| `norm_factor`      | Behavior | Typical use |
-| ------------------ | -------- | ----------- |
-| `neobert`          | `0.4 * sqrt(max(d_out, d_in))` | repo default for encoder pretraining |
-| `muon_reference`   | `sqrt(max(1, d_out / d_in))` | reference Muon parity / ablations |
-| `spectral`         | `sqrt(d_out / d_in)` | experimental scaling |
-| `match_rms_adamw`  | `0.2 * sqrt(max(d_out, d_in))` | reduced legacy-style scale |
-| `none`             | no post-orthogonalization scaling | debugging only |
-
-Why `neobert` is the default:
+### Maintained selector policy
 
 - this encoder setup has trained better with the symmetric `neobert` scale than with reference Muon scaling,
 - the name reflects repo intent rather than compatibility baggage,
 - `muon_reference` is still available when exact reference behavior matters.
 
-### Orthogonalization
-
-- `polar_express` is the shipped default for CUDA throughput
-- `newton_schulz` remains available for reference-style runs and debugging
+The field reference defines the momentum recurrence, every normalization formula, and the compute-dtype behavior of each orthogonalization algorithm.
 
 ### Fused QKV handling
 

@@ -20,21 +20,4 @@ In Python, `ConfigLoader.load(path, overrides=...)` accepts either the same list
 
 ## YAML variables
 
-An optional top-level `variables` mapping can remove repetition. An exact `$variables.path` value preserves its YAML type, while `{$variables.path}` or `${variables.path}` interpolates inside a string. Nested references are supported, cycles fail, unknown exact references fail, and unresolved inline tokens warn.
-
-```yaml
-variables:
-  seq_len: 1024
-  tag: pretrain-1024
-
-dataset:
-  max_seq_length: $variables.seq_len
-tokenizer:
-  max_length: $variables.seq_len
-datacollator:
-  max_length: $variables.seq_len
-wandb:
-  name: "neobert-{$variables.tag}"
-```
-
-Keep `model.max_position_embeddings` explicit: it is an architecture decision and must be at least the active training sequence length.
+The [YAML configuration reference](config_reference.yaml) defines the supported variable forms, failure behavior, and sequence-length interactions inline. Keep `model.max_position_embeddings` explicit because it is an architecture decision rather than a reusable interpolation value.
