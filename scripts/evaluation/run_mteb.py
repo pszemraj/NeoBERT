@@ -32,12 +32,14 @@ def _mteb_cache_identity(
     *,
     pooling: str,
     max_length: int,
+    trust_remote_code: bool,
 ) -> tuple[str, str]:
     """Build a stable MTEB cache identity for one local scoring contract.
 
     :param Any resolved: Resolved checkpoint model source.
     :param str pooling: Canonical embedding pooling strategy.
     :param int max_length: Evaluation context length.
+    :param bool trust_remote_code: Whether custom tokenizer code was enabled.
     :return tuple[str, str]: MTEB model name and contract revision.
     """
     checkpoint_dir = resolved.checkpoint_dir.resolve()
@@ -53,6 +55,7 @@ def _mteb_cache_identity(
         "checkpoint_tag": str(resolved.checkpoint_tag),
         "max_length": max_length,
         "pooling": pooling,
+        "trust_remote_code": trust_remote_code,
     }
     revision = hashlib.sha256(
         json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -214,10 +217,12 @@ def evaluate_mteb(cfg: Any) -> None:
     selected_tasks = _resolve_mteb_tasks(cfg)
 
     requested_max_length = int(cfg.tokenizer.max_length)
+    trust_remote_code = bool(cfg.tokenizer.trust_remote_code)
     resolved = resolve_checkpoint_model_source(
         pretrained_checkpoint_dir,
         pretrained_checkpoint,
         max_length=requested_max_length,
+        trust_remote_code=trust_remote_code,
     )
     ckpt = resolved.checkpoint_tag
 
@@ -265,6 +270,7 @@ def evaluate_mteb(cfg: Any) -> None:
         resolved,
         pooling=mteb_pooling,
         max_length=requested_max_length,
+        trust_remote_code=trust_remote_code,
     )
     model.mteb_model_meta = mteb.models.ModelMeta.create_empty(
         {

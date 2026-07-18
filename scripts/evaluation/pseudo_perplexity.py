@@ -134,12 +134,14 @@ def _build_neobert_masked_lm(
     checkpoint_path: str | Path,
     checkpoint: str,
     max_length: int,
+    trust_remote_code: bool = False,
 ) -> _ResolvedModelSource:
     """Build a NeoBERT MLM from checkpoint-local config and tokenizer artifacts.
 
     :param str | Path checkpoint_path: Checkpoint root or step directory.
     :param str checkpoint: Checkpoint selector.
     :param int max_length: Evaluation context length.
+    :param bool trust_remote_code: Allow checkpoint-local custom tokenizer code.
     :return _ResolvedModelSource: Resolved local model source.
     :raises FileNotFoundError: If checkpoint config or tokenizer artifacts are missing.
     :raises ValueError: If context length or tokenizer/model identity is incompatible.
@@ -148,6 +150,7 @@ def _build_neobert_masked_lm(
         checkpoint_path,
         checkpoint,
         max_length=max_length,
+        trust_remote_code=trust_remote_code,
     )
     model = NeoBERTLMHead(resolved.model_config)
     state_dict = load_step_checkpoint_state_dict(
@@ -173,6 +176,7 @@ def _build_neobert_masked_lm(
             "checkpoint_tag": resolved.checkpoint_tag,
             "config": str(resolved.config_path.resolve()),
             "tokenizer": str(resolved.tokenizer_path.resolve()),
+            "trust_remote_code": trust_remote_code,
         },
     )
 
@@ -532,6 +536,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--checkpoint", default="latest")
     parser.add_argument("--revision", help="Optional Hub model/tokenizer revision")
+    parser.add_argument(
+        "--trust_remote_code",
+        action="store_true",
+        help="Allow executable code from a checkpoint-local custom tokenizer",
+    )
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--compile", action="store_true")
@@ -585,6 +594,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             checkpoint_path=args.checkpoint_path,
             checkpoint=args.checkpoint,
             max_length=args.max_length,
+            trust_remote_code=args.trust_remote_code,
         )
     model = source.model
     tokenizer = source.tokenizer

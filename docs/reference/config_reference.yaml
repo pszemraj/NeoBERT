@@ -250,8 +250,8 @@ tokenizer:
   # Pretraining replaces it with the effective tokenizer length rounded to a multiple of 128. Resume loads the checkpoint tokenizer and recomputes this value; an incompatible effective vocabulary cannot load the saved model state. Fresh downstream initialization does not use it to resize a tokenizer.
   vocab_size: null
 
-  # tokenizer.trust_remote_code — boolean; default: false. Allows executable tokenizer/model code from a Hub repository.
-  # Security warning: use only with a trusted, preferably pinned tokenizer.revision. Hub GLUE rejects true with resume or checkpoint creation; set trainer.save_model=false or trainer.save_strategy="no" to permit only a non-resumable comparison. Resume and checkpoint-based native GLUE initialization restore the saved value.
+  # tokenizer.trust_remote_code — boolean; default: false. Allows executable tokenizer/model code from a Hub repository and custom tokenizer code from a checkpoint-local tokenizer/ where supported.
+  # Security warning: local dynamic modules still execute Python. Use only with trusted code and a preferably pinned tokenizer.revision. MTEB keeps this launch-controlled and includes it in the result-cache contract. Hub GLUE rejects true with resume or checkpoint creation; set trainer.save_model=false or trainer.save_strategy="no" to permit only a non-resumable comparison. Resume and checkpoint-based native GLUE initialization restore the saved value. Local pseudo-perplexity uses its separate --trust_remote_code CLI opt-in.
   trust_remote_code: false
 
   # tokenizer.revision — string | null; default: null. Optional Hub branch, tag, or commit for tokenizer/model loading.

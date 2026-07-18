@@ -29,12 +29,14 @@ def resolve_checkpoint_model_source(
     checkpoint: str | int,
     *,
     max_length: int,
+    trust_remote_code: bool = False,
 ) -> ResolvedCheckpointModelSource:
     """Resolve and validate checkpoint-local evaluation model inputs.
 
     :param str | Path checkpoint_path: Run root, checkpoint root, or step directory.
     :param str | int checkpoint: Requested checkpoint selector.
     :param int max_length: Requested evaluation context length.
+    :param bool trust_remote_code: Allow checkpoint-local custom tokenizer code.
     :raises FileNotFoundError: If checkpoint config or tokenizer artifacts are missing.
     :raises ValueError: If tokenizer/model identity or context length is incompatible.
     :return ResolvedCheckpointModelSource: Validated local evaluation source.
@@ -57,7 +59,7 @@ def resolve_checkpoint_model_source(
     tokenizer = get_tokenizer(
         pretrained_model_name_or_path=str(tokenizer_path),
         max_length=max_length,
-        trust_remote_code=False,
+        trust_remote_code=trust_remote_code,
         revision=None,
         allow_special_token_rewrite=cfg.tokenizer.allow_special_token_rewrite,
     )

@@ -21,11 +21,11 @@ from neobert.model import NeoBERTConfig, NeoBERTLMHead
 from tests.tokenizer_utils import build_wordlevel_tokenizer
 
 
-def test_shared_checkpoint_source_forwards_tokenizer_rewrite_policy(
+def test_shared_checkpoint_source_combines_saved_and_launch_tokenizer_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """All evaluation entry points must reconstruct checkpoint tokenizer policy."""
+    """Checkpoint mutation policy is saved while custom-code trust is launch-owned."""
     checkpoint_root = tmp_path / "checkpoints"
     checkpoint_dir = checkpoint_root / "10"
     (checkpoint_dir / "tokenizer").mkdir(parents=True)
@@ -56,6 +56,18 @@ def test_shared_checkpoint_source_forwards_tokenizer_rewrite_policy(
     )
 
     assert captured["allow_special_token_rewrite"] is True
+    assert captured["trust_remote_code"] is False
+
+    captured.clear()
+    evaluation_utils.resolve_checkpoint_model_source(
+        checkpoint_root,
+        "10",
+        max_length=32,
+        trust_remote_code=True,
+    )
+
+    assert captured["allow_special_token_rewrite"] is True
+    assert captured["trust_remote_code"] is True
 
 
 def _load_pseudo_perplexity_module():
@@ -243,6 +255,13 @@ def test_model_source_cli_is_exclusive_and_local_requires_checkpoint() -> None:
         parser.parse_args(["--hub_model", "bert-base-uncased", "--no-bf16"]).bf16
         is False
     )
+    assert parser.parse_args(["--checkpoint_path", "x"]).trust_remote_code is False
+    assert (
+        parser.parse_args(
+            ["--checkpoint_path", "x", "--trust_remote_code"]
+        ).trust_remote_code
+        is True
+    )
     with pytest.raises(SystemExit):
         module.main(["--checkpoint", "10"])
 
@@ -376,10 +395,11 @@ def test_build_neobert_uses_runtime_config_fields(
         pad_token_id=tokenizer.pad_token_id,
         attn_backend="sdpa",
     )
-    monkeypatch.setattr(
-        module,
-        "resolve_checkpoint_model_source",
-        lambda *_args, **_kwargs: SimpleNamespace(
+    resolver_kwargs: dict[str, object] = {}
+
+    def _resolve_source(*_args, **kwargs):
+        resolver_kwargs.update(kwargs)
+        return SimpleNamespace(
             checkpoint_root=tmp_path / "checkpoints",
             checkpoint_dir=checkpoint_dir,
             checkpoint_tag="10",
@@ -388,7 +408,12 @@ def test_build_neobert_uses_runtime_config_fields(
             training_config=cfg,
             tokenizer=tokenizer,
             model_config=resolved_model_config,
-        ),
+        )
+
+    monkeypatch.setattr(
+        module,
+        "resolve_checkpoint_model_source",
+        _resolve_source,
     )
     monkeypatch.setattr(
         module,
@@ -405,12 +430,15 @@ def test_build_neobert_uses_runtime_config_fields(
         checkpoint_path=tmp_path / "checkpoints",
         checkpoint="10",
         max_length=256,
+        trust_remote_code=True,
     )
 
     assert source.model is captured
     assert source.tokenizer is tokenizer
     assert source.model_label == "tiny"
     assert source.checkpoint_label == "10"
+    assert source.provenance["trust_remote_code"] is True
+    assert resolver_kwargs == {"max_length": 256, "trust_remote_code": True}
     assert captured.config.max_length == 256
     assert captured.config.dropout == 0.1
     assert captured.config.pad_token_id == 7

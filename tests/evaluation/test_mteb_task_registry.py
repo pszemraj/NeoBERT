@@ -138,7 +138,13 @@ def test_mteb_cache_identity_covers_checkpoint_and_scoring_contract(
     run_mteb = _load_script("run_mteb")
     training_config = SimpleNamespace(model=SimpleNamespace(name="tiny"))
 
-    def _identity(checkpoint: str, pooling: str, max_length: int) -> tuple[str, str]:
+    def _identity(
+        checkpoint: str,
+        pooling: str,
+        max_length: int,
+        *,
+        trust_remote_code: bool = False,
+    ) -> tuple[str, str]:
         return run_mteb._mteb_cache_identity(
             SimpleNamespace(
                 checkpoint_dir=tmp_path / "run" / "checkpoints" / checkpoint,
@@ -147,6 +153,7 @@ def test_mteb_cache_identity_covers_checkpoint_and_scoring_contract(
             ),
             pooling=pooling,
             max_length=max_length,
+            trust_remote_code=trust_remote_code,
         )
 
     baseline = _identity("10", "avg", 32)
@@ -156,6 +163,7 @@ def test_mteb_cache_identity_covers_checkpoint_and_scoring_contract(
     assert baseline != _identity("20", "avg", 32)
     assert baseline != _identity("10", "cls", 32)
     assert baseline != _identity("10", "avg", 64)
+    assert baseline != _identity("10", "avg", 32, trust_remote_code=True)
 
 
 def test_mteb_uses_checkpoint_local_model_and_tokenizer(
@@ -182,6 +190,7 @@ def test_mteb_uses_checkpoint_local_model_and_tokenizer(
     launch_cfg.task_types = ["STS12"]
     launch_cfg.output_folder = tmp_path / "results"
     launch_cfg.tokenizer.max_length = 32
+    launch_cfg.tokenizer.trust_remote_code = True
     launch_cfg.mteb_batch_size = 7
     launch_cfg.model.hidden_size = 999
 
@@ -273,7 +282,10 @@ def test_mteb_uses_checkpoint_local_model_and_tokenizer(
 
     model_config = captured["model_config"]
     assert model_config.hidden_size == checkpoint_cfg.model.hidden_size
-    assert captured["resolver_kwargs"] == {"max_length": 32}
+    assert captured["resolver_kwargs"] == {
+        "max_length": 32,
+        "trust_remote_code": True,
+    }
     model_name, model_revision = run_mteb._mteb_cache_identity(
         SimpleNamespace(
             checkpoint_dir=checkpoint_dir,
@@ -282,6 +294,7 @@ def test_mteb_uses_checkpoint_local_model_and_tokenizer(
         ),
         pooling="avg",
         max_length=32,
+        trust_remote_code=True,
     )
     assert captured["model_meta"] == {
         "name": model_name,
