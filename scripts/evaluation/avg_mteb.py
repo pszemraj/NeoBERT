@@ -2,152 +2,134 @@
 
 import argparse
 import json
+import os
 from pathlib import Path
 
-import mteb
-
-### GLOBAL VARIABLES ###
-
-TASK_LIST_CLASSIFICATION = [
-    "AmazonCounterfactualClassification",
-    "AmazonPolarityClassification",
-    "AmazonReviewsClassification",
-    "Banking77Classification",
-    "EmotionClassification",
-    "ImdbClassification",
-    "MassiveIntentClassification",
-    "MassiveScenarioClassification",
-    "MTOPDomainClassification",
-    "MTOPIntentClassification",
-    "ToxicConversationsClassification",
-    "TweetSentimentExtractionClassification",
-]
-
-TASK_LIST_CLUSTERING = [
-    "ArxivClusteringP2P",
-    "ArxivClusteringS2S",
-    "BiorxivClusteringP2P",
-    "BiorxivClusteringS2S",
-    "MedrxivClusteringP2P",
-    "MedrxivClusteringS2S",
-    "RedditClustering",
-    "RedditClusteringP2P",
-    "StackExchangeClustering",
-    "StackExchangeClusteringP2P",
-    "TwentyNewsgroupsClustering",
-]
-
-TASK_LIST_PAIR_CLASSIFICATION = [
-    "SprintDuplicateQuestions",
-    "TwitterSemEval2015",
-    "TwitterURLCorpus",
-]
-
-TASK_LIST_RERANKING = [
-    "AskUbuntuDupQuestions",
-    "MindSmallReranking",
-    "SciDocsRR",
-    "StackOverflowDupQuestions",
-]
-
-TASK_LIST_RETRIEVAL = [
-    "ArguAna",
-    "ClimateFEVER",
-    "CQADupstackRetrieval",
-    "DBPedia",
-    "FEVER",
-    "FiQA2018",
-    "HotpotQA",
-    "MSMARCO",
-    "NFCorpus",
-    "NQ",
-    "QuoraRetrieval",
-    "SCIDOCS",
-    "SciFact",
-    "Touche2020",
-    "TRECCOVID",
-]
-
-TASK_LIST_STS = [
-    "BIOSSES",
-    "SICK-R",
-    "STS12",
-    "STS13",
-    "STS14",
-    "STS15",
-    "STS16",
-    "STS17",
-    "STS22",
-    "STSBenchmark",
-]
-
-
-TASK_LIST_SUMMARIZATION = [
-    "SummEval",
-]
-
-TASK_LIST_EN = (
-    TASK_LIST_CLASSIFICATION
-    + TASK_LIST_CLUSTERING
-    + TASK_LIST_PAIR_CLASSIFICATION
-    + TASK_LIST_RERANKING
-    + TASK_LIST_RETRIEVAL
-    + TASK_LIST_STS
-    + TASK_LIST_SUMMARIZATION
+from neobert.mteb_tasks import (
+    MTEB_ALL_EXECUTION_TASKS,
+    MTEB_TASK_GROUPS,
+    MTEB_TASK_SPECS_BY_EXECUTION_NAME,
+    MTEBTaskSpec,
 )
 
 
-TASK_LIST_NAMES = [
-    ("Class.", TASK_LIST_CLASSIFICATION, ["en", "en-en"]),
-    ("Clust.", TASK_LIST_CLUSTERING, ["en", "en-en"]),
-    ("PairClass.", TASK_LIST_PAIR_CLASSIFICATION, ["en", "en-en"]),
-    ("Rerank.", TASK_LIST_RERANKING, ["en", "en-en"]),
-    ("Retr.", TASK_LIST_RETRIEVAL, ["en", "en-en"]),
-    ("STS", TASK_LIST_STS, ["en", "en-en"]),
-    ("Summ.", TASK_LIST_SUMMARIZATION, ["en", "en-en"]),
-    # ("BitextMining", TASK_LIST_BITEXT, []),
-    ("Avg.", TASK_LIST_EN, ["en", "en-en"]),
-]
+def _execution_score(
+    model_results: dict,
+    result_name: str,
+    split: str,
+) -> float | None:
+    """Return one concrete task score for its configured evaluation split.
+
+    :param dict model_results: Result payloads keyed by concrete task name.
+    :param str result_name: Concrete MTEB task name.
+    :param str split: Evaluation split containing the official score.
+    :return float | None: Main score, or ``None`` when missing.
+    """
+    try:
+        score = model_results[result_name]["scores"][split][0]["main_score"]
+    except (KeyError, TypeError, IndexError):
+        return None
+    return float(score) if score is not None else None
+
+
+def _task_score(model_results: dict, task: MTEBTaskSpec) -> float | None:
+    """Return one task score, averaging expanded dataset variants when needed.
+
+    :param dict model_results: Result payloads keyed by concrete MTEB task name.
+    :param MTEBTaskSpec task: Task specification to aggregate.
+    :return float | None: Mean main score, or ``None`` when no result is present.
+    """
+    scores: list[float] = []
+    for result_name in task.execution_names:
+        score = _execution_score(
+            model_results,
+            result_name,
+            task.evaluation_split,
+        )
+        if score is None:
+            return None
+        scores.append(score)
+    return sum(scores) / len(scores)
+
+
+def _average_categories(model_results: dict) -> dict[str, float | None]:
+    """Compute category and overall averages for one model.
+
+    :param dict model_results: Result payloads keyed by concrete MTEB task name.
+    :return dict[str, float | None]: Percentage scores keyed by reporting label.
+    """
+    category_scores: dict[str, float | None] = {}
+    all_task_scores = []
+    for group in MTEB_TASK_GROUPS:
+        scores = [
+            score
+            for task in group.tasks
+            if (score := _task_score(model_results, task)) is not None
+        ]
+        all_task_scores.extend(scores)
+        category_scores[group.label] = (
+            round(100 * sum(scores) / len(scores), 2) if scores else None
+        )
+    category_scores["Avg."] = (
+        round(100 * sum(all_task_scores) / len(all_task_scores), 2)
+        if all_task_scores
+        else None
+    )
+    return category_scores
+
+
+def _result_coverage(model_results: dict) -> dict[str, object]:
+    """Summarize concrete and logical MTEB result coverage.
+
+    :param dict model_results: Result payloads keyed by concrete task name.
+    :return dict[str, object]: Coverage counts, completeness, and missing results.
+    """
+    missing_results = [
+        f"{name}:{MTEB_TASK_SPECS_BY_EXECUTION_NAME[name].evaluation_split}"
+        for name in MTEB_ALL_EXECUTION_TASKS
+        if _execution_score(
+            model_results,
+            name,
+            MTEB_TASK_SPECS_BY_EXECUTION_NAME[name].evaluation_split,
+        )
+        is None
+    ]
+    logical_tasks = [task for group in MTEB_TASK_GROUPS for task in group.tasks]
+    logical_present = sum(
+        _task_score(model_results, task) is not None for task in logical_tasks
+    )
+    return {
+        "complete": not missing_results,
+        "concrete_present": len(MTEB_ALL_EXECUTION_TASKS) - len(missing_results),
+        "concrete_expected": len(MTEB_ALL_EXECUTION_TASKS),
+        "logical_present": logical_present,
+        "logical_expected": len(logical_tasks),
+        "missing_results": missing_results,
+    }
 
 
 def compute_table() -> None:
     """Compute and write average MTEB score tables."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--result_folder", dest="result_folder", type=str)
-    parser.add_argument("--model_name", dest="model_name", type=str)
+    parser.add_argument("--result_folder", required=True, type=Path)
+    parser.add_argument("--model_name", required=True)
+    parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="Write explicitly marked partial aggregates instead of failing",
+    )
     args = parser.parse_args()
 
     all_results = {}
 
-    result_dir = Path(args.result_folder)
+    result_dir = args.result_folder
     result_file = result_dir / f"{args.model_name}_avg_table.json"
 
     if result_file.exists():
-        UserWarning("Overwriting existing result file.")
         result_file.unlink()
 
-    def explore(path: Path) -> list[Path]:
-        """Collect leaf directories containing result JSON files.
-
-        :param Path path: Root path to search.
-        :return list[Path]: Leaf directories with JSON files.
-        """
-        paths = []
-        file_level = False
-        files = list(path.iterdir())
-        if not files:
-            UserWarning(f"Empty folder path: {path}.")
-        for file in files:
-            if file.is_dir():
-                paths.extend(explore(file))
-            else:
-                file_level = True
-        if file_level:
-            paths.append(path)
-        return paths
-
     for checkpoint in result_dir.iterdir():
-        paths = explore(checkpoint)
+        paths = [Path(root) for root, _, files in os.walk(checkpoint) if files]
         checkpoint_name = checkpoint.name
 
         for path in paths:
@@ -162,44 +144,23 @@ def compute_table() -> None:
                 if not file_path.name.endswith(".json"):
                     print(f"Skipping non-json {file_path.name}")
                     continue
-                else:
-                    with file_path.open("r", encoding="utf-8") as f:
-                        results = json.load(f)
-                        all_results[model_name] = {
-                            **all_results[model_name],
-                            **{file_path.stem: results},
-                        }
+                with file_path.open("r", encoding="utf-8") as f:
+                    results = json.load(f)
+                    all_results[model_name][file_path.stem] = results
 
     avg_results = {}
-
-    for model in all_results.keys():
-        avg_results[model] = {}
-        results = []
-        for task_type, task_list, _ in TASK_LIST_NAMES:
-            model_task_results = []
-            for task in task_list:
-                mteb_task = mteb.get_tasks(
-                    tasks=[
-                        task.replace("CQADupstackRetrieval", "CQADupstackTexRetrieval")
-                    ]
-                )
-                assert len(mteb_task) == 1, (
-                    f"Found {len(mteb_task)} for {task}. Expected 1."
-                )
-                test_result = all_results.get(model, {}).get(task, {})
-                try:
-                    model_task_results.append(
-                        test_result["scores"]["test"][0].get("main_score")
-                    )
-                except (KeyError, TypeError, IndexError):
-                    continue
-
-            if len(model_task_results) > 0:
-                avg_results[model][task_type] = round(
-                    100 * (sum(model_task_results) / len(model_task_results)), 2
-                )
-            else:
-                avg_results[model][task_type] = 0
+    for model, model_results in all_results.items():
+        coverage = _result_coverage(model_results)
+        if not coverage["complete"] and not args.allow_partial:
+            missing = ", ".join(coverage["missing_results"])
+            raise RuntimeError(
+                f"MTEB results for {model} are incomplete: {missing}. "
+                "Rerun missing tasks or pass --allow-partial."
+            )
+        avg_results[model] = {
+            "scores": _average_categories(model_results),
+            "coverage": coverage,
+        }
 
     with result_file.open("w", encoding="utf-8") as f:
         json.dump(avg_results, f, indent=2)

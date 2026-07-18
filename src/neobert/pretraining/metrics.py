@@ -2,11 +2,12 @@
 
 import math
 import time
-from collections import defaultdict
 from typing import Any, Callable, Dict
 
 import torch
 from accelerate import Accelerator
+
+from neobert.metrics import BaseTrainingMetrics
 
 
 def format_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
@@ -49,7 +50,7 @@ def format_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
     return formatted
 
 
-class Metrics(defaultdict):
+class Metrics(BaseTrainingMetrics):
     """Dictionary-like metrics container with distributed aggregation helpers."""
 
     # Internal counters that should never be emitted to experiment trackers.
@@ -58,6 +59,7 @@ class Metrics(defaultdict):
         "train/compute_accuracy",
         "train/batches",
         "train/batches_in_epoch",
+        "train/dataloader_batches_in_epoch",
         "train/samples",
         "train/masked_tokens",
         "train/epochs",
@@ -73,31 +75,13 @@ class Metrics(defaultdict):
 
     def __init__(self):
         """Initialize metrics storage with integer defaults."""
-        super().__init__(int)
-        for key in self.LOCAL_COUNT_KEYS:
-            self[key] = 0
-        for key in self.LOCAL_FLOAT_KEYS:
-            self[key] = 0.0
+        super().__init__()
         self["train/compute_accuracy"] = 1
         self._last_log_time: float | None = None
-        self._last_log_step: int | None = None
 
-    def state_dict(self) -> Dict[str, Any]:
-        """Return a serializable copy of the metrics.
-
-        :return dict[str, Any]: Metrics state.
-        """
-        return dict(self)
-
-    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        """Load metrics from a serialized state.
-
-        :param dict[str, Any] state_dict: Metrics state to load.
-        """
-        for k, v in state_dict.items():
-            self[k] = v
+    def _after_load(self) -> None:
+        """Reset timing state after loading persisted counters."""
         self._last_log_time = None
-        self._last_log_step = None
 
     def log(
         self,
@@ -113,26 +97,7 @@ class Metrics(defaultdict):
         :param Callable[[str], None] | None console_fn: Optional console emit function.
         :return dict[str, Any]: Formatted metrics logged for this step.
         """
-        # Aggregate only the local counters using a fixed key order.
-        count_tensor = torch.tensor(
-            [self.get(k, 0) for k in self.LOCAL_COUNT_KEYS],
-            device=accelerator.device,
-            dtype=torch.long,
-        )
-        count_tensor = accelerator.reduce(count_tensor, reduction="sum")
-        float_tensor = torch.tensor(
-            [self.get(k, 0.0) for k in self.LOCAL_FLOAT_KEYS],
-            device=accelerator.device,
-            dtype=torch.float64,
-        )
-        float_tensor = accelerator.reduce(float_tensor, reduction="sum")
-
-        count_vals = count_tensor.detach().cpu().tolist()
-        float_vals = float_tensor.detach().cpu().tolist()
-        metrics_agg = {
-            **{k: int(v) for k, v in zip(self.LOCAL_COUNT_KEYS, count_vals)},
-            **{k: float(v) for k, v in zip(self.LOCAL_FLOAT_KEYS, float_vals)},
-        }
+        metrics_agg = self.reduce_local_counters(accelerator)
 
         # Update global values
         self["train/samples"] = (
@@ -183,8 +148,6 @@ class Metrics(defaultdict):
         for key in list(tracker_payload):
             if key.startswith("train/local_"):
                 tracker_payload.pop(key, None)
-            if key.startswith("train/loss_path_"):
-                tracker_payload.pop(key, None)
         if not compute_accuracy:
             tracker_payload.pop("train/accuracy", None)
         accelerator.log(tracker_payload, step=current_step)
@@ -204,11 +167,7 @@ class Metrics(defaultdict):
             if fields:
                 console_fn(" | ".join(fields))
         self._last_log_time = now
-        self._last_log_step = current_step
 
         # Reset the local counters
-        for key in self.LOCAL_COUNT_KEYS:
-            self[key] = 0
-        for key in self.LOCAL_FLOAT_KEYS:
-            self[key] = 0.0
+        self.reset_local_counters()
         return formatted

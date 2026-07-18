@@ -3,10 +3,8 @@
 import json
 import logging
 import math
-import os
 import random
-import re
-import warnings
+import shutil
 from contextlib import nullcontext
 from copy import deepcopy
 from functools import partial
@@ -33,74 +31,55 @@ from transformers import (
 
 from neobert.checkpointing import (
     MODEL_WEIGHTS_NAME,
-    load_deepspeed_fp32_state_dict,
-    load_model_safetensors,
-    prune_step_checkpoints as _prune_step_checkpoints,
-    resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
-    save_portable_checkpoint_weights,
+    load_step_checkpoint_state_dict,
+    resolve_accelerate_state_dir,
 )
-from neobert.kernels.attention import canonicalize_attn_backend
-from neobert.model import NeoBERTConfig, NeoBERTForSequenceClassification
-from neobert.tokenizer import get_tokenizer
-
+from neobert.checkpointing import (
+    prune_step_checkpoints as _prune_step_checkpoints,
+)
+from neobert.checkpointing import (
+    resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
+)
 from neobert.config import Config, ConfigLoader, resolve_mixed_precision
 from neobert.glue.process import process_function
+from neobert.glue.state import GlueLoopState
+from neobert.glue.tasks import (
+    compute_official_glue_score,
+    get_checkpoint_selection_score,
+    get_glue_task_spec,
+)
+from neobert.glue.validation import GlueValidationError, validate_glue_config
+from neobert.kernels.attention import canonicalize_attn_backend
+from neobert.model import NeoBERTConfig, NeoBERTForSequenceClassification
 from neobert.optimizer import get_optimizer
-from neobert.scheduler import get_scheduler
+from neobert.scheduler import get_scheduler, resolve_scheduler_steps
+from neobert.tokenizer import get_tokenizer
 from neobert.training_utils import (
     _maybe_compile_model,
     _maybe_prepare_for_forward,
     _resolve_resume_checkpoint,
     _unwrap_optimizer,
+    attach_optimizer_param_names,
+    build_dataloader_config,
     create_accelerator,
+    sync_resume_source_of_truth,
     validate_distributed_runtime_policy,
     validate_muon_distributed_compatibility,
     validate_muon_runtime_topology,
+    validate_optimizer_param_name_manifest,
 )
-from neobert.utils import configure_tf32, format_resolved_config, prepare_wandb_config
-from neobert.validation import ValidationError, validate_glue_config
+from neobert.training_utils import (
+    save_training_checkpoint as _save_shared_training_checkpoint,
+)
+from neobert.utils import (
+    additive_attention_mask,
+    configure_tf32,
+    format_resolved_config,
+    prepare_wandb_config,
+)
 
 logger = get_logger(__name__)
 _bootstrap_logger = logging.getLogger(__name__)
-
-TASK_TO_METRIC = {
-    "stsb": "eval_pearson",
-    "cola": "eval_matthews_correlation",
-    "qqp": "eval_f1",
-    "sst2": "eval_accuracy",
-    "mnli": "eval_accuracy",
-    "mrpc": "eval_accuracy",
-    "qnli": "eval_accuracy",
-    "rte": "eval_accuracy",
-    "wnli": "eval_accuracy",
-    "snli": "eval_accuracy",
-    "allnli": "eval_accuracy",
-}
-
-# Official GLUE scoring rules (average across metrics when multiple are reported)
-GLUE_SCORE_SPECS = {
-    "cola": ("matthews_correlation",),
-    "sst2": ("accuracy",),
-    "mrpc": ("accuracy", "f1"),
-    "stsb": ("pearson", "spearmanr"),
-    "qqp": ("accuracy", "f1"),
-    "mnli": ("accuracy", "accuracy_mm"),
-    "qnli": ("accuracy",),
-    "rte": ("accuracy",),
-    "wnli": ("accuracy",),
-}
-
-TASK_TO_TRANSFER_FROM = {
-    "mnli": "snli",
-    "qnli": "mnli",
-    "wnli": "allnli",
-    "stsb": "mnli",
-    "mrpc": "mnli",
-    "rte": "mnli",
-}
-
-_STEP_RE = re.compile(r"(?:^|/)(?:step|checkpoint)_(\d+)(?:$|/)")
-_EPOCH_RE = re.compile(r"(?:^|/)(?:epoch)_(\d+)(?:$|/)")
 
 
 def _get_optimizer_update_step(optimizer: Any) -> Optional[int]:
@@ -117,27 +96,6 @@ def _get_optimizer_update_step(optimizer: Any) -> Optional[int]:
         return int(step)
     except (TypeError, ValueError):
         return None
-
-
-def _parse_checkpoint_progress(path: str) -> tuple[Optional[str], Optional[int]]:
-    """Parse step/epoch metadata from a checkpoint path.
-
-    :param str path: Checkpoint path or directory name.
-    :return tuple[str | None, int | None]: ("step" or "epoch", value) if detected.
-    """
-    name = Path(path).name
-    if name.isdigit():
-        return "step", int(name)
-
-    match = _STEP_RE.search(name)
-    if match:
-        return "step", int(match.group(1))
-
-    match = _EPOCH_RE.search(name)
-    if match:
-        return "epoch", int(match.group(1))
-
-    return None, None
 
 
 def _to_serializable(value: Any) -> Any:
@@ -176,59 +134,13 @@ def _configure_wandb_metrics(accelerator: Accelerator) -> None:
         break
 
 
-def _normalize_metrics_for_scoring(raw_metrics: dict) -> dict[str, float]:
-    """Normalize metric keys for GLUE score calculation.
-
-    :param dict raw_metrics: Raw metric mapping from evaluation.
-    :return dict[str, float]: Normalized metric mapping.
-    """
-    normalized: dict[str, float] = {}
-    for key, value in (raw_metrics or {}).items():
-        if not isinstance(key, str) or not isinstance(value, (int, float)):
-            continue
-        metric_key = key[len("eval_") :] if key.startswith("eval_") else key
-        normalized[metric_key] = float(value)
-    return normalized
-
-
-def compute_glue_score(task: str, metrics: dict[str, float]) -> float | None:
-    """Return official GLUE score (averaged where required) for a task.
-
-    :param str task: GLUE task name.
-    :param dict[str, float] metrics: Evaluation metrics for the task.
-    :return float | None: Official GLUE score, if available.
-    """
-
-    metric_keys = GLUE_SCORE_SPECS.get(task)
-    if not metric_keys:
-        return None
-
-    normalized = _normalize_metrics_for_scoring(metrics)
-    values = []
-    for key in metric_keys:
-        if key in normalized:
-            values.append(normalized[key])
-            continue
-        if task == "mnli" and key == "accuracy_mm":
-            for alias in ("accuracy_mismatched", "mnli_mm", "accuracy-mm"):
-                if alias in normalized:
-                    values.append(normalized[alias])
-                    break
-
-    if not values:
-        combined = normalized.get("combined_score")
-        return float(combined) if combined is not None else None
-
-    return float(sum(values) / len(values))
-
-
 def _resolve_glue_task(cfg: Any) -> str:
     """Resolve the active GLUE task name from config.
 
     :param Any cfg: Runtime config object.
     :return str: Normalized GLUE task name.
     """
-    return str(getattr(cfg.glue, "task_name", getattr(cfg, "task", "glue"))).strip()
+    return str(cfg.glue.task_name).strip()
 
 
 def _resolve_glue_runtime_policy(cfg: Config) -> tuple[str, str]:
@@ -259,27 +171,24 @@ def _resolve_glue_runtime_policy(cfg: Config) -> tuple[str, str]:
     return mixed_precision, "sdpa"
 
 
-def _load_glue_metric(glue_task: str, meta_task: str, experiment_id: str) -> Any:
+def _load_glue_metric(glue_task: str, experiment_id: str) -> Any:
     """Load an evaluate metric object for a GLUE-like task identifier.
 
     :param str glue_task: Task name (for example ``cola`` or ``mnli``).
-    :param str meta_task: Metric namespace (typically ``glue``).
     :param str experiment_id: Evaluate experiment id.
     :return Any: Instantiated evaluate metric object.
     """
-    if glue_task in ("multirc", "record"):
-        return evaluate.load("accuracy", experiment_id=experiment_id)
     if glue_task == "snli":
-        return evaluate.load(meta_task, "mnli", experiment_id=experiment_id)
+        return evaluate.load("glue", "mnli", experiment_id=experiment_id)
     if glue_task == "allnli":
-        return evaluate.load(meta_task, "wnli", experiment_id=experiment_id)
-    return evaluate.load(meta_task, glue_task, experiment_id=experiment_id)
+        return evaluate.load("glue", "wnli", experiment_id=experiment_id)
+    return evaluate.load("glue", glue_task, experiment_id=experiment_id)
 
 
 def _load_from_hub_tokenizer(cfg: Config) -> PreTrainedTokenizerBase:
     """Load tokenizer for hub sequence-classification models.
 
-    GLUE/SuperGLUE fine-tuning does not require MLM masking semantics, so hub
+    GLUE fine-tuning does not require MLM masking semantics, so hub
     tokenizers without a mask token should be accepted as-is.
 
     :param Config cfg: Runtime config.
@@ -548,16 +457,16 @@ def get_best_checkpoint_path(
         # Read the eval accuracy from the JSON file
         with json_path.open("r", encoding="utf-8") as f:
             results = json.load(f)
-            eval_accuracy = compute_glue_score(task, results) or results.get(
-                TASK_TO_METRIC.get(task, ""), 0
-            )
+            selection_score = get_checkpoint_selection_score(task, results)
+            if selection_score is None:
+                continue
 
             # Extract step number from the file name (e.g., all_results_step_{i}.json)
             step_number = int(json_path.stem.split("_")[3])
 
             # Update if a higher eval_accuracy is found
-            if eval_accuracy > best_accuracy:
-                best_accuracy = eval_accuracy
+            if selection_score > best_accuracy:
+                best_accuracy = selection_score
 
                 checkpoint = step_number
                 checkpoint_candidates = [
@@ -634,11 +543,22 @@ def load_pretrained_weights(
     """
     checkpoint_path = Path(checkpoint_dir) / str(checkpoint_id)
     state_dict_path = checkpoint_path / MODEL_WEIGHTS_NAME
+    try:
+        state_dict = load_step_checkpoint_state_dict(
+            checkpoint_dir,
+            checkpoint_id,
+            map_location="cpu",
+        )
+    except ModuleNotFoundError:
+        raise
+    except Exception as exc:
+        raise FileNotFoundError(
+            f"Unable to load checkpoint {checkpoint_path}: expected either "
+            f"{MODEL_WEIGHTS_NAME} or a DeepSpeed ZeRO checkpoint layout."
+        ) from exc
 
-    # Portable safetensors payload is preferred when available.
     if state_dict_path.exists():
         logger.info(f"Loading state dict from {state_dict_path}")
-        state_dict = load_model_safetensors(checkpoint_path, map_location="cpu")
         logger.info(f"Loaded state dict with {len(state_dict)} keys")
         logger.info(f"✅ Successfully loaded pretrained weights from {state_dict_path}")
     else:
@@ -646,15 +566,6 @@ def load_pretrained_weights(
             f"No {MODEL_WEIGHTS_NAME} found at {state_dict_path}; "
             "attempting DeepSpeed fp32 shard conversion."
         )
-        try:
-            state_dict = load_deepspeed_fp32_state_dict(checkpoint_path)
-        except ModuleNotFoundError:
-            raise
-        except Exception as exc:
-            raise FileNotFoundError(
-                f"Unable to load checkpoint {checkpoint_path}: expected either "
-                f"{MODEL_WEIGHTS_NAME} or a DeepSpeed ZeRO checkpoint layout."
-            ) from exc
         logger.info(
             "Loaded fp32 state dict from DeepSpeed checkpoint shards at "
             f"{checkpoint_path}"
@@ -682,25 +593,6 @@ def load_pretrained_weights(
         logger.info(f"Unexpected keys: {unexpected_keys}")
 
     return model
-
-
-def _save_portable_glue_checkpoint_weights(
-    model: torch.nn.Module,
-    accelerator: Accelerator,
-    checkpoint_path: Path,
-) -> bool:
-    """Refresh the portable ``model.safetensors`` in a GLUE step checkpoint.
-
-    :param torch.nn.Module model: Prepared GLUE model.
-    :param Accelerator accelerator: Active accelerator runtime.
-    :param Path checkpoint_path: Checkpoint directory ``checkpoints/<step>/``.
-    :return bool: True when portable weights were saved.
-    """
-    return save_portable_checkpoint_weights(
-        model,
-        accelerator,
-        checkpoint_path,
-    )
 
 
 def _should_save_glue_checkpoint(
@@ -733,8 +625,7 @@ def _should_save_glue_checkpoint(
         if save_steps is None or int(save_steps) <= 0:
             return False
         return completed_steps % int(save_steps) == 0
-    # Preserve legacy fallback behavior for unknown strategies.
-    return eval_ran_this_step
+    raise ValueError(f"Unsupported save_strategy={save_strategy!r}")
 
 
 def _resolve_glue_training_schedule(
@@ -762,16 +653,43 @@ def _resolve_glue_training_schedule(
     return updates_per_epoch, max_steps, num_train_epochs
 
 
+def _resolve_glue_scheduler_steps(cfg: Config) -> tuple[int, int, int]:
+    """Resolve GLUE scheduler phases through the shared scheduler contract.
+
+    ``scheduler.total_steps`` controls percentage-based phase resolution without
+    changing the trainer's stopping point. This matches pretraining and
+    contrastive scheduling semantics.
+
+    :param Config cfg: Runtime training config with a resolved trainer max step.
+    :return tuple[int, int, int]: Warmup, decay-end, and constant-phase steps.
+    """
+    _, warmup_steps, decay_steps, constant_steps = resolve_scheduler_steps(
+        trainer_max_steps=cfg.trainer.max_steps,
+        total_steps=cfg.scheduler.total_steps,
+        warmup_steps=cfg.scheduler.warmup_steps,
+        warmup_percent=cfg.scheduler.warmup_percent,
+        decay_steps=cfg.scheduler.decay_steps,
+        decay_percent=cfg.scheduler.decay_percent,
+        constant_steps=0,
+    )
+    return warmup_steps, decay_steps, constant_steps
+
+
 def save_training_checkpoint(
     cfg: Config,
+    tokenizer: PreTrainedTokenizerBase,
     model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
     accelerator: Accelerator,
     completed_steps: int,
 ) -> None:
     """Save a training checkpoint during fine-tuning.
 
     :param Config cfg: Configuration object.
+    :param PreTrainedTokenizerBase tokenizer: Runtime tokenizer to bundle.
     :param torch.nn.Module model: Model to save.
+    :param torch.optim.Optimizer optimizer: Optimizer whose parameter-name
+        manifest guards resume against positional state corruption.
     :param Accelerator accelerator: Accelerator instance.
     :param int completed_steps: Current training step.
     """
@@ -780,11 +698,32 @@ def save_training_checkpoint(
     checkpoint_tag = str(completed_steps)
     checkpoint_path = resume_checkpoint_dir / checkpoint_tag
 
-    # Save resumable Accelerate state for true optimizer/scheduler resume.
-    accelerator.save_state(output_dir=str(checkpoint_path))
-    accelerator.wait_for_everyone()
-    _save_portable_glue_checkpoint_weights(model, accelerator, checkpoint_path)
-    accelerator.wait_for_everyone()
+    def _save_metadata(path: Path) -> None:
+        """Save GLUE-specific config, tokenizer, and optional Hub model config.
+
+        :param Path path: Checkpoint step directory.
+        """
+        ConfigLoader.save(cfg, str(path / "config.yaml"))
+        tokenizer.save_pretrained(path / "tokenizer")
+        unwrapped_model = accelerator.unwrap_model(model)
+        while hasattr(unwrapped_model, "_orig_mod"):
+            unwrapped_model = unwrapped_model._orig_mod
+        model_config = getattr(unwrapped_model, "config", None)
+        if (
+            cfg.model.from_hub
+            and model_config is not None
+            and hasattr(model_config, "save_pretrained")
+        ):
+            model_config.save_pretrained(path / "model_config")
+
+    _save_shared_training_checkpoint(
+        task="glue",
+        checkpoint_path=checkpoint_path,
+        accelerator=accelerator,
+        model=model,
+        optimizer=optimizer,
+        save_metadata=_save_metadata,
+    )
 
     if accelerator.is_main_process:
         retention_limit = _resolve_checkpoint_retention_limit(cfg)
@@ -808,9 +747,7 @@ def _build_glue_attention_mask(
     """
     if use_hf_signature:
         return attention_mask
-    return torch.where(attention_mask == 1, float(0.0), float("-inf")).type(
-        dtype_pad_mask
-    )
+    return additive_attention_mask(attention_mask, dtype=dtype_pad_mask)
 
 
 def _create_glue_data_collator(
@@ -861,7 +798,6 @@ def _sync_runtime_cfg_from_pretraining(
     tokenizer_keys = (
         "name",
         "path",
-        "max_length",
         "truncation",
         "trust_remote_code",
         "revision",
@@ -877,6 +813,7 @@ def _sync_runtime_cfg_from_pretraining(
         if getattr(cfg.tokenizer, key) != pretraining_value:
             tokenizer_mismatches.append(key)
         setattr(cfg.tokenizer, key, pretraining_value)
+    cfg.tokenizer.max_length = cfg.glue.max_seq_length
     if tokenizer_mismatches:
         logging.getLogger(__name__).warning(
             "GLUE tokenizer config differs from pretrained checkpoint config for %s; "
@@ -885,33 +822,113 @@ def _sync_runtime_cfg_from_pretraining(
         )
 
 
+def _prepare_glue_output_dir(
+    output_dir: Path,
+    *,
+    resume_checkpoint_path: Path | None,
+    overwrite: bool,
+) -> None:
+    """Prepare GLUE output storage without destroying continuation artifacts.
+
+    :param Path output_dir: Run output directory.
+    :param Path | None resume_checkpoint_path: Selected continuation checkpoint.
+    :param bool overwrite: Whether a fresh run may replace existing contents.
+    :raises FileExistsError: If a fresh run targets a nonempty protected directory.
+    """
+    if resume_checkpoint_path is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return
+
+    if output_dir.is_dir() and any(output_dir.iterdir()):
+        if not overwrite:
+            raise FileExistsError(
+                f"GLUE output directory is not empty: {output_dir}. Set "
+                "trainer.overwrite_output_dir=true or choose another directory."
+            )
+        for path in output_dir.iterdir():
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _glue_terminal_resume_reason(
+    loop_state: GlueLoopState,
+    *,
+    max_steps: int,
+    early_stopping: int,
+) -> str | None:
+    """Return why restored GLUE state must not execute another update.
+
+    :param GlueLoopState loop_state: Restored optimizer-boundary state.
+    :param int max_steps: Current launch step budget.
+    :param int early_stopping: Configured non-improvement threshold.
+    :return str | None: Terminal reason, or ``None`` when training may continue.
+    """
+    if loop_state.completed_steps >= int(max_steps):
+        return (
+            f"saved step {loop_state.completed_steps} already reached the "
+            f"configured max_steps={max_steps}"
+        )
+    if int(early_stopping) > 0 and loop_state.early_stopping_counter >= int(
+        early_stopping
+    ):
+        return (
+            "saved early-stopping counter "
+            f"{loop_state.early_stopping_counter} reached the configured "
+            f"threshold {early_stopping}"
+        )
+    return None
+
+
 def trainer(cfg: Config) -> None:
-    """Run GLUE/SuperGLUE fine-tuning loop.
+    """Run GLUE and supported NLI fine-tuning loops.
 
     :param Config cfg: Training configuration.
     """
-    canonical_cfg = deepcopy(cfg)
+    cfg = deepcopy(cfg)
+    output_dir = Path(cfg.trainer.output_dir)
+    resume_checkpoint_root = output_dir / "checkpoints"
+    resolved_resume, iteration = _resolve_resume_checkpoint(
+        cfg.trainer.resume_from_checkpoint,
+        str(resume_checkpoint_root),
+        str(output_dir),
+    )
+    resume_checkpoint_path = Path(resolved_resume) if resolved_resume else None
+    if resume_checkpoint_path is not None:
+        sync_resume_source_of_truth(
+            cfg,
+            resume_checkpoint_path,
+            task="glue",
+            log=_bootstrap_logger,
+        )
 
-    # Extract task and meta_task from config
-    glue_task = _resolve_glue_task(canonical_cfg)
-    meta_task = "glue"  # Default for GLUE tasks
-    experiment_id = getattr(canonical_cfg, "id", "0")
-
-    # Use a mutable runtime copy so canonical config remains task-stable
-    cfg = deepcopy(canonical_cfg)
+    glue_task = _resolve_glue_task(cfg)
+    experiment_id = getattr(cfg, "id", "0")
 
     # Update cfg to have these as direct attributes for compatibility
     cfg.glue.task_name = glue_task
-    cfg.meta_task = meta_task
     cfg.id = experiment_id
     cfg.mode = getattr(cfg, "mode", "eval")  # Default to eval mode
-    cfg.num_labels = cfg.glue.num_labels if hasattr(cfg, "glue") else 2
-    cfg.max_seq_len = cfg.glue.max_seq_length if hasattr(cfg, "glue") else 128
-    output_dir = Path(cfg.trainer.output_dir)
+
+    # Fail before creating an Accelerator or mutating the output directory.
+    for warning in validate_glue_config(
+        cfg,
+        effective_model_config=(
+            cfg.model
+            if resume_checkpoint_path is not None and not cfg.model.from_hub
+            else None
+        ),
+        resume_checkpoint_path=resume_checkpoint_path,
+    ):
+        _bootstrap_logger.warning(warning)
+
     # Accelerator object
     project_config = ProjectConfiguration(
         cfg.trainer.output_dir,
         automatic_checkpoint_naming=False,
+        iteration=iteration,
     )
     mixed_precision, cfg.model.attn_backend = _resolve_glue_runtime_policy(cfg)
     cfg.trainer.mixed_precision = mixed_precision
@@ -924,16 +941,17 @@ def trainer(cfg: Config) -> None:
         mixed_precision=mixed_precision,
         project_config=project_config,
         gradient_accumulation_steps=int(cfg.trainer.gradient_accumulation_steps),
+        dataloader_config=build_dataloader_config(seed=cfg.seed),
     )
+    loop_state = GlueLoopState(world_size=accelerator.num_processes)
+    accelerator.register_for_checkpointing(loop_state)
     validate_distributed_runtime_policy(
         accelerator=accelerator,
-        log=logger,
         context="glue",
     )
     validate_muon_distributed_compatibility(
         accelerator=accelerator,
         optimizer_name=cfg.optimizer.name,
-        log=logger,
         context="glue",
     )
 
@@ -942,45 +960,38 @@ def trainer(cfg: Config) -> None:
     # Configure TF32 precision for GPUs with compute capability >= 8.0
     configure_tf32(enabled=cfg.trainer.tf32, print_fn=accelerator.print)
 
-    # Handle the repository creation
+    # Preserve prior metrics and checkpoints when continuing a run.
     if accelerator.is_main_process:
-        if output_dir.is_dir():
-            for file_path in output_dir.iterdir():
-                if file_path.is_file():
-                    file_path.unlink()
-        output_dir.mkdir(parents=True, exist_ok=True)
+        _prepare_glue_output_dir(
+            output_dir,
+            resume_checkpoint_path=resume_checkpoint_path,
+            overwrite=bool(cfg.trainer.overwrite_output_dir),
+        )
     accelerator.wait_for_everyone()
 
-    # Check from_hub in raw model dict for GLUE tasks
-    from_hub = False
-    if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
-        from_hub = cfg._raw_model_dict.get("from_hub", False)
-    elif hasattr(cfg.model, "from_hub"):
-        from_hub = cfg.model.from_hub
+    from_hub = cfg.model.from_hub
 
     model_pretraining_config: Config | None = None
-    if from_hub:
+    if resume_checkpoint_path is not None:
+        tokenizer_source = cfg.tokenizer.path or cfg.tokenizer.name
+        tokenizer = get_tokenizer(
+            pretrained_model_name_or_path=tokenizer_source,
+            max_length=cfg.glue.max_seq_length,
+            trust_remote_code=cfg.tokenizer.trust_remote_code,
+            revision=cfg.tokenizer.revision,
+            allow_special_token_rewrite=cfg.tokenizer.allow_special_token_rewrite,
+            enforce_mlm_special_tokens=not from_hub,
+        )
+        if not from_hub:
+            model_pretraining_config = deepcopy(cfg)
+    elif from_hub:
         tokenizer = _load_from_hub_tokenizer(cfg)
     else:
-        # For GLUE, we MUST have pretrained model info
-        # Check if we're allowing random weights for testing
-        allow_random_weights = cfg.glue.allow_random_weights
-        if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
-            allow_random_weights = cfg._raw_model_dict.get(
-                "allow_random_weights", allow_random_weights
-            )
-
-        if allow_random_weights:
+        if cfg.glue.allow_random_weights:
             # Skip pretrained config loading for testing
             pretrained_config_path = None
         elif cfg.glue.pretrained_model_path:
             pretrained_config_path = cfg.glue.pretrained_model_path
-        elif (
-            hasattr(cfg, "_raw_model_dict")
-            and cfg._raw_model_dict
-            and "pretrained_config_path" in cfg._raw_model_dict
-        ):
-            pretrained_config_path = cfg._raw_model_dict["pretrained_config_path"]
         else:
             raise ValueError(
                 "GLUE evaluation requires a pretrained model! "
@@ -996,7 +1007,7 @@ def trainer(cfg: Config) -> None:
             )
             tokenizer = get_tokenizer(
                 pretrained_model_name_or_path=tokenizer_source,
-                max_length=model_pretraining_config.tokenizer.max_length,
+                max_length=cfg.glue.max_seq_length,
                 trust_remote_code=model_pretraining_config.tokenizer.trust_remote_code,
                 revision=model_pretraining_config.tokenizer.revision,
                 allow_special_token_rewrite=model_pretraining_config.tokenizer.allow_special_token_rewrite,
@@ -1005,7 +1016,7 @@ def trainer(cfg: Config) -> None:
             # Use default tokenizer for random weights test
             tokenizer = get_tokenizer(
                 pretrained_model_name_or_path="bert-base-uncased",
-                max_length=128,
+                max_length=cfg.glue.max_seq_length,
                 trust_remote_code=cfg.tokenizer.trust_remote_code,
                 revision=cfg.tokenizer.revision,
                 allow_special_token_rewrite=cfg.tokenizer.allow_special_token_rewrite,
@@ -1016,10 +1027,16 @@ def trainer(cfg: Config) -> None:
 
     # Validate configuration after resolving effective model/tokenizer settings.
     try:
-        validate_glue_config(cfg)
-    except ValidationError as e:
+        validation_warnings = validate_glue_config(
+            cfg,
+            effective_model_config=None if from_hub else cfg.model,
+            resume_checkpoint_path=resume_checkpoint_path,
+        )
+    except GlueValidationError as e:
         logger.error(f"Configuration validation failed: {e}")
         raise
+    for warning in validation_warnings:
+        logger.warning(warning)
 
     tracker_config_dict = prepare_wandb_config(cfg)
     if accelerator.is_main_process:
@@ -1050,22 +1067,12 @@ def trainer(cfg: Config) -> None:
     accelerator.print("Loading metric...")
     # Keep train/eval metric state separate so eval.compute() does not reset
     # the running train metric window and vice versa.
-    train_metric_tracker = _load_glue_metric(glue_task, cfg.meta_task, cfg.id)
-    eval_metric_tracker = _load_glue_metric(glue_task, cfg.meta_task, cfg.id)
+    train_metric_tracker = _load_glue_metric(glue_task, cfg.id)
+    eval_metric_tracker = _load_glue_metric(glue_task, cfg.id)
 
     # Load additional metric for the mismatched validation set of mnli
     if glue_task == "mnli":
-        mm_metric = evaluate.load(
-            cfg.meta_task, "mnli_mismatched", experiment_id=cfg.id
-        )
-
-    # def compute_metrics(p: EvalPrediction):
-    #     preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
-    #     preds = np.squeeze(preds) if is_regression else np.argmax(preds, axis=1)
-    #     result = metric.compute(predictions=preds, references=p.label_ids)
-    #     if len(result) > 1:
-    #         result["combined_score"] = np.mean(list(result.values())).item()
-    #     return result
+        mm_metric = evaluate.load("glue", "mnli_mismatched", experiment_id=cfg.id)
 
     # Loading the dataset
     accelerator.print("Loading dataset...")
@@ -1092,13 +1099,8 @@ def trainer(cfg: Config) -> None:
             desc="Collapsing classes into entailment and not entailment.",
         )
 
-    elif cfg.meta_task == "glue":
-        raw_datasets = load_dataset("glue", glue_task)
     else:
-        raw_datasets = load_dataset(
-            "json",
-            data_dir=Path(os.environ["HF_DATASETS_CACHE"]) / "super_glue" / glue_task,
-        )
+        raw_datasets = load_dataset("glue", glue_task)
 
     # Preprocessing the datasets
     mapping = partial(process_function, tokenizer=tokenizer, cfg=cfg)
@@ -1176,12 +1178,8 @@ def trainer(cfg: Config) -> None:
         return batch
 
     # Use per_device batch sizes consistently
-    train_batch_size = (
-        cfg.trainer.per_device_train_batch_size or cfg.trainer.train_batch_size or 16
-    )
-    eval_batch_size = (
-        cfg.trainer.per_device_eval_batch_size or cfg.trainer.eval_batch_size or 32
-    )
+    train_batch_size = cfg.trainer.per_device_train_batch_size
+    eval_batch_size = cfg.trainer.per_device_eval_batch_size
     glue_num_workers = max(0, int(getattr(cfg.glue, "num_workers", 0)))
     train_loader_kwargs = {
         "collate_fn": collate_fn,
@@ -1216,92 +1214,61 @@ def trainer(cfg: Config) -> None:
     if from_hub:
         trust_remote_code = bool(getattr(cfg.tokenizer, "trust_remote_code", False))
         model_revision = getattr(cfg.tokenizer, "revision", None)
-        config = AutoConfig.from_pretrained(
-            cfg.model.name,
-            num_labels=num_labels,
-            finetuning_task=glue_task,
-            revision=model_revision,
-            trust_remote_code=trust_remote_code,
-        )
-        model = AutoModelForSequenceClassification.from_pretrained(
-            cfg.model.name,
-            from_tf=False,
-            config=config,
-            revision=model_revision,
-            trust_remote_code=trust_remote_code,
-            ignore_mismatched_sizes=False,
-        )
-    else:
-        # Convert config objects to dict for unpacking
-        if model_pretraining_config:
-            model_config_dict = (
-                model_pretraining_config.model.__dict__.copy()
-                if hasattr(model_pretraining_config.model, "__dict__")
-                else {}
+        if resume_checkpoint_path is not None:
+            model_config_dir = resume_checkpoint_path / "model_config"
+            if not model_config_dir.is_dir():
+                raise RuntimeError(
+                    f"{model_config_dir} is missing; Hub-model GLUE resume requires "
+                    "the checkpoint-local model configuration."
+                )
+            config = AutoConfig.from_pretrained(
+                model_config_dir,
+                local_files_only=True,
+                trust_remote_code=trust_remote_code,
             )
-        elif hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
-            # Use raw model dict when allow_random_weights is true
-            model_config_dict = cfg._raw_model_dict.copy()
+            model = AutoModelForSequenceClassification.from_config(
+                config,
+                trust_remote_code=trust_remote_code,
+            )
         else:
-            # Fallback to cfg.model attributes
-            model_config_dict = {
-                "hidden_size": getattr(cfg.model, "hidden_size", 768),
-                "num_hidden_layers": getattr(cfg.model, "num_hidden_layers", 12),
-                "num_attention_heads": getattr(cfg.model, "num_attention_heads", 12),
-                "intermediate_size": getattr(cfg.model, "intermediate_size", 3072),
-                "vocab_size": getattr(cfg.model, "vocab_size", 30522),
-                "hidden_act": getattr(cfg.model, "hidden_act", "gelu"),
-                "max_length": getattr(cfg.model, "max_position_embeddings", 512),
-                "norm_eps": getattr(cfg.model, "norm_eps", 1e-5),
-            }
-
-        # Map dropout_prob to dropout and remove classifier_init_range from model config
-        if "dropout_prob" in model_config_dict:
-            model_config_dict["dropout"] = model_config_dict.pop("dropout_prob")
-        if "max_position_embeddings" in model_config_dict:
-            model_config_dict["max_length"] = model_config_dict.pop(
-                "max_position_embeddings"
+            config = AutoConfig.from_pretrained(
+                cfg.model.name,
+                num_labels=num_labels,
+                finetuning_task=glue_task,
+                revision=model_revision,
+                trust_remote_code=trust_remote_code,
             )
-        if (
-            "layer_norm_eps" in model_config_dict
-            and "norm_eps" not in model_config_dict
-        ):
-            model_config_dict["norm_eps"] = model_config_dict.pop("layer_norm_eps")
-        if "classifier_init_range" in model_config_dict:
-            model_config_dict.pop("classifier_init_range")
-        if "allow_random_weights" in model_config_dict:
-            model_config_dict.pop("allow_random_weights")
-        if "pretrained_checkpoint_dir" in model_config_dict:
-            model_config_dict.pop("pretrained_checkpoint_dir")
-        if "pretrained_checkpoint" in model_config_dict:
-            model_config_dict.pop("pretrained_checkpoint")
-        if "name_or_path" in model_config_dict:
-            model_config_dict.pop("name_or_path")
-        if "name" in model_config_dict:
-            model_config_dict.pop("name")
-
-        # Use model config directly - don't merge with tokenizer config
-        # The tokenizer's vocab_size should match the model's anyway
-        combined_config = model_config_dict
-        combined_config.pop("xformers_attention", None)
-        combined_config.pop("flash_attention", None)
-        combined_config["attn_backend"] = "sdpa"
+            model = AutoModelForSequenceClassification.from_pretrained(
+                cfg.model.name,
+                from_tf=False,
+                config=config,
+                revision=model_revision,
+                trust_remote_code=trust_remote_code,
+                ignore_mismatched_sizes=False,
+            )
+    else:
+        source_model_config = (
+            model_pretraining_config.model
+            if model_pretraining_config is not None
+            else cfg.model
+        )
+        model_vocab_size = source_model_config.vocab_size
 
         # If using random weights (for testing), round vocab_size for GPU efficiency
-        allow_random_weights = cfg.glue.allow_random_weights
-        if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
-            allow_random_weights = cfg._raw_model_dict.get(
-                "allow_random_weights", allow_random_weights
-            )
-
-        if allow_random_weights and "vocab_size" in combined_config:
+        if cfg.glue.allow_random_weights:
             from neobert.config import round_up_to_multiple
 
-            # Round vocab_size for GPU efficiency when using random weights
-            combined_config["vocab_size"] = round_up_to_multiple(len(tokenizer), 128)
+            model_vocab_size = round_up_to_multiple(len(tokenizer), 128)
+            cfg.model.vocab_size = model_vocab_size
 
         model = NeoBERTForSequenceClassification(
-            NeoBERTConfig(**combined_config),
+            NeoBERTConfig.from_model_config(
+                source_model_config,
+                max_length=source_model_config.max_position_embeddings,
+                pad_token_id=tokenizer.pad_token_id,
+                attn_backend="sdpa",
+                vocab_size=model_vocab_size,
+            ),
             num_labels=num_labels,
             classifier_dropout=cfg.glue.classifier_dropout,
             classifier_init_range=cfg.glue.classifier_init_range,
@@ -1311,8 +1278,13 @@ def trainer(cfg: Config) -> None:
     pretrained_checkpoint: int | str | None = None
     allow_random_weights = cfg.glue.allow_random_weights
 
-    if cfg.glue.transfer_from_task:
-        task_to_transfer_from = TASK_TO_TRANSFER_FROM.get(glue_task, None)
+    if resume_checkpoint_path is not None:
+        logger.info(
+            "Constructed model from checkpoint-local configuration; full weights "
+            "will be restored with Accelerate state."
+        )
+    elif cfg.glue.transfer_from_task:
+        task_to_transfer_from = get_glue_task_spec(glue_task).transfer_from
         if not task_to_transfer_from:
             raise ValueError(f"Task to transfer from for {glue_task} is not set.")
         transfer_checkpoint_dir, checkpoint_list = get_best_checkpoint_path(
@@ -1332,29 +1304,16 @@ def trainer(cfg: Config) -> None:
         pretrained_checkpoint_dir = Path(transfer_checkpoint_dir)
 
     else:
-        # Get checkpoint info from raw model dict for GLUE
         logger.info("Looking for pretrained checkpoint info...")
-
-        # Prefer GLUEConfig for checkpoint info
         pretrained_checkpoint_dir_cfg = cfg.glue.pretrained_checkpoint_dir
         pretrained_checkpoint = cfg.glue.pretrained_checkpoint
-
-        # Fall back to raw model dict for legacy configs
-        if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
-            pretrained_checkpoint_dir_cfg = cfg._raw_model_dict.get(
-                "pretrained_checkpoint_dir", pretrained_checkpoint_dir_cfg
-            )
-            pretrained_checkpoint = cfg._raw_model_dict.get(
-                "pretrained_checkpoint", pretrained_checkpoint
-            )
-            allow_random_weights = cfg._raw_model_dict.get(
-                "allow_random_weights", allow_random_weights
-            )
 
         if pretrained_checkpoint_dir_cfg:
             pretrained_checkpoint_dir = Path(pretrained_checkpoint_dir_cfg)
 
-    if pretrained_checkpoint_dir is None or pretrained_checkpoint is None:
+    if resume_checkpoint_path is not None:
+        pretrained_checkpoint = None
+    elif pretrained_checkpoint_dir is None or pretrained_checkpoint is None:
         if allow_random_weights:
             logger.warning(
                 "⚠️  Using random weights for testing as allow_random_weights=true"
@@ -1376,7 +1335,11 @@ def trainer(cfg: Config) -> None:
         )
 
     # Load pretrained weights if available
-    if not from_hub and pretrained_checkpoint is not None:
+    if (
+        resume_checkpoint_path is None
+        and not from_hub
+        and pretrained_checkpoint is not None
+    ):
         model = load_pretrained_weights(
             model, str(pretrained_checkpoint_dir), pretrained_checkpoint, logger
         )
@@ -1404,6 +1367,8 @@ def trainer(cfg: Config) -> None:
         train_dataloader,
         eval_dataloader,
     )
+    # Record parameter-group ordering for the resume manifest guard.
+    attach_optimizer_param_names(model, optimizer)
 
     validate_muon_runtime_topology(
         accelerator=accelerator,
@@ -1430,43 +1395,15 @@ def trainer(cfg: Config) -> None:
             "preparation; check num_train_epochs/max_steps config."
         )
 
-    if cfg.scheduler.warmup_percent is not None:
-        if cfg.scheduler.warmup_steps is not None:
-            warnings.warn(
-                "Overriding warmup_steps based on scheduler.warmup_percent.",
-                UserWarning,
-                stacklevel=2,
-            )
-        cfg.scheduler.warmup_steps = math.ceil(
-            cfg.trainer.max_steps / 100 * cfg.scheduler.warmup_percent
-        )
-    if cfg.scheduler.decay_percent is not None:
-        if cfg.scheduler.decay_steps is not None:
-            warnings.warn(
-                "Overriding decay_steps based on scheduler.decay_percent.",
-                UserWarning,
-                stacklevel=2,
-            )
-        cfg.scheduler.decay_steps = math.ceil(
-            cfg.trainer.max_steps / 100 * cfg.scheduler.decay_percent
-        )
-    elif cfg.scheduler.decay_steps is None:
-        cfg.scheduler.decay_steps = cfg.trainer.max_steps
-
-    scheduler_params = (
-        cfg.scheduler.__dict__.copy()
-        if hasattr(cfg.scheduler, "__dict__")
-        else cfg.scheduler.copy()
-    )
-    if "name" in scheduler_params:
-        scheduler_params["decay"] = scheduler_params.pop("name")
-    if "final_lr_ratio" in scheduler_params:
-        scheduler_params["final_ratio"] = scheduler_params.pop("final_lr_ratio")
-
+    warmup_steps, decay_steps, constant_steps = _resolve_glue_scheduler_steps(cfg)
     scheduler = get_scheduler(
         optimizer=optimizer,
         lr=cfg.optimizer.lr,
-        **scheduler_params,
+        decay=cfg.scheduler.name,
+        warmup_steps=warmup_steps,
+        decay_steps=decay_steps,
+        final_ratio=cfg.scheduler.final_lr_ratio,
+        constant_steps=constant_steps,
     )
     scheduler = accelerator.prepare(scheduler)
     lr = cfg.optimizer.lr
@@ -1496,11 +1433,7 @@ def trainer(cfg: Config) -> None:
             f"Invalid eval_strategy: {eval_strategy}. Must be 'epoch' or 'steps'"
         )
 
-    # To keep the last n checkpoints before the best model and do k cycles before early stopping, we save the last k+n models
     early_stopping = getattr(cfg.trainer, "early_stopping", 0)
-    max_ckpt = getattr(cfg.trainer, "max_ckpt", 0)
-    if max_ckpt is not None and max_ckpt > 0 and early_stopping > 0:
-        cfg.trainer.max_ckpt = max_ckpt + early_stopping
     save_strategy = str(getattr(cfg.trainer, "save_strategy", "steps")).strip().lower()
     save_model = bool(getattr(cfg.trainer, "save_model", True))
     save_steps = getattr(cfg.trainer, "save_steps", None)
@@ -1540,26 +1473,17 @@ def trainer(cfg: Config) -> None:
         range(total_steps),
         disable=bool(cfg.trainer.disable_tqdm) or not accelerator.is_local_main_process,
     )
-    completed_steps = 0
-    starting_epoch = 0
-    resume_microbatch_in_epoch = 0
-
     # Optionally resume full Accelerate state (model/optimizer/scheduler/scaler).
-    resume_checkpoint_root = output_dir / "checkpoints"
-    resume_checkpoint_path, _ = _resolve_resume_checkpoint(
-        cfg.trainer.resume_from_checkpoint,
-        str(resume_checkpoint_root),
-        str(output_dir),
-    )
-    if cfg.trainer.resume_from_checkpoint and resume_checkpoint_path:
-        resume_checkpoint = Path(resume_checkpoint_path)
-        if not resume_checkpoint.exists():
-            raise FileNotFoundError(
-                f"resume_from_checkpoint path not found: {resume_checkpoint}"
-            )
-
-        accelerator.print(f"Resuming GLUE run from checkpoint: {resume_checkpoint}")
-        accelerator.load_state(str(resume_checkpoint))
+    if resume_checkpoint_path is not None:
+        accelerator.print(
+            f"Resuming GLUE run from checkpoint: {resume_checkpoint_path}"
+        )
+        # Fail fast on optimizer parameter-order drift before loading positional
+        # optimizer state (checkpoints predating the manifest are rejected).
+        validate_optimizer_param_name_manifest(optimizer, resume_checkpoint_path)
+        accelerator.load_state(
+            str(resolve_accelerate_state_dir(resume_checkpoint_path))
+        )
         validate_muon_runtime_topology(
             accelerator=accelerator,
             optimizer=optimizer,
@@ -1568,53 +1492,86 @@ def trainer(cfg: Config) -> None:
             context="glue resume",
         )
 
+        checkpoint_step = (
+            int(resume_checkpoint_path.name)
+            if resume_checkpoint_path.name.isdigit()
+            else None
+        )
+        if (
+            checkpoint_step is not None
+            and loop_state.completed_steps != checkpoint_step
+        ):
+            raise RuntimeError(
+                "GLUE loop state disagrees with checkpoint directory: "
+                f"state={loop_state.completed_steps}, directory={checkpoint_step}."
+            )
         step_from_optimizer = _get_optimizer_update_step(optimizer)
-        if step_from_optimizer is not None and step_from_optimizer > 0:
-            completed_steps = step_from_optimizer
-        elif resume_checkpoint.name.isdigit():
-            completed_steps = int(resume_checkpoint.name)
-        else:
-            kind, value = _parse_checkpoint_progress(str(resume_checkpoint))
-            if kind == "epoch" and value is not None:
-                completed_steps = (value + 1) * num_update_steps_per_epoch
-            elif kind == "step" and value is not None:
-                completed_steps = value
+        if (
+            step_from_optimizer is not None
+            and step_from_optimizer != loop_state.completed_steps
+        ):
+            raise RuntimeError(
+                "GLUE loop state disagrees with optimizer update counter: "
+                f"state={loop_state.completed_steps}, optimizer={step_from_optimizer}."
+            )
 
-        starting_epoch = completed_steps // num_update_steps_per_epoch
-        resume_update_in_epoch = completed_steps % num_update_steps_per_epoch
-        resume_microbatch_in_epoch = (
-            resume_update_in_epoch * cfg.trainer.gradient_accumulation_steps
+    completed_steps = loop_state.completed_steps
+    starting_epoch = loop_state.epoch
+    resume_microbatch_in_epoch = loop_state.microbatches_in_epoch
+    if resume_microbatch_in_epoch > len(train_dataloader):
+        raise RuntimeError(
+            "Saved GLUE microbatch cursor exceeds the prepared dataloader length: "
+            f"{resume_microbatch_in_epoch} > {len(train_dataloader)}."
         )
-    elif cfg.trainer.resume_from_checkpoint:
-        logger.warning(
-            "resume_from_checkpoint is set but no valid checkpoints were found in "
-            f"{resume_checkpoint_root}"
-        )
+    if resume_microbatch_in_epoch == len(train_dataloader):
+        starting_epoch += 1
+        resume_microbatch_in_epoch = 0
 
     # update the progress_bar if load from checkpoint
     progress_bar.update(completed_steps)
 
     # Initialize all training loop variables upfront
     results = {}
-    total_loss = 0.0
+    total_loss = loop_state.total_loss
     micro_loss_sum = 0.0
     micro_loss_count = 0
-    early_stop = False
-    prev_accuracy = 0.0
-    early_stopping_counter = 1
+    terminal_resume_reason = _glue_terminal_resume_reason(
+        loop_state,
+        max_steps=cfg.trainer.max_steps,
+        early_stopping=early_stopping,
+    )
+    early_stop = terminal_resume_reason is not None
+    if terminal_resume_reason is not None:
+        accelerator.print(f"GLUE resume is already terminal: {terminal_resume_reason}.")
     eval_metric = {}
     epoch = starting_epoch
-    completed_steps = completed_steps  # Ensure it's in scope
-    last_train_metrics = {}
-    last_val_metrics = {}
-    evaluation_round = 0
+    last_train_metrics = deepcopy(loop_state.last_train_metrics)
+    last_val_metrics = deepcopy(loop_state.last_val_metrics)
+    # Train metrics cover every local microbatch since the previous evaluation.
+    # These diagnostic samples are not checkpoint state, so continuation starts
+    # a fresh window while uninterrupted checkpoint saves preserve the window.
     train_predictions_buffer: list[torch.Tensor] = []
     train_references_buffer: list[torch.Tensor] = []
+    evaluate_split = partial(
+        get_evaluation,
+        model=model,
+        accelerator=accelerator,
+        dtype_pad_mask=dtype_pad_mask,
+        is_regression=is_regression,
+        return_predictions=False,
+        use_hf_signature=from_hub,
+        disable_tqdm=bool(cfg.trainer.disable_tqdm),
+    )
 
     for epoch in range(starting_epoch, cfg.trainer.num_train_epochs):
-        sampler = getattr(train_dataloader, "sampler", None)
-        if sampler is not None and hasattr(sampler, "set_epoch"):
-            sampler.set_epoch(epoch)
+        if completed_steps >= cfg.trainer.max_steps or early_stop:
+            break
+        if hasattr(train_dataloader, "set_epoch"):
+            train_dataloader.set_epoch(epoch)
+        else:
+            sampler = getattr(train_dataloader, "sampler", None)
+            if sampler is not None and hasattr(sampler, "set_epoch"):
+                sampler.set_epoch(epoch)
 
         for micro_step, batch in enumerate(train_dataloader):
             if epoch == starting_epoch and micro_step < resume_microbatch_in_epoch:
@@ -1694,6 +1651,12 @@ def trainer(cfg: Config) -> None:
                         total_loss += micro_loss_sum / micro_loss_count
                     micro_loss_sum = 0.0
                     micro_loss_count = 0
+                    loop_state.record_update(
+                        completed_steps=completed_steps,
+                        epoch=epoch,
+                        microbatches_in_epoch=micro_step + 1,
+                        total_loss=total_loss,
+                    )
 
                     ran_evaluation = False
                     metric_improved_this_eval = False
@@ -1733,16 +1696,9 @@ def trainer(cfg: Config) -> None:
                             ).item()
 
                         model.eval()
-                        eval_metric = get_evaluation(
-                            model=model,
+                        eval_metric = evaluate_split(
                             dataloader=eval_dataloader,
-                            accelerator=accelerator,
                             metric=eval_metric_tracker,
-                            dtype_pad_mask=dtype_pad_mask,
-                            is_regression=is_regression,
-                            return_predictions=False,
-                            use_hf_signature=from_hub,
-                            disable_tqdm=bool(cfg.trainer.disable_tqdm),
                         )["eval_metric"]
 
                         # Log all metrics properly for STS-B (both Pearson and Spearman)
@@ -1770,16 +1726,9 @@ def trainer(cfg: Config) -> None:
                             results["accuracy"] = eval_metric["accuracy"]
 
                             # Evaluation on mismatched MNLI
-                            mm_eval_metric = get_evaluation(
-                                model=model,
+                            mm_eval_metric = evaluate_split(
                                 dataloader=mm_eval_dataloader,
-                                accelerator=accelerator,
                                 metric=mm_metric,
-                                dtype_pad_mask=dtype_pad_mask,
-                                is_regression=is_regression,
-                                return_predictions=False,
-                                use_hf_signature=from_hub,
-                                disable_tqdm=bool(cfg.trainer.disable_tqdm),
                             )["eval_metric"]
                             results["accuracy_mm"] = mm_eval_metric["accuracy"]
 
@@ -1814,17 +1763,20 @@ def trainer(cfg: Config) -> None:
                         for key, value in val_metrics.items():
                             log_payload[f"val/{key}"] = value
 
-                        score_for_early_stop = compute_glue_score(
+                        official_score = compute_official_glue_score(
                             glue_task, val_metrics
                         )
-                        if score_for_early_stop is not None:
-                            log_payload["val/score"] = score_for_early_stop
+                        if official_score is not None:
+                            log_payload["val/score"] = official_score
+
+                        score_for_early_stop = get_checkpoint_selection_score(
+                            glue_task, val_metrics
+                        )
 
                         log_payload = {
                             k: _to_serializable(v) for k, v in log_payload.items()
                         }
 
-                        evaluation_round += 1
                         accelerator.log(log_payload, step=completed_steps)
 
                         last_train_metrics = {
@@ -1848,10 +1800,10 @@ def trainer(cfg: Config) -> None:
                         last_val_metrics.update(
                             {k: _to_serializable(v) for k, v in val_metrics.items()}
                         )
-                        if score_for_early_stop is not None:
-                            last_val_metrics["score"] = _to_serializable(
-                                score_for_early_stop
-                            )
+                        if official_score is not None:
+                            last_val_metrics["score"] = _to_serializable(official_score)
+                        loop_state.last_train_metrics = deepcopy(last_train_metrics)
+                        loop_state.last_val_metrics = deepcopy(last_val_metrics)
 
                         all_results = {
                             f"eval_{k}": _to_serializable(v)
@@ -1882,28 +1834,24 @@ def trainer(cfg: Config) -> None:
                                 json.dump(all_results, f, indent=2)
                         accelerator.wait_for_everyone()
 
-                        fallback_metric = next(iter(val_metrics.values()), 0.0)
-                        curr_accuracy = (
+                        if score_for_early_stop is None:
+                            raise RuntimeError(
+                                f"Evaluation for {glue_task} did not return required "
+                                f"checkpoint metric "
+                                f"{get_glue_task_spec(glue_task).checkpoint_metric!r}."
+                            )
+                        metric_improved_this_eval = loop_state.update_selection_score(
                             score_for_early_stop
-                            if score_for_early_stop is not None
-                            else fallback_metric
                         )
-                        metric_improved_this_eval = curr_accuracy > prev_accuracy
-
-                        # Update early stopping counter
-                        if metric_improved_this_eval:
-                            prev_accuracy = curr_accuracy
-                            early_stopping_counter = 0
-
-                        else:
-                            early_stopping_counter += 1
 
                         if (
                             early_stopping > 0
-                            and early_stopping_counter >= early_stopping
+                            and loop_state.early_stopping_counter >= early_stopping
                         ):
                             accelerator.print(
-                                f"Evaluation accuracy has not improved in {early_stopping} cycles of {cfg.trainer.eval_steps} evaluation steps, stopping the training."
+                                "Checkpoint-selection score has not improved in "
+                                f"{early_stopping} evaluation cycles; stopping at "
+                                f"step {completed_steps}."
                             )
                             early_stop = True
 
@@ -1921,7 +1869,12 @@ def trainer(cfg: Config) -> None:
                     # means keep all checkpoints while still saving.
                     if should_save and save_model:
                         save_training_checkpoint(
-                            cfg, model, accelerator, completed_steps
+                            cfg,
+                            tokenizer,
+                            model,
+                            optimizer,
+                            accelerator,
+                            completed_steps,
                         )
 
             if completed_steps >= cfg.trainer.max_steps or early_stop:

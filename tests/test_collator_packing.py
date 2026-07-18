@@ -6,10 +6,16 @@ import warnings
 
 import numpy as np
 import torch
-from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import PreTrainedTokenizerFast
 
-from neobert.collator import CustomCollatorForMLM, DataCollatorWithPacking, get_collator
+from neobert.collator import (
+    CustomCollatorForMLM,
+    DataCollatorWithPacking,
+    get_collator,
+    resolve_packed_token_limits,
+)
+from neobert.utils import additive_attention_mask
+from neobert.warnings import NeoBERTWarning
+from tests.tokenizer_utils import build_wordlevel_tokenizer
 
 
 class DummyPadCollator:
@@ -49,21 +55,6 @@ class DummyPadCollator:
 
 class TestCollatorPacking(unittest.TestCase):
     """Tests for edge cases in sequence packing."""
-
-    @staticmethod
-    def _make_tokenizer(padding_side: str = "right") -> PreTrainedTokenizerFast:
-        """Build a minimal tokenizer for collator tests."""
-        vocab = {"[PAD]": 0, "[UNK]": 1, "[MASK]": 2, "hello": 3, "world": 4}
-        tokenizer = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
-        tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
-        fast = PreTrainedTokenizerFast(
-            tokenizer_object=tokenizer,
-            pad_token="[PAD]",
-            unk_token="[UNK]",
-            mask_token="[MASK]",
-        )
-        fast.padding_side = padding_side
-        return fast
 
     @staticmethod
     def _packed_to_list(packed):
@@ -148,9 +139,59 @@ class TestCollatorPacking(unittest.TestCase):
         self.assertEqual(token_counts, packed_counts)
         self.assertEqual(batch["input_ids"].shape[1], 6)
 
+    def test_rejects_inputs_with_outer_boundaries(self):
+        """Reject pre-specialized segments instead of duplicating boundaries."""
+        collator = DataCollatorWithPacking(
+            start_token_id=10,
+            end_token_id=11,
+            max_length=8,
+            default_data_collator=DummyPadCollator(),
+        )
+
+        for input_ids in ([10, 1, 2], [1, 2, 11], [10, 1, 11]):
+            with self.subTest(input_ids=input_ids):
+                with self.assertRaisesRegex(ValueError, "add_special_tokens=False"):
+                    collator([{"input_ids": input_ids}])
+
+    def test_allows_boundary_tokens_inside_raw_segment(self):
+        """Keep literal special tokens when they are not outer boundaries."""
+        collator = DataCollatorWithPacking(
+            start_token_id=10,
+            end_token_id=11,
+            max_length=8,
+            default_data_collator=DummyPadCollator(),
+        )
+
+        batch = collator([{"input_ids": [1, 10, 11, 2]}])
+
+        self.assertEqual(batch["input_ids"][0].tolist(), [10, 1, 10, 11, 2, 11, 0, 0])
+
+    def test_resolve_packed_token_limits_reserves_boundaries(self):
+        """Use one shared token budget for online and offline packing inputs."""
+        tokenizer = build_wordlevel_tokenizer(include_cls=True, include_sep=True)
+
+        token_limit, start_token_id, end_token_id = resolve_packed_token_limits(
+            tokenizer, 8
+        )
+
+        self.assertEqual(token_limit, 6)
+        self.assertEqual(start_token_id, tokenizer.cls_token_id)
+        self.assertEqual(end_token_id, tokenizer.sep_token_id)
+
+    def test_packed_length_must_leave_room_for_content(self):
+        """Reject target lengths consumed entirely by segment boundaries."""
+        tokenizer = build_wordlevel_tokenizer(include_cls=True, include_sep=True)
+
+        with self.assertRaisesRegex(ValueError, "must exceed"):
+            resolve_packed_token_limits(tokenizer, 2)
+
     def test_return_packed_seqlens_omits_key_when_left_padded(self):
         """Ensure packed_seqlens is omitted for non-right-padded masks."""
-        tokenizer = self._make_tokenizer(padding_side="left")
+        tokenizer = build_wordlevel_tokenizer(
+            vocab={"hello": 3, "world": 4},
+            padding_side="left",
+            include_sep=False,
+        )
         collator = get_collator(tokenizer, return_packed_seqlens=True)
         features = [{"input_ids": [2, 3]}, {"input_ids": [2]}]
         with warnings.catch_warnings(record=True) as caught:
@@ -160,11 +201,15 @@ class TestCollatorPacking(unittest.TestCase):
         self.assertTrue(
             any("Skipping packed_seqlens" in str(w.message) for w in caught)
         )
+        self.assertTrue(all(w.category is NeoBERTWarning for w in caught))
         self.assertNotIn("packed_seqlens", batch)
 
     def test_mask_all_numpy_path_masks_without_801010_split(self):
         """Ensure numpy masking path follows 100% mask-all semantics."""
-        tokenizer = self._make_tokenizer()
+        tokenizer = build_wordlevel_tokenizer(
+            vocab={"hello": 3, "world": 4},
+            include_sep=False,
+        )
         collator = CustomCollatorForMLM(
             tokenizer=tokenizer,
             mlm_probability=1.0,
@@ -186,7 +231,10 @@ class TestCollatorPacking(unittest.TestCase):
 
     def test_mask_all_false_keeps_hf_801010_corruption(self):
         """Ensure default collator path does not force 100% [MASK] replacement."""
-        tokenizer = self._make_tokenizer()
+        tokenizer = build_wordlevel_tokenizer(
+            vocab={"hello": 3, "world": 4},
+            include_sep=False,
+        )
         collator = get_collator(
             tokenizer=tokenizer,
             mlm_probability=1.0,
@@ -225,3 +273,37 @@ class TestCollatorPacking(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "Could not resolve pad_token_id"):
             collator([{"input_ids": [1, 2, 3]}])
+
+
+class TestAdditiveAttentionMask(unittest.TestCase):
+    """Validate the shared keep/pad to additive mask conversion."""
+
+    def test_integer_mask_converts_to_zero_and_neg_inf(self):
+        """0/1 integer masks map to 0 at kept and -inf at padded positions."""
+        mask = torch.tensor([[1, 1, 0]], dtype=torch.long)
+
+        additive = additive_attention_mask(mask)
+
+        self.assertEqual(additive.dtype, torch.float32)
+        self.assertEqual(additive[0, 0].item(), 0.0)
+        self.assertEqual(additive[0, 1].item(), 0.0)
+        self.assertEqual(additive[0, 2].item(), float("-inf"))
+
+    def test_bool_mask_keeps_true_positions(self):
+        """Bool masks keep True positions attendable."""
+        mask = torch.tensor([[True, False]])
+
+        additive = additive_attention_mask(mask)
+
+        self.assertEqual(additive[0, 0].item(), 0.0)
+        self.assertEqual(additive[0, 1].item(), float("-inf"))
+
+    def test_float_binary_mask_and_dtype_override(self):
+        """Float 0/1 masks convert and honor the requested output dtype."""
+        mask = torch.tensor([[1.0, 0.0]])
+
+        additive = additive_attention_mask(mask, dtype=torch.bfloat16)
+
+        self.assertEqual(additive.dtype, torch.bfloat16)
+        self.assertEqual(additive[0, 0].item(), 0.0)
+        self.assertEqual(additive[0, 1].item(), float("-inf"))

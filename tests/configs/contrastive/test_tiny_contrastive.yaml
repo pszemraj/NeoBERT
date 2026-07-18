@@ -9,7 +9,6 @@ model:
   vocab_size: 30522
   max_position_embeddings: 128
   attn_backend: sdpa
-  ngpt: false
   hidden_act: "gelu"
 
 dataset:
@@ -32,13 +31,13 @@ trainer:
   eval_steps: 10
   save_steps: 20
   dataloader_num_workers: 0
-  report_to: []
   use_cpu: true
 
 contrastive:
   temperature: 0.05
   pooling: "avg"
-  loss_type: "simcse"
+  pretraining_prob: 0.0
+  allow_random_weights: true
 
 optimizer:
   name: "adamw"

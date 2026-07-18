@@ -1,29 +1,26 @@
 # NeoBERT
 
 > [!IMPORTANT]
-> This repository is a fork of [chandar-lab/NeoBERT](https://github.com/chandar-lab/NeoBERT) focused on active experimentation and training-system iteration.
+> This repository builds on the original [chandar-lab/NeoBERT](https://github.com/chandar-lab/NeoBERT) codebase and is focused on active experimentation and training-system iteration.
 
 ## Description
 
-NeoBERT is an encoder architecture for masked-language-model pretraining,
-embedding extraction, and downstream evaluation (GLUE/MTEB).
+NeoBERT is an encoder architecture for masked-language-model pretraining, embedding extraction, and downstream evaluation (GLUE/MTEB).
 
-This fork adds:
+This repo adds:
 
 - configurable attention backends (`sdpa`, `flash_attn_varlen` for packed training),
-- optional Liger kernel dispatch (`kernel_backend: auto|liger|torch`),
+- optional Liger kernel dispatch (`model.kernel_backend: auto|liger|torch`),
 - safetensors-first checkpointing,
 - end-to-end training/eval/export scripts with config-driven workflows.
 
-Pretraining loss path is selected with one explicit flag:
-`trainer.masked_logits_only_loss`.
+Pretraining supports masked-logits-only training and a full-logits ablation path; see [Training](docs/guides/training.md#mlm-loss-path-selection).
 
-- `true` (default, recommended): masked-logits-only path.
-- `false` (legacy/debug): original full-logits CE path.
-
-Paper (original): <https://arxiv.org/abs/2502.19587>
+Original paper: <https://arxiv.org/abs/2502.19587>
 
 ## Install
+
+NeoBERT requires Python 3.10 or newer and PyTorch 2.6 or newer.
 
 ```bash
 git clone https://github.com/pszemraj/NeoBERT.git
@@ -41,43 +38,22 @@ pip install -e .[flash] --no-build-isolation
 pip install -e .[legacy-checkpoints]
 ```
 
-See [docs/troubleshooting.md](docs/troubleshooting.md) for environment issues.
+See [Troubleshooting](docs/guides/troubleshooting.md) for environment issues.
 
 ## Verify Setup
 
 ```bash
-# Tiny pretraining smoke test
-python scripts/pretraining/pretrain.py \
-  tests/configs/pretraining/test_tiny_pretrain.yaml
-
-# Full test suite
-python tests/run_tests.py
+# Deterministic one-step local pretraining smoke
+pytest -q tests/training/test_pretrain_pipeline.py::TestPretrainPipeline::test_pretraining_one_step_local_smoke
 ```
 
-## Quick Commands
-
-| Task      | Command                                                                                                              |
-| --------- | -------------------------------------------------------------------------------------------------------------------- |
-| Pretrain  | `python scripts/pretraining/pretrain.py configs/pretraining/pretrain_neobert.yaml`                                   |
-| GLUE eval | `python scripts/evaluation/run_glue.py configs/glue/cola.yaml`                                                       |
-| MTEB eval | `python scripts/evaluation/run_mteb.py configs/pretraining/pretrain_neobert.yaml --model_name_or_path outputs/<run>` |
-| Export HF | `python scripts/export-hf/export.py outputs/<run>/checkpoints/<step>`                                                |
-| Tests     | `python tests/run_tests.py`                                                                                          |
+See [Testing](docs/guides/testing.md) for the full suite and targeted test commands.
 
 ## Documentation
 
-- [docs/README.md](docs/README.md)
-- [Training Guide](docs/training.md)
-- [Configuration Reference](docs/configuration.md)
-- [Evaluation Guide](docs/evaluation.md)
-- [Export Guide](docs/export.md)
-- [Architecture](docs/architecture.md)
-- [Troubleshooting](docs/troubleshooting.md)
-- [Testing](docs/testing.md)
-- [Dev Notes](docs/dev.md)
+Use the [documentation index](docs/README.md) for training, evaluation, export, configuration, architecture, testing, and troubleshooting.
 
-Directory READMEs under `configs/`, `scripts/`, `tests/`, and `jobs/` focus on
-entrypoints and quick usage.
+Directory READMEs under `configs/`, `scripts/`, `tests/`, and `jobs/` focus on entrypoints and quick usage.
 
 ## Repository Layout
 
@@ -93,7 +69,7 @@ entrypoints and quick usage.
 ```bibtex
 @misc{breton2025neobertnextgenerationbert,
       title={NeoBERT: A Next-Generation BERT},
-      author={Lola Le Breton and Quentin Fournier and Mariam El Mezouar and Sarath Chandar},
+      author={Lola Le Breton and Quentin Fournier and Mariam El Mezouar and John X. Morris and Sarath Chandar},
       year={2025},
       eprint={2502.19587},
       archivePrefix={arXiv},

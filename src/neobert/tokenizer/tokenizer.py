@@ -7,16 +7,105 @@ from typing import Any, Optional, Tuple
 
 from datasets import Dataset, Features, Sequence, Value
 from tokenizers.processors import TemplateProcessing
-from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers import (
+    AutoTokenizer,
+    PreTrainedTokenizer,
+    PreTrainedTokenizerBase,
+    PreTrainedTokenizerFast,
+)
+
+from neobert.collator import resolve_packed_token_limits
+from neobert.streaming import (
+    is_streaming_dataset,
+    is_transient_streaming_error,
+    peek_streaming_example,
+)
 
 logger = logging.getLogger("neobert.tokenizer")
+
+
+def tokenize_pretraining_dataset(
+    dataset: Dataset,
+    tokenizer: PreTrainedTokenizer,
+    *,
+    column_name: str,
+    max_length: int,
+    truncation: bool,
+    pack_sequences: bool,
+    return_special_tokens_mask: bool,
+    **kwargs: Any,
+) -> Dataset:
+    """Tokenize pretraining text under the packed-sequence boundary contract.
+
+    :param Dataset dataset: Source dataset containing raw text.
+    :param PreTrainedTokenizer tokenizer: Tokenizer to apply.
+    :param str column_name: Source text column.
+    :param int max_length: Final sequence length target.
+    :param bool truncation: Whether to truncate long source examples.
+    :param bool pack_sequences: Whether the downstream collator packs raw segments.
+    :param bool return_special_tokens_mask: Whether to store special-token masks.
+    :param Any kwargs: Extra keyword arguments forwarded to :func:`tokenize`.
+    :return Dataset: Tokenized pretraining dataset.
+    """
+    tokenize_max_length = max_length
+    if pack_sequences:
+        tokenize_max_length, _, _ = resolve_packed_token_limits(tokenizer, max_length)
+
+    return tokenize(
+        dataset,
+        tokenizer,
+        column_name=column_name,
+        max_length=tokenize_max_length,
+        truncation=truncation,
+        add_special_tokens=not pack_sequences,
+        remove_columns=True,
+        return_special_tokens_mask=return_special_tokens_mask,
+        **kwargs,
+    )
+
+
+def align_tokenizer_vocab(
+    tokenizer: PreTrainedTokenizerBase,
+    target_size: int,
+) -> int:
+    """Grow a tokenizer vocabulary to an exact target with inert placeholders.
+
+    Existing token IDs remain unchanged, and placeholder token names encode their
+    target IDs so saved tokenizer artifacts stay deterministic across training and
+    export.
+
+    :param PreTrainedTokenizerBase tokenizer: Tokenizer to mutate.
+    :param int target_size: Required exact tokenizer length.
+    :raises ValueError: If shrinking is requested or insertion misses the target.
+    :return int: Number of added placeholder tokens.
+    """
+    current_size = len(tokenizer)
+    if current_size == target_size:
+        return 0
+    if current_size > target_size:
+        raise ValueError(
+            "Cannot align tokenizer vocabulary to a smaller target: "
+            f"current_size={current_size}, target_size={target_size}."
+        )
+
+    needed = target_size - current_size
+    extra_tokens = [
+        f"<|neobert_extra_token_{idx}|>" for idx in range(current_size, target_size)
+    ]
+    added = tokenizer.add_tokens(extra_tokens, special_tokens=False)
+    final_size = len(tokenizer)
+    if added != needed or final_size != target_size:
+        raise ValueError(
+            f"Failed to align tokenizer vocabulary: needed={needed}, added={added}, "
+            f"final_size={final_size}, target={target_size}."
+        )
+    return added
 
 
 def get_tokenizer(
     pretrained_model_name_or_path: str = "meta-llama/Llama-2-7b-hf",
     max_length: int = 4096,
     token: Optional[str] = None,
-    vocab_size: Optional[int] = None,
     use_fast: bool = True,
     trust_remote_code: bool = False,
     revision: Optional[str] = None,
@@ -29,7 +118,6 @@ def get_tokenizer(
     :param str pretrained_model_name_or_path: Tokenizer model name or path.
     :param int max_length: Maximum sequence length.
     :param str | None token: Optional auth token for gated models.
-    :param int | None vocab_size: Deprecated; tokenizer vocab size is derived from the model.
     :param bool use_fast: Whether to require a fast tokenizer backend.
     :param bool trust_remote_code: Allow remote tokenizer code execution.
     :param str | None revision: Optional tokenizer revision/commit.
@@ -38,12 +126,8 @@ def get_tokenizer(
     :param Any kwargs: Additional kwargs forwarded to ``from_pretrained``.
     :return PreTrainedTokenizer: Configured tokenizer instance.
     """
-    if vocab_size is not None:
-        logger.warning(
-            "get_tokenizer(): 'vocab_size' is deprecated and ignored; "
-            "resize model embeddings instead."
-        )
-    kwargs.pop("vocab_size", None)
+    if "vocab_size" in kwargs:
+        raise TypeError("get_tokenizer() does not accept 'vocab_size'.")
     kwargs.setdefault("use_fast", use_fast)
     kwargs.setdefault("trust_remote_code", trust_remote_code)
     if revision is not None:
@@ -191,17 +275,32 @@ def get_tokenizer(
 
 
 def resolve_text_column(
-    dataset: Dataset, is_streaming: bool, preferred: Optional[str] = None
+    dataset: Dataset,
+    is_streaming: bool,
+    preferred: Optional[str] = None,
+    *,
+    streaming_read_retries: int = 0,
+    streaming_read_retry_backoff_seconds: float = 1.0,
+    streaming_read_retry_max_backoff_seconds: float = 8.0,
 ) -> str:
     """Resolve the text column for tokenization.
 
     :param Dataset dataset: Dataset to inspect.
     :param bool is_streaming: Whether the dataset is streaming.
     :param str | None preferred: Optional preferred column name to validate.
+    :param int streaming_read_retries: Retry count for transient streaming reads.
+    :param float streaming_read_retry_backoff_seconds: Initial backoff for retries.
+    :param float streaming_read_retry_max_backoff_seconds: Maximum retry backoff.
     :return str: Name of the text column.
     """
     if is_streaming:
-        first_example = next(iter(dataset))
+        first_example = peek_streaming_example(
+            dataset,
+            context="resolve_text_column",
+            max_retries=streaming_read_retries,
+            base_backoff_seconds=streaming_read_retry_backoff_seconds,
+            max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+        )
         columns = list(first_example.keys())
     else:
         columns = dataset.column_names
@@ -326,6 +425,9 @@ def tokenize(
     truncation: bool = True,
     add_special_tokens: bool = True,
     return_special_tokens_mask: bool = False,
+    streaming_read_retries: int = 0,
+    streaming_read_retry_backoff_seconds: float = 1.0,
+    streaming_read_retry_max_backoff_seconds: float = 8.0,
     **kwargs: Any,
 ) -> Dataset:
     """Tokenize a dataset with a single- or multi-column schema.
@@ -338,11 +440,14 @@ def tokenize(
     :param bool truncation: Whether to truncate sequences.
     :param bool add_special_tokens: Whether to add tokenizer special tokens.
     :param bool return_special_tokens_mask: Whether to return special token masks.
+    :param int streaming_read_retries: Retry count for transient streaming reads.
+    :param float streaming_read_retry_backoff_seconds: Initial backoff for retries.
+    :param float streaming_read_retry_max_backoff_seconds: Maximum retry backoff.
     :param Any kwargs: Extra arguments passed to ``Dataset.map``.
     :return Dataset: Tokenized dataset.
     """
     # Check if this is a streaming dataset (IterableDataset)
-    is_streaming = hasattr(dataset, "_iter") or "IterableDataset" in str(type(dataset))
+    is_streaming = is_streaming_dataset(dataset)
 
     # Get the number of cpu cores available to the process
     # Override with kwargs if provided (e.g., from trainer)
@@ -356,7 +461,13 @@ def tokenize(
         if is_streaming:
             # For streaming datasets, we need to get column names from first example
             try:
-                first_example = next(iter(dataset))
+                first_example = peek_streaming_example(
+                    dataset,
+                    context="tokenize streaming schema",
+                    max_retries=streaming_read_retries,
+                    base_backoff_seconds=streaming_read_retry_backoff_seconds,
+                    max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+                )
                 all_columns = list(first_example.keys())
                 # Remove all columns except the ones we're creating
                 columns_to_remove = [
@@ -364,7 +475,9 @@ def tokenize(
                     for col in all_columns
                     if col not in ["input_ids", "attention_mask", "token_type_ids"]
                 ]
-            except Exception:
+            except Exception as exc:
+                if is_transient_streaming_error(exc):
+                    raise
                 # Fallback to just removing the text column(s) we're tokenizing
                 if isinstance(column_name, str):
                     columns_to_remove = [column_name]

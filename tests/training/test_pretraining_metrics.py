@@ -3,43 +3,33 @@
 
 import math
 import unittest
-from typing import Any, Dict, List, Tuple
-
-import torch
 
 from neobert.pretraining.metrics import Metrics
-
-
-class _AcceleratorStub:
-    """Minimal accelerator stub for unit-testing metrics aggregation."""
-
-    def __init__(self) -> None:
-        """Initialize a CPU-only accelerator stub."""
-        self.device = torch.device("cpu")
-        self.is_main_process = True
-        self.logged: List[Tuple[Dict[str, Any], int]] = []
-
-    def reduce(self, tensor: torch.Tensor, reduction: str = "sum") -> torch.Tensor:
-        """Return local tensors unchanged for single-process tests.
-
-        :param torch.Tensor tensor: Value to reduce.
-        :param str reduction: Reduction mode.
-        :return torch.Tensor: Unchanged input tensor.
-        """
-        _ = reduction
-        return tensor
-
-    def log(self, values: Dict[str, Any], step: int) -> None:
-        """Capture tracker payloads for assertions.
-
-        :param dict[str, Any] values: Metrics payload.
-        :param int step: Logging step.
-        """
-        self.logged.append((values, step))
+from tests.metrics_utils import AcceleratorStub
 
 
 class TestPretrainingMetrics(unittest.TestCase):
     """Unit tests for pretraining metrics tracker payload behavior."""
+
+    def test_checkpoint_state_is_versioned_and_round_trips(self):
+        """Loop counters require a versioned, topology-bound checkpoint payload."""
+        metrics = Metrics()
+        metrics["train/steps"] = 7
+        metrics["train/dataloader_batches_in_epoch"] = 3
+
+        state = metrics.state_dict()
+        restored = Metrics()
+        restored.load_state_dict(state)
+
+        self.assertEqual(state["metrics_state_version"], 1)
+        self.assertEqual(state["world_size"], 1)
+        self.assertEqual(restored["train/steps"], 7)
+        self.assertEqual(restored["train/dataloader_batches_in_epoch"], 3)
+
+    def test_checkpoint_state_rejects_unversioned_cursor(self):
+        """Legacy loop state cannot prove distributed packed-cursor alignment."""
+        with self.assertRaisesRegex(ValueError, "cannot prove"):
+            Metrics().load_state_dict({"train/steps": 7})
 
     def test_tracker_payload_omits_internal_keys_when_accuracy_disabled(self):
         """Do not emit disabled-accuracy/internal keys to tracker payloads."""
@@ -53,7 +43,7 @@ class TestPretrainingMetrics(unittest.TestCase):
         metrics["train/local_num_correct"] = 2
         metrics["train/local_sum_loss"] = 6.0
 
-        accelerator = _AcceleratorStub()
+        accelerator = AcceleratorStub()
         _ = metrics.log(accelerator)
 
         self.assertEqual(len(accelerator.logged), 1)
@@ -85,7 +75,7 @@ class TestPretrainingMetrics(unittest.TestCase):
         metrics["train/local_num_correct"] = 6
         metrics["train/local_sum_loss"] = 4.0
 
-        accelerator = _AcceleratorStub()
+        accelerator = AcceleratorStub()
         _ = metrics.log(accelerator)
 
         payload, step = accelerator.logged[0]
@@ -96,26 +86,24 @@ class TestPretrainingMetrics(unittest.TestCase):
         self.assertIn("train/accuracy", payload)
         self.assertEqual(payload["train/accuracy"], 0.75)
 
-    def test_tracker_payload_strips_loss_path_debug_metrics(self):
-        """Never emit masked-loss-path diagnostics to external trackers."""
-        metrics = Metrics()
-        metrics["train/steps"] = 7
-        metrics["train/local_samples"] = 1
-        metrics["train/local_tokens"] = 4
-        metrics["train/local_num_pred"] = 2
-        metrics["train/local_num_correct"] = 1
-        metrics["train/local_sum_loss"] = 3.0
-        metrics["train/loss_path_steps_liger_flce"] = 10
-        metrics["train/loss_path_ratio_liger_flce"] = 1.0
 
-        accelerator = _AcceleratorStub()
-        formatted = metrics.log(accelerator)
+def test_metrics_accelerate_checkpoint_round_trip(tmp_path) -> None:
+    """Accelerate persists and restores the versioned pretraining loop state."""
+    from accelerate import Accelerator
 
-        payload, _ = accelerator.logged[0]
-        self.assertIn("train/loss_path_steps_liger_flce", formatted)
-        self.assertIn("train/loss_path_ratio_liger_flce", formatted)
-        self.assertNotIn("train/loss_path_steps_liger_flce", payload)
-        self.assertNotIn("train/loss_path_ratio_liger_flce", payload)
+    accelerator = Accelerator(cpu=True)
+    metrics = Metrics()
+    metrics["train/steps"] = 9
+    metrics["train/dataloader_batches_in_epoch"] = 4
+    accelerator.register_for_checkpointing(metrics)
+
+    accelerator.save_state(str(tmp_path))
+    metrics["train/steps"] = 0
+    metrics["train/dataloader_batches_in_epoch"] = 0
+    accelerator.load_state(str(tmp_path))
+
+    assert metrics["train/steps"] == 9
+    assert metrics["train/dataloader_batches_in_epoch"] == 4
 
 
 if __name__ == "__main__":

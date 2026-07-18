@@ -1,19 +1,20 @@
 """Attention backend dispatch: PyTorch SDPA + flash_attn_varlen."""
 
-from dataclasses import dataclass
 import logging
 import math
+from dataclasses import dataclass
 from typing import Literal, Optional
 
 import torch
 
 from neobert.modeling_utils import (
+    PackedSeqLens,
     is_torch_compiling,
+    packed_seqlens_to_tensor,
     scaled_dot_product_attention_compat,
 )
 
 logger = logging.getLogger(__name__)
-PackedSeqLens = torch.Tensor | list[list[int]]
 
 
 @dataclass(frozen=True)
@@ -36,7 +37,9 @@ FLASH_ATTN_ERROR: Optional[str] = None
 _flash_attn_varlen_func = None
 
 try:
-    from flash_attn import flash_attn_varlen_func as _flash_attn_varlen_func  # type: ignore[no-redef]
+    from flash_attn import (
+        flash_attn_varlen_func as _flash_attn_varlen_func,  # type: ignore[no-redef]
+    )
 
     FLASH_ATTN_AVAILABLE = True
 except (ImportError, RuntimeError) as exc:
@@ -45,25 +48,19 @@ except (ImportError, RuntimeError) as exc:
 _WARNED_SDPA_PACKED_GPU = False
 
 
-try:
-    _dynamo_disable = torch.compiler.disable
-except (AttributeError, RuntimeError):
-    _dynamo_disable = torch._dynamo.disable  # type: ignore[attr-defined]
-
-
 def canonicalize_attn_backend(
     requested: str,
 ) -> Literal["sdpa", "flash_attn_varlen"]:
     """Canonicalize the attention backend string without environment checks.
 
-    :param str requested: One of ``"sdpa"``, ``"flash_attn_varlen"``, ``"flash_attn"``, or ``"flash"``.
+    :param str requested: ``"sdpa"`` or ``"flash_attn_varlen"``.
     :return str: Canonical backend name.
     :raises ValueError: If *requested* is unknown.
     """
     normalized = str(requested).lower().strip()
     if normalized == "sdpa":
         return "sdpa"
-    if normalized in ("flash_attn_varlen", "flash_attn", "flash"):
+    if normalized == "flash_attn_varlen":
         return "flash_attn_varlen"
     raise ValueError(
         f"Unknown attn_backend '{requested}'. Expected: 'sdpa' or 'flash_attn_varlen'."
@@ -75,7 +72,7 @@ def resolve_attn_backend(
 ) -> Literal["sdpa", "flash_attn_varlen"]:
     """Resolve and validate the attention backend against installed packages.
 
-    :param str requested: One of ``"sdpa"`` or ``"flash_attn_varlen"`` (aliases accepted).
+    :param str requested: ``"sdpa"`` or ``"flash_attn_varlen"``.
     :return str: Resolved backend name.
     :raises ImportError: If flash-attn backend is requested but unavailable.
     """
@@ -137,46 +134,34 @@ def _normalize_packed_seqlens_tensor(
     *,
     batch_size: int,
     seq_len: int,
+    device: torch.device | None = None,
+    validate_lengths: bool = True,
 ) -> torch.Tensor:
     """Normalize packed metadata to a fixed-rank int32 tensor.
 
     :param torch.Tensor | list[list[int]] packed_seqlens: Packed segment lengths.
     :param int batch_size: Expected batch size.
     :param int seq_len: Expected padded sequence length.
+    :param torch.device | None device: Optional destination device.
+    :param bool validate_lengths: Whether to validate nonnegative lengths and row sums.
     :return torch.Tensor: ``int32`` tensor of shape ``[B, N]``.
     """
-    if torch.is_tensor(packed_seqlens):
-        tensor = packed_seqlens.detach()
-        if tensor.ndim == 1:
-            tensor = tensor.unsqueeze(1)
-        if tensor.ndim != 2:
-            raise ValueError(
-                "packed_seqlens tensor must be rank 1 or 2, got "
-                f"shape={tuple(tensor.shape)}"
-            )
-        tensor = tensor.to(torch.int32)
-    else:
-        normalized_rows: list[list[int]] = []
-        max_segments = 0
-        for row in packed_seqlens:
-            if row is None:
-                segs: list[int] = []
-            else:
-                segs = [int(x) for x in row if int(x) > 0]
-            normalized_rows.append(segs)
-            max_segments = max(max_segments, len(segs))
-        tensor = torch.zeros((len(normalized_rows), max_segments), dtype=torch.int32)
-        for idx, segs in enumerate(normalized_rows):
-            if not segs:
-                continue
-            tensor[idx, : len(segs)] = torch.tensor(segs, dtype=torch.int32)
+    tensor = packed_seqlens_to_tensor(
+        packed_seqlens,
+        device=device,
+        validate=validate_lengths,
+    )
+    if tensor is None:
+        raise TypeError("packed_seqlens must not be None")
 
     if tensor.shape[0] != batch_size:
         raise ValueError(
             "packed_seqlens batch mismatch: "
             f"{tensor.shape[0]} != batch_size={batch_size}"
         )
-    sums = tensor.clamp_min(0).sum(dim=1)
+    if not validate_lengths:
+        return tensor
+    sums = tensor.sum(dim=1)
     bad = sums > seq_len
     if bad.any():
         bad_idx = int(torch.where(bad)[0][0].item())
@@ -187,7 +172,7 @@ def _normalize_packed_seqlens_tensor(
     return tensor
 
 
-@_dynamo_disable
+@torch.compiler.disable
 def prepare_packed_flash_metadata(
     packed_seqlens: torch.Tensor,
     *,
@@ -273,7 +258,7 @@ def prepare_packed_flash_metadata(
     )
 
 
-@_dynamo_disable
+@torch.compiler.disable
 def _flash_varlen_attention(
     xq: torch.Tensor,
     xk: torch.Tensor,
@@ -434,29 +419,13 @@ def attention_forward(
     """
     attn_backend = canonicalize_attn_backend(attn_backend)
     if packed_seqlens is not None:
-        if packed_flash_metadata is not None and torch.is_tensor(packed_seqlens):
-            # Reuse already-normalized tensor path when metadata is precomputed
-            # once in the model forward; avoid per-layer revalidation overhead.
-            packed_tensor = packed_seqlens.detach()
-            if packed_tensor.ndim == 1:
-                packed_tensor = packed_tensor.unsqueeze(1)
-            if packed_tensor.ndim != 2:
-                raise ValueError(
-                    "packed_seqlens tensor must be rank 1 or 2, got "
-                    f"shape={tuple(packed_tensor.shape)}"
-                )
-            if packed_tensor.shape[0] != xq.shape[0]:
-                raise ValueError(
-                    "packed_seqlens batch mismatch: "
-                    f"{packed_tensor.shape[0]} != batch_size={xq.shape[0]}"
-                )
-            packed_tensor = packed_tensor.to(device=xq.device, dtype=torch.int32)
-        else:
-            packed_tensor = _normalize_packed_seqlens_tensor(
-                packed_seqlens,
-                batch_size=xq.shape[0],
-                seq_len=xq.shape[1],
-            )
+        packed_tensor = _normalize_packed_seqlens_tensor(
+            packed_seqlens,
+            batch_size=xq.shape[0],
+            seq_len=xq.shape[1],
+            device=xq.device if packed_flash_metadata is not None else None,
+            validate_lengths=packed_flash_metadata is None,
+        )
         # Packed sequences
         if attn_backend == "flash_attn_varlen":
             if not xq.is_cuda:

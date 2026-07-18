@@ -124,6 +124,26 @@ def canonicalize_kernel_backend(
     )
 
 
+def _require_liger_component(
+    backend: str,
+    component: Any,
+    component_name: str,
+) -> None:
+    """Reject an explicit Liger request when its kernel is unavailable.
+
+    :param str backend: Canonical kernel backend.
+    :param Any component: Imported Liger kernel component, or ``None``.
+    :param str component_name: Human-readable component name for the error.
+    :raises ImportError: If ``backend='liger'`` and the component is unavailable.
+    """
+    if backend == "liger" and component is None:
+        detail = f": {LIGER_ERROR}" if LIGER_ERROR else ""
+        raise ImportError(
+            f"kernel_backend='liger' requested but the Liger {component_name} "
+            f"kernel is not available{detail}"
+        )
+
+
 def resolve_kernel_backend(
     requested: str,
 ) -> Literal["torch", "liger"]:
@@ -170,14 +190,16 @@ class _AdaptiveRMSNorm(nn.Module):
     faster Triton kernel - with no checkpoint-compatibility issues.
     """
 
-    def __init__(self, dim: int, eps: float = 1e-6) -> None:
+    def __init__(self, dim: int, eps: float = 1e-6, *, strict: bool = False) -> None:
         """Initialize the adaptive RMSNorm module.
 
         :param int dim: Feature dimension.
         :param float eps: Numerical epsilon.
+        :param bool strict: Whether every forward must use Liger.
         """
         super().__init__()
         self.eps = eps
+        self.strict = strict
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -186,6 +208,8 @@ class _AdaptiveRMSNorm(nn.Module):
         :param torch.Tensor x: Input tensor.
         :return torch.Tensor: Normalized tensor.
         """
+        if self.strict:
+            _should_use_liger("liger", x)
         if x.is_cuda and _LigerRMSNormFunction is not None:
             return _LigerRMSNormFunction.apply(x, self.weight, self.eps)
         # Native torch path (CPU or Liger unavailable). Torch>=2.6.0 guarantees
@@ -244,8 +268,9 @@ def get_rmsnorm(
     :return nn.Module: RMSNorm instance.
     """
     backend = canonicalize_kernel_backend(backend)
+    _require_liger_component(backend, _LigerRMSNormFunction, "RMSNorm")
     if backend in ("liger", "auto") and _LigerRMSNormFunction is not None:
-        return _AdaptiveRMSNorm(dim, eps=eps)
+        return _AdaptiveRMSNorm(dim, eps=eps, strict=backend == "liger")
 
     from neobert.model.rmsnorm import RMSNorm
 
@@ -272,6 +297,7 @@ def swiglu_forward(
     :return torch.Tensor: Activated tensor.
     """
     backend = canonicalize_kernel_backend(backend)
+    _require_liger_component(backend, _LigerSiLUMulFunction, "SwiGLU")
     if _LigerSiLUMulFunction is not None and _should_use_liger(backend, gate):
         return _LigerSiLUMulFunction.apply(gate, up)
     return nn.functional.silu(gate) * up
@@ -285,13 +311,21 @@ def swiglu_forward(
 class _AdaptiveCrossEntropyLoss(nn.Module):
     """CrossEntropy loss that dispatches to Liger on CUDA, PyTorch on CPU."""
 
-    def __init__(self, reduction: str = "mean", **kwargs: Any) -> None:
+    def __init__(
+        self,
+        reduction: str = "mean",
+        *,
+        strict: bool = False,
+        **kwargs: Any,
+    ) -> None:
         """Initialize the adaptive CE loss module.
 
         :param str reduction: Loss reduction mode.
+        :param bool strict: Whether every forward must use Liger.
         :param Any kwargs: Forwarded kwargs for CE constructors.
         """
         super().__init__()
+        self.strict = strict
         self._torch_ce = nn.CrossEntropyLoss(reduction=reduction, **kwargs)
         self._liger_ce = (
             _LigerCrossEntropyLoss(reduction=reduction, **kwargs)
@@ -306,6 +340,8 @@ class _AdaptiveCrossEntropyLoss(nn.Module):
         :param torch.Tensor target: Target labels.
         :return torch.Tensor: Computed loss.
         """
+        if self.strict:
+            _should_use_liger("liger", input)
         if input.is_cuda and self._liger_ce is not None:
             return self._liger_ce(input, target)
         return self._torch_ce(input, target)
@@ -327,6 +363,11 @@ def get_cross_entropy_loss(
     :return nn.Module: CrossEntropyLoss instance.
     """
     backend = canonicalize_kernel_backend(backend)
+    _require_liger_component(backend, _LigerCrossEntropyLoss, "CrossEntropy")
     if backend in ("liger", "auto") and _LigerCrossEntropyLoss is not None:
-        return _AdaptiveCrossEntropyLoss(reduction=reduction, **kwargs)
+        return _AdaptiveCrossEntropyLoss(
+            reduction=reduction,
+            strict=backend == "liger",
+            **kwargs,
+        )
     return nn.CrossEntropyLoss(reduction=reduction, **kwargs)

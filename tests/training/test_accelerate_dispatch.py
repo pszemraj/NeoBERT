@@ -7,37 +7,11 @@ import unittest
 
 import torch
 from accelerate.data_loader import prepare_data_loader
-from tokenizers import Tokenizer, models, pre_tokenizers
 from torch.utils.data import DataLoader, IterableDataset
 from transformers import PreTrainedTokenizerFast
 
 from neobert.collator import get_collator
-
-
-def _make_tokenizer() -> PreTrainedTokenizerFast:
-    """Create a tiny tokenizer for tests.
-
-    :return PreTrainedTokenizerFast: Tokenizer instance.
-    """
-    vocab = {
-        "[PAD]": 0,
-        "[UNK]": 1,
-        "[MASK]": 2,
-        "[SEP]": 3,
-        "hello": 4,
-        "world": 5,
-        "test": 6,
-        "sentence": 7,
-    }
-    tokenizer = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
-    tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
-    return PreTrainedTokenizerFast(
-        tokenizer_object=tokenizer,
-        pad_token="[PAD]",
-        unk_token="[UNK]",
-        mask_token="[MASK]",
-        sep_token="[SEP]",
-    )
+from tests.tokenizer_utils import build_wordlevel_tokenizer
 
 
 class _StreamingDataset(IterableDataset):
@@ -74,7 +48,9 @@ class TestAccelerateDispatch(unittest.TestCase):
 
     def test_dispatch_batches_accepts_packed_seqlens_tensor(self):
         """Ensure dispatch batching can concatenate packed_seqlens."""
-        tokenizer = _make_tokenizer()
+        tokenizer = build_wordlevel_tokenizer(
+            vocab={"hello": 4, "world": 5, "test": 6, "sentence": 7},
+        )
         collator = get_collator(
             tokenizer=tokenizer,
             mlm_probability=0.15,
@@ -102,7 +78,9 @@ class TestAccelerateDispatch(unittest.TestCase):
 
     def test_packed_seqlens_fixed_width_concat(self):
         """Ensure packed_seqlens has stable width across packed batches."""
-        tokenizer = _make_tokenizer()
+        tokenizer = build_wordlevel_tokenizer(
+            vocab={"hello": 4, "world": 5, "test": 6, "sentence": 7},
+        )
         collator = get_collator(
             tokenizer=tokenizer,
             mlm_probability=0.15,

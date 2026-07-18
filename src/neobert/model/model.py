@@ -1,33 +1,20 @@
-"""NeoBERT model architecture and task heads."""
+"""NeoBERT encoder backbone and shared modeling utilities."""
 
 # NOTE: HF export/inference uses ``neobert/huggingface/modeling_neobert.py`` with
 # different attention backends; keep core math consistent across both.
 
 import logging
-import math
 import warnings
-from copy import deepcopy
-from functools import partial
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Optional
 
-import numpy as np
 import torch
 from torch import nn
-from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from torch.utils.checkpoint import checkpoint
-from transformers import (
-    DataCollatorWithPadding,
-    PretrainedConfig,
-    PreTrainedModel,
-    PreTrainedTokenizerFast,
-)
-from transformers.modeling_outputs import SequenceClassifierOutput
-
-if TYPE_CHECKING:
-    pass
+from transformers import PretrainedConfig, PreTrainedModel
 
 from neobert.kernels.attention import (
     PackedFlashMetadata,
+    PackedSeqLens,
     attention_forward,
     canonicalize_attn_backend,
     prepare_packed_flash_metadata,
@@ -38,10 +25,19 @@ from neobert.kernels.backend import (
     swiglu_forward,
 )
 from neobert.model.rotary import apply_rotary_emb, precompute_freqs_cis
-from neobert.modeling_utils import is_torch_compiling, swiglu_intermediate_size
+from neobert.modeling_utils import (
+    is_torch_compiling,
+    packed_seqlens_to_tensor,
+    removed_model_config_fields,
+    right_padded_mask_lengths,
+    swiglu_intermediate_size,
+)
+from neobert.warnings import NeoBERTWarning
+
+if TYPE_CHECKING:
+    from neobert.config import ModelConfig
 
 logger = logging.getLogger(__name__)
-PackedSeqLens = torch.Tensor | list[list[int]]
 
 
 def _normalize_pad_mask(pad_mask: torch.Tensor) -> torch.Tensor:
@@ -101,68 +97,41 @@ def _infer_single_segment_packed_seqlens_from_pad_mask(
     if key_mask.shape[-1] != seq_len:
         return None
 
-    keep = torch.isfinite(key_mask) & (key_mask == 0)
-    keep_int = keep.to(torch.int)
-    if not torch.all(keep_int.cummin(dim=-1).values == keep_int):
+    lengths = right_padded_mask_lengths(key_mask, convention="additive")
+    if lengths is None:
         return None
 
-    lengths = keep_int.sum(dim=-1).clamp(max=seq_len).to(torch.int32)
+    lengths = lengths.clamp(max=seq_len)
     # Fully padded rows are not valid packed segments; keep additive-mask path.
     if (lengths <= 0).any():
         return None
-    return lengths.unsqueeze(1).cpu()
+    return lengths.cpu()
 
 
 def _normalize_packed_seqlens(
     packed_seqlens: Any,
     *,
     seq_len: Optional[int] = None,
+    batch_size: Optional[int] = None,
 ) -> Optional[torch.Tensor]:
     """Normalize packed sequence lengths to rank-2 int32 tensors.
 
     :param Any packed_seqlens: Packed segment lengths tensor or list.
     :param int | None seq_len: Optional sequence length for validation.
+    :param int | None batch_size: Optional batch size for validation.
     :return torch.Tensor | None: Packed segment lengths tensor of shape ``[B, N]``.
     """
-    if packed_seqlens is None:
+    tensor = packed_seqlens_to_tensor(packed_seqlens)
+    if tensor is None:
         return None
 
-    if torch.is_tensor(packed_seqlens):
-        tensor = packed_seqlens.detach()
-        if tensor.ndim == 1:
-            tensor = tensor.unsqueeze(1)
-        if tensor.ndim != 2:
-            raise ValueError(
-                "packed_seqlens tensor must be rank 1 or 2, got "
-                f"shape={tuple(tensor.shape)}"
-            )
-        tensor = tensor.to(torch.int32)
-    elif isinstance(packed_seqlens, list):
-        normalized_rows: list[list[int]] = []
-        max_segments = 0
-        for row in packed_seqlens:
-            if row is None:
-                segs: list[int] = []
-            else:
-                segs = [int(x) for x in row if int(x) > 0]
-            normalized_rows.append(segs)
-            max_segments = max(max_segments, len(segs))
-
-        tensor = torch.zeros(
-            (len(normalized_rows), max_segments),
-            dtype=torch.int32,
+    if batch_size is not None and tensor.shape[0] != batch_size:
+        raise ValueError(
+            "packed_seqlens batch dimension does not match input batch size "
+            f"({tensor.shape[0]} != {batch_size})."
         )
-        for idx, segs in enumerate(normalized_rows):
-            if not segs:
-                continue
-            tensor[idx, : len(segs)] = torch.tensor(segs, dtype=torch.int32)
-    else:
-        raise TypeError(
-            f"Unsupported packed_seqlens type: {type(packed_seqlens).__name__}"
-        )
-
     if seq_len is not None:
-        sums = tensor.clamp_min(0).sum(dim=1)
+        sums = tensor.sum(dim=1)
         bad = sums > seq_len
         if bad.any():
             bad_idx = int(torch.where(bad)[0][0].item())
@@ -172,6 +141,45 @@ def _normalize_packed_seqlens(
             )
 
     return tensor
+
+
+def _build_learned_position_ids(
+    src: torch.Tensor,
+    *,
+    pad_token_id: int,
+    packed_seqlens: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Build one-indexed learned position IDs with zero reserved for padding.
+
+    Packed segment lengths define document boundaries, so positions restart at
+    one for every segment. Unpacked inputs retain the pad-aware cumulative
+    positions used by the original model.
+
+    :param torch.Tensor src: Token IDs shaped ``[batch, sequence]``.
+    :param int pad_token_id: Token ID treated as padding for unpacked inputs.
+    :param torch.Tensor | None packed_seqlens: Normalized packed segment lengths.
+    :return torch.Tensor: Position IDs shaped like ``src``.
+    """
+    if packed_seqlens is None:
+        token_mask = src.ne(pad_token_id).to(torch.long)
+        return torch.cumsum(token_mask, dim=1) * token_mask
+
+    batch_size, seq_len = src.shape
+    lengths = packed_seqlens.to(device=src.device, dtype=torch.long)
+    segment_starts = torch.cumsum(lengths, dim=1) - lengths
+    sentinel_starts = torch.full_like(segment_starts, seq_len)
+    safe_starts = torch.where(lengths > 0, segment_starts, sentinel_starts)
+
+    start_offsets = torch.zeros(
+        (batch_size, seq_len + 1), device=src.device, dtype=torch.long
+    )
+    start_offsets.scatter_(1, safe_starts, safe_starts)
+    latest_start = torch.cummax(start_offsets[:, :seq_len], dim=1).values
+
+    token_offsets = torch.arange(seq_len, device=src.device).unsqueeze(0)
+    position_ids = token_offsets - latest_start + 1
+    valid_tokens = token_offsets < lengths.sum(dim=1, keepdim=True)
+    return position_ids * valid_tokens
 
 
 class SwiGLU(nn.Module):
@@ -233,8 +241,6 @@ class NeoBERTConfig(PretrainedConfig):
         attn_backend: str = "sdpa",
         kernel_backend: str = "auto",
         tie_word_embeddings: bool = True,
-        base_scale: float = 1.0 / (960.0**0.5),
-        ngpt: bool = False,
         **kwargs: Any,
     ):
         """Initialize the NeoBERT configuration.
@@ -256,17 +262,21 @@ class NeoBERTConfig(PretrainedConfig):
         :param str attn_backend: Attention backend (``"sdpa"`` or ``"flash_attn_varlen"``).
         :param str kernel_backend: Kernel backend (``"auto"``, ``"liger"``, or ``"torch"``).
         :param bool tie_word_embeddings: Whether to tie input/output embeddings.
-        :param float base_scale: Base scaling factor for NGPT.
-        :param bool ngpt: Whether to enable NGPT mode.
         :param Any kwargs: Additional configuration parameters.
         """
+        removed_fields = removed_model_config_fields(kwargs)
+        if removed_fields:
+            raise TypeError(
+                "Unsupported removed NeoBERT config field(s): "
+                + ", ".join(removed_fields)
+            )
         # Legacy: accept flash_attention bool and map to attn_backend
         if "flash_attention" in kwargs:
             fa = kwargs.pop("flash_attention")
             warnings.warn(
                 "NeoBERTConfig: 'flash_attention' is deprecated; use "
                 '\'attn_backend\' instead ("sdpa" or "flash_attn_varlen").',
-                UserWarning,
+                NeoBERTWarning,
                 stacklevel=2,
             )
             if isinstance(fa, bool):
@@ -291,7 +301,7 @@ class NeoBERTConfig(PretrainedConfig):
         if "dropout_prob" in kwargs and "dropout" not in kwargs:
             warnings.warn(
                 "NeoBERTConfig: 'dropout_prob' is deprecated; use 'dropout' instead.",
-                UserWarning,
+                NeoBERTWarning,
                 stacklevel=2,
             )
             dropout = kwargs["dropout_prob"]
@@ -320,7 +330,7 @@ class NeoBERTConfig(PretrainedConfig):
             warnings.warn(
                 "NeoBERTConfig: 'max_position_embeddings' is deprecated for the "
                 "training model; use 'max_length' when constructing configs.",
-                UserWarning,
+                NeoBERTWarning,
                 stacklevel=2,
             )
             self.max_length = int(kwargs["max_position_embeddings"])
@@ -331,11 +341,55 @@ class NeoBERTConfig(PretrainedConfig):
 
         self.attn_backend = canonicalize_attn_backend(attn_backend)
         self.kernel_backend = canonicalize_kernel_backend(kernel_backend)
-        self.base_scale = base_scale
-        self.ngpt = ngpt
 
-        # Store any extra kwargs for reference
-        self.kwargs = kwargs
+    @classmethod
+    def from_model_config(
+        cls,
+        model_config: "ModelConfig",
+        *,
+        max_length: int,
+        pad_token_id: int,
+        attn_backend: str,
+        vocab_size: Optional[int] = None,
+        num_labels: Optional[int] = None,
+    ) -> "NeoBERTConfig":
+        """Construct a runtime model config from the typed project model config.
+
+        Sequence length, padding ID, and attention backend are required at each task
+        boundary because they depend on tokenizer and execution context.
+
+        :param ModelConfig model_config: Typed project model configuration.
+        :param int max_length: Task-specific maximum sequence length.
+        :param int pad_token_id: Task tokenizer padding token ID.
+        :param str attn_backend: Task-specific attention backend.
+        :param int | None vocab_size: Optional task-specific vocabulary override.
+        :param int | None num_labels: Optional classification label count.
+        :return NeoBERTConfig: Canonical runtime model configuration.
+        """
+        runtime_kwargs: dict[str, Any] = {
+            "classifier_init_range": model_config.classifier_init_range,
+        }
+        if num_labels is not None:
+            runtime_kwargs["num_labels"] = num_labels
+        return cls(
+            hidden_size=model_config.hidden_size,
+            num_hidden_layers=model_config.num_hidden_layers,
+            num_attention_heads=model_config.num_attention_heads,
+            intermediate_size=model_config.intermediate_size,
+            dropout=model_config.dropout_prob,
+            embedding_init_range=model_config.embedding_init_range,
+            decoder_init_range=model_config.decoder_init_range,
+            rms_norm=model_config.rms_norm,
+            rope=model_config.rope,
+            norm_eps=model_config.norm_eps,
+            hidden_act=model_config.hidden_act,
+            vocab_size=model_config.vocab_size if vocab_size is None else vocab_size,
+            pad_token_id=pad_token_id,
+            max_length=max_length,
+            attn_backend=attn_backend,
+            kernel_backend=model_config.kernel_backend,
+            **runtime_kwargs,
+        )
 
 
 class EncoderBlock(nn.Module):
@@ -490,202 +544,6 @@ class EncoderBlock(nn.Module):
         return self.ffn_dropout(self.ffn(x))
 
 
-class NormEncoderBlock(nn.Module):
-    """Transformer encoder block."""
-
-    def __init__(self, config: NeoBERTConfig) -> None:
-        """Initialize the normalized encoder block.
-
-        :param NeoBERTConfig config: Model configuration.
-        """
-        super().__init__()
-
-        self.config = config
-
-        # Attention
-        self.qkv = nn.Linear(
-            in_features=config.hidden_size,
-            out_features=config.hidden_size * 3,
-            bias=False,
-        )
-        self.wo = nn.Linear(
-            in_features=config.hidden_size, out_features=config.hidden_size, bias=False
-        )
-        self.resid_dropout = nn.Dropout(config.dropout)
-
-        # Kernel backend for Liger/torch dispatch (resolved at forward time)
-        self._kb = getattr(config, "kernel_backend", "auto")
-
-        self.c_fc = nn.Linear(
-            config.hidden_size, 2 * config.intermediate_size, bias=False
-        )
-        self.mlp_c_proj = nn.Linear(
-            config.intermediate_size, config.hidden_size, bias=False
-        )
-        self.mlp_c_proj._ngpt_c_proj = True
-
-        self.ffn_dropout = nn.Dropout(config.dropout)
-
-        self.attn_alpha_init_value = 0.05
-        self.attn_alpha_init_scaling = config.base_scale
-        self.attn_alpha = torch.nn.Parameter(
-            self.attn_alpha_init_scaling * torch.ones(config.hidden_size)
-        )
-
-        self.mlp_alpha_init_value = 0.05
-        self.mlp_alpha_init_scaling = config.base_scale
-        self.mlp_alpha = torch.nn.Parameter(
-            self.mlp_alpha_init_scaling * torch.ones(config.hidden_size)
-        )
-
-        self.sqk_init_value = 1.0
-        self.sqk_init_scaling = config.base_scale
-        self.sqk = torch.nn.Parameter(
-            self.sqk_init_scaling * torch.ones(config.hidden_size)
-        )
-
-        self.suv_init_value = 1.0
-        self.suv_init_scaling = 1.0
-        self.suv = torch.nn.Parameter(
-            self.suv_init_scaling * torch.ones(2 * config.intermediate_size)
-        )
-
-    def justnorm(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply L2 normalization across the last dimension.
-
-        :param torch.Tensor x: Input tensor.
-        :return torch.Tensor: Normalized tensor.
-        """
-        return x / (x.norm(p=2, dim=-1, keepdim=True) + 1e-8)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        pad_mask: torch.Tensor,
-        freqs_cis: torch.Tensor,
-        packed_seqlens: Optional[PackedSeqLens] = None,
-        packed_flash_meta: Optional[PackedFlashMetadata] = None,
-    ) -> torch.Tensor:
-        """Run the normalized encoder block forward pass.
-
-        :param torch.Tensor x: Input tensor.
-        :param torch.Tensor pad_mask: Additive attention mask.
-        :param torch.Tensor freqs_cis: Rotary embedding frequencies.
-        :param torch.Tensor | list[list[int]] | None packed_seqlens: Packed segment lengths.
-        :param PackedFlashMetadata | None packed_flash_meta: Cached flash varlen metadata.
-        :return torch.Tensor: Updated hidden states.
-        """
-        x_attn = self._att_block(
-            x,
-            pad_mask,
-            freqs_cis,
-            packed_seqlens,
-            packed_flash_meta,
-        )
-
-        lr = self.attn_alpha * (
-            self.attn_alpha_init_value / self.attn_alpha_init_scaling
-        )
-        lr = torch.abs(lr)
-
-        A_norm = self.justnorm(x)
-        B_norm = self.justnorm(x_attn)
-        x = self.justnorm(A_norm + lr * (B_norm - A_norm))
-
-        x_ff = self._ff_block(x)
-
-        lr = self.mlp_alpha * (self.mlp_alpha_init_value / self.mlp_alpha_init_scaling)
-        lr = torch.abs(lr)
-
-        A_norm = self.justnorm(x)
-        B_norm = self.justnorm(x_ff)
-        x = self.justnorm(A_norm + lr * (B_norm - A_norm))
-
-        return x
-
-    def _att_block(
-        self,
-        x: torch.Tensor,
-        pad_mask: torch.Tensor,
-        freqs_cis: torch.Tensor,
-        packed_seqlens: Optional[PackedSeqLens] = None,
-        packed_flash_meta: Optional[PackedFlashMetadata] = None,
-    ) -> torch.Tensor:
-        """Apply the attention sub-layer.
-
-        :param torch.Tensor x: Input tensor.
-        :param torch.Tensor pad_mask: Additive attention mask.
-        :param torch.Tensor freqs_cis: Rotary embedding frequencies.
-        :param torch.Tensor | list[list[int]] | None packed_seqlens: Packed segment lengths.
-        :param PackedFlashMetadata | None packed_flash_meta: Cached flash varlen metadata.
-        :return torch.Tensor: Attention output.
-        """
-        batch_size, seq_len, _ = x.shape
-
-        xq, xk, xv = (
-            self.qkv(x)
-            .view(
-                batch_size,
-                seq_len,
-                self.config.num_attention_heads,
-                self.config.dim_head * 3,
-            )
-            .chunk(3, dim=-1)
-        )
-
-        if self.config.rope:
-            xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
-
-        sqk = (self.sqk * (self.sqk_init_value / self.sqk_init_scaling)).view(
-            1,
-            1,
-            self.config.num_attention_heads,
-            self.config.hidden_size // self.config.num_attention_heads,
-        )
-        xq = sqk * self.justnorm(xq)
-        xk = sqk * self.justnorm(xk)
-
-        softmax_scale = (
-            self.config.hidden_size / self.config.num_attention_heads
-        ) ** 0.5
-
-        attn = attention_forward(
-            xq,
-            xk,
-            xv,
-            pad_mask=pad_mask,
-            packed_seqlens=packed_seqlens,
-            dropout_p=self.config.dropout if self.training else 0.0,
-            scale=softmax_scale,
-            attn_backend=self.config.attn_backend,
-            packed_flash_metadata=packed_flash_meta,
-        )
-
-        return self.resid_dropout(
-            self.wo(attn.reshape(batch_size, seq_len, self.config.hidden_size))
-        )
-
-    def _ff_block(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply the feed-forward sub-layer.
-
-        :param torch.Tensor x: Input tensor.
-        :return torch.Tensor: Feed-forward output.
-        """
-        uv = self.c_fc(x)
-        suv = self.suv * (
-            (self.suv_init_value / self.suv_init_scaling)
-            * (self.config.hidden_size**0.5)
-        )
-        uv = suv * uv
-
-        u, v = torch.chunk(uv, 2, dim=-1)
-        # gate=v, up=u: Liger computes silu(gate) * up
-        x = swiglu_forward(v, u, self._kb)
-        x = self.mlp_c_proj(x)
-
-        return self.ffn_dropout(x)
-
-
 class NeoBERTPreTrainedModel(PreTrainedModel):
     """Base class with NeoBERT weight initialization."""
 
@@ -699,17 +557,9 @@ class NeoBERTPreTrainedModel(PreTrainedModel):
         :param nn.Module module: Module to initialize.
         """
         if isinstance(module, nn.Linear):
-            if getattr(module, "_ngpt_c_proj", False):
-                torch.nn.init.normal_(
-                    module.weight,
-                    mean=0.0,
-                    std=self.config.base_scale
-                    / math.sqrt(2 * self.config.num_hidden_layers),
-                )
-            else:
-                module.weight.data.uniform_(
-                    -self.config.decoder_init_range, self.config.decoder_init_range
-                )
+            module.weight.data.uniform_(
+                -self.config.decoder_init_range, self.config.decoder_init_range
+            )
             if module.bias is not None:
                 module.bias.data.zero_()
         elif isinstance(module, nn.Embedding):
@@ -782,7 +632,11 @@ class NeoBERT(NeoBERTPreTrainedModel):
         :return torch.Tensor: Encoded hidden states.
         """
         seq_len = src.shape[1]
-        packed_seqlens = _normalize_packed_seqlens(packed_seqlens, seq_len=seq_len)
+        packed_seqlens = _normalize_packed_seqlens(
+            packed_seqlens,
+            seq_len=seq_len,
+            batch_size=src.shape[0],
+        )
 
         use_packed = self.config.attn_backend != "sdpa" or packed_seqlens is not None
         if use_packed:
@@ -827,6 +681,7 @@ class NeoBERT(NeoBERTPreTrainedModel):
                 warnings.warn(
                     f"Sequence length {seq_len} exceeds max_length {self.config.max_length}; "
                     "using a transient RoPE cache for this forward. Consider truncating inputs.",
+                    NeoBERTWarning,
                     stacklevel=2,
                 )
                 freqs_cis = precompute_freqs_cis(
@@ -843,9 +698,12 @@ class NeoBERT(NeoBERTPreTrainedModel):
 
         # Positional embedding
         if not self.config.rope:
-            mask = src.ne(self.config.pad_token_id).int()
-            incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask)) * mask
-            x += self.positional_embedding(incremental_indices.long())
+            position_ids = _build_learned_position_ids(
+                src,
+                pad_token_id=self.config.pad_token_id,
+                packed_seqlens=packed_seqlens,
+            )
+            x += self.positional_embedding(position_ids)
 
         # Transformer encoder
         for layer in self.transformer_encoder:
@@ -879,650 +737,3 @@ class NeoBERT(NeoBERTPreTrainedModel):
 
         x = self.layer_norm(x)
         return x
-
-
-class NormNeoBERT(NeoBERTPreTrainedModel):
-    """NeoBERT encoder with normalized residuals."""
-
-    config_class = NeoBERTConfig
-
-    def __init__(self, config: NeoBERTConfig) -> None:
-        """Initialize the normalized NeoBERT encoder.
-
-        :param NeoBERTConfig config: Model configuration.
-        """
-        super().__init__(config)
-
-        self.config = config
-
-        self.encoder = nn.Embedding(
-            config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id
-        )
-
-        if self.config.rope:
-            # Keep a fixed-size RoPE cache to avoid mutating buffers in forward().
-            self.register_buffer(
-                "freqs_cis",
-                precompute_freqs_cis(config.dim_head, config.max_length),
-                persistent=False,
-            )
-        else:
-            # Use a fixed padding index (0) for positional embeddings to decouple
-            # position IDs from token padding IDs.
-            self.positional_embedding = nn.Embedding(
-                # Positions are 1-indexed when using cumsum; reserve 0 for padding.
-                config.max_length + 1,
-                config.hidden_size,
-                padding_idx=0,
-            )
-
-        self.transformer_encoder = nn.ModuleList()
-        for _ in range(config.num_hidden_layers):
-            self.transformer_encoder.append(NormEncoderBlock(config))
-
-        # Initialize weights and apply final processing
-        self.post_init()
-        self.gradient_checkpointing = False
-
-    def forward(
-        self,
-        src: torch.Tensor,
-        pad_mask: Optional[torch.Tensor] = None,
-        packed_seqlens: Optional[PackedSeqLens] = None,
-    ) -> torch.Tensor:
-        """Run the normalized encoder forward pass.
-
-        :param torch.Tensor src: Input token IDs.
-        :param torch.Tensor | None pad_mask: Additive attention mask.
-        :param torch.Tensor | list[list[int]] | None packed_seqlens: Packed segment lengths.
-        :return torch.Tensor: Encoded hidden states.
-        """
-        seq_len = src.shape[1]
-        packed_seqlens = _normalize_packed_seqlens(packed_seqlens, seq_len=seq_len)
-
-        use_packed = self.config.attn_backend != "sdpa" or packed_seqlens is not None
-        if use_packed:
-            if (
-                packed_seqlens is None
-                and pad_mask is not None
-                and torch.is_tensor(pad_mask)
-            ):
-                packed_seqlens = _infer_single_segment_packed_seqlens_from_pad_mask(
-                    pad_mask, seq_len
-                )
-                if packed_seqlens is not None:
-                    pad_mask = None
-            if packed_seqlens is not None and pad_mask is not None:
-                logger.warning(
-                    "packed_seqlens provided; ignoring pad_mask for packed attention."
-                )
-                pad_mask = None
-
-        packed_flash_meta: Optional[PackedFlashMetadata] = None
-        if (
-            packed_seqlens is not None
-            and self.config.attn_backend == "flash_attn_varlen"
-            and not is_torch_compiling()
-        ):
-            packed_flash_meta = prepare_packed_flash_metadata(
-                packed_seqlens,
-                batch_size=src.shape[0],
-                seq_len=seq_len,
-                device=src.device,
-            )
-
-        # Normalize to broadcast-friendly shapes to avoid O(S^2) materialization.
-        if pad_mask is not None and torch.is_tensor(pad_mask):
-            pad_mask = _normalize_pad_mask(pad_mask)
-
-        # RoPE
-        freqs_cis = None
-        if self.config.rope:
-            seq_len = src.shape[1]
-            if seq_len > self.config.max_length:
-                warnings.warn(
-                    f"Sequence length {seq_len} exceeds max_length {self.config.max_length}; "
-                    "using a transient RoPE cache for this forward. Consider truncating inputs.",
-                    stacklevel=2,
-                )
-                freqs_cis = precompute_freqs_cis(
-                    self.config.dim_head, seq_len, device=src.device
-                )
-            else:
-                freqs_cis = self.freqs_cis
-                if freqs_cis.device != src.device:
-                    freqs_cis = freqs_cis.to(src.device)
-                freqs_cis = freqs_cis[:seq_len]
-
-        # Embedding
-        x = self.encoder(src)
-
-        # Positional embedding
-        if not self.config.rope:
-            mask = src.ne(self.config.pad_token_id).int()
-            incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask)) * mask
-            x += self.positional_embedding(incremental_indices.long())
-
-        # Transformer encoder
-        for layer in self.transformer_encoder:
-            if self.gradient_checkpointing and self.training:
-
-                def custom_forward(
-                    hidden_states: torch.Tensor, layer: NormEncoderBlock = layer
-                ) -> torch.Tensor:
-                    """Run one normalized encoder block for checkpointing.
-
-                    :param torch.Tensor hidden_states: Input hidden states.
-                    :param NormEncoderBlock layer: Bound layer instance.
-                    :return torch.Tensor: Updated hidden states.
-                    """
-                    return layer(
-                        hidden_states,
-                        pad_mask,
-                        freqs_cis,
-                        packed_seqlens,
-                        packed_flash_meta,
-                    )
-
-                x = checkpoint(
-                    custom_forward,
-                    x,
-                    preserve_rng_state=True,
-                    use_reentrant=False,
-                )
-            else:
-                x = layer(x, pad_mask, freqs_cis, packed_seqlens, packed_flash_meta)
-
-        return x
-
-
-class NeoBERTLMHead(NeoBERTPreTrainedModel):
-    """NeoBERT with a language modeling head."""
-
-    config_class = NeoBERTConfig
-
-    def __init__(self, config: NeoBERTConfig) -> None:
-        """Initialize the language modeling head.
-
-        :param NeoBERTConfig config: Model configuration.
-        """
-        super().__init__(config)
-
-        self.config = config
-
-        self.model = NormNeoBERT(config) if self.config.ngpt else NeoBERT(config)
-        self.decoder = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-
-        should_tie = bool(getattr(self.config, "tie_word_embeddings", False))
-        if self.config.ngpt and should_tie:
-            logger.warning(
-                "Disabling tie_word_embeddings for ngpt=True. "
-                "NormNeoBERT emits unit-normalized hidden states, so tying decoder "
-                "weights to raw token embeddings is not a stable parameterization."
-            )
-            self.config.tie_word_embeddings = False
-            should_tie = False
-
-        # ``post_init()`` applies HF-style init; explicit ``tie_weights()`` keeps
-        # decoder/input embedding aliasing deterministic in this training module.
-        self.post_init()
-        if should_tie:
-            self.tie_weights()
-
-    def get_input_embeddings(self) -> nn.Embedding:
-        """Return input token embeddings for weight tying.
-
-        :return nn.Embedding: Input embedding module.
-        """
-        return self.model.encoder
-
-    def set_input_embeddings(self, new_embeddings: nn.Embedding) -> None:
-        """Set input token embeddings (used by HF APIs)."""
-        self.model.encoder = new_embeddings
-
-    def get_output_embeddings(self) -> nn.Linear:
-        """Return output embeddings for weight tying.
-
-        :return nn.Linear: Output projection module.
-        """
-        return self.decoder
-
-    def set_output_embeddings(self, new_embeddings: nn.Linear) -> None:
-        """Set output embeddings (used by HF APIs)."""
-        self.decoder = new_embeddings
-
-    def forward(
-        self,
-        src: torch.Tensor,
-        pad_mask: Optional[torch.Tensor] = None,
-        packed_seqlens: Optional[PackedSeqLens] = None,
-        *,
-        return_logits: bool = True,
-    ) -> Dict[str, torch.Tensor]:
-        """Run the LM head forward pass.
-
-        :param torch.Tensor src: Input token IDs.
-        :param torch.Tensor | None pad_mask: Additive attention mask.
-        :param torch.Tensor | list[list[int]] | None packed_seqlens: Packed segment lengths.
-        :param bool return_logits: Whether to materialize logits.
-        :return dict[str, torch.Tensor]: Hidden states and optional logits.
-        """
-        hidden_representation = self.model.forward(src, pad_mask, packed_seqlens)
-        output: Dict[str, torch.Tensor] = {
-            "hidden_representation": hidden_representation
-        }
-        if return_logits:
-            output["logits"] = self.decoder(hidden_representation)
-        return output
-
-
-class NeoBERTForSequenceClassification(NeoBERTPreTrainedModel):
-    """NeoBERT with a classification head."""
-
-    def __init__(
-        self,
-        config: NeoBERTConfig,
-        num_labels: int = 2,
-        classifier_dropout: float = 0.1,
-        classifier_init_range: float = 0.02,
-        **kwargs: Any,
-    ) -> None:
-        """Initialize the sequence classification head.
-
-        :param NeoBERTConfig config: Model configuration.
-        :param int num_labels: Number of output labels.
-        :param float classifier_dropout: Dropout probability.
-        :param float classifier_init_range: Init range for classifier.
-        :param Any kwargs: Unused extra arguments for compatibility.
-        """
-        # Clone the incoming config so forcing SDPA here does not mutate caller state.
-        local_config = deepcopy(config)
-        if local_config.attn_backend != "sdpa":
-            logger.warning(
-                "NeoBERTForSequenceClassification does not support packed attention; "
-                "forcing attn_backend='sdpa' for this instance."
-            )
-            local_config.attn_backend = "sdpa"
-
-        super().__init__(local_config)
-
-        self.config = local_config
-
-        self.num_labels = num_labels
-        self.classifier_dropout = classifier_dropout
-        self.classifier_init_range = classifier_init_range
-
-        self.model = (
-            NormNeoBERT(local_config) if local_config.ngpt else NeoBERT(local_config)
-        )
-
-        self.dense = nn.Linear(self.config.hidden_size, self.config.hidden_size)
-        self.dropout = nn.Dropout(self.classifier_dropout)
-        self.classifier = nn.Linear(self.config.hidden_size, self.num_labels)
-
-        self.post_init()
-        # Only reinitialize the classification head; backbone was already
-        # initialized by NeoBERTPreTrainedModel._init_weights via post_init().
-        nn.init.normal_(self.dense.weight, mean=0.0, std=self.classifier_init_range)
-        if self.dense.bias is not None:
-            nn.init.zeros_(self.dense.bias)
-        nn.init.normal_(
-            self.classifier.weight, mean=0.0, std=self.classifier_init_range
-        )
-        if self.classifier.bias is not None:
-            nn.init.zeros_(self.classifier.bias)
-
-    def forward(
-        self, src: torch.Tensor, pad_mask: Optional[torch.Tensor] = None
-    ) -> Dict[str, torch.Tensor]:
-        """Run the classification head forward pass.
-
-        :param torch.Tensor src: Input token IDs.
-        :param torch.Tensor | None pad_mask: Additive attention mask.
-        :return dict[str, torch.Tensor]: Hidden states and logits.
-        """
-        hidden_representation = self.model.forward(src, pad_mask)
-
-        # NeoBERT GLUE path assumes BERT-style special-token placement where the
-        # sequence-summary token is at position 0.
-        x = hidden_representation[:, 0, :]
-        x = self.dropout(x)
-        x = self.dense(x)
-        x = torch.tanh(x)
-        x = self.dropout(x)
-
-        logits = self.classifier(x)
-
-        return {"hidden_representation": hidden_representation, "logits": logits}
-
-
-class NeoBERTHFForSequenceClassification(NeoBERTPreTrainedModel):
-    """Hugging Face compatible NeoBERT sequence classifier."""
-
-    config_class = NeoBERTConfig
-
-    def __init__(self, config: NeoBERTConfig) -> None:
-        """Initialize the HF-compatible classifier.
-
-        :param NeoBERTConfig config: Model configuration.
-        """
-        # Clone the incoming config so forcing SDPA here does not mutate caller state.
-        local_config = deepcopy(config)
-        if local_config.attn_backend != "sdpa":
-            logger.warning(
-                "NeoBERTHFForSequenceClassification does not support packed attention; "
-                "forcing attn_backend='sdpa' for this instance."
-            )
-            local_config.attn_backend = "sdpa"
-
-        super().__init__(local_config)
-
-        self.config = local_config
-
-        self.num_labels = getattr(local_config, "num_labels", 2)
-        self.classifier_dropout = getattr(local_config, "classifier_dropout", 0.1)
-        self.classifier_init_range = getattr(
-            local_config, "classifier_init_range", 0.02
-        )
-
-        self.model = (
-            NormNeoBERT(local_config) if local_config.ngpt else NeoBERT(local_config)
-        )
-
-        self.dense = nn.Linear(self.config.hidden_size, self.config.hidden_size)
-        self.dropout = nn.Dropout(self.classifier_dropout)
-        self.classifier = nn.Linear(self.config.hidden_size, self.num_labels)
-
-        self.post_init()
-        # Only reinitialize the classification head; backbone was already
-        # initialized by NeoBERTPreTrainedModel._init_weights via post_init().
-        nn.init.normal_(self.dense.weight, mean=0.0, std=self.classifier_init_range)
-        if self.dense.bias is not None:
-            nn.init.zeros_(self.dense.bias)
-        nn.init.normal_(
-            self.classifier.weight, mean=0.0, std=self.classifier_init_range
-        )
-        if self.classifier.bias is not None:
-            nn.init.zeros_(self.classifier.bias)
-
-    def forward(
-        self,
-        input_ids: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        token_type_ids: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-    ) -> SequenceClassifierOutput | tuple:
-        """Forward pass for sequence classification.
-
-        :param torch.Tensor | None input_ids: Input token IDs.
-        :param torch.Tensor | None attention_mask: Attention mask.
-        :param torch.Tensor | None token_type_ids: Token type IDs.
-        :param torch.Tensor | None position_ids: Position IDs.
-        :param torch.Tensor | None inputs_embeds: Optional input embeddings.
-        :param torch.Tensor | None labels: Optional labels for loss.
-        :param bool | None output_attentions: Whether to return attentions.
-        :param bool | None output_hidden_states: Whether to return hidden states.
-        :param bool | None return_dict: Whether to return dict outputs.
-        :return SequenceClassifierOutput | tuple: Model outputs.
-        """
-        # Convert attention masks to additive mask (-inf for masked, 0 for keep).
-        # Accept bool/int/float masks here for HF/pipeline compatibility; training
-        # collators emit additive float masks by default.
-        if attention_mask is not None:
-            if attention_mask.dtype is torch.bool:
-                additive_mask = torch.where(attention_mask, float(0.0), float("-inf"))
-            elif attention_mask.is_floating_point() and attention_mask.min() < 0:
-                additive_mask = attention_mask
-            else:
-                additive_mask = torch.where(
-                    attention_mask == 0, float("-inf"), float(0.0)
-                )
-            if additive_mask.dtype != torch.float32:
-                additive_mask = additive_mask.to(torch.float32)
-        else:
-            additive_mask = None
-        hidden_representation = self.model.forward(input_ids, additive_mask)
-
-        # Mirror NeoBERT classifier pooling assumption (summary token at index 0).
-        x = hidden_representation[:, 0, :]
-        x = self.dropout(x)
-        x = self.dense(x)
-        x = torch.tanh(x)
-        x = self.dropout(x)
-
-        logits = self.classifier(x)
-
-        loss = None
-        if labels is not None:
-            if self.config.problem_type is None:
-                if self.num_labels == 1:
-                    self.config.problem_type = "regression"
-                elif self.num_labels > 1 and (
-                    labels.dtype == torch.long or labels.dtype == torch.int
-                ):
-                    self.config.problem_type = "single_label_classification"
-                else:
-                    self.config.problem_type = "multi_label_classification"
-
-            if self.config.problem_type == "regression":
-                loss_fct = MSELoss()
-                if self.num_labels == 1:
-                    loss = loss_fct(logits.squeeze(), labels.squeeze())
-                else:
-                    loss = loss_fct(logits, labels)
-            elif self.config.problem_type == "single_label_classification":
-                loss_fct = CrossEntropyLoss()
-                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
-            elif self.config.problem_type == "multi_label_classification":
-                loss_fct = BCEWithLogitsLoss()
-                loss = loss_fct(logits, labels)
-        if not return_dict:
-            output = (logits,)
-            return ((loss,) + output) if loss is not None else output
-
-        return SequenceClassifierOutput(
-            loss=loss,
-            logits=logits,
-            hidden_states=hidden_representation,
-            attentions=None,
-        )
-
-
-class NeoBERTForMTEB(NeoBERTPreTrainedModel):
-    """NeoBERT wrapper for MTEB-style encoding."""
-
-    config_class = NeoBERTConfig
-
-    def __init__(
-        self,
-        config: NeoBERTConfig,
-        tokenizer: PreTrainedTokenizerFast,
-        max_length: int = 1024,
-        batch_size: int = 8,
-        pooling: str = "avg",
-        **kwargs: Any,
-    ) -> None:
-        """Initialize the MTEB encoder wrapper.
-
-        :param NeoBERTConfig config: Model configuration.
-        :param PreTrainedTokenizerFast tokenizer: Tokenizer for text inputs.
-        :param int max_length: Maximum sequence length.
-        :param int batch_size: Encoding batch size.
-        :param str pooling: Pooling strategy (avg/cls).
-        :param Any kwargs: Unused extra arguments for compatibility.
-        """
-        super().__init__(config)
-
-        self.config = config
-        self.model = NeoBERT(config)
-
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-        self.batch_size = batch_size
-        self.pooling = pooling
-
-    def encode_queries(self, queries: List[str], **kwargs: Any) -> np.ndarray:
-        """Encode a list of queries.
-
-        :param list[str] queries: Query strings to encode.
-        :param Any kwargs: Additional encoding arguments.
-        :return np.ndarray: Encoded query embeddings.
-        """
-        if "instructions" in kwargs:
-            if kwargs["instructions"] is not None:
-                queries = [
-                    (query + " " + kwargs["instructions"][query]).strip()
-                    for query in queries
-                ]
-            new_kwargs = {
-                k: v for k, v in kwargs.items() if k not in ["instructions", "qid"]
-            }
-        else:
-            new_kwargs = kwargs
-
-        return self.encode(
-            queries,
-            **new_kwargs,
-        )
-
-    def encode_corpus(
-        self,
-        corpus: List[Dict[str, str]] | Dict[str, List[str]],
-        batch_size: int,
-        **kwargs: Any,
-    ) -> np.ndarray:
-        """Encode a corpus of documents.
-
-        :param list[dict[str, str]] | dict[str, list[str]] corpus: Corpus inputs.
-        :param int batch_size: Encoding batch size.
-        :param Any kwargs: Additional encoding arguments.
-        :return np.ndarray: Encoded corpus embeddings.
-        """
-        if isinstance(corpus, dict):
-            sentences = [
-                (corpus["title"][i] + " " + corpus["text"][i]).strip()
-                if "title" in corpus
-                else corpus["text"][i].strip()
-                for i in range(len(corpus["text"]))
-            ]
-        else:
-            if isinstance(corpus[0], dict):
-                sentences = [
-                    (doc["title"] + " " + doc["text"]).strip()
-                    if "title" in doc
-                    else doc["text"].strip()
-                    for doc in corpus
-                ]
-            else:
-                sentences = corpus
-
-        if "instructions" in kwargs:  # not used on the doc side
-            new_kwargs = {
-                k: v for k, v in kwargs.items() if k not in ["instructions", "qid"]
-            }
-        else:
-            new_kwargs = kwargs
-
-        return self.encode(
-            sentences,
-            **new_kwargs,
-        )
-
-    @torch.no_grad()
-    def encode(self, sentences: list[str], **kwargs: Any) -> torch.Tensor:
-        """Encodes the given sentences using the encoder.
-
-        Args:
-            sentences: The sentences to encode.
-            **kwargs: Optional overrides for the DataLoader.
-                - num_workers (int): DataLoader worker processes (default: 0).
-                - pin_memory (bool | None): Pin CPU memory for CUDA transfer. Defaults
-                  to ``True`` on CUDA devices, otherwise ``False``.
-
-        Returns:
-            The encoded sentences.
-        """
-        from datasets import Dataset
-        from torch.utils.data import DataLoader
-        from tqdm import tqdm
-
-        # Respect the model's current device to avoid CPU/GPU mismatches.
-        param = next(self.parameters())
-        device = param.device
-        # Keep additive masks in float32 for numerical stability (match training).
-        mask_dtype = torch.float32
-        num_workers = int(kwargs.pop("num_workers", 0))
-        pin_memory = kwargs.pop("pin_memory", None)
-        if pin_memory is None:
-            pin_memory = device.type == "cuda"
-
-        def _transform_func(
-            tokenizer: PreTrainedTokenizerFast, x: Dict[str, List]
-        ) -> Dict[str, List]:
-            """Tokenize a batch of input texts.
-
-            :param PreTrainedTokenizerFast tokenizer: Tokenizer to apply.
-            :param dict[str, list] x: Batch with ``input_texts``.
-            :return dict[str, list]: Tokenized batch.
-            """
-            batch_dict = tokenizer(
-                x["input_texts"],
-                truncation=True,
-                max_length=self.max_length,
-                padding=False,
-                return_token_type_ids=False,
-            )
-
-            return batch_dict
-
-        dataset: Dataset = Dataset.from_dict({"input_texts": sentences})
-        dataset.set_transform(partial(_transform_func, self.tokenizer))
-
-        data_collator = DataCollatorWithPadding(self.tokenizer, pad_to_multiple_of=8)
-        dataloader = DataLoader(
-            dataset,
-            collate_fn=data_collator,
-            batch_size=self.batch_size,
-            num_workers=num_workers,
-            shuffle=False,
-            pin_memory=pin_memory,
-        )
-
-        encodings = []
-        for batch in tqdm(
-            dataloader, desc="encoding", mininterval=10, disable=len(sentences) < 128
-        ):
-            input_ids = batch["input_ids"].to(device)
-            int_mask = batch["attention_mask"]
-
-            if self.config.attn_backend != "sdpa":
-                # Packed path: compute packed_seqlens on CPU to avoid CUDA sync,
-                # then pass pad_mask=None so the model uses packed attention.
-                packed_seqlens = int_mask.sum(dim=1, keepdim=True).to(
-                    device="cpu", dtype=torch.int32
-                )
-                outputs = self.model(input_ids, None, packed_seqlens=packed_seqlens)
-                pool_mask = int_mask.to(device=device, dtype=mask_dtype)
-            else:
-                pool_mask = int_mask.to(device=device, dtype=mask_dtype)
-                additive_mask = torch.where(
-                    pool_mask == 1, float(0.0), float("-inf")
-                ).type(mask_dtype)
-                outputs = self.model(input_ids, additive_mask)
-
-            if self.pooling == "avg":
-                outputs = outputs * pool_mask.unsqueeze(-1).expand(
-                    -1, -1, outputs.shape[-1]
-                )
-                outputs = outputs.sum(dim=1) / pool_mask.sum(dim=1).unsqueeze(-1)
-            else:
-                outputs = outputs[:, 0, :]
-
-            encodings.append(outputs.cpu().numpy())
-
-        return np.concatenate(encodings, axis=0)

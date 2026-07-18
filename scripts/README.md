@@ -6,13 +6,14 @@ CLI entry points for NeoBERT training, evaluation, and export.
 
 - `pretraining/` - MLM training, preprocessing, and tokenization helpers
 - `contrastive/` - contrastive preprocessing, downloads, and fine-tuning
-- `evaluation/` - GLUE and MTEB runners plus result utilities
+- `evaluation/` - evaluation runners and result utilities
 - `export-hf/` - Hugging Face export and validation tools
 
 ## Related Docs
 
-- [Training](../docs/training.md)
-- [Evaluation](../docs/evaluation.md)
-- [Export](../docs/export.md)
-- [Configuration](../docs/configuration.md)
+- [Training](../docs/guides/training.md)
+- [Training optimization](../docs/guides/training-optimization.md)
+- [Evaluation](../docs/guides/evaluation.md)
+- [Export](../docs/guides/export.md)
+- [Configuration](../docs/reference/configuration.md)
 - [Jobs](../jobs/README.md)

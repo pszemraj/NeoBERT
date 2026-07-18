@@ -2,19 +2,18 @@
 
 Repository configs for training and evaluation workflows.
 
-Field definitions and defaults are in [docs/configuration.md](../docs/configuration.md).
+Field definitions, defaults, constraints, and interactions are in [docs/reference/config_reference.yaml](../docs/reference/config_reference.yaml).
 
 ## Layout
 
-- `configs/pretraining/` - production/experiment pretraining recipes.
-- `configs/glue/` - per-task GLUE recipes and generated sweep configs.
-- `configs/contrastive/` - contrastive fine-tuning recipes.
+- `configs/pretraining/` - runnable pretraining recipes; most use Hub datasets or tokenizers.
+- `configs/glue/` - checkpoint-specific templates plus generated configs under `generated/`; generate configs for the checkpoint you intend to evaluate.
+- `configs/contrastive/` - contrastive fine-tuning recipe that expects preprocessed data at `dataset.path`.
 
-Tiny smoke-test configs live under [Test Config Files](../tests/configs/README.md).
+Small test fixtures live under [Test Config Files](../tests/configs/README.md); they are not all standalone jobs.
 
 ## Related Docs
 
-- [Configuration reference](../docs/configuration.md)
-- [Training guide](../docs/training.md)
-- [Evaluation guide](../docs/evaluation.md)
-- [Tiny test configs](../tests/configs/README.md)
+- [Training guide](../docs/guides/training.md)
+- [Training optimization](../docs/guides/training-optimization.md)
+- [Evaluation guide](../docs/guides/evaluation.md)

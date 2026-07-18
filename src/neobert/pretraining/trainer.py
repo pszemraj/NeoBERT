@@ -6,7 +6,10 @@ import logging
 import math
 import os
 import re
+import signal
+from collections.abc import Mapping
 from contextlib import contextmanager
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional, Tuple
 
@@ -15,10 +18,10 @@ import torch
 import wandb
 from accelerate import Accelerator
 from accelerate.utils import (
-    DataLoaderConfiguration,
     DistributedDataParallelKwargs,
     DistributedType,
     ProjectConfiguration,
+    gather_object,
     send_to_device,
     set_seed,
 )
@@ -31,14 +34,17 @@ from datasets import (
     load_dataset_builder,
     load_from_disk,
 )
-
 from tqdm import tqdm
 from transformers import BatchEncoding, PreTrainedTokenizerBase
 
 from neobert.checkpointing import (
     prune_step_checkpoints as _prune_step_checkpoints,
+)
+from neobert.checkpointing import (
+    resolve_accelerate_state_dir,
+)
+from neobert.checkpointing import (
     resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
-    save_portable_checkpoint_weights as _save_portable_checkpoint_weights,
 )
 from neobert.config import (
     Config,
@@ -51,25 +57,52 @@ from neobert.dataloader import get_dataloader
 from neobert.kernels.attention import resolve_runtime_attn_backend
 from neobert.kernels.backend import get_cross_entropy_loss, resolve_kernel_backend
 from neobert.model import NeoBERTConfig, NeoBERTLMHead
+from neobert.modeling_utils import packed_seqlens_to_tensor
 from neobert.optimizer import get_optimizer
 from neobert.pretraining.masked_objective import (
     MaskedObjectiveOut,
     MaskedPositionsOnlyMLMObjective,
 )
+
+# Our metric object and model
+from neobert.pretraining.metrics import Metrics, format_metrics
 from neobert.scheduler import get_scheduler, resolve_scheduler_steps
-from neobert.tokenizer import get_tokenizer, resolve_text_column
+from neobert.streaming import (
+    RetryingStreamingDataset,
+    is_streaming_dataset,
+    peek_streaming_example,
+    retry_streaming_operation,
+    supports_streaming_iteration_resume,
+)
+from neobert.tokenizer import (
+    align_tokenizer_vocab,
+    get_tokenizer,
+    resolve_text_column,
+    tokenize_pretraining_dataset,
+)
 from neobert.training_utils import (
-    _compute_l2_norm_for_logging,
+    PreemptionState,
     _maybe_compile_model,
     _maybe_prepare_for_forward,
+    _pin_cpu_tensors,
+    _resolve_cuda_pin_memory,
     _resolve_resume_checkpoint,
     _update_global_norm_metric_for_logging,
+    attach_optimizer_param_names,
+    build_dataloader_config,
     create_accelerator,
+    initialize_wandb_trackers,
+    preserve_sigterm_handler,
+    resolve_fsdp_version,
     resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
+    save_training_checkpoint,
+    should_save_step_checkpoint,
+    sync_resume_source_of_truth,
     validate_distributed_runtime_policy,
     validate_muon_distributed_compatibility,
     validate_muon_runtime_topology,
+    validate_optimizer_param_name_manifest,
 )
 from neobert.utils import (
     configure_tf32,
@@ -78,11 +111,21 @@ from neobert.utils import (
     prepare_wandb_config,
 )
 
-# Our metric object and model
-from neobert.pretraining.metrics import Metrics, format_metrics
-
 # Set up logger
 logger = logging.getLogger(__name__)
+
+_BATCH_BUFFER_STATE_VERSION = 1
+_BATCH_BUFFER_STATE_VERSION_KEY = "batch_buffer_version"
+_BATCH_BUFFER_STATE_WORLD_SIZE_KEY = "world_size"
+_BATCH_BUFFER_STATE_RANKS_KEY = "rank_buffers"
+_PRETRAINING_CORPUS_IDENTITY_FIELDS = frozenset(
+    {
+        "dataset.name",
+        "dataset.config",
+        "dataset.path",
+        "dataset.text_column",
+    }
+)
 
 
 def _resolve_masked_logits_only_loss(value: Any) -> bool:
@@ -131,6 +174,35 @@ def _resolve_eval_samples(value: Any) -> Optional[int]:
     return resolved
 
 
+def _resolve_resume_checkpoint_and_eval_samples(
+    cfg: Config,
+    checkpoint_dir: Path,
+    output_dir: Path,
+) -> tuple[Optional[str], int, Optional[int], set[str]]:
+    """Resolve resume state and derive eval sample cap after config sync.
+
+    :param Config cfg: Mutable training configuration.
+    :param Path checkpoint_dir: Canonical checkpoint root.
+    :param Path output_dir: Training output root.
+    :return tuple[str | None, int, int | None, set[str]]: Resume path, iteration, eval cap, and launch-controlled drift.
+    """
+    resume_checkpoint_path, iteration = _resolve_resume_checkpoint(
+        cfg.trainer.resume_from_checkpoint,
+        str(checkpoint_dir),
+        str(output_dir),
+    )
+    resume_config_drift: set[str] = set()
+    if cfg.trainer.resume_from_checkpoint and resume_checkpoint_path:
+        resume_config_drift = sync_resume_source_of_truth(
+            cfg,
+            resume_checkpoint_path,
+            task="pretraining",
+            log=logger,
+        )
+    eval_samples = _resolve_eval_samples(getattr(cfg.dataset, "eval_samples", None))
+    return resume_checkpoint_path, iteration, eval_samples, resume_config_drift
+
+
 def _format_percent(value: float) -> str:
     """Format a percentage value for log output.
 
@@ -138,6 +210,56 @@ def _format_percent(value: float) -> str:
     :return str: Human-readable percentage string.
     """
     return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def _streaming_retry_settings(cfg: Config) -> tuple[int, float, float]:
+    """Resolve transient streaming read retry settings from config.
+
+    :param Config cfg: Active runtime config.
+    :return tuple[int, float, float]: ``(retries, base_backoff, max_backoff)``.
+    """
+    return (
+        int(cfg.dataset.streaming_read_retries),
+        float(cfg.dataset.streaming_read_retry_backoff_seconds),
+        float(cfg.dataset.streaming_read_retry_max_backoff_seconds),
+    )
+
+
+def _maybe_wrap_streaming_dataset_for_retries(
+    dataset: Dataset,
+    *,
+    label: str,
+    cfg: Config,
+) -> Dataset:
+    """Wrap a streaming dataset so transient hub read failures restart iteration.
+
+    :param Dataset dataset: Dataset to wrap.
+    :param str label: Human-readable dataset label for logs/errors.
+    :param Config cfg: Active runtime config.
+    :return Dataset: Wrapped dataset when retries are enabled, otherwise the original.
+    """
+    if isinstance(dataset, RetryingStreamingDataset):
+        return dataset
+    if not is_streaming_dataset(dataset):
+        return dataset
+    retries, base_backoff, max_backoff = _streaming_retry_settings(cfg)
+    if retries <= 0:
+        return dataset
+    if not supports_streaming_iteration_resume(dataset):
+        logger.warning(
+            "Streaming read retries are enabled for %s, but the dataset does not "
+            "expose resumable iteration state; leaving it unwrapped to avoid "
+            "duplicating or skipping examples after a transient failure.",
+            label,
+        )
+        return dataset
+    return RetryingStreamingDataset(
+        dataset,
+        label=label,
+        max_retries=retries,
+        base_backoff_seconds=base_backoff,
+        max_backoff_seconds=max_backoff,
+    )
 
 
 def _log_masking_strategy(cfg: Config) -> None:
@@ -185,23 +307,6 @@ def _log_masking_strategy(cfg: Config) -> None:
     )
 
 
-def _resolve_fsdp_version(accelerator: Accelerator) -> int:
-    """Resolve FSDP version from Accelerate state.
-
-    Defaults to ``1`` when plugin metadata is unavailable.
-
-    :param Accelerator accelerator: Active accelerator runtime.
-    :return int: FSDP plugin version.
-    """
-    state = getattr(accelerator, "state", None)
-    fsdp_plugin = getattr(state, "fsdp_plugin", None) if state is not None else None
-    raw_version = getattr(fsdp_plugin, "fsdp_version", None)
-    try:
-        return int(raw_version) if raw_version is not None else 1
-    except (TypeError, ValueError):
-        return 1
-
-
 @contextmanager
 def _gather_decoder_weight_for_masked_objective(
     model: torch.nn.Module,
@@ -238,7 +343,7 @@ def _gather_decoder_weight_for_masked_objective(
         raise AttributeError("Could not resolve decoder.weight for masked objective.")
 
     if accelerator.distributed_type is DistributedType.FSDP:
-        fsdp_version = _resolve_fsdp_version(accelerator)
+        fsdp_version = resolve_fsdp_version(accelerator)
         if fsdp_version >= 2:
             base_model = model
             unwrapped_model: Optional[torch.nn.Module] = None
@@ -363,7 +468,7 @@ def _should_backward_inside_gathered_decoder_weight(
     :return bool: ``True`` when backward should run inside gather context.
     """
     if accelerator.distributed_type is DistributedType.FSDP:
-        return _resolve_fsdp_version(accelerator) >= 2
+        return resolve_fsdp_version(accelerator) >= 2
     return False
 
 
@@ -419,106 +524,8 @@ def _move_batch_to_device(batch: BatchEncoding, device: torch.device) -> BatchEn
     """
     if hasattr(batch, "to") and not torch.is_tensor(batch):
         batch = dict(batch)
-    # ``non_blocking`` overlaps copies when DataLoader uses pinned host memory.
+    # ``non_blocking`` overlaps copies when the batch uses pinned host memory.
     return send_to_device(batch, device, non_blocking=True)
-
-
-def _ensure_pinned_cpu_batch(batch: BatchEncoding) -> BatchEncoding:
-    """Pin CPU tensor values in a batch for async host->device transfer.
-
-    ``torch.cat``/``torch.split`` on pinned tensors produce non-pinned outputs.
-    Packed-batch stitching can therefore drop pinned memory guarantees unless we
-    re-pin the final CPU tensors before ``send_to_device(..., non_blocking=True)``.
-
-    :param BatchEncoding batch: Batch mapping of tensors/lists/scalars.
-    :return BatchEncoding: Batch with CPU tensors pinned when needed.
-    """
-
-    def _pin_value(value: Any) -> tuple[Any, bool]:
-        """Pin tensors in nested structures and report whether anything changed.
-
-        :param Any value: Candidate tensor/container/scalar value.
-        :return tuple[Any, bool]: Possibly pinned value and change flag.
-        """
-        if torch.is_tensor(value):
-            if value.device.type != "cpu" or value.is_pinned():
-                return value, False
-            return value.pin_memory(), True
-
-        if isinstance(value, dict):
-            updated: dict[Any, Any] = {}
-            changed = False
-            for key, inner in value.items():
-                pinned_inner, inner_changed = _pin_value(inner)
-                updated[key] = pinned_inner
-                changed = changed or inner_changed
-            if not changed:
-                return value, False
-            return updated, True
-
-        if isinstance(value, list):
-            updated_list: list[Any] = []
-            changed = False
-            for inner in value:
-                pinned_inner, inner_changed = _pin_value(inner)
-                updated_list.append(pinned_inner)
-                changed = changed or inner_changed
-            if not changed:
-                return value, False
-            return updated_list, True
-
-        if isinstance(value, tuple):
-            updated_items: list[Any] = []
-            changed = False
-            for inner in value:
-                pinned_inner, inner_changed = _pin_value(inner)
-                updated_items.append(pinned_inner)
-                changed = changed or inner_changed
-            if not changed:
-                return value, False
-            return tuple(updated_items), True
-
-        return value, False
-
-    pinned_batch, repinned = _pin_value(dict(batch))
-    if not repinned:
-        return batch
-    return pinned_batch
-
-
-def _pad_tokenizer_to_multiple(
-    tokenizer: PreTrainedTokenizerBase,
-    *,
-    multiple: int = 128,
-) -> tuple[int, int, int]:
-    """Pad tokenizer length to ``multiple`` by adding inert extra tokens.
-
-    The model uses rounded embedding sizes for tensor-core efficiency. Adding
-    explicit placeholder tokens keeps tokenizer/model vocab contracts aligned.
-
-    :param PreTrainedTokenizerBase tokenizer: Tokenizer to mutate.
-    :param int multiple: Target rounding multiple.
-    :return tuple[int, int, int]: ``(original_size, padded_size, added_count)``.
-    """
-    original_size = len(tokenizer)
-    padded_size = round_up_to_multiple(original_size, multiple)
-    if padded_size == original_size:
-        return original_size, padded_size, 0
-
-    needed = padded_size - original_size
-    extra_tokens = [
-        f"<|neobert_extra_token_{idx}|>"
-        for idx in range(original_size, original_size + needed)
-    ]
-    added = tokenizer.add_tokens(extra_tokens, special_tokens=False)
-    final_size = len(tokenizer)
-    if added != needed or final_size != padded_size:
-        raise RuntimeError(
-            "Failed to pad tokenizer vocabulary to requested multiple: "
-            f"needed={needed}, added={added}, final_size={final_size}, "
-            f"target={padded_size}."
-        )
-    return original_size, final_size, added
 
 
 def _sync_tokenizer_derived_config(
@@ -531,10 +538,9 @@ def _sync_tokenizer_derived_config(
     :param PreTrainedTokenizerBase tokenizer: Active tokenizer instance.
     :return tuple[int, int, int]: ``(original_vocab_size, resolved_vocab_size, added)``.
     """
-    original_vocab_size, resolved_vocab_size, added_tokens = _pad_tokenizer_to_multiple(
-        tokenizer,
-        multiple=128,
-    )
+    original_vocab_size = len(tokenizer)
+    resolved_vocab_size = round_up_to_multiple(original_vocab_size, 128)
+    added_tokens = align_tokenizer_vocab(tokenizer, resolved_vocab_size)
 
     # This mutation is intentional and happens before model construction so all
     # ranks build the same tensor shapes; resolved values are persisted into
@@ -594,6 +600,10 @@ def _load_streaming_split(
     dataset_name: str,
     split: str,
     dataset_kwargs: dict[str, object],
+    *,
+    streaming_read_retries: int = 0,
+    streaming_read_retry_backoff_seconds: float = 1.0,
+    streaming_read_retry_max_backoff_seconds: float = 8.0,
 ) -> Dataset:
     """Load a streaming dataset split with optional slice notation.
 
@@ -603,14 +613,23 @@ def _load_streaming_split(
     :param str dataset_name: Dataset identifier.
     :param str split: Split string (e.g., "train[:1%]").
     :param dict[str, object] dataset_kwargs: Additional kwargs for HF datasets.
+    :param int streaming_read_retries: Retry count for transient streaming reads.
+    :param float streaming_read_retry_backoff_seconds: Initial retry backoff.
+    :param float streaming_read_retry_max_backoff_seconds: Maximum retry backoff.
     :return Dataset: Streaming dataset (IterableDataset).
     """
     base, start_token, end_token = _parse_split_slice(split)
-    dataset = load_dataset(
-        dataset_name,
-        split=base,
-        streaming=True,
-        **dataset_kwargs,
+    dataset = retry_streaming_operation(
+        lambda: load_dataset(
+            dataset_name,
+            split=base,
+            streaming=True,
+            **dataset_kwargs,
+        ),
+        context=f"load streaming split {dataset_name}:{base}",
+        max_retries=streaming_read_retries,
+        base_backoff_seconds=streaming_read_retry_backoff_seconds,
+        max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
     )
 
     if start_token is None and end_token is None:
@@ -622,7 +641,13 @@ def _load_streaming_split(
     total_examples: Optional[int] = None
     if needs_total:
         try:
-            builder = load_dataset_builder(dataset_name, **dataset_kwargs)
+            builder = retry_streaming_operation(
+                lambda: load_dataset_builder(dataset_name, **dataset_kwargs),
+                context=f"load dataset builder {dataset_name}",
+                max_retries=streaming_read_retries,
+                base_backoff_seconds=streaming_read_retry_backoff_seconds,
+                max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+            )
             if base in builder.info.splits:
                 total_examples = builder.info.splits[base].num_examples
         except Exception as exc:
@@ -659,17 +684,29 @@ def _infer_eval_split_name(
     dataset_kwargs: dict[str, object],
     *,
     train_split: Optional[str],
+    streaming_read_retries: int = 0,
+    streaming_read_retry_backoff_seconds: float = 1.0,
+    streaming_read_retry_max_backoff_seconds: float = 8.0,
 ) -> Optional[str]:
     """Infer a reasonable eval split name from dataset metadata.
 
     :param str dataset_name: Dataset identifier.
     :param dict[str, object] dataset_kwargs: Additional kwargs for HF datasets.
     :param str | None train_split: Train split selector (possibly sliced).
+    :param int streaming_read_retries: Retry count for transient streaming reads.
+    :param float streaming_read_retry_backoff_seconds: Initial retry backoff.
+    :param float streaming_read_retry_max_backoff_seconds: Maximum retry backoff.
     :return str | None: Preferred eval split name or ``None``.
     """
     train_base = _parse_split_slice(train_split or "train")[0].lower()
     try:
-        builder = load_dataset_builder(dataset_name, **dataset_kwargs)
+        builder = retry_streaming_operation(
+            lambda: load_dataset_builder(dataset_name, **dataset_kwargs),
+            context=f"infer eval split for {dataset_name}",
+            max_retries=streaming_read_retries,
+            base_backoff_seconds=streaming_read_retry_backoff_seconds,
+            max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+        )
         split_names = list(getattr(builder.info, "splits", {}).keys())
     except Exception as exc:
         logger.warning(
@@ -826,6 +863,15 @@ def _resolve_streaming_eval_budget(
     return max(1, math.ceil(eval_samples / eval_batch_size)), "dataset.eval_samples"
 
 
+def _requires_streaming_eval_budget(eval_dataset: object | None) -> bool:
+    """Return whether an eval dataset needs an explicit streaming budget.
+
+    :param object | None eval_dataset: Evaluation dataset to inspect.
+    :return bool: ``True`` when the dataset is streaming-style.
+    """
+    return eval_dataset is not None and is_streaming_dataset(eval_dataset)
+
+
 def _run_eval(
     model: torch.nn.Module,
     eval_dataloader: torch.utils.data.DataLoader,
@@ -870,7 +916,7 @@ def _run_eval(
                     break
                 if manual_device_move:
                     batch = _move_batch_to_device(batch, accelerator.device)
-                packed_seqlens = _packed_seqlens_to_tensor(batch.get("packed_seqlens"))
+                packed_seqlens = packed_seqlens_to_tensor(batch.get("packed_seqlens"))
                 pad_mask = (
                     None
                     if packed_seqlens is not None
@@ -935,44 +981,6 @@ def _run_eval(
             model.train()
 
 
-def _packed_seqlens_to_tensor(
-    packed_seqlens: Any,
-) -> Optional[torch.Tensor]:
-    """Normalize packed sequence lengths to rank-2 int32 tensors.
-
-    :param Any packed_seqlens: Packed segment lengths tensor or list.
-    :return torch.Tensor | None: Packed segment lengths.
-    """
-    if packed_seqlens is None:
-        return None
-    if torch.is_tensor(packed_seqlens):
-        tensor = packed_seqlens.detach()
-        if tensor.ndim == 1:
-            tensor = tensor.unsqueeze(1)
-        if tensor.ndim != 2:
-            raise ValueError(
-                "packed_seqlens tensor must be rank 1 or 2, got "
-                f"shape={tuple(tensor.shape)}"
-            )
-        return tensor.to(torch.int32)
-
-    normalized_rows: list[list[int]] = []
-    max_segments = 0
-    for row in packed_seqlens:
-        if row is None:
-            segs: list[int] = []
-        else:
-            segs = [int(x) for x in row if int(x) > 0]
-        normalized_rows.append(segs)
-        max_segments = max(max_segments, len(segs))
-
-    tensor = torch.zeros((len(normalized_rows), max_segments), dtype=torch.int32)
-    for idx, segs in enumerate(normalized_rows):
-        if segs:
-            tensor[idx, : len(segs)] = torch.tensor(segs, dtype=torch.int32)
-    return tensor
-
-
 def _resolve_loader_perf_settings(
     cfg: Config,
     *,
@@ -981,7 +989,7 @@ def _resolve_loader_perf_settings(
     """Resolve effective dataloader performance settings.
 
     Applies conservative CUDA-friendly defaults when users leave knobs unset:
-    - ``pin_memory=True`` on CUDA
+    - pinned host-memory staging on CUDA
     - ``prefetch_factor=4`` when workers are enabled and no value is provided
 
     :param Config cfg: Training config.
@@ -990,7 +998,10 @@ def _resolve_loader_perf_settings(
         ``(pin_memory, persistent_workers, prefetch_factor, notes)``.
     """
     num_workers = max(0, int(cfg.dataset.num_workers))
-    pin_memory = bool(cfg.dataset.pin_memory)
+    pin_memory, notes = _resolve_cuda_pin_memory(
+        cfg.dataset.pin_memory,
+        device=device,
+    )
     persistent_workers = bool(cfg.dataset.persistent_workers and num_workers > 0)
     prefetch_factor = cfg.dataset.prefetch_factor
     if num_workers <= 0:
@@ -1002,14 +1013,7 @@ def _resolve_loader_perf_settings(
                 f"dataset.prefetch_factor must be > 0 when set, got {prefetch_factor}."
             )
 
-    notes: list[str] = []
     if device.type == "cuda":
-        if not pin_memory:
-            pin_memory = True
-            notes.append(
-                "dataset.pin_memory was false; enabling pin_memory=True on CUDA "
-                "to improve host->device transfer overlap."
-            )
         if num_workers > 0 and prefetch_factor is None:
             prefetch_factor = 4
             notes.append(
@@ -1017,6 +1021,27 @@ def _resolve_loader_perf_settings(
             )
 
     return pin_memory, persistent_workers, prefetch_factor, notes
+
+
+def _should_use_loader_pin_memory(
+    *,
+    pin_memory: bool,
+    accelerator: Accelerator,
+) -> bool:
+    """Return whether pinned CPU staging should happen inside the dataloader.
+
+    Loader-side pinning is enabled whenever the runtime supports it so that
+    every consumer (training loop, eval loop) gets page-locked batches for
+    ``non_blocking`` H2D copies.  The training path additionally re-pins
+    after gradient-accumulation concatenation (``torch.cat`` produces
+    unpinned tensors); the ``_pin_cpu_tensors`` helper is a no-op when
+    tensors are already pinned.
+
+    :param bool pin_memory: Whether pinned CPU staging is enabled overall.
+    :param Accelerator accelerator: Runtime accelerator instance.
+    :return bool: ``True`` when loader-side pinning should be enabled.
+    """
+    return bool(pin_memory and hasattr(accelerator, "prepare_data_loader"))
 
 
 def _scale_gradients(model: torch.nn.Module, scale: torch.Tensor) -> None:
@@ -1069,19 +1094,6 @@ def _gradient_token_scale(
     return scale, clamped
 
 
-def _compute_weight_norm_for_logging(
-    model: torch.nn.Module,
-    accelerator: Accelerator,
-) -> Optional[float]:
-    """Compute model weight norm for logging.
-
-    :param torch.nn.Module model: Training model (possibly wrapped).
-    :param Accelerator accelerator: Active accelerator runtime.
-    :return float | None: L2 weight norm or ``None`` when unavailable.
-    """
-    return _compute_l2_norm_for_logging(model.parameters(), accelerator)
-
-
 def _clear_stored_batch(stored_batch: BatchEncoding) -> None:
     """Drop buffered batch fragments in-place.
 
@@ -1089,6 +1101,126 @@ def _clear_stored_batch(stored_batch: BatchEncoding) -> None:
     """
     for key in list(stored_batch.keys()):
         stored_batch[key] = None
+
+
+def _clone_checkpoint_value_to_cpu(value: Any) -> Any:
+    """Clone a checkpoint value while moving tensors to CPU.
+
+    :param Any value: Buffered batch value to clone.
+    :return Any: Detached CPU-safe copy.
+    """
+    if torch.is_tensor(value):
+        return value.detach().cpu().clone()
+    if isinstance(value, Mapping):
+        return {
+            key: _clone_checkpoint_value_to_cpu(inner) for key, inner in value.items()
+        }
+    if isinstance(value, list):
+        return [_clone_checkpoint_value_to_cpu(inner) for inner in value]
+    if isinstance(value, tuple):
+        return tuple(_clone_checkpoint_value_to_cpu(inner) for inner in value)
+    return deepcopy(value)
+
+
+class _CheckpointableBatchBuffer(dict[str, Any]):
+    """Rank-local batch fragments serialized through Accelerate checkpoints."""
+
+    def __init__(self, *, num_processes: int, process_index: int) -> None:
+        """Initialize an empty rank-local fragment buffer.
+
+        :param int num_processes: Distributed world size.
+        :param int process_index: Current global process index.
+        :raises ValueError: If the process topology is invalid.
+        """
+        num_processes = int(num_processes)
+        process_index = int(process_index)
+        if num_processes <= 0:
+            raise ValueError(f"num_processes must be positive, got {num_processes}.")
+        if process_index < 0 or process_index >= num_processes:
+            raise ValueError(
+                f"process_index must be in [0, {num_processes}), got {process_index}."
+            )
+        super().__init__(
+            input_ids=None,
+            attention_mask=None,
+            labels=None,
+            packed_seqlens=None,
+        )
+        self._num_processes = num_processes
+        self._process_index = process_index
+
+    def state_dict(self) -> dict[str, Any]:
+        """Gather and return every rank's CPU fragment buffer.
+
+        Accelerate writes registered custom state only from the main process, so
+        every rank contributes its local fragments before that single payload is
+        persisted.
+
+        :return dict[str, Any]: Versioned rank-indexed buffer state.
+        """
+        local_state = {
+            key: _clone_checkpoint_value_to_cpu(value) for key, value in self.items()
+        }
+        rank_buffers = (
+            gather_object([local_state]) if self._num_processes > 1 else [local_state]
+        )
+        if (
+            not isinstance(rank_buffers, list)
+            or len(rank_buffers) != self._num_processes
+        ):
+            raise RuntimeError(
+                "Failed to gather one packed batch buffer per process: "
+                f"expected {self._num_processes}, got "
+                f"{len(rank_buffers) if isinstance(rank_buffers, list) else type(rank_buffers).__name__}."
+            )
+        return {
+            _BATCH_BUFFER_STATE_VERSION_KEY: _BATCH_BUFFER_STATE_VERSION,
+            _BATCH_BUFFER_STATE_WORLD_SIZE_KEY: self._num_processes,
+            _BATCH_BUFFER_STATE_RANKS_KEY: rank_buffers,
+        }
+
+    def load_state_dict(self, state_dict: Mapping[str, Any]) -> None:
+        """Restore the buffered fragments belonging to this rank.
+
+        :param Mapping[str, Any] state_dict: Versioned rank-indexed buffer state.
+        :raises ValueError: If the payload version or distributed topology differs.
+        """
+        if not isinstance(state_dict, Mapping):
+            raise ValueError("Batch buffer checkpoint state must be a mapping.")
+        version = state_dict.get(_BATCH_BUFFER_STATE_VERSION_KEY)
+        if version != _BATCH_BUFFER_STATE_VERSION:
+            raise ValueError(
+                "Unsupported batch buffer checkpoint version "
+                f"{version!r}; expected {_BATCH_BUFFER_STATE_VERSION}."
+            )
+        checkpoint_world_size = int(
+            state_dict.get(_BATCH_BUFFER_STATE_WORLD_SIZE_KEY, 0)
+        )
+        if checkpoint_world_size != self._num_processes:
+            raise ValueError(
+                "Cannot restore rank-local batch buffers with a different world "
+                f"size: checkpoint={checkpoint_world_size}, runtime={self._num_processes}."
+            )
+        rank_buffers = state_dict.get(_BATCH_BUFFER_STATE_RANKS_KEY)
+        if (
+            not isinstance(rank_buffers, list)
+            or len(rank_buffers) != self._num_processes
+        ):
+            raise ValueError(
+                "Batch buffer checkpoint must contain exactly one mapping per rank."
+            )
+        rank_state = rank_buffers[self._process_index]
+        if not isinstance(rank_state, Mapping):
+            raise ValueError(
+                f"Batch buffer state for rank {self._process_index} is not a mapping."
+            )
+        self.clear()
+        self.update(
+            {
+                str(key): _clone_checkpoint_value_to_cpu(value)
+                for key, value in rank_state.items()
+            }
+        )
 
 
 def _append_to_stored_batch(
@@ -1122,40 +1254,17 @@ def _append_to_stored_batch(
     return stored_batch
 
 
-def _resolve_pack_token_limits(
-    tokenizer: PreTrainedTokenizerBase, max_length: int
-) -> Tuple[int, Optional[int], Optional[int]]:
-    """Compute tokenization limits for packed sequences.
-
-    :param PreTrainedTokenizerBase tokenizer: Tokenizer supplying special tokens.
-    :param int max_length: Target packed sequence length.
-    :return tuple[int, int | None, int | None]: Trimmed max_length and boundary IDs.
-    """
-    start_token_id = (
-        tokenizer.cls_token_id
-        if tokenizer.cls_token_id is not None
-        else tokenizer.bos_token_id
-    )
-    end_token_id = (
-        tokenizer.sep_token_id
-        if tokenizer.sep_token_id is not None
-        else tokenizer.eos_token_id
-    )
-    reserve = int(start_token_id is not None) + int(end_token_id is not None)
-    return max(1, max_length - reserve), start_token_id, end_token_id
-
-
 def _resolve_tokenize_num_proc(
     requested: Optional[int],
     num_processes: int,
     is_main_process: bool,
-) -> int:
+) -> Optional[int]:
     """Resolve per-rank num_proc for dataset tokenization.
 
     :param int | None requested: Requested num_proc from config (or None).
     :param int num_processes: Number of distributed processes.
     :param bool is_main_process: Whether the caller is the main process.
-    :return int: Effective num_proc for this rank.
+    :return int | None: Effective worker count, or ``None`` for in-process mapping.
     """
     if requested is None or requested <= 0:
         if hasattr(os, "sched_getaffinity"):
@@ -1169,7 +1278,8 @@ def _resolve_tokenize_num_proc(
         requested = max(1, requested // num_processes)
         if not is_main_process:
             requested = 1
-    return max(1, requested)
+    requested = max(1, requested)
+    return None if requested == 1 else requested
 
 
 def _select_train_split(
@@ -1385,7 +1495,11 @@ def _maybe_shuffle_streaming_dataset(
     :param callable | None print_fn: Optional logging callback.
     :return Dataset: Shuffled dataset (or the original dataset if no shuffle is applied).
     """
-    if buffer_size <= 0 or not hasattr(dataset, "shuffle"):
+    if (
+        buffer_size <= 0
+        or not is_streaming_dataset(dataset)
+        or not hasattr(dataset, "shuffle")
+    ):
         return dataset
 
     shuffled = dataset.shuffle(buffer_size=buffer_size, seed=seed)
@@ -1408,59 +1522,92 @@ def _prepare_resume_dataloader(
     :param bool is_streaming: Whether the dataset is streaming.
     :return torch.utils.data.DataLoader | None: Skipped dataloader or ``None``.
     """
-    completed_batches = int(metrics.get("train/batches", 0))
-    if completed_batches <= 0:
+    # ``skip_first_batches`` skips *raw* dataloader iterations, so the resume
+    # cursor must be counted in raw pulls, not trained microbatches. With packed
+    # collation an undersized batch is buffered (a raw dataloader pull that
+    # advances no trained-batch counter), so resuming by the trained-batch count
+    # under-skips by the packing ratio and silently replays already-trained data.
+    # ``train/dataloader_batches_in_epoch`` counts raw pulls in the current epoch
+    # and resets at each epoch boundary, so it is the correct skip target for
+    # both streaming and map-style datasets. The checkpointed rank-local batch
+    # buffer preserves untrained fragments from those skipped pulls. Checkpoints
+    # written before this counter existed skip nothing and restart the current
+    # epoch (safe: bounded re-training, never a silent partial replay).
+    resume_step = int(metrics.get("train/dataloader_batches_in_epoch", 0))
+    if resume_step <= 0:
         return None
 
-    loader_len: Optional[int] = None
-    if hasattr(train_dataloader, "__len__"):
-        try:
-            loader_len = len(train_dataloader)
-        except TypeError:
-            loader_len = None
+    resume_epoch = int(metrics.get("train/epochs", 0))
+    dataloader_length = _safe_len(train_dataloader)
+    if dataloader_length is not None:
+        if resume_step > dataloader_length:
+            raise RuntimeError(
+                "Resume dataloader cursor exceeds the current epoch length: "
+                f"cursor={resume_step}, length={dataloader_length}. The checkpoint "
+                "and current data geometry are incompatible."
+            )
+        if resume_step == dataloader_length:
+            next_epoch = resume_epoch + 1
+            metrics["train/epochs"] = next_epoch
+            metrics["train/batches_in_epoch"] = 0
+            metrics["train/dataloader_batches_in_epoch"] = 0
+            if hasattr(train_dataloader, "set_epoch"):
+                train_dataloader.set_epoch(next_epoch)
+            logger.info(
+                "Resume: the saved dataloader cursor is at the epoch boundary; "
+                "continuing from epoch %d without constructing an empty skipped loader.",
+                next_epoch,
+            )
+            return None
 
     if hasattr(train_dataloader, "set_epoch"):
-        train_dataloader.set_epoch(int(metrics.get("train/epochs", 0)))
+        train_dataloader.set_epoch(resume_epoch)
 
-    if loader_len is not None:
-        if loader_len <= 0:
-            logger.warning(
-                "Resume requested but dataloader length is non-positive; "
-                "starting from the current epoch boundary."
-            )
-            return None
-        resume_step = completed_batches % loader_len
-        if is_streaming:
-            logger.info(
-                "Streaming resume: skipping "
-                f"{resume_step} batch(es) within current epoch "
-                f"(consumed={completed_batches}, loader_len={loader_len})."
-            )
-    else:
-        if not is_streaming:
-            logger.warning(
-                "Resume requested but dataloader has no length; "
-                "starting from the current epoch boundary."
-            )
-            return None
-        # Streaming fallback: when epoch has already been restored via
-        # ``set_epoch(train/epochs)``, global consumed-batch counts can over-skip.
-        # Prefer epoch-local progress when available from checkpointed metrics.
-        resume_step = int(metrics.get("train/batches_in_epoch", 0))
-        if resume_step <= 0:
-            # Backward-compatible fallback for older checkpoints.
-            resume_step = completed_batches
-        logger.warning(
-            "Streaming resume with unknown dataloader length: skipping "
-            f"{resume_step} batch(es) from current epoch "
-            f"(completed_batches={completed_batches}, "
-            f"batches_in_epoch={int(metrics.get('train/batches_in_epoch', 0))})."
-        )
+    logger.info(
+        "Resume (%s): skipping %d dataloader batch(es) already pulled in the "
+        "current epoch (epoch=%d).",
+        "streaming" if is_streaming else "map-style",
+        resume_step,
+        resume_epoch,
+    )
+    skipped_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
+    # ``skip_first_batches`` constructs a new DataLoaderShard whose iteration
+    # starts at zero. Set the epoch on that new wrapper as well, otherwise its
+    # first ``__iter__`` resets the seedable sampler back to epoch zero.
+    if hasattr(skipped_dataloader, "set_epoch"):
+        skipped_dataloader.set_epoch(resume_epoch)
+    return skipped_dataloader
 
-    if resume_step == 0:
-        return None
 
-    return accelerator.skip_first_batches(train_dataloader, resume_step)
+def _reset_data_position_for_corpus_change(
+    metrics: Metrics,
+    stored_batch: BatchEncoding,
+    train_dataset: Any,
+    train_dataloader: Any,
+    resume_config_drift: set[str],
+) -> set[str]:
+    """Reset rank-local data state when continued pretraining changes corpus.
+
+    :param Metrics metrics: Restored training metrics and cursors.
+    :param BatchEncoding stored_batch: Restored packed-fragment buffer.
+    :param Any train_dataset: Runtime training dataset.
+    :param Any train_dataloader: Prepared runtime training dataloader.
+    :param set[str] resume_config_drift: Launch-controlled checkpoint drift.
+    :return set[str]: Drifted corpus-identity fields that triggered the reset.
+    """
+    changed_fields = resume_config_drift & _PRETRAINING_CORPUS_IDENTITY_FIELDS
+    if not changed_fields:
+        return set()
+
+    metrics["train/epochs"] = 0
+    metrics["train/batches_in_epoch"] = 0
+    metrics["train/dataloader_batches_in_epoch"] = 0
+    _clear_stored_batch(stored_batch)
+    if hasattr(train_dataset, "set_epoch"):
+        train_dataset.set_epoch(0)
+    if hasattr(train_dataloader, "set_epoch"):
+        train_dataloader.set_epoch(0)
+    return set(changed_fields)
 
 
 def _safe_len(dataloader: torch.utils.data.DataLoader) -> Optional[int]:
@@ -1477,6 +1624,137 @@ def _safe_len(dataloader: torch.utils.data.DataLoader) -> Optional[int]:
         return None
 
 
+def _save_pretraining_checkpoint_metadata(
+    cfg: Config,
+    tokenizer: PreTrainedTokenizerBase,
+    checkpoint_path: Path,
+) -> None:
+    """Save pretraining config and tokenizer metadata for one checkpoint.
+
+    :param Config cfg: Runtime configuration.
+    :param PreTrainedTokenizerBase tokenizer: Runtime tokenizer.
+    :param Path checkpoint_path: Checkpoint step directory.
+    """
+    ConfigLoader.save(cfg, str(checkpoint_path / "config.yaml"))
+    tokenizer_info = {
+        "tokenizer_name": cfg.tokenizer.path or cfg.tokenizer.name,
+        "vocab_size": cfg.model.vocab_size,
+        "base_vocab_size": tokenizer.vocab_size,
+        "total_vocab_size": len(tokenizer),
+        "pad_token_id": tokenizer.pad_token_id,
+    }
+    with (checkpoint_path / "tokenizer_info.json").open(
+        "w", encoding="utf-8"
+    ) as handle:
+        json.dump(tokenizer_info, handle, indent=2)
+    tokenizer_dir = checkpoint_path / "tokenizer"
+    tokenizer_dir.mkdir(parents=True, exist_ok=True)
+    tokenizer.model_max_length = cfg.model.max_position_embeddings
+    tokenizer.save_pretrained(tokenizer_dir)
+    logger.info(
+        "Saved checkpoint to %s (includes Accelerate state, model weights, config, "
+        "and tokenizer artifacts).",
+        checkpoint_path,
+    )
+
+
+def _tokenize_dataset_if_needed(
+    dataset: Any,
+    *,
+    tokenizer: PreTrainedTokenizerBase,
+    cfg: Config,
+    accelerator: Any,
+    context: str,
+    streaming_read_retries: int,
+    streaming_read_retry_backoff_seconds: float,
+    streaming_read_retry_max_backoff_seconds: float,
+) -> tuple[Any, bool, bool]:
+    """Tokenize a train/eval dataset when it does not already expose input IDs.
+
+    :param Any dataset: Map-style or streaming dataset.
+    :param PreTrainedTokenizerBase tokenizer: Runtime tokenizer.
+    :param Config cfg: Runtime configuration.
+    :param Any accelerator: Active Accelerator instance.
+    :param str context: Human-readable split label for retry diagnostics.
+    :param int streaming_read_retries: Maximum transient read retries.
+    :param float streaming_read_retry_backoff_seconds: Initial retry backoff.
+    :param float streaming_read_retry_max_backoff_seconds: Maximum retry backoff.
+    :return tuple[Any, bool, bool]: Dataset, streaming flag, and tokenization flag.
+    """
+    streaming = is_streaming_dataset(dataset)
+    if streaming:
+        first_example = peek_streaming_example(
+            dataset,
+            context=f"inspect {context} stream schema",
+            max_retries=streaming_read_retries,
+            base_backoff_seconds=streaming_read_retry_backoff_seconds,
+            max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+        )
+        needs_tokenization = "input_ids" not in first_example
+    else:
+        needs_tokenization = "input_ids" not in dataset.column_names
+    if not needs_tokenization:
+        return dataset, streaming, False
+
+    text_column = resolve_text_column(
+        dataset,
+        streaming,
+        preferred=cfg.dataset.text_column,
+        streaming_read_retries=streaming_read_retries,
+        streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+        streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+    )
+    num_proc = (
+        None
+        if streaming
+        else _resolve_tokenize_num_proc(
+            cfg.dataset.num_proc,
+            accelerator.num_processes,
+            accelerator.is_main_process,
+        )
+    )
+    target_length = cfg.datacollator.max_length or cfg.dataset.max_seq_length
+    with accelerator.main_process_first():
+        dataset = tokenize_pretraining_dataset(
+            dataset,
+            tokenizer,
+            column_name=text_column,
+            max_length=target_length,
+            truncation=cfg.tokenizer.truncation,
+            pack_sequences=cfg.datacollator.pack_sequences,
+            return_special_tokens_mask=True,
+            num_proc=num_proc,
+            streaming_read_retries=streaming_read_retries,
+            streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+            streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+        )
+    return dataset, streaming, True
+
+
+def _validate_packed_batch_buffering_policy(
+    *,
+    pack_sequences: bool,
+    enforce_full_packed_batches: bool,
+    num_processes: int,
+) -> None:
+    """Reject rank-local packed-batch skipping in distributed training.
+
+    :param bool pack_sequences: Whether the packing collator is active.
+    :param bool enforce_full_packed_batches: Whether undersized rows are buffered.
+    :param int num_processes: Distributed process count.
+    :raises ValueError: If distributed packing could skip model calls per rank.
+    """
+    if pack_sequences and enforce_full_packed_batches and num_processes > 1:
+        raise ValueError(
+            "trainer.enforce_full_packed_batches=true is single-process-only. "
+            "Packing produces data-dependent row counts on each rank, so rank-local "
+            "buffering can desynchronize model calls and resume cursors. Leave it "
+            "false for distributed runs; unequal local packed microbatches are "
+            "normalized by the global masked-token count."
+        )
+
+
+@preserve_sigterm_handler()
 def trainer(cfg: Config) -> None:
     """Run the pretraining loop.
 
@@ -1485,18 +1763,20 @@ def trainer(cfg: Config) -> None:
     masked_logits_only_loss = _resolve_masked_logits_only_loss(
         getattr(cfg.trainer, "masked_logits_only_loss", True)
     )
-    eval_samples = _resolve_eval_samples(getattr(cfg.dataset, "eval_samples", None))
 
     # Checkpoint layout (BREAKING): all resumable/exportable artifacts are written
     # under output_dir/checkpoints/<step>/.
     output_dir = Path(cfg.trainer.output_dir)
     checkpoint_dir = output_dir / "checkpoints"
     checkpoint_retention_limit = _resolve_checkpoint_retention_limit(cfg)
-    resume_checkpoint_path, iteration = _resolve_resume_checkpoint(
-        cfg.trainer.resume_from_checkpoint,
-        str(checkpoint_dir),
-        str(output_dir),
+    resume_checkpoint_path, iteration, eval_samples, resume_config_drift = (
+        _resolve_resume_checkpoint_and_eval_samples(cfg, checkpoint_dir, output_dir)
     )
+    if cfg.dataset.path and not Path(cfg.dataset.path).exists():
+        raise FileNotFoundError(
+            f"Configured dataset.path does not exist: {cfg.dataset.path}. "
+            "Clear dataset.path explicitly to load dataset.name from the Hub."
+        )
 
     # Accelerator object - disable automatic checkpoint naming so the trainer can
     # control a single checkpoint tree (checkpoints/<step>).
@@ -1515,9 +1795,11 @@ def trainer(cfg: Config) -> None:
     # Keep manual placement for packed mode only; in non-packed mode we use
     # Accelerate's device placement for better overlap.
     disable_dispatch = bool(cfg.datacollator.pack_sequences)
-    dataloader_config = None
+    dataloader_config = build_dataloader_config(
+        seed=cfg.seed,
+        dispatch_batches=False if disable_dispatch else None,
+    )
     if disable_dispatch:
-        dataloader_config = DataLoaderConfiguration(dispatch_batches=False)
         logger.info("Disabling Accelerate dispatch_batches for packed-sequence mode.")
 
     mixed_precision = resolve_mixed_precision(
@@ -1553,7 +1835,6 @@ def trainer(cfg: Config) -> None:
         )
     validate_distributed_runtime_policy(
         accelerator=accelerator,
-        log=logger,
         context="pretraining",
     )
     if getattr(accelerator, "is_main_process", True):
@@ -1569,7 +1850,7 @@ def trainer(cfg: Config) -> None:
         else:
             logger.info("Checkpoint retention policy: disabled (keep all checkpoints).")
     if accelerator.distributed_type is DistributedType.FSDP:
-        fsdp_version = _resolve_fsdp_version(accelerator)
+        fsdp_version = resolve_fsdp_version(accelerator)
         if fsdp_version < 2:
             raise RuntimeError(
                 "NeoBERT pretraining is FSDP2-first. "
@@ -1579,46 +1860,18 @@ def trainer(cfg: Config) -> None:
     validate_muon_distributed_compatibility(
         accelerator=accelerator,
         optimizer_name=cfg.optimizer.name,
-        log=logger,
         context="pretraining",
     )
 
     # Initialise the wandb run and pass wandb parameters
     tracker_config_dict = prepare_wandb_config(cfg)
     if wandb_enabled:
-        Path(cfg.wandb.dir).mkdir(parents=True, exist_ok=True)
-        accelerator.init_trackers(
-            project_name=cfg.wandb.project,
-            init_kwargs={
-                "wandb": {
-                    "name": cfg.wandb.name,
-                    "entity": cfg.wandb.entity,
-                    "config": tracker_config_dict,
-                    "tags": cfg.wandb.tags,
-                    "dir": cfg.wandb.dir,
-                    "mode": cfg.wandb.mode,
-                    "resume": cfg.wandb.resume,
-                }
-            },
+        initialize_wandb_trackers(
+            cfg=cfg,
+            accelerator=accelerator,
+            tracker_config=tracker_config_dict,
+            log=logger,
         )
-        if accelerator.is_main_process and wandb.run is not None:
-            wandb.run.config.update(tracker_config_dict, allow_val_change=True)
-            config_path = getattr(cfg, "config_path", None)
-            if config_path:
-                abs_config_path = Path(config_path).expanduser().resolve()
-                if abs_config_path.is_file():
-                    artifact = wandb.Artifact(
-                        name=f"{wandb.run.id}-config",
-                        type="config",
-                        metadata={"source": str(abs_config_path)},
-                    )
-                    artifact.add_file(str(abs_config_path))
-                    wandb.run.log_artifact(artifact)
-                else:
-                    logger.warning(
-                        f"Configured config_path '{config_path}' not found; "
-                        "skipping wandb artifact upload"
-                    )
 
     # Set the seed
     set_seed(cfg.seed)
@@ -1629,19 +1882,38 @@ def trainer(cfg: Config) -> None:
 
     # Local and global counters
     metrics = Metrics()
-    accelerator.register_for_checkpointing(metrics)
+    stored_batch = _CheckpointableBatchBuffer(
+        num_processes=accelerator.num_processes,
+        process_index=accelerator.process_index,
+    )
+    accelerator.register_for_checkpointing(metrics, stored_batch)
     log_interval = max(1, cfg.trainer.logging_steps)
     enforce_full_packed_batches = bool(
-        getattr(cfg.trainer, "enforce_full_packed_batches", True)
+        getattr(cfg.trainer, "enforce_full_packed_batches", False)
+    )
+    _validate_packed_batch_buffering_policy(
+        pack_sequences=bool(cfg.datacollator.pack_sequences),
+        enforce_full_packed_batches=enforce_full_packed_batches,
+        num_processes=accelerator.num_processes,
     )
     log_train_accuracy = bool(getattr(cfg.trainer, "log_train_accuracy", False))
     log_grad_norm = bool(getattr(cfg.trainer, "log_grad_norm", False))
     metrics["train/compute_accuracy"] = int(log_train_accuracy)
-    # Internal resume cursor only (checkpointed via register_for_checkpointing);
+    # Internal resume cursors only (checkpointed via register_for_checkpointing);
     # excluded from tracker payloads and console metrics.
+    # ``train/batches_in_epoch`` counts trained microbatches; the raw-pull cursor
+    # below is what resume skipping uses (see ``_prepare_resume_dataloader``).
     metrics["train/batches_in_epoch"] = int(metrics.get("train/batches_in_epoch", 0))
+    metrics["train/dataloader_batches_in_epoch"] = int(
+        metrics.get("train/dataloader_batches_in_epoch", 0)
+    )
 
     is_streaming = cfg.dataset.streaming
+    (
+        streaming_read_retries,
+        streaming_read_retry_backoff_seconds,
+        streaming_read_retry_max_backoff_seconds,
+    ) = _streaming_retry_settings(cfg)
 
     if cfg.datacollator.pack_sequences:
         logger.info(
@@ -1668,7 +1940,9 @@ def trainer(cfg: Config) -> None:
         )
 
     prior_model_vocab_size = int(cfg.model.vocab_size)
-    prior_tokenizer_vocab_size = int(cfg.tokenizer.vocab_size)
+    prior_tokenizer_vocab_size = (
+        int(cfg.tokenizer.vocab_size) if cfg.tokenizer.vocab_size is not None else None
+    )
     original_vocab_size, resolved_vocab_size, added_tokens = (
         _sync_tokenizer_derived_config(
             cfg,
@@ -1698,18 +1972,6 @@ def trainer(cfg: Config) -> None:
     if accelerator.is_main_process and wandb_enabled and wandb.run is not None:
         wandb.run.config.update(resolved_config_dict, allow_val_change=True)
 
-    # Tokenization strategy for packed sequences: strip special tokens and reinsert
-    # boundaries in the collator to avoid duplicate BOS/EOS/SEP tokens.
-    pack_sequences = cfg.datacollator.pack_sequences
-    add_special_tokens = not pack_sequences
-    return_special_tokens_mask = True
-    tokenize_max_length = cfg.dataset.max_seq_length
-    if pack_sequences:
-        pack_target_length = cfg.datacollator.max_length or cfg.dataset.max_seq_length
-        tokenize_max_length, _, _ = _resolve_pack_token_limits(
-            tokenizer, pack_target_length
-        )
-
     # Dataset
     dataset_kwargs: dict[str, object] = {}
     if cfg.dataset.config:
@@ -1722,13 +1984,8 @@ def trainer(cfg: Config) -> None:
     train_dataset = None
     if cfg.dataset.path:
         dataset_path = Path(cfg.dataset.path)
-        if dataset_path.exists():
-            train_dataset = load_from_disk(dataset_path)
-            train_dataset = _select_train_split(train_dataset, cfg.dataset.train_split)
-        else:
-            logger.warning(
-                f"Dataset path {dataset_path} not found; falling back to load_dataset()."
-            )
+        train_dataset = load_from_disk(dataset_path)
+        train_dataset = _select_train_split(train_dataset, cfg.dataset.train_split)
 
     if train_dataset is None:
         if cfg.dataset.train_split:
@@ -1737,6 +1994,9 @@ def trainer(cfg: Config) -> None:
                     cfg.dataset.name,
                     cfg.dataset.train_split,
                     dataset_kwargs,
+                    streaming_read_retries=streaming_read_retries,
+                    streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+                    streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
                 )
             else:
                 train_dataset = load_dataset(
@@ -1746,113 +2006,41 @@ def trainer(cfg: Config) -> None:
                     **dataset_kwargs,
                 )
         else:
-            dataset = load_dataset(
-                cfg.dataset.name,
-                streaming=cfg.dataset.streaming,
-                **dataset_kwargs,
+            dataset = (
+                retry_streaming_operation(
+                    lambda: load_dataset(
+                        cfg.dataset.name,
+                        streaming=True,
+                        **dataset_kwargs,
+                    ),
+                    context=f"load streaming dataset {cfg.dataset.name}",
+                    max_retries=streaming_read_retries,
+                    base_backoff_seconds=streaming_read_retry_backoff_seconds,
+                    max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+                )
+                if cfg.dataset.streaming
+                else load_dataset(
+                    cfg.dataset.name,
+                    streaming=False,
+                    **dataset_kwargs,
+                )
             )
             train_dataset = dataset["train"]
 
-    # Check if dataset needs tokenization
-    # For streaming datasets, we need to check differently
-    needs_tokenization = False
+    is_streaming = is_streaming_dataset(train_dataset)
 
-    if train_dataset is not None:
+    train_dataset, is_streaming, train_was_tokenized = _tokenize_dataset_if_needed(
+        train_dataset,
+        tokenizer=tokenizer,
+        cfg=cfg,
+        accelerator=accelerator,
+        context="training",
+        streaming_read_retries=streaming_read_retries,
+        streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+        streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
+    )
+    if train_was_tokenized:
         if is_streaming:
-            # For streaming datasets, peek at the first example
-            first_example = next(iter(train_dataset))
-            needs_tokenization = "input_ids" not in first_example
-        else:
-            needs_tokenization = "input_ids" not in train_dataset.column_names
-
-    if needs_tokenization:
-        accelerator.print("Dataset is not tokenized. Tokenizing now...")
-        from neobert.tokenizer import tokenize
-
-        # For non-streaming datasets, check if pre-tokenization is requested
-        if not is_streaming and cfg.dataset.pre_tokenize:
-            # Create output directory
-            if cfg.dataset.pre_tokenize_output:
-                output_dir = cfg.dataset.pre_tokenize_output
-            else:
-                output_dir = f"tokenized_data/{cfg.dataset.name.replace('/', '_')}"
-
-            Path(output_dir).mkdir(parents=True, exist_ok=True)
-            success_flag = Path(output_dir) / ".tokenize_complete"
-            failure_flag = Path(output_dir) / ".tokenize_failed"
-
-            accelerator.print(f"Pre-tokenizing dataset to: {output_dir}")
-
-            if accelerator.is_main_process and not success_flag.exists():
-                if failure_flag.exists():
-                    failure_flag.unlink()
-                try:
-                    text_column = resolve_text_column(
-                        train_dataset,
-                        is_streaming=False,
-                        preferred=cfg.dataset.text_column,
-                    )
-                    tokenized_dataset = tokenize(
-                        train_dataset,
-                        tokenizer,
-                        column_name=text_column,
-                        max_length=tokenize_max_length,
-                        remove_columns=True,
-                        truncation=cfg.tokenizer.truncation,
-                        num_proc=cfg.dataset.num_proc,
-                        add_special_tokens=add_special_tokens,
-                        return_special_tokens_mask=return_special_tokens_mask,
-                    )
-                    tokenized_dataset.save_to_disk(output_dir)
-                except Exception as exc:
-                    failure_flag.write_text(str(exc))
-                else:
-                    success_flag.write_text("ok")
-
-            accelerator.wait_for_everyone()
-            if not success_flag.exists():
-                err_msg = (
-                    failure_flag.read_text()
-                    if failure_flag.exists()
-                    else "Pre-tokenization failed; see main process logs."
-                )
-                raise RuntimeError(f"Tokenization failed: {err_msg}")
-
-            accelerator.print(f"Pre-tokenization complete. Loading from: {output_dir}")
-            # Load the pre-tokenized dataset
-            train_dataset = load_from_disk(output_dir)
-            train_dataset = _select_train_split(train_dataset, cfg.dataset.train_split)
-        else:
-            # Determine text column
-            text_column = resolve_text_column(
-                train_dataset,
-                is_streaming,
-                preferred=cfg.dataset.text_column,
-            )
-            tokenize_num_proc = (
-                None
-                if is_streaming
-                else _resolve_tokenize_num_proc(
-                    cfg.dataset.num_proc,
-                    accelerator.num_processes,
-                    accelerator.is_main_process,
-                )
-            )
-
-            # Tokenize dataset
-            with accelerator.main_process_first():
-                train_dataset = tokenize(
-                    train_dataset,
-                    tokenizer,
-                    column_name=text_column,
-                    max_length=tokenize_max_length,
-                    remove_columns=True,
-                    truncation=cfg.tokenizer.truncation,
-                    num_proc=tokenize_num_proc,
-                    add_special_tokens=add_special_tokens,
-                    return_special_tokens_mask=return_special_tokens_mask,
-                )
-        if cfg.dataset.streaming:
             accelerator.print("Tokenization setup complete for streaming dataset.")
         else:
             accelerator.print(
@@ -1871,6 +2059,9 @@ def trainer(cfg: Config) -> None:
             cfg.dataset.name,
             dataset_kwargs,
             train_split=cfg.dataset.train_split,
+            streaming_read_retries=streaming_read_retries,
+            streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+            streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
         )
         if inferred_eval_split is not None:
             eval_split = inferred_eval_split
@@ -1896,6 +2087,9 @@ def trainer(cfg: Config) -> None:
                     cfg.dataset.name,
                     eval_split,
                     dataset_kwargs,
+                    streaming_read_retries=streaming_read_retries,
+                    streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+                    streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
                 )
             else:
                 eval_dataset = load_dataset(
@@ -1930,11 +2124,7 @@ def trainer(cfg: Config) -> None:
         )
 
     if eval_dataset is not None and eval_samples is not None:
-        eval_dataset_is_streaming = (
-            cfg.dataset.streaming
-            and hasattr(eval_dataset, "take")
-            and hasattr(eval_dataset, "skip")
-        )
+        eval_dataset_is_streaming = is_streaming_dataset(eval_dataset)
         if eval_dataset_is_streaming:
             eval_dataset = eval_dataset.take(eval_samples)
         else:
@@ -1942,57 +2132,56 @@ def trainer(cfg: Config) -> None:
             eval_dataset = eval_dataset.select(range(min(eval_samples, eval_size)))
 
     if eval_dataset is not None:
-        eval_is_streaming = (
-            cfg.dataset.streaming
-            and hasattr(eval_dataset, "take")
-            and hasattr(eval_dataset, "skip")
+        eval_dataset, eval_is_streaming, _ = _tokenize_dataset_if_needed(
+            eval_dataset,
+            tokenizer=tokenizer,
+            cfg=cfg,
+            accelerator=accelerator,
+            context="eval",
+            streaming_read_retries=streaming_read_retries,
+            streaming_read_retry_backoff_seconds=streaming_read_retry_backoff_seconds,
+            streaming_read_retry_max_backoff_seconds=streaming_read_retry_max_backoff_seconds,
         )
-        eval_needs_tokenization = False
-        if eval_is_streaming:
-            first_example = next(iter(eval_dataset))
-            eval_needs_tokenization = "input_ids" not in first_example
-        else:
-            eval_needs_tokenization = "input_ids" not in eval_dataset.column_names
-
-        if eval_needs_tokenization:
-            from neobert.tokenizer import tokenize
-
-            text_column = resolve_text_column(
-                eval_dataset,
-                eval_is_streaming,
-                preferred=cfg.dataset.text_column,
-            )
-            eval_num_proc = (
-                None
-                if eval_is_streaming
-                else _resolve_tokenize_num_proc(
-                    cfg.dataset.num_proc,
-                    accelerator.num_processes,
-                    accelerator.is_main_process,
-                )
-            )
-            with accelerator.main_process_first():
-                eval_dataset = tokenize(
-                    eval_dataset,
-                    tokenizer,
-                    column_name=text_column,
-                    max_length=tokenize_max_length,
-                    remove_columns=True,
-                    truncation=cfg.tokenizer.truncation,
-                    num_proc=eval_num_proc,
-                    add_special_tokens=add_special_tokens,
-                    return_special_tokens_mask=return_special_tokens_mask,
-                )
 
         if not eval_is_streaming:
             accelerator.print(f"Eval dataset size: {len(eval_dataset)}")
 
-    if cfg.dataset.streaming and hasattr(cfg.dataset, "shuffle_buffer_size"):
+    if is_streaming and hasattr(cfg.dataset, "shuffle_buffer_size"):
         train_dataset = _maybe_shuffle_streaming_dataset(
             train_dataset,
             cfg.dataset.shuffle_buffer_size,
             cfg.seed,
             print_fn=accelerator.print,
+        )
+        train_dataset = _maybe_wrap_streaming_dataset_for_retries(
+            train_dataset,
+            label=f"{cfg.dataset.name}:{cfg.dataset.train_split or 'train'}",
+            cfg=cfg,
+        )
+        if eval_dataset is not None and eval_is_streaming:
+            eval_dataset = _maybe_wrap_streaming_dataset_for_retries(
+                eval_dataset,
+                label=f"{cfg.dataset.name}:{eval_split or 'eval'}",
+                cfg=cfg,
+            )
+
+    # Streaming resume is approximate (skip-based), not exact. We intentionally do
+    # NOT register train_dataset with Accelerate to checkpoint its cursor: the
+    # dataset is consumed through an Accelerate-prepared DataLoader, whose adapter
+    # (DataLoaderShard/DataLoaderDispatcher) iterates one batch ahead before
+    # yielding, and DataLoaderDispatcher may prefetch num_processes batches. So the
+    # raw dataset cursor at checkpoint time is ahead of the last trained batch, and
+    # trusting it on resume would silently drop prefetched-but-untrained examples.
+    # The retry wrapper's state_dict() is still used for in-process transient-read
+    # recovery, which is unaffected by dataloader lookahead. Exact resume needs a
+    # stateful-dataloader boundary (torchdata StatefulDataLoader via Accelerate's
+    # use_stateful_dataloader); tracked in docs/TODO.md.
+    if is_streaming and supports_streaming_iteration_resume(train_dataset):
+        logger.info(
+            "Streaming dataset exposes a resumable cursor, but trainer resume uses "
+            "approximate batch skipping: the Accelerate-prepared DataLoader owns "
+            "prefetch/lookahead state, so the raw dataset cursor is not a valid "
+            "checkpoint boundary."
         )
 
     pin_memory, persistent_workers, prefetch_factor, loader_perf_notes = (
@@ -2000,6 +2189,10 @@ def trainer(cfg: Config) -> None:
     )
     for note in loader_perf_notes:
         logger.info(note)
+    loader_pin_memory = _should_use_loader_pin_memory(
+        pin_memory=pin_memory,
+        accelerator=accelerator,
+    )
 
     # Dataloader
     collator_max_length = cfg.datacollator.max_length or cfg.dataset.max_seq_length
@@ -2008,7 +2201,7 @@ def trainer(cfg: Config) -> None:
         tokenizer,
         batch_size=cfg.trainer.per_device_train_batch_size,
         num_workers=cfg.dataset.num_workers,
-        pin_memory=pin_memory,
+        pin_memory=loader_pin_memory,
         persistent_workers=persistent_workers,
         prefetch_factor=prefetch_factor,
         mlm_probability=cfg.datacollator.mlm_probability,
@@ -2026,7 +2219,7 @@ def trainer(cfg: Config) -> None:
             tokenizer,
             batch_size=cfg.trainer.per_device_eval_batch_size,
             num_workers=cfg.dataset.num_workers,
-            pin_memory=pin_memory,
+            pin_memory=loader_pin_memory,
             persistent_workers=persistent_workers,
             prefetch_factor=prefetch_factor,
             mlm_probability=cfg.datacollator.mlm_probability,
@@ -2047,27 +2240,11 @@ def trainer(cfg: Config) -> None:
         print(f"Tokenizer total len(): {len(tokenizer)}")
         print(f"Tokenizer pad_token_id: {tokenizer.pad_token_id}")
 
-    # Keep this mapping in sync with ModelConfig fields to avoid config drift.
-    model_config = NeoBERTConfig(
-        hidden_size=cfg.model.hidden_size,
-        num_hidden_layers=cfg.model.num_hidden_layers,
-        num_attention_heads=cfg.model.num_attention_heads,
-        intermediate_size=cfg.model.intermediate_size,
+    model_config = NeoBERTConfig.from_model_config(
+        cfg.model,
         max_length=cfg.model.max_position_embeddings,
-        vocab_size=cfg.model.vocab_size,  # Use preprocessed vocab_size
-        rope=cfg.model.rope,
-        rms_norm=cfg.model.rms_norm,
-        hidden_act=cfg.model.hidden_act,
-        dropout=cfg.model.dropout_prob,
-        norm_eps=cfg.model.norm_eps,
-        embedding_init_range=cfg.model.embedding_init_range,
-        decoder_init_range=cfg.model.decoder_init_range,
-        classifier_init_range=cfg.model.classifier_init_range,
         pad_token_id=cfg.model.pad_token_id,
         attn_backend=cfg.model.attn_backend,
-        kernel_backend=cfg.model.kernel_backend,
-        ngpt=cfg.model.ngpt,
-        base_scale=cfg.model.base_scale,
     )
     model = NeoBERTLMHead(model_config)
 
@@ -2094,14 +2271,13 @@ def trainer(cfg: Config) -> None:
         logger.info(f"QK-clipping: {muon_cfg.enable_clipping}")
         logger.info(f"Clipping threshold: {muon_cfg.clipping_threshold}")
         logger.info(f"Newton-Schulz iterations: {muon_cfg.ns_steps}")
+        logger.info(f"Nesterov: {muon_cfg.nesterov}")
         logger.info(f"Orthogonalization: {muon_cfg.orthogonalization}")
         logger.info(f"Norm factor: {muon_cfg.norm_factor}")
+        logger.info(f"Param policy: {muon_cfg.param_policy}")
         logger.info(f"Clipping warmup steps: {muon_cfg.clipping_warmup_steps}")
         logger.info(f"Clipping interval: {muon_cfg.clipping_interval}")
         logger.info(f"QK chunk size: {muon_cfg.clipping_qk_chunk_size}")
-        logger.info(
-            f"Capture last microbatch only: {muon_cfg.capture_last_microbatch_only}"
-        )
         logger.info("=" * 60)
 
     optimizer = get_optimizer(
@@ -2115,6 +2291,7 @@ def trainer(cfg: Config) -> None:
         eps=cfg.optimizer.eps,
         muon_config=cfg.optimizer.muon_config,
     )
+    attach_optimizer_param_names(model, optimizer)
     _, warmup_steps, decay_steps, constant_steps = resolve_scheduler_steps(
         trainer_max_steps=cfg.trainer.max_steps,
         total_steps=cfg.scheduler.total_steps,
@@ -2265,12 +2442,7 @@ def trainer(cfg: Config) -> None:
             "ablation/debug and has higher memory use."
         )
     eval_max_batches = getattr(cfg.trainer, "eval_max_batches", None)
-    eval_dataset_is_streaming = (
-        eval_dataset is not None
-        and cfg.dataset.streaming
-        and hasattr(eval_dataset, "take")
-        and hasattr(eval_dataset, "skip")
-    )
+    eval_dataset_is_streaming = _requires_streaming_eval_budget(eval_dataset)
     if eval_dataset_is_streaming:
         eval_max_batches, eval_budget_source = _resolve_streaming_eval_budget(
             eval_max_batches=eval_max_batches,
@@ -2291,7 +2463,8 @@ def trainer(cfg: Config) -> None:
             raise FileNotFoundError(
                 f"resume_from_checkpoint path not found: {resume_checkpoint_path}"
             )
-        accelerator.load_state(str(resume_checkpoint))
+        validate_optimizer_param_name_manifest(optimizer, resume_checkpoint)
+        accelerator.load_state(str(resolve_accelerate_state_dir(resume_checkpoint)))
         validate_muon_runtime_topology(
             accelerator=accelerator,
             optimizer=optimizer,
@@ -2299,21 +2472,40 @@ def trainer(cfg: Config) -> None:
             log=logger,
             context="pretraining resume",
         )
-        if is_streaming and hasattr(train_dataset, "set_epoch"):
+        changed_corpus_fields = _reset_data_position_for_corpus_change(
+            metrics,
+            stored_batch,
+            train_dataset,
+            train_dataloader,
+            resume_config_drift,
+        )
+        corpus_changed = bool(changed_corpus_fields)
+        if corpus_changed:
+            logger.warning(
+                "Resume corpus changed (%s); preserving optimizer/model progress "
+                "but restarting data position at epoch zero and clearing packed "
+                "fragments from the previous corpus.",
+                ", ".join(sorted(changed_corpus_fields)),
+            )
+        elif is_streaming and hasattr(train_dataset, "set_epoch"):
             resume_epoch = int(metrics.get("train/epochs", 0))
             train_dataset.set_epoch(resume_epoch)
             logger.info(
                 "Restored streaming dataset epoch to "
                 f"{resume_epoch} before resume skipping."
             )
-        skipped_train_dataloader = _prepare_resume_dataloader(
-            train_dataloader, metrics, accelerator, is_streaming
-        )
+        if not corpus_changed:
+            skipped_train_dataloader = _prepare_resume_dataloader(
+                train_dataloader, metrics, accelerator, is_streaming
+            )
     elif cfg.trainer.resume_from_checkpoint:
         logger.warning(
             "resume_from_checkpoint is set but no valid checkpoints were found in "
             f"{checkpoint_dir}"
         )
+
+    preemption = PreemptionState()
+    signal.signal(signal.SIGTERM, preemption.request)
 
     # Progress bar
     pbar = tqdm(
@@ -2341,12 +2533,6 @@ def trainer(cfg: Config) -> None:
     )
     local_loss_path_other = torch.zeros((), device=accelerator.device, dtype=torch.long)
     logged_masked_loss_path = False
-    stored_batch = {
-        "input_ids": None,
-        "attention_mask": None,
-        "labels": None,
-        "packed_seqlens": None,
-    }
     warned_low_token_scale = False
     while cfg.trainer.max_steps > metrics["train/steps"]:
         # Use skipped_train_dataloader the first epoch after resuming
@@ -2358,6 +2544,9 @@ def trainer(cfg: Config) -> None:
         saw_batch_this_epoch = False
         for batch in dataloader:
             saw_batch_this_epoch = True
+            # Count every raw dataloader pull (including ones buffered below) so
+            # resume skips the true consumed position, not the trained-batch count.
+            metrics["train/dataloader_batches_in_epoch"] += 1
             # Pack or truncate to target per-step batch size. Packed mode can emit
             # variable batch dimensions, so we buffer/merge there too now that
             # packed_seqlens uses fixed-width tensor metadata.
@@ -2392,7 +2581,7 @@ def trainer(cfg: Config) -> None:
 
             if manual_device_move:
                 if pin_memory and accelerator.device.type == "cuda":
-                    batch = _ensure_pinned_cpu_batch(batch)
+                    batch = _pin_cpu_tensors(batch)
                 batch = _move_batch_to_device(batch, accelerator.device)
 
             # Update number of batches only when we will execute a backward pass.
@@ -2401,7 +2590,7 @@ def trainer(cfg: Config) -> None:
 
             num_pred = (batch["labels"] != -100).sum()
             num_tokens = (batch["input_ids"] != model_config.pad_token_id).sum()
-            packed_seqlens = _packed_seqlens_to_tensor(batch.get("packed_seqlens"))
+            packed_seqlens = packed_seqlens_to_tensor(batch.get("packed_seqlens"))
             pad_mask = (
                 None
                 if packed_seqlens is not None
@@ -2627,10 +2816,12 @@ def trainer(cfg: Config) -> None:
                 save_strategy = str(getattr(cfg.trainer, "save_strategy", "steps"))
                 eval_strategy = str(getattr(cfg.trainer, "eval_strategy", "steps"))
                 save_model = bool(getattr(cfg.trainer, "save_model", True))
-                should_save = (
-                    save_model
-                    and save_strategy == "steps"
-                    and metrics["train/steps"] % cfg.trainer.save_steps == 0
+                should_save = should_save_step_checkpoint(
+                    step=metrics["train/steps"],
+                    max_steps=cfg.trainer.max_steps,
+                    save_steps=cfg.trainer.save_steps,
+                    save_model=save_model,
+                    save_strategy=save_strategy,
                 )
                 # Compute eval trigger from the same post-update step snapshot used
                 # for save logic to keep step-based scheduling deterministic.
@@ -2640,50 +2831,34 @@ def trainer(cfg: Config) -> None:
                     and cfg.trainer.eval_steps > 0
                     and metrics["train/steps"] % cfg.trainer.eval_steps == 0
                 )
-                if should_save:
-                    step_tag = str(metrics["train/steps"])
-                    checkpoint_path = checkpoint_dir / step_tag
-                    accelerator.save_state(output_dir=str(checkpoint_path))
-                    accelerator.wait_for_everyone()
-                    _save_portable_checkpoint_weights(
-                        model, accelerator, checkpoint_path
+                preemption_requested = preemption.synchronize(accelerator)
+                if should_save or preemption_requested:
+                    save_training_checkpoint(
+                        task="pretraining",
+                        checkpoint_path=checkpoint_dir
+                        / str(int(metrics["train/steps"])),
+                        accelerator=accelerator,
+                        model=model,
+                        optimizer=optimizer,
+                        save_metadata=lambda path: (
+                            _save_pretraining_checkpoint_metadata(cfg, tokenizer, path)
+                        ),
                     )
-                    accelerator.wait_for_everyone()
-
-                    # Save export metadata alongside resumable state.
-                    if accelerator.is_main_process:
-                        config_path = checkpoint_path / "config.yaml"
-                        ConfigLoader.save(cfg, str(config_path))
-
-                        tokenizer_info = {
-                            "tokenizer_name": cfg.tokenizer.path or cfg.tokenizer.name,
-                            "vocab_size": cfg.model.vocab_size,
-                            "base_vocab_size": tokenizer.vocab_size,
-                            "total_vocab_size": len(tokenizer),
-                            "pad_token_id": tokenizer.pad_token_id,
-                        }
-                        tokenizer_info_path = checkpoint_path / "tokenizer_info.json"
-                        with tokenizer_info_path.open("w", encoding="utf-8") as f:
-                            json.dump(tokenizer_info, f, indent=2)
-
-                        tokenizer_dir = checkpoint_path / "tokenizer"
-                        tokenizer_dir.mkdir(parents=True, exist_ok=True)
-                        tokenizer.model_max_length = cfg.model.max_position_embeddings
-                        tokenizer.save_pretrained(tokenizer_dir)
-                        logger.info(
-                            "Saved checkpoint to "
-                            f"{checkpoint_path} (includes Accelerate state, model "
-                            "weights, config, and tokenizer artifacts)."
-                        )
-
-                    accelerator.wait_for_everyone()
-
                     if checkpoint_retention_limit > 0 and accelerator.is_main_process:
                         _prune_step_checkpoints(
                             checkpoint_dir,
                             checkpoint_retention_limit,
                         )
                     accelerator.wait_for_everyone()
+
+                if preemption_requested:
+                    accelerator.print(
+                        "SIGTERM received; saved a synchronized checkpoint at "
+                        f"completed optimizer step {metrics['train/steps']}."
+                    )
+                    pbar.close()
+                    accelerator.end_training()
+                    raise SystemExit(128 + signal.SIGTERM)
 
                 if should_eval:
                     eval_metrics = _run_eval(
@@ -2707,6 +2882,20 @@ def trainer(cfg: Config) -> None:
                 if metrics["train/steps"] >= cfg.trainer.max_steps:
                     pbar.close()
                     return
+
+        if not saw_batch_this_epoch and skipped_train_dataloader is not None:
+            metrics["train/epochs"] += 1
+            metrics["train/batches_in_epoch"] = 0
+            metrics["train/dataloader_batches_in_epoch"] = 0
+            skipped_train_dataloader = None
+            if is_streaming and hasattr(train_dataset, "set_epoch"):
+                train_dataset.set_epoch(metrics["train/epochs"])
+            logger.warning(
+                "Resume skipping exhausted the saved epoch before yielding a batch; "
+                "continuing from epoch %d.",
+                metrics["train/epochs"],
+            )
+            continue
 
         if not saw_batch_this_epoch:
             raise RuntimeError(
@@ -2733,10 +2922,11 @@ def trainer(cfg: Config) -> None:
         # Update the number of epochs
         metrics["train/epochs"] += 1
         metrics["train/batches_in_epoch"] = 0
+        metrics["train/dataloader_batches_in_epoch"] = 0
         skipped_train_dataloader = None
 
         # For streaming datasets, update the epoch to ensure different shuffling
-        if cfg.dataset.streaming and hasattr(train_dataset, "set_epoch"):
+        if is_streaming and hasattr(train_dataset, "set_epoch"):
             # Called after epoch increment so the next epoch uses the new seed.
             train_dataset.set_epoch(metrics["train/epochs"])
             accelerator.print(

@@ -12,16 +12,19 @@ dependencies = [
     "datasets",
     "einops",
     "evaluate",
-    "mteb",
+    "filelock",
+    "httpx",
+    "liger-kernel>=0.6",
+    "mteb>=2.18",
     "numpy",
     "pyyaml",
+    "requests",
     "safetensors",
     "scikit-learn",
     "torch>=2.6.0",
     "tqdm",
-    "transformers",
+    "transformers>=5.4.0",
     "wandb",
-    "liger-kernel>=0.6",
 ]
 authors = [
     { name = "Lola Le Breton", email = "lola.lebreton@mila.quebec" },
@@ -36,7 +39,7 @@ license = { text = "MIT License" }
 keywords = []
 
 [project.optional-dependencies]
-dev = ["ruff", "isort", "pytest", "pytest-cov", "pytest-clarity", "xeger"]
+dev = ["ruff", "pytest", "pytest-cov", "pytest-clarity"]
 flash = ["flash-attn>=2.5"]
 legacy-checkpoints = ["deepspeed"]
 
@@ -52,6 +55,14 @@ local_scheme = "dirty-tag"
 [tool.pytest.ini_options]
 # Keep default `pytest -q` runs focused on the curated test suite.
 testpaths = ["tests"]
+filterwarnings = [
+    # Keep project warnings strict without failing on optional CUDA/third-party
+    # runtime warnings such as PyTorch NVML initialization messages.
+    'error::neobert.warnings.NeoBERTWarning',
+    # Triton constructs ast.AnnAssign without Python 3.13's new ``simple`` field.
+    # Keep this scoped to the upstream compiler module and exact deprecation.
+    'ignore:AnnAssign\.__init__ missing 1 required positional argument.*:DeprecationWarning:triton\.compiler\.code_generator',
+]
 # Prevent accidental collection of scratch data/scripts and large artifacts.
 norecursedirs = [
     "local-scratch",
@@ -64,3 +75,6 @@ norecursedirs = [
     ".venv",
     "build",
 ]
+
+[tool.ruff.lint]
+extend-select = ["I"]

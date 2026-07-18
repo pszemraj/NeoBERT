@@ -5,16 +5,16 @@ from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, Optional
 
 import torch
-import torch.nn as nn
 from accelerate.utils import DistributedType
 from torch.optim import Adam, AdamW
 
 from neobert.optimizer.muon_clip import MuonClipConfig, MuonClipOptimizer
-
-# from .soap.soap import SOAP  # TODO: Add SOAP optimizer implementation
+from neobert.optimizer.parameter_groups import (
+    embedding_parameter_ids,
+    uses_weight_decay,
+)
 
 logger = logging.getLogger(__name__)
-_WARNED_MUONCLIP_FSDP_CLIPPING_DISABLE = False
 
 
 def _build_adamw_param_groups(
@@ -28,25 +28,14 @@ def _build_adamw_param_groups(
     """
     decay_params = []
     no_decay_params = []
-    embedding_param_ids = {
-        id(param)
-        for module in model.modules()
-        if isinstance(module, nn.Embedding)
-        for param in module.parameters(recurse=False)
-    }
+    embedding_param_ids = embedding_parameter_ids(model)
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-        name_lower = name.lower()
-        if (
-            param.ndim < 2
-            or name_lower.endswith(".bias")
-            or "norm" in name_lower
-            or id(param) in embedding_param_ids
-        ):
-            no_decay_params.append(param)
-        else:
+        if uses_weight_decay(name, param, embedding_param_ids):
             decay_params.append(param)
+        else:
+            no_decay_params.append(param)
 
     return [
         {"params": decay_params, "weight_decay": weight_decay},
@@ -75,13 +64,13 @@ def get_optimizer(
     optimizer_name = kwargs.pop("name").lower()
 
     logger.info(f"Initializing optimizer: {optimizer_name}")
+    if muon_config is not None and optimizer_name in {"adam", "adamw"}:
+        logger.warning(
+            f"optimizer.muon_config provided but optimizer is {optimizer_name}; ignoring"
+        )
 
     match optimizer_name:
         case "adamw":
-            if muon_config is not None:
-                logger.warning(
-                    "optimizer.muon_config provided but optimizer is adamw; ignoring"
-                )
             weight_decay = kwargs.pop("weight_decay", 0.0)
             param_groups = _build_adamw_param_groups(model, weight_decay)
             optimizer = AdamW(param_groups, **kwargs)
@@ -89,16 +78,11 @@ def get_optimizer(
             return optimizer
 
         case "adam":
-            if muon_config is not None:
-                logger.warning(
-                    "optimizer.muon_config provided but optimizer is adam; ignoring"
-                )
             optimizer = Adam(model.parameters(), **kwargs)
             logger.info(f"Adam initialized with lr={kwargs.get('lr', 'default')}")
             return optimizer
 
         case "muonclip" | "muon-clip" | "muon_clip":
-            global _WARNED_MUONCLIP_FSDP_CLIPPING_DISABLE
             if model_config is None:
                 raise ValueError(
                     "MuonClip requires model_config to be passed. "
@@ -145,18 +129,32 @@ def get_optimizer(
                 distributed_type is DistributedType.FSDP
                 and muon_clip_cfg.enable_clipping
             ):
-                # Keep this factory-side disable for now. MuonClip hooks are
-                # created before ``accelerator.prepare()``, so preserving
-                # ``config.enable_clipping`` without a dedicated post-prepare
-                # runtime toggle would still capture activations on the first
-                # sharded step. Track the intent/runtime split cleanup separately.
-                muon_clip_cfg.enable_clipping = False
-                if not _WARNED_MUONCLIP_FSDP_CLIPPING_DISABLE:
-                    logger.warning(
-                        "MuonClip QK clipping is not supported under FSDP2 sharded Muon "
-                        "updates. Auto-disabling clipping for this run."
-                    )
-                    _WARNED_MUONCLIP_FSDP_CLIPPING_DISABLE = True
+                # QK clipping is unsupported under FSDP2 sharded Muon updates
+                # (hooks are created before accelerator.prepare(), and the
+                # owner-compute path cannot run the activation-capture flow).
+                # Fail fast rather than silently downgrading to Muon-only: that
+                # would change the optimizer recipe without record. The user
+                # must opt into Muon-only explicitly (the *_muonclip_noclip
+                # config does exactly this).
+                raise ValueError(
+                    "optimizer.name=muonclip requested QK clipping "
+                    "(muon_config.enable_clipping=true), but QK clipping is not "
+                    "supported under FSDP2 sharded Muon updates. Set "
+                    "optimizer.muon_config.enable_clipping=false for an explicit "
+                    "Muon-only run (see the *_muonclip_noclip config), or run "
+                    "without FSDP2 sharding to keep QK clipping."
+                )
+
+            if (
+                distributed_type is DistributedType.FSDP
+                and muon_clip_cfg.param_policy == "all_2d"
+            ):
+                logger.warning(
+                    "MuonClip param_policy=all_2d preserves the v0.1.3 optimizer "
+                    "scope. Under FSDP2 it will also owner-compute embeddings/"
+                    "output matrices, so expect materially higher communication "
+                    "cost than hidden_2d."
+                )
 
             logger.info(
                 f"MuonClip configuration:\n"
@@ -165,20 +163,15 @@ def get_optimizer(
                 f"  - Clipping threshold: {muon_clip_cfg.clipping_threshold}\n"
                 f"  - Clipping interval: {muon_clip_cfg.clipping_interval}\n"
                 f"  - QK chunk size: {muon_clip_cfg.clipping_qk_chunk_size}\n"
-                f"  - Capture last microbatch only: {muon_clip_cfg.capture_last_microbatch_only}\n"
                 f"  - Newton-Schulz steps: {muon_clip_cfg.ns_steps}\n"
+                f"  - Nesterov: {muon_clip_cfg.nesterov}\n"
                 f"  - Alpha (Q/K balance): {muon_clip_cfg.clipping_alpha}\n"
                 f"  - Orthogonalization: {muon_clip_cfg.orthogonalization}\n"
-                f"  - Norm factor: {muon_clip_cfg.norm_factor}"
+                f"  - Norm factor: {muon_clip_cfg.norm_factor}\n"
+                f"  - Param policy: {muon_clip_cfg.param_policy}"
             )
 
             return MuonClipOptimizer(model, model_config, muon_clip_cfg)
-
-        # case "SOAP":
-        #     assert distributed_type is not DistributedType.DEEPSPEED, (
-        #         "SOAP does not support DeepSpeed"
-        #     )
-        #     return SOAP(model.parameters(), **kwargs)
 
         case _:
             raise ValueError(

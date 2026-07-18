@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
+from export_utils import REQUIRED_HF_CONFIG_FIELDS, has_packed_swiglu_weights
 from transformers import AutoModel, AutoModelForMaskedLM, AutoTokenizer
 
 
@@ -48,22 +49,7 @@ def _check_required_config_fields(config: Dict[str, Any]) -> Optional[str]:
     :param dict[str, Any] config: Loaded config mapping.
     :return str | None: Issue summary if missing fields.
     """
-    required = [
-        "hidden_size",
-        "num_hidden_layers",
-        "num_attention_heads",
-        "intermediate_size",
-        "vocab_size",
-        "max_position_embeddings",
-        "norm_eps",
-        "pad_token_id",
-        "rms_norm",
-        "rope",
-        "hidden_act",
-        "dropout",
-        "flash_attention",
-    ]
-    missing = [field for field in required if field not in config]
+    missing = [field for field in REQUIRED_HF_CONFIG_FIELDS if field not in config]
     if missing:
         return f"missing config fields: {missing}"
     return None
@@ -81,11 +67,10 @@ def _check_swiglu_layout(model: object, config: Dict[str, Any]) -> Optional[str]
     if str(config.get("hidden_act", "")).lower() != "swiglu":
         return None
     state = model.state_dict()
-    has_w12 = any(".ffn.w12." in key for key in state.keys())
     has_w1 = any(".ffn.w1." in key for key in state.keys())
     has_w2 = any(".ffn.w2." in key for key in state.keys())
     has_w3 = any(".ffn.w3." in key for key in state.keys())
-    if has_w12:
+    if has_packed_swiglu_weights(state):
         return "packed SwiGLU weights (ffn.w12) found; expected unpacked w1/w2/w3"
     if not (has_w1 and has_w2 and has_w3):
         return "missing unpacked SwiGLU weights (w1/w2/w3)"
@@ -321,6 +306,9 @@ def test_attention_mask_parity(
             torch.tensor(float("-inf")),
         )
         additive_mask = additive_mask.to(torch.float32)
+        zero_int_mask = torch.zeros_like(int_mask)
+        zero_bool_mask = zero_int_mask.bool()
+        zero_float_mask = zero_int_mask.to(torch.float32)
 
         with torch.no_grad():
             out_none = model(input_ids=input_ids).last_hidden_state
@@ -346,11 +334,25 @@ def test_attention_mask_parity(
                 input_ids=input_ids,
                 attention_mask=additive_mask,
             ).last_hidden_state
+            out_zero_int = model(
+                input_ids=input_ids,
+                attention_mask=zero_int_mask,
+            ).last_hidden_state
+            out_zero_bool = model(
+                input_ids=input_ids,
+                attention_mask=zero_bool_mask,
+            ).last_hidden_state
+            out_zero_float = model(
+                input_ids=input_ids,
+                attention_mask=zero_float_mask,
+            ).last_hidden_state
 
         checks = [
             ("none_vs_ones", out_none, out_ones, atol, rtol),
             ("int_vs_bool", out_int_sdpa, out_bool, atol, rtol),
             ("int_vs_additive", out_int_sdpa, out_add, atol, rtol),
+            ("zero_int_vs_bool", out_zero_int, out_zero_bool, atol, rtol),
+            ("zero_int_vs_float", out_zero_int, out_zero_float, atol, rtol),
             # Eager softmax and SDPA can differ slightly on full-sized models.
             ("sdpa_vs_eager", out_int_sdpa, out_int_eager, 2e-5, rtol),
         ]

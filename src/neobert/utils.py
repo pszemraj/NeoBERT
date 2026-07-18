@@ -10,7 +10,6 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import torch
 import torch.nn as nn
 
-
 _TASK_CONFIG_FIELDS: dict[str, tuple[str, ...]] = {
     "pretraining": (
         "task",
@@ -60,7 +59,6 @@ _TASK_CONFIG_FIELDS: dict[str, tuple[str, ...]] = {
         "scheduler",
         "wandb",
         "glue",
-        "_raw_model_dict",
         "pretraining_metadata",
     ),
     "mteb": (
@@ -88,25 +86,35 @@ _NON_CONTRASTIVE_DATASET_EXCLUDE_FIELDS = {
     "alpha",
 }
 
-_LEGACY_TRAINER_EXCLUDE_FIELDS = {
-    "report_to",
-    "max_ckpt",
-    "train_batch_size",
-    "eval_batch_size",
-}
-
 _NON_CONTRASTIVE_TRAINER_EXCLUDE_FIELDS = {"dataloader_num_workers"}
 
 _PRETRAINING_TRAINER_EXCLUDE_FIELDS = {
     "disable_tqdm",
     "early_stopping",
-    "metric_for_best_model",
-    "greater_is_better",
-    "load_best_model_at_end",
     "save_model",
 }
 
 _SIMPLE_STRING_TOKEN_RE = re.compile(r"^[A-Za-z0-9_./:=+-]+$")
+
+
+def additive_attention_mask(
+    attention_mask: torch.Tensor,
+    *,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Convert a keep/pad attention mask to an additive ``0``/``-inf`` mask.
+
+    Canonical conversion used by every non-packed attention path (GLUE,
+    contrastive, MTEB, collator, HF adapter) so mask semantics cannot drift
+    between them. Nonzero entries mean "attend" per the HF convention; bool
+    masks keep ``True`` positions. Prefer ``torch.float32`` output: ``-inf``
+    additive masks in reduced precision can propagate NaNs through softmax.
+
+    :param torch.Tensor attention_mask: Keep/pad mask (bool or 0/1 numeric).
+    :param torch.dtype dtype: Output dtype for the additive mask.
+    :return torch.Tensor: Additive mask, ``0`` where kept and ``-inf`` where padded.
+    """
+    return torch.where(attention_mask != 0, 0.0, float("-inf")).to(dtype)
 
 
 def _serialize_config(cfg: Any) -> Dict[str, Any]:
@@ -179,8 +187,6 @@ def _task_filter_config(config_dict: Dict[str, Any]) -> Dict[str, Any]:
 
     trainer_cfg = filtered.get("trainer")
     if isinstance(trainer_cfg, dict):
-        for key in _LEGACY_TRAINER_EXCLUDE_FIELDS:
-            trainer_cfg.pop(key, None)
         if task != "contrastive":
             for key in _NON_CONTRASTIVE_TRAINER_EXCLUDE_FIELDS:
                 trainer_cfg.pop(key, None)
@@ -354,18 +360,7 @@ def prepare_wandb_config(cfg: Any) -> Dict[str, Any]:
     :param Any cfg: Configuration object (typically a dataclass).
     :return dict[str, Any]: Task-scoped dictionary ready for tracker ingestion.
     """
-    config_dict = _serialize_config(cfg)
-
-    # Preserve dynamically attached metadata only for GLUE-oriented runs.
-    task = str(config_dict.get("task", "pretraining")).strip().lower()
-    if (
-        task == "glue"
-        and hasattr(cfg, "_raw_model_dict")
-        and cfg._raw_model_dict is not None
-    ):
-        config_dict["_raw_model_dict"] = cfg._raw_model_dict
-
-    return _task_filter_config(config_dict)
+    return _task_filter_config(_serialize_config(cfg))
 
 
 def configure_tf32(

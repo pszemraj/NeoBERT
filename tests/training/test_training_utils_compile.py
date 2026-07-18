@@ -2,29 +2,222 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+import signal
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
-from accelerate.state import AcceleratorState, GradientState
 from accelerate.utils import DataLoaderConfiguration, DistributedType
 
-from neobert.config import Config
+from neobert.checkpointing import (
+    ACCELERATE_STATE_DIR,
+    CHECKPOINT_COMPLETE_NAME,
+    OPTIMIZER_PARAM_NAMES_MANIFEST,
+    checkpoint_resume_errors,
+    mark_checkpoint_complete,
+)
+from neobert.config import Config, ConfigLoader
 from neobert.model import NeoBERT, NeoBERTConfig
 from neobert.optimizer import get_optimizer
 from neobert.training_utils import (
     _compute_l2_norm_for_logging,
     _maybe_compile_model,
+    _reset_accelerate_runtime_state,
+    _resolve_resume_checkpoint,
     _update_global_norm_metric_for_logging,
+    attach_optimizer_param_names,
     create_accelerator,
+    optimizer_state_semantics,
+    preserve_sigterm_handler,
     resolve_runtime_mixed_precision_and_attn_backend,
     resolve_wandb_watch_mode,
+    save_optimizer_param_name_manifest,
+    should_save_step_checkpoint,
+    sync_resume_source_of_truth,
     validate_distributed_runtime_policy,
     validate_muon_distributed_compatibility,
     validate_muon_runtime_topology,
+    validate_optimizer_param_name_manifest,
 )
+
+
+def test_preserve_sigterm_handler_restores_after_exception() -> None:
+    """Training failures must not leak their SIGTERM handler into the process."""
+    original_handler = signal.getsignal(signal.SIGTERM)
+
+    def replacement_handler(signum: int, frame: object) -> None:
+        del signum, frame
+
+    @preserve_sigterm_handler()
+    def fail_after_installing_handler() -> None:
+        signal.signal(signal.SIGTERM, replacement_handler)
+        raise RuntimeError("training failed")
+
+    try:
+        with pytest.raises(RuntimeError, match="training failed"):
+            fail_after_installing_handler()
+        assert signal.getsignal(signal.SIGTERM) == original_handler
+    finally:
+        signal.signal(signal.SIGTERM, original_handler)
+
+    from neobert.contrastive.trainer import trainer as contrastive_trainer
+    from neobert.pretraining.trainer import trainer as pretraining_trainer
+
+    assert hasattr(contrastive_trainer, "__wrapped__")
+    assert hasattr(pretraining_trainer, "__wrapped__")
+
+
+def _write_complete_checkpoint_shell(
+    checkpoint_path: Path,
+    *,
+    task: str = "pretraining",
+) -> None:
+    """Write minimal current-format artifacts for resume-selection tests.
+
+    :param Path checkpoint_path: Existing step directory.
+    :param str task: Task recorded in config and marker.
+    """
+    accelerate_dir = checkpoint_path / ACCELERATE_STATE_DIR
+    accelerate_dir.mkdir(exist_ok=True)
+    for filename in (
+        "model.safetensors",
+        "optimizer.bin",
+        "scheduler.bin",
+        "random_states_0.pkl",
+    ):
+        (accelerate_dir / filename).write_bytes(b"x")
+    (accelerate_dir / "custom_checkpoint_0.pkl").write_bytes(b"x")
+    if task == "pretraining":
+        (accelerate_dir / "custom_checkpoint_1.pkl").write_bytes(b"x")
+    (checkpoint_path / OPTIMIZER_PARAM_NAMES_MANIFEST).write_text(
+        '{"schema_version":1,"state_semantics":"adamw-v1","param_name_groups":[]}\n',
+        encoding="utf-8",
+    )
+    (checkpoint_path / "config.yaml").write_text(f"task: {task}\n", encoding="utf-8")
+    (checkpoint_path / "model.safetensors").write_bytes(b"x")
+    tokenizer_dir = checkpoint_path / "tokenizer"
+    tokenizer_dir.mkdir(exist_ok=True)
+    (tokenizer_dir / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+    mark_checkpoint_complete(checkpoint_path, task=task)
+
+
+def test_numeric_resume_selector_resolves_under_checkpoint_root(tmp_path: Path) -> None:
+    """Bare step selectors resolve to the canonical checkpoints directory."""
+    output_dir = tmp_path / "run"
+    checkpoint_dir = output_dir / "checkpoints"
+    expected = checkpoint_dir / "100"
+    expected.mkdir(parents=True)
+    _write_complete_checkpoint_shell(expected)
+    (output_dir / "100").mkdir()
+
+    resume_path, iteration = _resolve_resume_checkpoint(
+        "100", str(checkpoint_dir), str(output_dir)
+    )
+
+    assert Path(resume_path) == expected
+    assert iteration == 101
+
+
+def test_latest_resume_preserves_zero_padding_and_skips_incomplete(
+    tmp_path: Path,
+) -> None:
+    """Latest returns the exact newest complete directory spelling."""
+    output_dir = tmp_path / "run"
+    checkpoint_dir = output_dir / "checkpoints"
+    complete = checkpoint_dir / "00050"
+    incomplete = checkpoint_dir / "60"
+    complete.mkdir(parents=True)
+    incomplete.mkdir()
+    _write_complete_checkpoint_shell(complete)
+    (incomplete / ACCELERATE_STATE_DIR).mkdir()
+
+    resume_path, iteration = _resolve_resume_checkpoint(
+        "latest", str(checkpoint_dir), str(output_dir)
+    )
+
+    assert Path(resume_path) == complete
+    assert iteration == 51
+
+
+@pytest.mark.parametrize("selector", ["auto", "latest", "true"])
+@pytest.mark.parametrize(
+    "checkpoint_root_state",
+    ["missing", "empty", "no-numbered-checkpoints"],
+)
+def test_automatic_resume_starts_fresh_without_checkpoints(
+    tmp_path: Path,
+    selector: str,
+    checkpoint_root_state: str,
+) -> None:
+    """Automatic resume selectors must permit a job's first launch."""
+    output_dir = tmp_path / "run"
+    checkpoint_dir = output_dir / "checkpoints"
+    if checkpoint_root_state != "missing":
+        checkpoint_dir.mkdir(parents=True)
+    if checkpoint_root_state == "no-numbered-checkpoints":
+        (checkpoint_dir / "notes.txt").write_text(
+            "no checkpoints yet\n", encoding="utf-8"
+        )
+
+    resume_path, iteration = _resolve_resume_checkpoint(
+        selector,
+        str(checkpoint_dir),
+        str(output_dir),
+    )
+
+    assert resume_path is None
+    assert iteration == 0
+
+
+@pytest.mark.parametrize(
+    "marker_payload",
+    [None, []],
+    ids=["null", "array"],
+)
+def test_latest_resume_skips_non_object_completion_marker(
+    tmp_path: Path,
+    marker_payload: object,
+) -> None:
+    """Latest skips checkpoints whose completion marker is not a JSON object."""
+    output_dir = tmp_path / "run"
+    checkpoint_dir = output_dir / "checkpoints"
+    complete = checkpoint_dir / "50"
+    damaged = checkpoint_dir / "60"
+    complete.mkdir(parents=True)
+    damaged.mkdir()
+    _write_complete_checkpoint_shell(complete)
+    _write_complete_checkpoint_shell(damaged)
+    (damaged / CHECKPOINT_COMPLETE_NAME).write_text(
+        json.dumps(marker_payload), encoding="utf-8"
+    )
+
+    assert checkpoint_resume_errors(damaged) == [
+        f"invalid {CHECKPOINT_COMPLETE_NAME}: expected a JSON object"
+    ]
+    resume_path, iteration = _resolve_resume_checkpoint(
+        "latest", str(checkpoint_dir), str(output_dir)
+    )
+
+    assert Path(resume_path) == complete
+    assert iteration == 51
+
+
+def test_explicit_incomplete_resume_is_rejected(tmp_path: Path) -> None:
+    """Explicit selectors cannot bypass checkpoint completion validation."""
+    output_dir = tmp_path / "run"
+    checkpoint_dir = output_dir / "checkpoints"
+    incomplete = checkpoint_dir / "60"
+    incomplete.mkdir(parents=True)
+
+    with pytest.raises(RuntimeError, match="not resumable"):
+        _resolve_resume_checkpoint("60", str(checkpoint_dir), str(output_dir))
+
+    with pytest.raises(RuntimeError, match="No complete resumable checkpoints"):
+        _resolve_resume_checkpoint("latest", str(checkpoint_dir), str(output_dir))
 
 
 def _make_cfg() -> Config:
@@ -42,6 +235,84 @@ def _make_cfg() -> Config:
 def _make_accelerator() -> SimpleNamespace:
     """Build a minimal accelerator stub."""
     return SimpleNamespace(distributed_type=DistributedType.NO)
+
+
+class _RuntimeTopologyShard:
+    def __init__(self, dim: int) -> None:
+        self.dim = dim
+
+
+class _RuntimeTopologyMesh:
+    def __init__(self, ndim: int = 1) -> None:
+        self.ndim = ndim
+
+
+class _RuntimeTopologyDTensorParam:
+    def __init__(
+        self,
+        *,
+        mesh_ndim: int = 1,
+        shard_dim: int = 0,
+        local: torch.Tensor | None = None,
+    ) -> None:
+        self.device_mesh = _RuntimeTopologyMesh(mesh_ndim)
+        self.placements = (_RuntimeTopologyShard(shard_dim),)
+        self._local = torch.zeros(1, 1) if local is None else local
+
+    def to_local(self) -> torch.Tensor:
+        return self._local
+
+
+def _runtime_topology_optimizer(
+    *, mesh_ndim: int = 1, shard_dim: int = 0
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        param_groups=[
+            {
+                "use_muon": True,
+                "params": [
+                    _RuntimeTopologyDTensorParam(
+                        mesh_ndim=mesh_ndim,
+                        shard_dim=shard_dim,
+                    )
+                ],
+            }
+        ]
+    )
+
+
+class _RuntimeReplicate:
+    pass
+
+
+class _RuntimeLoggingDTensor:
+    def __init__(self, local_value: torch.Tensor, placements: tuple[object, ...]):
+        self.device_mesh = _RuntimeTopologyMesh()
+        self._local_value = local_value
+        self.placements = placements
+
+    def to_local(self) -> torch.Tensor:
+        return self._local_value
+
+
+class _RuntimeShardedGradParam(_RuntimeTopologyDTensorParam):
+    def __init__(self, grad: torch.Tensor) -> None:
+        super().__init__(local=torch.zeros(0))
+        self.grad = grad
+
+
+class _CompileWrapper(torch.nn.Module):
+    def __init__(self, module: torch.nn.Module) -> None:
+        super().__init__()
+        self._orig_mod = module
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Run the wrapped module forward.
+
+        :param torch.Tensor inputs: Input tensor.
+        :return torch.Tensor: Wrapped module output.
+        """
+        return self._orig_mod(inputs)
 
 
 def test_maybe_compile_model_allows_muonclip_clipping(
@@ -178,10 +449,503 @@ def test_resolve_wandb_watch_mode_matrix() -> None:
             assert warning is None
 
 
+def test_sync_resume_source_of_truth_uses_checkpoint_config(
+    tmp_path: Path,
+) -> None:
+    """Resume should use checkpoint tokenizer/model/objective fields."""
+    checkpoint_dir = tmp_path / "checkpoints" / "10"
+    tokenizer_dir = checkpoint_dir / "tokenizer"
+    tokenizer_dir.mkdir(parents=True)
+
+    checkpoint_cfg = Config()
+    checkpoint_cfg.task = "contrastive"
+    checkpoint_cfg.model.hidden_size = 128
+    checkpoint_cfg.model.dropout_prob = 0.2
+    checkpoint_cfg.tokenizer.name = "checkpoint-tokenizer"
+    checkpoint_cfg.tokenizer.max_length = 256
+    checkpoint_cfg.dataset.name = "checkpoint-dataset"
+    checkpoint_cfg.dataset.path = "checkpoint-data"
+    checkpoint_cfg.dataset.max_seq_length = 256
+    checkpoint_cfg.datacollator.mlm_probability = 0.3
+    checkpoint_cfg.datacollator.pack_sequences = True
+    checkpoint_cfg.contrastive.pooling = "max"
+    checkpoint_cfg.contrastive.pretraining_prob = 0.4
+    checkpoint_cfg.contrastive.pretraining_dataset_path = "checkpoint-simcse"
+    checkpoint_cfg.trainer.per_device_train_batch_size = 8
+    checkpoint_cfg.trainer.gradient_accumulation_steps = 4
+    checkpoint_cfg.optimizer.name = "adamw"
+    checkpoint_cfg.optimizer.lr = 2e-5
+    checkpoint_cfg.scheduler.name = "linear"
+    checkpoint_cfg.scheduler.warmup_percent = 10
+    checkpoint_cfg.trainer.gradient_checkpointing = True
+    checkpoint_cfg.trainer.torch_compile = True
+    ConfigLoader.save(checkpoint_cfg, str(checkpoint_dir / "config.yaml"))
+
+    runtime_cfg = Config()
+    runtime_cfg.task = "contrastive"
+    runtime_cfg.model.hidden_size = 64
+    runtime_cfg.model.dropout_prob = 0.0
+    runtime_cfg.tokenizer.name = "runtime-tokenizer"
+    runtime_cfg.tokenizer.max_length = 128
+    runtime_cfg.dataset.name = "runtime-dataset"
+    runtime_cfg.dataset.path = "runtime-data"
+    runtime_cfg.dataset.max_seq_length = 128
+    runtime_cfg.datacollator.mlm_probability = 0.15
+    runtime_cfg.datacollator.pack_sequences = False
+    runtime_cfg.contrastive.pooling = "avg"
+    runtime_cfg.contrastive.pretraining_prob = 0.0
+    runtime_cfg.contrastive.pretraining_dataset_path = "runtime-simcse"
+    runtime_cfg.trainer.per_device_train_batch_size = 32
+    runtime_cfg.trainer.gradient_accumulation_steps = 1
+    runtime_cfg.optimizer.name = "adam"
+    runtime_cfg.optimizer.lr = 1e-3
+    runtime_cfg.scheduler.name = "cosine"
+    runtime_cfg.scheduler.warmup_percent = 5
+    runtime_cfg.trainer.gradient_checkpointing = False
+    runtime_cfg.trainer.torch_compile = False
+
+    drift = sync_resume_source_of_truth(
+        runtime_cfg,
+        checkpoint_dir,
+        task="contrastive",
+        log=logging.getLogger("test"),
+    )
+
+    # Model shape/semantics, tokenizer identity, masking, and objective are
+    # checkpoint-authoritative (forced back).
+    assert runtime_cfg.model.hidden_size == 128
+    assert runtime_cfg.model.dropout_prob == 0.2
+    assert runtime_cfg.tokenizer.path == str(tokenizer_dir)
+    assert runtime_cfg.datacollator.mlm_probability == 0.3
+    assert runtime_cfg.datacollator.pack_sequences is True
+    assert runtime_cfg.contrastive.pooling == "max"
+    assert runtime_cfg.contrastive.pretraining_prob == 0.4
+    assert runtime_cfg.contrastive.pretraining_dataset_path == "runtime-simcse"
+    assert "contrastive.pretraining_dataset_path" in drift
+    # Corpus identity is operator-controlled (launch config wins on resume).
+    assert runtime_cfg.dataset.name == "runtime-dataset"
+    assert runtime_cfg.dataset.path == "runtime-data"
+    # Both configs default to RoPE, so context length is operator-controlled too.
+    assert runtime_cfg.tokenizer.max_length == 128
+    assert runtime_cfg.dataset.max_seq_length == 128
+    # Trainer runtime/performance knobs stay launch-controlled on resume.
+    assert runtime_cfg.trainer.per_device_train_batch_size == 32
+    assert runtime_cfg.trainer.gradient_accumulation_steps == 1
+    assert runtime_cfg.trainer.gradient_checkpointing is False
+    assert runtime_cfg.trainer.torch_compile is False
+    assert runtime_cfg.optimizer.name == "adamw"
+    assert runtime_cfg.optimizer.lr == pytest.approx(2e-5)
+    assert runtime_cfg.scheduler.name == "linear"
+    assert runtime_cfg.scheduler.warmup_percent == 10
+
+
+def test_sync_resume_forces_sequence_length_for_non_rope(tmp_path: Path) -> None:
+    """Non-RoPE context length is checkpoint-authoritative (learned pos table).
+
+    Corpus identity stays operator-controlled regardless of RoPE, but sequence
+    length is forced back for non-RoPE checkpoints because changing it would
+    break the strict positional-embedding weight load.
+    """
+    checkpoint_dir = tmp_path / "checkpoints" / "10"
+    checkpoint_dir.mkdir(parents=True)
+    checkpoint_cfg = Config()
+    checkpoint_cfg.model.rope = False
+    checkpoint_cfg.model.max_position_embeddings = 256
+    checkpoint_cfg.tokenizer.max_length = 256
+    checkpoint_cfg.dataset.max_seq_length = 256
+    checkpoint_cfg.datacollator.max_length = 256
+    checkpoint_cfg.dataset.name = "checkpoint-dataset"
+    ConfigLoader.save(checkpoint_cfg, str(checkpoint_dir / "config.yaml"))
+
+    runtime_cfg = Config()
+    runtime_cfg.model.rope = False
+    runtime_cfg.model.max_position_embeddings = 512
+    runtime_cfg.tokenizer.max_length = 512
+    runtime_cfg.dataset.max_seq_length = 512
+    runtime_cfg.datacollator.max_length = 512
+    runtime_cfg.dataset.name = "runtime-dataset"
+
+    sync_resume_source_of_truth(
+        runtime_cfg, checkpoint_dir, task="pretraining", log=logging.getLogger("test")
+    )
+
+    # Non-RoPE: sequence length forced back to the checkpoint's.
+    assert runtime_cfg.model.max_position_embeddings == 256
+    assert runtime_cfg.tokenizer.max_length == 256
+    assert runtime_cfg.dataset.max_seq_length == 256
+    assert runtime_cfg.datacollator.max_length == 256
+    # Corpus identity is still operator-controlled.
+    assert runtime_cfg.dataset.name == "runtime-dataset"
+
+
+def test_sync_resume_preserves_rope_packed_context_and_pretraining_batch_size(
+    tmp_path: Path,
+) -> None:
+    """RoPE context may extend, but a batch cursor keeps checkpoint geometry."""
+    checkpoint_dir = tmp_path / "checkpoints" / "10"
+    checkpoint_dir.mkdir(parents=True)
+    checkpoint_cfg = Config()
+    checkpoint_cfg.model.rope = True
+    checkpoint_cfg.model.max_position_embeddings = 1024
+    checkpoint_cfg.tokenizer.max_length = 1024
+    checkpoint_cfg.dataset.max_seq_length = 1024
+    checkpoint_cfg.datacollator.max_length = 1024
+    checkpoint_cfg.trainer.per_device_train_batch_size = 8
+    ConfigLoader.save(checkpoint_cfg, str(checkpoint_dir / "config.yaml"))
+
+    runtime_cfg = Config()
+    runtime_cfg.model.rope = True
+    runtime_cfg.model.max_position_embeddings = 2048
+    runtime_cfg.tokenizer.max_length = 2048
+    runtime_cfg.dataset.max_seq_length = 2048
+    runtime_cfg.datacollator.max_length = 2048
+    runtime_cfg.trainer.per_device_train_batch_size = 32
+
+    drift = sync_resume_source_of_truth(
+        runtime_cfg,
+        checkpoint_dir,
+        task="pretraining",
+        log=logging.getLogger("test"),
+    )
+
+    assert runtime_cfg.model.max_position_embeddings == 2048
+    assert runtime_cfg.tokenizer.max_length == 2048
+    assert runtime_cfg.dataset.max_seq_length == 2048
+    assert runtime_cfg.datacollator.max_length == 2048
+    assert runtime_cfg.trainer.per_device_train_batch_size == 8
+    assert {
+        "model.max_position_embeddings",
+        "tokenizer.max_length",
+        "dataset.max_seq_length",
+        "datacollator.max_length",
+    } <= drift
+
+
+def test_sync_resume_preserves_new_corpus_split_selection(tmp_path: Path) -> None:
+    """A corpus change must not inherit loader/split choices from the old source."""
+    checkpoint_dir = tmp_path / "checkpoints" / "10"
+    checkpoint_dir.mkdir(parents=True)
+    checkpoint_cfg = Config()
+    checkpoint_cfg.dataset.name = "old-corpus"
+    checkpoint_cfg.dataset.config = "old-subset"
+    checkpoint_cfg.dataset.streaming = False
+    checkpoint_cfg.dataset.train_split = "old-train"
+    checkpoint_cfg.dataset.eval_split = "old-validation"
+    checkpoint_cfg.dataset.validation_split = 0.1
+    checkpoint_cfg.dataset.eval_samples = 100
+    checkpoint_cfg.dataset.shuffle_buffer_size = 1000
+    ConfigLoader.save(checkpoint_cfg, checkpoint_dir / "config.yaml")
+
+    runtime_cfg = Config()
+    runtime_cfg.dataset.name = "new-corpus"
+    runtime_cfg.dataset.config = "new-subset"
+    runtime_cfg.dataset.streaming = True
+    runtime_cfg.dataset.train_split = "train"
+    runtime_cfg.dataset.eval_split = None
+    runtime_cfg.dataset.validation_split = None
+    runtime_cfg.dataset.eval_samples = 500
+    runtime_cfg.dataset.shuffle_buffer_size = 20000
+
+    drift = sync_resume_source_of_truth(
+        runtime_cfg,
+        checkpoint_dir,
+        task="pretraining",
+        log=logging.getLogger("test"),
+    )
+
+    assert runtime_cfg.dataset.name == "new-corpus"
+    assert runtime_cfg.dataset.config == "new-subset"
+    assert runtime_cfg.dataset.streaming is True
+    assert runtime_cfg.dataset.train_split == "train"
+    assert runtime_cfg.dataset.eval_split is None
+    assert runtime_cfg.dataset.validation_split is None
+    assert runtime_cfg.dataset.eval_samples == 500
+    assert runtime_cfg.dataset.shuffle_buffer_size == 20000
+    assert {
+        "dataset.name",
+        "dataset.config",
+        "dataset.streaming",
+        "dataset.train_split",
+        "dataset.eval_split",
+        "dataset.validation_split",
+        "dataset.eval_samples",
+        "dataset.shuffle_buffer_size",
+    } <= drift
+
+
+def test_sync_resume_restores_same_corpus_split_selection(tmp_path: Path) -> None:
+    """An unchanged corpus must retain checkpoint cursor and split semantics."""
+    checkpoint_dir = tmp_path / "checkpoints" / "10"
+    checkpoint_dir.mkdir(parents=True)
+    checkpoint_cfg = Config()
+    checkpoint_cfg.dataset.name = "same-corpus"
+    checkpoint_cfg.dataset.config = "same-subset"
+    checkpoint_cfg.dataset.streaming = True
+    checkpoint_cfg.dataset.train_split = "train"
+    checkpoint_cfg.dataset.eval_split = "validation"
+    checkpoint_cfg.dataset.eval_samples = 100
+    checkpoint_cfg.dataset.shuffle_buffer_size = 1000
+    ConfigLoader.save(checkpoint_cfg, checkpoint_dir / "config.yaml")
+
+    runtime_cfg = Config()
+    runtime_cfg.dataset.name = "same-corpus"
+    runtime_cfg.dataset.config = "same-subset"
+    runtime_cfg.dataset.streaming = False
+    runtime_cfg.dataset.train_split = "alternate-train"
+    runtime_cfg.dataset.eval_split = None
+    runtime_cfg.dataset.eval_samples = 500
+    runtime_cfg.dataset.shuffle_buffer_size = 20000
+
+    drift = sync_resume_source_of_truth(
+        runtime_cfg,
+        checkpoint_dir,
+        task="pretraining",
+        log=logging.getLogger("test"),
+    )
+
+    assert runtime_cfg.dataset.streaming is True
+    assert runtime_cfg.dataset.train_split == "train"
+    assert runtime_cfg.dataset.eval_split == "validation"
+    assert runtime_cfg.dataset.eval_samples == 100
+    assert runtime_cfg.dataset.shuffle_buffer_size == 1000
+    assert (
+        not {
+            "dataset.streaming",
+            "dataset.train_split",
+            "dataset.eval_split",
+            "dataset.eval_samples",
+            "dataset.shuffle_buffer_size",
+        }
+        & drift
+    )
+
+
+def test_sync_glue_resume_forces_task_and_cursor_geometry(tmp_path: Path) -> None:
+    """GLUE continuation should reconstruct task semantics and sample geometry."""
+    checkpoint_dir = tmp_path / "checkpoints" / "10"
+    (checkpoint_dir / "tokenizer").mkdir(parents=True)
+    checkpoint_cfg = Config()
+    checkpoint_cfg.task = "glue"
+    checkpoint_cfg.seed = 17
+    checkpoint_cfg.model.name = "checkpoint-model"
+    checkpoint_cfg.model.from_hub = True
+    checkpoint_cfg.model.max_position_embeddings = 256
+    checkpoint_cfg.tokenizer.max_length = 192
+    checkpoint_cfg.glue.task_name = "stsb"
+    checkpoint_cfg.glue.num_labels = 1
+    checkpoint_cfg.glue.max_seq_length = 192
+    checkpoint_cfg.glue.classifier_dropout = 0.2
+    checkpoint_cfg.trainer.per_device_train_batch_size = 8
+    checkpoint_cfg.trainer.gradient_accumulation_steps = 4
+    checkpoint_cfg.optimizer.name = "adamw"
+    checkpoint_cfg.optimizer.lr = 2e-5
+    checkpoint_cfg.scheduler.name = "linear"
+    checkpoint_cfg.scheduler.warmup_percent = 10
+    ConfigLoader.save(checkpoint_cfg, checkpoint_dir / "config.yaml")
+
+    runtime_cfg = Config()
+    runtime_cfg.task = "glue"
+    runtime_cfg.seed = 99
+    runtime_cfg.model.name = "launch-model"
+    runtime_cfg.model.from_hub = False
+    runtime_cfg.model.max_position_embeddings = 512
+    runtime_cfg.tokenizer.max_length = 128
+    runtime_cfg.glue.task_name = "sst2"
+    runtime_cfg.glue.num_labels = 2
+    runtime_cfg.glue.max_seq_length = 128
+    runtime_cfg.glue.classifier_dropout = 0.1
+    runtime_cfg.trainer.per_device_train_batch_size = 32
+    runtime_cfg.trainer.gradient_accumulation_steps = 1
+    runtime_cfg.optimizer.name = "adam"
+    runtime_cfg.optimizer.lr = 1e-3
+    runtime_cfg.scheduler.name = "cosine"
+    runtime_cfg.scheduler.warmup_percent = 5
+
+    sync_resume_source_of_truth(
+        runtime_cfg,
+        checkpoint_dir,
+        task="glue",
+        log=logging.getLogger("test"),
+    )
+
+    assert runtime_cfg.seed == 17
+    assert runtime_cfg.model.name == "checkpoint-model"
+    assert runtime_cfg.model.from_hub is True
+    assert runtime_cfg.model.max_position_embeddings == 256
+    assert runtime_cfg.tokenizer.max_length == 192
+    assert runtime_cfg.tokenizer.path == str(checkpoint_dir / "tokenizer")
+    assert runtime_cfg.glue.task_name == "stsb"
+    assert runtime_cfg.glue.num_labels == 1
+    assert runtime_cfg.glue.max_seq_length == 192
+    assert runtime_cfg.glue.classifier_dropout == pytest.approx(0.2)
+    assert runtime_cfg.trainer.per_device_train_batch_size == 8
+    assert runtime_cfg.trainer.gradient_accumulation_steps == 4
+    assert runtime_cfg.optimizer.name == "adamw"
+    assert runtime_cfg.optimizer.lr == pytest.approx(2e-5)
+    assert runtime_cfg.scheduler.name == "linear"
+    assert runtime_cfg.scheduler.warmup_percent == 10
+
+
+def test_sync_resume_source_of_truth_rejects_missing_config(tmp_path: Path) -> None:
+    """Resume without checkpoint config must fail before runtime state load."""
+    checkpoint_dir = tmp_path / "checkpoints" / "10"
+    checkpoint_dir.mkdir(parents=True)
+
+    with pytest.raises(RuntimeError, match="config.yaml"):
+        sync_resume_source_of_truth(
+            Config(),
+            checkpoint_dir,
+            task="pretraining",
+            log=logging.getLogger("test"),
+        )
+
+
+def test_optimizer_param_name_manifest_rejects_reordered_groups(
+    tmp_path: Path,
+) -> None:
+    """Same-shaped parameter reordering must not load optimizer state silently."""
+
+    class OrderedPair(torch.nn.Module):
+        def __init__(self, reverse: bool = False) -> None:
+            super().__init__()
+            if reverse:
+                self.second = torch.nn.Linear(2, 2, bias=False)
+                self.first = torch.nn.Linear(2, 2, bias=False)
+            else:
+                self.first = torch.nn.Linear(2, 2, bias=False)
+                self.second = torch.nn.Linear(2, 2, bias=False)
+
+    model = OrderedPair(reverse=False)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    attach_optimizer_param_names(model, optimizer)
+    save_optimizer_param_name_manifest(optimizer, tmp_path)
+
+    validate_optimizer_param_name_manifest(optimizer, tmp_path)
+
+    reordered_model = OrderedPair(reverse=True)
+    reordered_optimizer = torch.optim.AdamW(reordered_model.parameters(), lr=1e-3)
+    attach_optimizer_param_names(reordered_model, reordered_optimizer)
+    with pytest.raises(RuntimeError, match="parameter order changed"):
+        validate_optimizer_param_name_manifest(reordered_optimizer, tmp_path)
+
+
+def test_optimizer_param_name_manifest_ignores_runtime_wrapper_prefixes(
+    tmp_path: Path,
+) -> None:
+    """Compile/distributed wrapper prefixes must not affect resume manifests."""
+    compiled_checkpoint = tmp_path / "compiled"
+    compiled_checkpoint.mkdir()
+    compiled_model = _CompileWrapper(torch.nn.Linear(2, 2))
+    compiled_optimizer = torch.optim.AdamW(compiled_model.parameters(), lr=1e-3)
+    attach_optimizer_param_names(compiled_model, compiled_optimizer)
+    manifest_path = save_optimizer_param_name_manifest(
+        compiled_optimizer,
+        compiled_checkpoint,
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["param_name_groups"] == [["weight", "bias"]]
+
+    uncompiled_model = torch.nn.Linear(2, 2)
+    uncompiled_optimizer = torch.optim.AdamW(uncompiled_model.parameters(), lr=1e-3)
+    attach_optimizer_param_names(uncompiled_model, uncompiled_optimizer)
+    validate_optimizer_param_name_manifest(uncompiled_optimizer, compiled_checkpoint)
+
+    uncompiled_checkpoint = tmp_path / "uncompiled"
+    uncompiled_checkpoint.mkdir()
+    save_optimizer_param_name_manifest(uncompiled_optimizer, uncompiled_checkpoint)
+
+    compiled_resume_model = _CompileWrapper(torch.nn.Linear(2, 2))
+    compiled_resume_optimizer = torch.optim.AdamW(
+        compiled_resume_model.parameters(),
+        lr=1e-3,
+    )
+    attach_optimizer_param_names(compiled_resume_model, compiled_resume_optimizer)
+    validate_optimizer_param_name_manifest(
+        compiled_resume_optimizer,
+        uncompiled_checkpoint,
+    )
+
+
+def test_optimizer_state_semantics_tags() -> None:
+    """Semantics tags come from STATE_SEMANTICS or a class-name default."""
+    from neobert.optimizer import MuonClipOptimizer
+
+    model = torch.nn.Linear(2, 2, bias=False)
+    adamw = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    assert optimizer_state_semantics(adamw) == "adamw-v1"
+    assert MuonClipOptimizer.STATE_SEMANTICS == "muonclip-heavyball-v2"
+
+
+def test_optimizer_state_semantics_honors_instance_qualified_tags() -> None:
+    """Config-qualified instance tags must shadow the class-level tag."""
+    model = torch.nn.Linear(2, 2, bias=False)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    optimizer.STATE_SEMANTICS = "adamw-v1|norm_factor=spectral"
+
+    assert optimizer_state_semantics(optimizer) == "adamw-v1|norm_factor=spectral"
+
+
+def test_optimizer_param_name_manifest_rejects_missing_manifest(
+    tmp_path: Path,
+) -> None:
+    """Checkpoints without a manifest must not resume optimizer state silently."""
+    model = torch.nn.Linear(2, 2, bias=False)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    attach_optimizer_param_names(model, optimizer)
+
+    with pytest.raises(RuntimeError, match="predates the optimizer resume manifest"):
+        validate_optimizer_param_name_manifest(optimizer, tmp_path)
+
+
+def test_optimizer_param_name_manifest_rejects_outdated_schema(
+    tmp_path: Path,
+) -> None:
+    """Bare name-list manifests lack state semantics and must be rejected."""
+    model = torch.nn.Linear(2, 2, bias=False)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    attach_optimizer_param_names(model, optimizer)
+
+    manifest_path = tmp_path / "optimizer_param_names.json"
+    manifest_path.write_text(json.dumps([["weight"]]), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="outdated manifest schema"):
+        validate_optimizer_param_name_manifest(optimizer, tmp_path)
+
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 0,
+                "state_semantics": "adamw-v1",
+                "param_name_groups": [["weight"]],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="schema_version must be 1"):
+        validate_optimizer_param_name_manifest(optimizer, tmp_path)
+
+
+def test_optimizer_param_name_manifest_rejects_changed_state_semantics(
+    tmp_path: Path,
+) -> None:
+    """State saved under a different update rule must not load silently."""
+    model = torch.nn.Linear(2, 2, bias=False)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    attach_optimizer_param_names(model, optimizer)
+    manifest_path = save_optimizer_param_name_manifest(optimizer, tmp_path)
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["state_semantics"] = "adamw-v0"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="state semantics changed"):
+        validate_optimizer_param_name_manifest(optimizer, tmp_path)
+
+
 def test_create_accelerator_recreates_state_for_mixed_precision_reuse() -> None:
     """Sequential trainer runs should honor updated mixed precision settings."""
-    GradientState._reset_state()
-    AcceleratorState._reset_state(reset_partial_state=True)
+    _reset_accelerate_runtime_state()
 
     try:
         first = create_accelerator(
@@ -200,8 +964,7 @@ def test_create_accelerator_recreates_state_for_mixed_precision_reuse() -> None:
         assert second.device.type == "cpu"
         assert second.state.mixed_precision == "no"
     finally:
-        GradientState._reset_state()
-        AcceleratorState._reset_state(reset_partial_state=True)
+        _reset_accelerate_runtime_state()
 
 
 def test_create_accelerator_resets_on_state_mismatch_error(
@@ -246,6 +1009,49 @@ def test_create_accelerator_resets_on_state_mismatch_error(
 
     assert out.cpu is True
     assert out.mixed_precision == "bf16"
+    assert calls == [
+        {"mixed_precision": "bf16", "cpu": True},
+        {"mixed_precision": "bf16", "cpu": True},
+    ]
+    assert reset_calls == [("gradient", None), ("accelerator", True)]
+
+
+def test_create_accelerator_resets_when_cpu_request_reuses_cuda_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CPU requests should not silently reuse stale CUDA accelerator state."""
+    import neobert.training_utils as training_utils
+
+    reset_calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        training_utils.AcceleratorState,
+        "_reset_state",
+        lambda reset_partial_state=False: reset_calls.append(
+            ("accelerator", bool(reset_partial_state))
+        ),
+    )
+    monkeypatch.setattr(
+        training_utils.GradientState,
+        "_reset_state",
+        lambda: reset_calls.append(("gradient", None)),
+    )
+
+    calls: list[dict[str, object]] = []
+
+    def _fake_factory(**kwargs: object) -> SimpleNamespace:
+        calls.append(dict(kwargs))
+        device = torch.device("cuda" if len(calls) == 1 else "cpu")
+        return SimpleNamespace(device=device, **kwargs)
+
+    out = create_accelerator(
+        use_cpu=True,
+        log=logging.getLogger("test"),
+        accelerator_factory=_fake_factory,
+        mixed_precision="bf16",
+    )
+
+    assert out.device.type == "cpu"
     assert calls == [
         {"mixed_precision": "bf16", "cpu": True},
         {"mixed_precision": "bf16", "cpu": True},
@@ -425,7 +1231,6 @@ def test_validate_muon_distributed_compatibility_rejects_fsdp1() -> None:
         validate_muon_distributed_compatibility(
             accelerator=accelerator,
             optimizer_name="muonclip",
-            log=logging.getLogger("test"),
             context="unit-test",
         )
 
@@ -439,7 +1244,6 @@ def test_validate_muon_distributed_compatibility_allows_fsdp2() -> None:
     validate_muon_distributed_compatibility(
         accelerator=accelerator,
         optimizer_name="muonclip",
-        log=logging.getLogger("test"),
         context="unit-test",
     )
 
@@ -457,7 +1261,6 @@ def test_validate_muon_distributed_compatibility_rejects_fsdp2_tp_mesh() -> None
         validate_muon_distributed_compatibility(
             accelerator=accelerator,
             optimizer_name="muonclip",
-            log=logging.getLogger("test"),
             context="unit-test",
         )
 
@@ -469,29 +1272,6 @@ def test_validate_muon_distributed_compatibility_rejects_unknown_fsdp() -> None:
         validate_muon_distributed_compatibility(
             accelerator=accelerator,
             optimizer_name="muonclip",
-            log=logging.getLogger("test"),
-            context="unit-test",
-        )
-
-
-@pytest.mark.parametrize("zero_stage", [None, 0, 1, 2, 3])
-def test_validate_muon_distributed_compatibility_rejects_deepspeed(
-    zero_stage: int | None,
-) -> None:
-    """MuonClip should reject all DeepSpeed runtimes, not just ZeRO-2/3."""
-    accelerator = SimpleNamespace(
-        distributed_type=DistributedType.DEEPSPEED,
-        state=SimpleNamespace(
-            deepspeed_plugin=SimpleNamespace(zero_stage=zero_stage),
-        ),
-    )
-
-    match = "FSDP2-only" if zero_stage is None else f"ZeRO stage {zero_stage}"
-    with pytest.raises(RuntimeError, match=match):
-        validate_muon_distributed_compatibility(
-            accelerator=accelerator,
-            optimizer_name="muonclip",
-            log=logging.getLogger("test"),
             context="unit-test",
         )
 
@@ -512,35 +1292,17 @@ def test_validate_distributed_runtime_policy_rejects_deepspeed(
     with pytest.raises(RuntimeError, match=match):
         validate_distributed_runtime_policy(
             accelerator=accelerator,
-            log=logging.getLogger("test"),
             context="unit-test",
         )
 
 
 def test_validate_muon_runtime_topology_rejects_multidim_mesh() -> None:
     """Prepared MuonClip DTensor params must reject unsupported mesh rank."""
-
-    class _FakeShard:
-        def __init__(self, dim: int):
-            self.dim = dim
-
-    class _FakeMesh:
-        ndim = 2
-
-    class _FakeDTensorParam:
-        device_mesh = _FakeMesh()
-        placements = (_FakeShard(0),)
-
-        def to_local(self) -> torch.Tensor:
-            return torch.zeros(1, 1)
-
     accelerator = SimpleNamespace(
         distributed_type=DistributedType.FSDP,
         num_processes=2,
     )
-    optimizer = SimpleNamespace(
-        param_groups=[{"use_muon": True, "params": [_FakeDTensorParam()]}]
-    )
+    optimizer = _runtime_topology_optimizer(mesh_ndim=2)
 
     with pytest.raises(RuntimeError, match="device_mesh.ndim=2"):
         validate_muon_runtime_topology(
@@ -554,28 +1316,11 @@ def test_validate_muon_runtime_topology_rejects_multidim_mesh() -> None:
 
 def test_validate_muon_runtime_topology_accepts_row_shard_layout() -> None:
     """Prepared MuonClip DTensor params should allow 1D Shard(0) layouts."""
-
-    class _FakeShard:
-        def __init__(self, dim: int):
-            self.dim = dim
-
-    class _FakeMesh:
-        ndim = 1
-
-    class _FakeDTensorParam:
-        device_mesh = _FakeMesh()
-        placements = (_FakeShard(0),)
-
-        def to_local(self) -> torch.Tensor:
-            return torch.zeros(1, 1)
-
     accelerator = SimpleNamespace(
         distributed_type=DistributedType.FSDP,
         num_processes=2,
     )
-    optimizer = SimpleNamespace(
-        param_groups=[{"use_muon": True, "params": [_FakeDTensorParam()]}]
-    )
+    optimizer = _runtime_topology_optimizer()
 
     validate_muon_runtime_topology(
         accelerator=accelerator,
@@ -610,24 +1355,6 @@ def test_validate_muon_runtime_topology_rejects_missing_dtensor_params() -> None
 
 def test_compute_l2_norm_for_logging_reduces_only_sharded_dtensors() -> None:
     """Global logged norms must reduce shard contributions without double-counting replicas."""
-
-    class _FakeShard:
-        def __init__(self, dim: int):
-            self.dim = dim
-
-    class _FakeReplicate:
-        pass
-
-    class _FakeDTensor:
-        device_mesh = SimpleNamespace(ndim=1)
-
-        def __init__(self, local_value: torch.Tensor, placements: tuple[object, ...]):
-            self._local_value = local_value
-            self.placements = placements
-
-        def to_local(self) -> torch.Tensor:
-            return self._local_value
-
     reduce_calls: list[tuple[float, str]] = []
 
     accelerator = SimpleNamespace(
@@ -638,8 +1365,8 @@ def test_compute_l2_norm_for_logging_reduces_only_sharded_dtensors() -> None:
         ),
     )
     parameters = [
-        _FakeDTensor(torch.tensor([3.0, 4.0]), (_FakeShard(0),)),
-        _FakeDTensor(torch.tensor([1.0, 2.0]), (_FakeReplicate(),)),
+        _RuntimeLoggingDTensor(torch.tensor([3.0, 4.0]), (_RuntimeTopologyShard(0),)),
+        _RuntimeLoggingDTensor(torch.tensor([1.0, 2.0]), (_RuntimeReplicate(),)),
     ]
 
     norm = _compute_l2_norm_for_logging(parameters, accelerator)
@@ -651,21 +1378,6 @@ def test_compute_l2_norm_for_logging_reduces_only_sharded_dtensors() -> None:
 
 def test_compute_l2_norm_for_logging_uses_dtensor_owner_for_gradients() -> None:
     """Gradient logging must reduce local grads when the owning param is sharded."""
-
-    class _FakeShard:
-        def __init__(self, dim: int):
-            self.dim = dim
-
-    class _FakeShardedParam:
-        device_mesh = SimpleNamespace(ndim=1)
-        placements = (_FakeShard(0),)
-
-        def __init__(self, grad: torch.Tensor):
-            self.grad = grad
-
-        def to_local(self) -> torch.Tensor:
-            return torch.zeros(0)
-
     reduce_calls: list[tuple[float, str]] = []
     accelerator = SimpleNamespace(
         distributed_type=DistributedType.FSDP,
@@ -676,7 +1388,7 @@ def test_compute_l2_norm_for_logging_uses_dtensor_owner_for_gradients() -> None:
     )
 
     norm = _compute_l2_norm_for_logging(
-        [_FakeShardedParam(torch.tensor([6.0, 8.0]))],
+        [_RuntimeShardedGradParam(torch.tensor([6.0, 8.0]))],
         accelerator,
         grad=True,
     )
@@ -686,15 +1398,10 @@ def test_compute_l2_norm_for_logging_uses_dtensor_owner_for_gradients() -> None:
     assert reduce_calls == [(100.0, "sum")]
 
 
-def test_get_optimizer_disables_muonclip_clipping_under_fsdp(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+def test_get_optimizer_rejects_muonclip_clipping_under_fsdp(
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """FSDP MuonClip builds must force clipping off and emit a warning once."""
-    import neobert.optimizer.optimizer as optimizer_module
-
-    monkeypatch.setattr(
-        optimizer_module, "_WARNED_MUONCLIP_FSDP_CLIPPING_DISABLE", False
-    )
+    """FSDP MuonClip with clipping must fail fast, not silently downgrade."""
     model_cfg = NeoBERTConfig(
         hidden_size=32,
         num_hidden_layers=1,
@@ -708,8 +1415,8 @@ def test_get_optimizer_disables_muonclip_clipping_under_fsdp(
     )
     model = NeoBERT(model_cfg)
 
-    with caplog.at_level(logging.WARNING):
-        optimizer = get_optimizer(
+    with pytest.raises(ValueError, match="enable_clipping=false"):
+        get_optimizer(
             model,
             DistributedType.FSDP,
             model_config=model_cfg,
@@ -721,9 +1428,34 @@ def test_get_optimizer_disables_muonclip_clipping_under_fsdp(
             muon_config={"enable_clipping": True},
         )
 
+    # An explicit Muon-only run is still allowed under FSDP.
+    optimizer = get_optimizer(
+        model,
+        DistributedType.FSDP,
+        model_config=model_cfg,
+        name="muonclip",
+        lr=1e-4,
+        weight_decay=0.0,
+        betas=(0.9, 0.95),
+        eps=1e-8,
+        muon_config={"enable_clipping": False},
+    )
     assert hasattr(optimizer, "config")
     assert not optimizer.config.enable_clipping
-    assert "Auto-disabling clipping" in caplog.text
+
+    with caplog.at_level(logging.WARNING):
+        get_optimizer(
+            model,
+            DistributedType.FSDP,
+            model_config=model_cfg,
+            name="muonclip",
+            lr=1e-4,
+            weight_decay=0.0,
+            betas=(0.9, 0.95),
+            eps=1e-8,
+            muon_config={"enable_clipping": False, "param_policy": "all_2d"},
+        )
+    assert "materially higher communication cost" in caplog.text
 
 
 def test_get_optimizer_rejects_muonclip_under_deepspeed() -> None:
@@ -753,3 +1485,30 @@ def test_get_optimizer_rejects_muonclip_under_deepspeed() -> None:
             eps=1e-8,
             muon_config={"enable_clipping": False},
         )
+
+
+def test_should_save_step_checkpoint_guarantees_terminal_step() -> None:
+    """Terminal step must checkpoint even when max_steps is not a save tick."""
+    # save_steps tick
+    assert should_save_step_checkpoint(
+        step=20, max_steps=100, save_steps=20, save_model=True, save_strategy="steps"
+    )
+    # non-terminal, non-tick -> no save
+    assert not should_save_step_checkpoint(
+        step=21, max_steps=100, save_steps=20, save_model=True, save_strategy="steps"
+    )
+    # terminal step that is NOT a save_steps multiple -> must still save
+    assert should_save_step_checkpoint(
+        step=101, max_steps=101, save_steps=20, save_model=True, save_strategy="steps"
+    )
+    # any step at/after max_steps saves (guards >= boundary)
+    assert should_save_step_checkpoint(
+        step=105, max_steps=101, save_steps=20, save_model=True, save_strategy="steps"
+    )
+    # disabled saving / non-steps strategy never saves, even at the terminal step
+    assert not should_save_step_checkpoint(
+        step=101, max_steps=101, save_steps=20, save_model=False, save_strategy="steps"
+    )
+    assert not should_save_step_checkpoint(
+        step=101, max_steps=101, save_steps=20, save_model=True, save_strategy="no"
+    )

@@ -6,25 +6,26 @@ These wrap [scripts](../scripts/README.md) and [configs](../configs/README.md).
 
 ## Files
 
-- `example_pretrain.sh` - pretraining launcher; set `RUN_FULL=1` for the long run
-- `example_evaluate.sh` - evaluation launcher
+- `example_pretrain.sh` - small-model network-backed pretraining example; set `RUN_FULL=1` to continue into the production examples
+- `example_evaluate.sh` - sequential single-task, quick-suite, and full-suite examples; its shipped GLUE configs require the checkpoint paths they reference
 
 ## Example Launches
 
+Activate the Python environment containing your NeoBERT installation using your preferred environment manager, then run the launchers from the repository root:
+
 ```bash
-./jobs/example_pretrain.sh
-RUN_FULL=1 ./jobs/example_pretrain.sh
-./jobs/example_evaluate.sh
+bash jobs/example_pretrain.sh
+RUN_FULL=1 bash jobs/example_pretrain.sh
+bash jobs/example_evaluate.sh
 ```
 
 ## Notes
 
-- Checkpoints and logs are written under each run's `trainer.output_dir`.
-- For long runs on clusters, copy these scripts and adapt resource flags,
-  paths, and environment setup.
+- Training outputs and checkpoints use each config's `trainer.output_dir`; GLUE suite logs default to `logs/<config-directory-name>/`.
+- `example_pretrain.sh` uses the selected config's full `trainer.max_steps`; use the root README's local pytest command for a bounded setup smoke.
+- For long runs on clusters, copy these scripts and adapt resource flags, paths, and environment setup.
 
 ## Related Docs
 
-- [Scripts](../scripts/README.md)
-- [Training](../docs/training.md)
-- [Evaluation](../docs/evaluation.md)
+- [Training](../docs/guides/training.md)
+- [Evaluation](../docs/guides/evaluation.md)

@@ -12,6 +12,7 @@ The script will create an hf/ directory in the parent folder with the exported m
 """
 
 import argparse
+import inspect
 import json
 import shutil
 import textwrap
@@ -22,9 +23,24 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 import transformers
 import yaml
-from neobert.checkpointing import load_deepspeed_fp32_state_dict
-from safetensors.torch import load_file, save_file
+from export_utils import (
+    REQUIRED_TRAINING_MODEL_CONFIG_FIELDS,
+    has_packed_swiglu_weights,
+)
+from mlm_predict import clean_metaspace_before_mask
+from safetensors.torch import save_file
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
+
+from neobert.checkpointing import (
+    load_deepspeed_fp32_state_dict,
+    load_model_safetensors,
+)
+from neobert.modeling_utils import (
+    removed_model_config_fields,
+    swiglu_intermediate_size,
+)
+from neobert.tokenizer import align_tokenizer_vocab
+from neobert.warnings import NeoBERTWarning
 
 
 def load_config(config_path: Path) -> Dict[str, Any]:
@@ -88,28 +104,12 @@ def _align_tokenizer_vocab_for_export(
     :raises ValueError: If tokenizer length exceeds model vocab size.
     """
     current_size = len(tokenizer)
-    if current_size == target_vocab_size:
-        return 0
     if current_size > target_vocab_size:
         raise ValueError(
             "Tokenizer length exceeds model vocab_size in checkpoint: "
             f"len(tokenizer)={current_size} > vocab_size={target_vocab_size}."
         )
-
-    needed = target_vocab_size - current_size
-    extra_tokens = [
-        f"<|neobert_extra_token_{idx}|>"
-        for idx in range(current_size, current_size + needed)
-    ]
-    added = tokenizer.add_tokens(extra_tokens, special_tokens=False)
-    final_size = len(tokenizer)
-    if added != needed or final_size != target_vocab_size:
-        raise ValueError(
-            "Failed to align tokenizer vocabulary for export: "
-            f"needed={needed}, added={added}, final_size={final_size}, "
-            f"target={target_vocab_size}."
-        )
-    return added
+    return align_tokenizer_vocab(tokenizer, target_vocab_size)
 
 
 def load_state_dict_from_checkpoint(checkpoint_path: Path) -> Dict[str, torch.Tensor]:
@@ -124,10 +124,7 @@ def load_state_dict_from_checkpoint(checkpoint_path: Path) -> Dict[str, torch.Te
     """
     state_dict_path = checkpoint_path / "model.safetensors"
     if state_dict_path.exists():
-        state_dict = load_file(str(state_dict_path), device="cpu")
-        if not state_dict:
-            raise ValueError(f"Loaded state dict is empty from {state_dict_path}")
-        return state_dict
+        return load_model_safetensors(checkpoint_path, map_location="cpu")
 
     try:
         state_dict = load_deepspeed_fp32_state_dict(checkpoint_path)
@@ -159,17 +156,6 @@ def maybe_alias_decoder_weights(
     if "model.decoder.bias" not in state_dict and "decoder.bias" in state_dict:
         state_dict["model.decoder.bias"] = state_dict["decoder.bias"]
     return state_dict
-
-
-def _swiglu_intermediate_size(intermediate_size: int, multiple_of: int = 8) -> int:
-    """Compute the reduced SwiGLU hidden size used in training.
-
-    :param int intermediate_size: Config intermediate size.
-    :param int multiple_of: Alignment multiple.
-    :return int: Effective SwiGLU hidden size.
-    """
-    hidden = int(2 * intermediate_size / 3)
-    return multiple_of * ((hidden + multiple_of - 1) // multiple_of)
 
 
 def _check_shape(
@@ -214,7 +200,7 @@ def validate_state_dict_layout(
     if "model.decoder.bias" in state_dict:
         _check_shape(state_dict, "model.decoder.bias", (vocab_size,))
 
-    if any(".ffn.w12." in key for key in state_dict.keys()):
+    if has_packed_swiglu_weights(state_dict):
         raise ValueError(
             "Packed SwiGLU weights (ffn.w12) found. Export expects unpacked "
             "w1/w2/w3 weights from training."
@@ -226,7 +212,7 @@ def validate_state_dict_layout(
         _check_shape(state_dict, f"{prefix}.wo.weight", (hidden_size, hidden_size))
 
         if hidden_act == "swiglu":
-            mlp_hidden = _swiglu_intermediate_size(model_config["intermediate_size"])
+            mlp_hidden = swiglu_intermediate_size(model_config["intermediate_size"])
             _check_shape(
                 state_dict, f"{prefix}.ffn.w1.weight", (mlp_hidden, hidden_size)
             )
@@ -290,26 +276,12 @@ def run_forward_sanity_check(
 
 
 def validate_required_config_fields(model_config: Dict[str, Any]) -> None:
-    """Validate that all required config fields are present."""
-    required_fields = [
-        "hidden_size",
-        "num_hidden_layers",
-        "num_attention_heads",
-        "intermediate_size",
-        "vocab_size",
-        "max_position_embeddings",
-        "norm_eps",
-        "pad_token_id",
-        # Architecture-affecting fields that must be explicit for correct export.
-        "rope",
-        "rms_norm",
-        "hidden_act",
+    """Validate that all required training model config fields are present."""
+    missing_fields = [
+        field
+        for field in REQUIRED_TRAINING_MODEL_CONFIG_FIELDS
+        if field not in model_config
     ]
-
-    missing_fields = []
-    for field in required_fields:
-        if field not in model_config:
-            missing_fields.append(field)
 
     if missing_fields:
         raise ValueError(
@@ -341,8 +313,12 @@ def create_hf_config(
             f"Unsupported hidden_act '{hidden_act}' for HF export. Supported: swiglu, gelu."
         )
 
-    if model_config.get("ngpt", False):
-        raise ValueError("ngpt/NormNeoBERT is not supported by the HF export path.")
+    removed_fields = removed_model_config_fields(model_config)
+    if removed_fields:
+        raise ValueError(
+            "Checkpoint uses removed NeoBERT model field(s): "
+            + ", ".join(removed_fields)
+        )
 
     # Map our config to HF format - using the original HF model structure
     hf_config = {
@@ -369,8 +345,7 @@ def create_hf_config(
         "rms_norm": model_config.get("rms_norm", True),
         "rope": model_config.get("rope", True),
         "hidden_act": hidden_act,
-        "dropout": model_config.get("dropout", model_config.get("dropout_prob", 0.0)),
-        "flash_attention": model_config.get("attn_backend", "sdpa") != "sdpa",
+        "dropout": model_config["dropout_prob"],
         "pad_token_id": model_config["pad_token_id"],
         "torch_dtype": torch_dtype,
         "transformers_version": transformers.__version__,
@@ -381,7 +356,6 @@ def create_hf_config(
 
 def map_weights(
     state_dict: Dict[str, torch.Tensor],
-    model_config: Dict[str, Any],
     *,
     allow_decoder_bias_drop: bool = False,
 ) -> Dict[str, torch.Tensor]:
@@ -394,13 +368,11 @@ def map_weights(
     - Base model weights with "model." prefix for NeoBERTLMHead
     - Decoder weights at top level for LM head
     :param dict[str, torch.Tensor] state_dict: Training state dict.
-    :param dict[str, Any] model_config: Model config mapping.
     :param bool allow_decoder_bias_drop: Whether to allow dropping legacy decoder
         bias when exporting to the current biasless HF LM head.
     :return dict[str, torch.Tensor]: Remapped state dict.
     :raises ValueError: If legacy decoder bias is present and dropping is not allowed.
     """
-    _ = model_config
     mapped = {}
     legacy_bias_keys = [
         key for key in ("model.decoder.bias", "decoder.bias") if key in state_dict
@@ -421,7 +393,7 @@ def map_weights(
             message
             + "Proceeding because allow_decoder_bias_drop=True; decoder bias will be "
             "excluded from exported weights.",
-            UserWarning,
+            NeoBERTWarning,
             stacklevel=2,
         )
 
@@ -591,7 +563,6 @@ def export_checkpoint(
     print("Converting and mapping model weights...")
     mapped_state_dict = map_weights(
         state_dict,
-        model_config,
         allow_decoder_bias_drop=allow_decoder_bias_drop,
     )
 
@@ -705,10 +676,15 @@ def export_checkpoint(
     # Generate MLM example based on actual tokenizer
     if has_metaspace:
         # Include space token handling for Metaspace tokenizers
+        metaspace_cleanup_source = textwrap.dedent(
+            inspect.getsource(clean_metaspace_before_mask)
+        )
         mlm_example = f'''```python
 from transformers import AutoModelForMaskedLM, AutoTokenizer
+from typing import Any
 import torch
 
+{metaspace_cleanup_source}
 repo_id = "{repo_id}"  # Update this to your HF repo ID
 tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
 model = AutoModelForMaskedLM.from_pretrained(repo_id, trust_remote_code=True)
@@ -720,26 +696,7 @@ text = "NeoBERT is the most {mask_display} model of its kind!"
 text = text.replace("{mask_display}", tokenizer.mask_token)
 
 inputs = tokenizer(text, return_tensors="pt")
-
-# Handle Metaspace tokenizer quirk: remove extra space tokens before mask
-# Get the space token ID dynamically
-try:
-    space_token_id = tokenizer.convert_tokens_to_ids("▁")
-except:
-    space_token_id = None
-
-if space_token_id is not None:
-    input_ids = inputs["input_ids"][0].tolist()
-    cleaned_ids = []
-    for i, token_id in enumerate(input_ids):
-        # Skip space token if it's immediately before mask token
-        if token_id == space_token_id and i < len(input_ids) - 1 and input_ids[i + 1] == tokenizer.mask_token_id:
-            continue
-        cleaned_ids.append(token_id)
-
-    if len(cleaned_ids) != len(input_ids):
-        inputs["input_ids"] = torch.tensor([cleaned_ids])
-        inputs["attention_mask"] = torch.ones_like(inputs["input_ids"])
+inputs = clean_metaspace_before_mask(inputs, tokenizer)
 
 # Get predictions
 with torch.no_grad():

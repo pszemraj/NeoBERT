@@ -2,130 +2,75 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from pathlib import Path
 from typing import Any
 
 import torch
-from mteb import MTEB
 
-from neobert.checkpointing import (
-    MODEL_WEIGHTS_NAME,
-    load_deepspeed_fp32_state_dict,
-    load_model_safetensors,
-    resolve_deepspeed_checkpoint_root_and_tag,
-)
+from neobert.checkpointing import load_step_checkpoint_state_dict
 from neobert.config import ConfigLoader
-from neobert.model import NeoBERTConfig, NeoBERTForMTEB
-from neobert.tokenizer import get_tokenizer
+from neobert.evaluation_utils import resolve_checkpoint_model_source
+from neobert.model import NeoBERTForMTEB
+from neobert.model.wrappers import normalize_mteb_pooling
+from neobert.mteb_tasks import (
+    MTEB_ALL_EXECUTION_TASKS,
+    MTEB_EXECUTION_TASKS_BY_TYPE,
+    MTEB_TASK_SPECS_BY_EXECUTION_NAME,
+    expand_mteb_task_name,
+)
 
 logging.basicConfig(level=logging.INFO)
 
 logger = logging.getLogger("main")
 
-TASK_LIST_CLASSIFICATION = [
-    "AmazonCounterfactualClassification",
-    "AmazonPolarityClassification",
-    "AmazonReviewsClassification",
-    "Banking77Classification",
-    "EmotionClassification",
-    "ImdbClassification",
-    "MassiveIntentClassification",
-    "MassiveScenarioClassification",
-    "MTOPDomainClassification",
-    "MTOPIntentClassification",
-    "ToxicConversationsClassification",
-    "TweetSentimentExtractionClassification",
-]
 
-TASK_LIST_CLUSTERING = [
-    "ArxivClusteringP2P",
-    "ArxivClusteringS2S",
-    "BiorxivClusteringP2P",
-    "BiorxivClusteringS2S",
-    "MedrxivClusteringP2P",
-    "MedrxivClusteringS2S",
-    "RedditClustering",
-    "RedditClusteringP2P",
-    "StackExchangeClustering",
-    "StackExchangeClusteringP2P",
-    "TwentyNewsgroupsClustering",
-]
+def _mteb_cache_identity(
+    resolved: Any,
+    *,
+    pooling: str,
+    max_length: int,
+    trust_remote_code: bool,
+) -> tuple[str, str]:
+    """Build a stable MTEB cache identity for one local scoring contract.
 
-TASK_LIST_PAIR_CLASSIFICATION = [
-    "SprintDuplicateQuestions",
-    "TwitterSemEval2015",
-    "TwitterURLCorpus",
-]
+    :param Any resolved: Resolved checkpoint model source.
+    :param str pooling: Canonical embedding pooling strategy.
+    :param int max_length: Evaluation context length.
+    :param bool trust_remote_code: Whether custom tokenizer code was enabled.
+    :return tuple[str, str]: MTEB model name and contract revision.
+    """
+    checkpoint_dir = resolved.checkpoint_dir.resolve()
+    run_name = (
+        checkpoint_dir.parent.parent.name
+        if checkpoint_dir.parent.name == "checkpoints"
+        else checkpoint_dir.parent.name
+    )
+    configured_name = getattr(resolved.training_config.model, "name", None)
+    model_name = str(configured_name or run_name)
+    contract = {
+        "checkpoint": str(checkpoint_dir),
+        "checkpoint_tag": str(resolved.checkpoint_tag),
+        "max_length": max_length,
+        "pooling": pooling,
+        "trust_remote_code": trust_remote_code,
+    }
+    revision = hashlib.sha256(
+        json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"NeoBERT/{model_name}", revision
 
-TASK_LIST_RERANKING = [
-    "AskUbuntuDupQuestions",
-    "MindSmallReranking",
-    "SciDocsRR",
-    "StackOverflowDupQuestions",
-]
 
-TASK_LIST_RETRIEVAL = [
-    "MSMARCO",
-    "ArguAna",
-    "ClimateFEVER",
-    "CQADupstackAndroidRetrieval",
-    "CQADupstackEnglishRetrieval",
-    "CQADupstackGamingRetrieval",
-    "CQADupstackGisRetrieval",
-    "CQADupstackMathematicaRetrieval",
-    "CQADupstackPhysicsRetrieval",
-    "CQADupstackProgrammersRetrieval",
-    "CQADupstackStatsRetrieval",
-    "CQADupstackTexRetrieval",
-    "CQADupstackUnixRetrieval",
-    "CQADupstackWebmastersRetrieval",
-    "CQADupstackWordpressRetrieval",
-    "DBPedia",
-    "FEVER",
-    "FiQA2018",
-    "HotpotQA",
-    "NFCorpus",
-    "NQ",
-    "QuoraRetrieval",
-    "SCIDOCS",
-    "SciFact",
-    "Touche2020",
-    "TRECCOVID",
-]
+def _get_mteb_module() -> Any:
+    """Load MTEB only when benchmark execution begins.
 
-TASK_LIST_STS = [
-    "BIOSSES",
-    "SICK-R",
-    "STS12",
-    "STS13",
-    "STS14",
-    "STS15",
-    "STS16",
-    "STS17",
-    "STS22",
-    "STSBenchmark",
-    "SummEval",
-]
+    :return Any: Installed MTEB module.
+    """
+    import mteb
 
-TASK_LIST = (
-    TASK_LIST_CLASSIFICATION
-    + TASK_LIST_CLUSTERING
-    + TASK_LIST_PAIR_CLASSIFICATION
-    + TASK_LIST_RERANKING
-    + TASK_LIST_RETRIEVAL
-    + TASK_LIST_STS
-)
-
-TASK_TYPE = {
-    "classification": TASK_LIST_CLASSIFICATION,
-    "clustering": TASK_LIST_CLUSTERING,
-    "pair_classification": TASK_LIST_PAIR_CLASSIFICATION,
-    "reranking": TASK_LIST_RERANKING,
-    "retrieval": TASK_LIST_RETRIEVAL,
-    "sts": TASK_LIST_STS,
-    "all": TASK_LIST,
-}
+    return mteb
 
 
 def _resolve_mteb_tasks(cfg: Any) -> list[str]:
@@ -135,7 +80,7 @@ def _resolve_mteb_tasks(cfg: Any) -> list[str]:
     1. ``cfg.task_types`` (CLI ``--task_types``), if provided.
     2. ``cfg.mteb_task_type`` category.
 
-    ``cfg.task_types`` entries can be either category aliases from ``TASK_TYPE``
+    ``cfg.task_types`` entries can be either category aliases from the registry
     (for example ``classification`` or ``sts``) or explicit task names.
 
     :param Any cfg: Configuration object.
@@ -145,16 +90,17 @@ def _resolve_mteb_tasks(cfg: Any) -> list[str]:
     requested = getattr(cfg, "task_types", None)
     if requested is None:
         mteb_task_type = str(getattr(cfg, "mteb_task_type", "all")).strip().lower()
-        if mteb_task_type not in TASK_TYPE:
-            raise ValueError(f"Task type must be one of {sorted(TASK_TYPE.keys())}.")
-        return list(TASK_TYPE[mteb_task_type])
+        if mteb_task_type not in MTEB_EXECUTION_TASKS_BY_TYPE:
+            raise ValueError(
+                f"Task type must be one of {sorted(MTEB_EXECUTION_TASKS_BY_TYPE)}."
+            )
+        return list(MTEB_EXECUTION_TASKS_BY_TYPE[mteb_task_type])
 
     if isinstance(requested, str):
         requested_tokens = [token.strip() for token in requested.split(",")]
     else:
         requested_tokens = [str(token).strip() for token in requested]
 
-    explicit_lookup = {task.lower(): task for task in TASK_LIST}
     selected: list[str] = []
     unknown: list[str] = []
     for token in requested_tokens:
@@ -162,14 +108,14 @@ def _resolve_mteb_tasks(cfg: Any) -> list[str]:
             continue
         lowered = token.lower()
         if lowered == "all":
-            selected.extend(TASK_LIST)
+            selected.extend(MTEB_ALL_EXECUTION_TASKS)
             continue
-        if lowered in TASK_TYPE:
-            selected.extend(TASK_TYPE[lowered])
+        if lowered in MTEB_EXECUTION_TASKS_BY_TYPE:
+            selected.extend(MTEB_EXECUTION_TASKS_BY_TYPE[lowered])
             continue
-        explicit_task = explicit_lookup.get(lowered)
-        if explicit_task is not None:
-            selected.append(explicit_task)
+        explicit_tasks = expand_mteb_task_name(token)
+        if explicit_tasks is not None:
+            selected.extend(explicit_tasks)
             continue
         unknown.append(token)
 
@@ -178,7 +124,7 @@ def _resolve_mteb_tasks(cfg: Any) -> list[str]:
             "Unknown --task_types entries: "
             + ", ".join(sorted(unknown))
             + ". Valid categories: "
-            + ", ".join(sorted(TASK_TYPE.keys()))
+            + ", ".join(sorted(MTEB_EXECUTION_TASKS_BY_TYPE))
         )
 
     # Stable dedupe to preserve user-specified order.
@@ -189,6 +135,17 @@ def _resolve_mteb_tasks(cfg: Any) -> list[str]:
             "`--task_types` (for example 'all', 'sts', or 'MSMARCO')."
         )
     return resolved
+
+
+def _parse_task_type_override(value: str | None) -> list[str] | None:
+    """Preserve omission separately from an explicit ``all`` override.
+
+    :param str | None value: Raw CLI task selector.
+    :return list[str] | None: Parsed override, or ``None`` when omitted.
+    """
+    if value is None:
+        return None
+    return [token.strip() for token in value.split(",")]
 
 
 def _load_mteb_encoder_weights(
@@ -246,63 +203,6 @@ def _load_mteb_encoder_weights(
         )
 
 
-def _is_loadable_mteb_step(checkpoint_root: Path, step: int) -> bool:
-    """Return whether a checkpoint step is loadable for MTEB evaluation.
-
-    A step is considered loadable when either a portable safetensors weight file
-    exists at ``checkpoints/<step>/model.safetensors`` or DeepSpeed ZeRO shards
-    can be resolved for the same step.
-
-    :param Path checkpoint_root: ``checkpoints`` root directory.
-    :param int step: Numeric checkpoint step.
-    :return bool: True if MTEB can load weights from this step.
-    """
-    step_dir = checkpoint_root / str(step)
-    if (step_dir / MODEL_WEIGHTS_NAME).exists():
-        return True
-    try:
-        resolve_deepspeed_checkpoint_root_and_tag(checkpoint_root, tag=str(step))
-    except (FileNotFoundError, ValueError):
-        return False
-    return True
-
-
-def _resolve_mteb_checkpoint_step(
-    checkpoint_root: Path,
-    requested: str | int,
-) -> str:
-    """Resolve a concrete checkpoint step/tag for MTEB loading.
-
-    :param Path checkpoint_root: ``checkpoints`` root directory.
-    :param str | int requested: Requested checkpoint selector or ``latest``.
-    :raises ValueError: If no loadable checkpoint step exists.
-    :return str: Concrete checkpoint step/tag.
-    """
-    requested_text = str(requested).strip()
-    if requested_text.lower() != "latest":
-        return requested_text
-
-    candidates = sorted(
-        (
-            int(path.name)
-            for path in checkpoint_root.iterdir()
-            if path.is_dir() and path.name.isdigit()
-        ),
-        reverse=True,
-    )
-    if not candidates:
-        raise ValueError(f"Unable to find numbered checkpoints under {checkpoint_root}")
-
-    for step in candidates:
-        if _is_loadable_mteb_step(checkpoint_root, step):
-            return str(step)
-
-    raise ValueError(
-        "Unable to find a loadable checkpoint under "
-        f"{checkpoint_root}. Checked steps: {', '.join(str(step) for step in candidates)}."
-    )
-
-
 def evaluate_mteb(cfg: Any) -> None:
     """Evaluate a model on the MTEB benchmark.
 
@@ -310,113 +210,95 @@ def evaluate_mteb(cfg: Any) -> None:
     """
     # Get MTEB-specific config (kept at top-level Config for now)
     mteb_batch_size = getattr(cfg, "mteb_batch_size", 32)
-    mteb_pooling = getattr(cfg, "mteb_pooling", "mean")
+    mteb_pooling = normalize_mteb_pooling(getattr(cfg, "mteb_pooling", "avg"))
     mteb_overwrite_results = getattr(cfg, "mteb_overwrite_results", False)
     pretrained_checkpoint = getattr(cfg, "pretrained_checkpoint", "latest")
     pretrained_checkpoint_dir = Path(cfg.trainer.output_dir)
-    use_deepspeed = getattr(cfg, "use_deepspeed", False)
     selected_tasks = _resolve_mteb_tasks(cfg)
 
-    # Get checkpoint number
-    checkpoint_root = pretrained_checkpoint_dir / "checkpoints"
-    ckpt = _resolve_mteb_checkpoint_step(checkpoint_root, pretrained_checkpoint)
+    requested_max_length = int(cfg.tokenizer.max_length)
+    trust_remote_code = bool(cfg.tokenizer.trust_remote_code)
+    resolved = resolve_checkpoint_model_source(
+        pretrained_checkpoint_dir,
+        pretrained_checkpoint,
+        max_length=requested_max_length,
+        trust_remote_code=trust_remote_code,
+    )
+    ckpt = resolved.checkpoint_tag
 
     # Define path to store results
+    configured_output = getattr(cfg, "output_folder", None)
     output_folder = (
-        pretrained_checkpoint_dir / "mteb" / str(ckpt) / str(cfg.tokenizer.max_length)
+        Path(configured_output)
+        if configured_output
+        else pretrained_checkpoint_dir
+        / "mteb"
+        / str(ckpt)
+        / str(cfg.tokenizer.max_length)
     )
 
     # Cuda
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Load tokenizer
-    tokenizer = get_tokenizer(
-        pretrained_model_name_or_path=cfg.tokenizer.name,
-        max_length=cfg.tokenizer.max_length,
-        trust_remote_code=bool(getattr(cfg.tokenizer, "trust_remote_code", False)),
-        revision=getattr(cfg.tokenizer, "revision", None),
-    )
-
     # Instantiate model
-    model_config = NeoBERTConfig(
-        hidden_size=cfg.model.hidden_size,
-        num_hidden_layers=cfg.model.num_hidden_layers,
-        num_attention_heads=cfg.model.num_attention_heads,
-        intermediate_size=cfg.model.intermediate_size,
-        max_position_embeddings=cfg.model.max_position_embeddings,
-        vocab_size=cfg.model.vocab_size,  # Use checkpoint's vocab_size since we always load weights
-        rope=cfg.model.rope,
-        rms_norm=cfg.model.rms_norm,
-        hidden_act=cfg.model.hidden_act,
-        dropout_prob=cfg.model.dropout_prob,
-        norm_eps=cfg.model.norm_eps,
-        embedding_init_range=cfg.model.embedding_init_range,
-        decoder_init_range=cfg.model.decoder_init_range,
-        classifier_init_range=cfg.model.classifier_init_range,
-        pad_token_id=tokenizer.pad_token_id,
-    )
-
     model = NeoBERTForMTEB(
-        config=model_config,
-        tokenizer=tokenizer,
+        config=resolved.model_config,
+        tokenizer=resolved.tokenizer,
         batch_size=mteb_batch_size,
         pooling=mteb_pooling,
-        max_length=cfg.tokenizer.max_length,
+        max_length=requested_max_length,
     )
 
     # Load pretrained weights
-    checkpoint_step_dir = checkpoint_root / str(ckpt)
-    checkpoint_path = checkpoint_step_dir / MODEL_WEIGHTS_NAME
-    if use_deepspeed:
-        state_dict = load_deepspeed_fp32_state_dict(
-            checkpoint_root,
-            tag=str(ckpt),
-        )
-        _load_mteb_encoder_weights(
-            model,
-            state_dict,
-            source=f"DeepSpeed checkpoint tag={ckpt}",
-        )
-    else:
-        if checkpoint_path.exists():
-            state_dict = load_model_safetensors(
-                checkpoint_step_dir,
-                map_location=device,
-            )
-            _load_mteb_encoder_weights(
-                model,
-                state_dict,
-                source=f"safetensors checkpoint {checkpoint_path}",
-            )
-        else:
-            logger.warning(
-                f"{MODEL_WEIGHTS_NAME} not found at {checkpoint_path}; "
-                "falling back to DeepSpeed fp32 shard conversion."
-            )
-            state_dict = load_deepspeed_fp32_state_dict(
-                checkpoint_root,
-                tag=str(ckpt),
-            )
-            _load_mteb_encoder_weights(
-                model,
-                state_dict,
-                source=f"DeepSpeed fallback tag={ckpt}",
-            )
+    state_dict = load_step_checkpoint_state_dict(
+        resolved.checkpoint_root,
+        ckpt,
+        map_location=device,
+    )
+    _load_mteb_encoder_weights(
+        model,
+        state_dict,
+        source=f"checkpoint step {ckpt}",
+    )
 
     model.to(device)
     model.eval()
 
     # Evaluate
+    mteb = _get_mteb_module()
+    model_name, model_revision = _mteb_cache_identity(
+        resolved,
+        pooling=mteb_pooling,
+        max_length=requested_max_length,
+        trust_remote_code=trust_remote_code,
+    )
+    model.mteb_model_meta = mteb.models.ModelMeta.create_empty(
+        {
+            "name": model_name,
+            "revision": model_revision,
+            "framework": ["PyTorch"],
+            "max_tokens": requested_max_length,
+            "embed_dim": resolved.model_config.hidden_size,
+        }
+    )
+    result_cache = mteb.ResultCache(cache_path=output_folder)
+    overwrite_strategy = "always" if mteb_overwrite_results else "only-missing"
     for task in selected_tasks:
         logger.info(f"Running task: {task}")
-        eval_splits = ["dev"] if task == "MSMARCO" else ["test"]
-        evaluation = MTEB(tasks=[task], task_langs=["en"])
+        eval_splits = [MTEB_TASK_SPECS_BY_EXECUTION_NAME[task].evaluation_split]
+        evaluation_task = mteb.get_task(
+            task,
+            languages=["eng"],
+            eval_splits=eval_splits,
+        )
         with torch.autocast(device_type=device, dtype=torch.bfloat16):
-            evaluation.run(
+            mteb.evaluate(
                 model,
-                output_folder=output_folder,
-                eval_splits=eval_splits,
-                overwrite_results=mteb_overwrite_results,
+                evaluation_task,
+                cache=result_cache,
+                co2_tracker=False,
+                encode_kwargs={"batch_size": mteb_batch_size},
+                overwrite_strategy=overwrite_strategy,
             )
 
 
@@ -429,11 +311,11 @@ def main() -> None:
     parser.add_argument(
         "--model_name_or_path", type=str, required=True, help="Model path"
     )
+    parser.add_argument("--task_types", type=str, help="Task types to evaluate")
     parser.add_argument(
-        "--task_types", type=str, default="all", help="Task types to evaluate"
-    )
-    parser.add_argument(
-        "--output_folder", type=str, default="results", help="Output folder"
+        "--output_folder",
+        type=Path,
+        help="Optional result directory (default: <model>/mteb/<step>/<max-length>)",
     )
 
     args, remaining = parser.parse_known_args()
@@ -441,7 +323,7 @@ def main() -> None:
     # Load configuration
     config = ConfigLoader.load(args.config, remaining)
     config.trainer.output_dir = args.model_name_or_path
-    config.task_types = args.task_types.split(",") if args.task_types != "all" else None
+    config.task_types = _parse_task_type_override(args.task_types)
     config.output_folder = args.output_folder
 
     # Run MTEB evaluation

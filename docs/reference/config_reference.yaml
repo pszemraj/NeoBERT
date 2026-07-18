@@ -1,0 +1,875 @@
+# NeoBERT configuration reference
+#
+# Copy this valid YAML, delete sections that do not apply to your task, and change the remaining values.
+# Every ordinary field is optional because the loader supplies the shown default; comments mark fields that become required for a particular task or feature.
+# Unknown keys are errors. YAML scalar types matter: use true/false for booleans, null for an unset optional value, and quote strings that YAML could parse as another type.
+
+# variables — mapping; default: absent. Optional interpolation values removed before schema validation.
+# Exact "$variables.path" replacement preserves the value's type. "{$variables.path}" or "${variables.path}" interpolates into a string.
+# Paths use letters, digits, underscores, hyphens, and dots; dots traverse nested mappings. Nested references are allowed; cycles and unknown exact references are errors, while unresolved inline tokens warn and remain literal.
+variables: {}
+
+# task — string; default: "pretraining". One of: pretraining | glue | mteb | contrastive (case-insensitive; surrounding whitespace is ignored).
+# The executable selects the runtime; this value must match that entry point so validation/checkpoint metadata use the right task. Populated sections never infer or dispatch a task.
+task: pretraining
+
+# model — mapping; default: all ModelConfig defaults below. Architecture settings used to construct a new NeoBERT model.
+model:
+  # model.name — string | null; default: null. Optional model label/path metadata; required when model.from_hub=true for GLUE and overridden by run_glue.py --model_name_or_path.
+  # Hub GLUE uses it as the model/tokenizer source. Checkpoint-based native GLUE initialization and GLUE resume replace it from the selected checkpoint; other trainers treat it as metadata.
+  name: null
+
+  # model.hidden_size — integer; default: 768. Positive encoder width; must be divisible by model.num_attention_heads.
+  # When model.rope=true, the resulting per-head width must also be even.
+  # Resume and fresh checkpoint-based native GLUE initialization replace this with the selected checkpoint value. Fresh pretrained-contrastive initialization does so when the source contains config.yaml.
+  hidden_size: 768
+
+  # model.num_hidden_layers — integer; default: 12. Number of encoder blocks; use a positive value.
+  # Resume and fresh checkpoint-based native GLUE initialization replace this with the selected checkpoint value. Fresh pretrained-contrastive initialization does so when the source contains config.yaml.
+  num_hidden_layers: 12
+
+  # model.num_attention_heads — integer; default: 12. Positive attention-head count; must divide model.hidden_size.
+  # model.hidden_size / this value must be even when model.rope=true.
+  # Resume and fresh checkpoint-based native GLUE initialization replace this with the selected checkpoint value. Fresh pretrained-contrastive initialization does so when the source contains config.yaml.
+  num_attention_heads: 12
+
+  # model.intermediate_size — integer; default: 3072. Base feed-forward size; use a positive value. GELU uses it directly, while SwiGLU uses two-thirds of it rounded up to a multiple of 8 for the actual hidden width.
+  # Resume and fresh checkpoint-based native GLUE initialization replace this with the selected checkpoint value. Fresh pretrained-contrastive initialization does so when the source contains config.yaml.
+  intermediate_size: 3072
+
+  # model.max_position_embeddings — integer; default: 512. Configured context length and positional-cache/table size; use a positive value.
+  # For pretraining/contrastive it must be >= dataset.max_seq_length. Learned positions (model.rope=false) impose this hard limit; RoPE can build a slower transient cache for a longer runtime input, but maintained training configs keep all sequence-length controls at or below this value.
+  # Fresh checkpoint-based native GLUE initialization replaces it from the checkpoint; fresh pretrained-contrastive initialization does so when the source contains config.yaml. Resume restores it for learned positions and GLUE; pretraining/contrastive continuation may keep the launch value only when both checkpoint and launch use RoPE.
+  max_position_embeddings: 512
+
+  # model.vocab_size — integer; nominal default: 30522. Runtime-owned for new pretraining runs.
+  # Pretraining replaces it with len(tokenizer) rounded up to a multiple of 128 and adds inert tokens. Resume and fresh checkpoint-based native GLUE initialization restore it; fresh pretrained-contrastive initialization does so when the source contains config.yaml. Do not use it to truncate a tokenizer.
+  # Random/custom-tokenizer contrastive runs do not align it automatically: it must cover every tokenizer ID unless pretrained synchronization supplies the value.
+  vocab_size: 30522
+
+  # model.rope — boolean; default: true. true uses rotary positions; false uses learned absolute position embeddings.
+  # RoPE requires an even attention head width. Learned positions impose a hard trained context limit on downstream evaluation.
+  # Resume and fresh checkpoint-based native GLUE initialization replace this with the selected checkpoint value. Fresh pretrained-contrastive initialization does so when the source contains config.yaml.
+  rope: true
+
+  # model.rms_norm — boolean; default: true. true uses RMSNorm; false uses LayerNorm.
+  # Resume and fresh checkpoint-based native GLUE initialization replace this with the selected checkpoint value. Fresh pretrained-contrastive initialization does so when the source contains config.yaml.
+  rms_norm: true
+
+  # model.hidden_act — string; default: "swiglu". One of: swiglu | gelu (case-insensitive).
+  # Resume and fresh checkpoint-based native GLUE initialization replace this with the selected checkpoint value. Fresh pretrained-contrastive initialization does so when the source contains config.yaml.
+  hidden_act: swiglu
+
+  # model.dropout_prob — float; default: 0.0. Dropout probability; must be in [0, 1].
+  # contrastive.pretraining_prob > 0 requires this to be > 0 so the two SimCSE views differ; the maintained contrastive recipe uses 0.1.
+  # Fresh contrastive initialization from a pretraining checkpoint keeps this launch value; resume and checkpoint-based native GLUE initialization restore the saved value.
+  dropout_prob: 0.0
+
+  # model.norm_eps — float; default: 1e-5. Positive epsilon used by RMSNorm or LayerNorm.
+  # Resume and fresh checkpoint-based native GLUE initialization replace this with the selected checkpoint value. Fresh pretrained-contrastive initialization does so when the source contains config.yaml.
+  norm_eps: 1.0e-5
+
+  # model.embedding_init_range — float; default: 0.02. Uniform embedding-initialization half-range [-value, +value]; use a non-negative value.
+  # Resume and fresh checkpoint-based native GLUE initialization replace this with the selected checkpoint value. Fresh pretrained-contrastive initialization does so when the source contains config.yaml.
+  embedding_init_range: 0.02
+
+  # model.decoder_init_range — float; default: 0.02. Uniform half-range for MLM decoder initialization; use a non-negative value.
+  # Resume and fresh checkpoint-based native GLUE initialization replace this with the selected checkpoint value. Fresh pretrained-contrastive initialization does so when the source contains config.yaml.
+  decoder_init_range: 0.02
+
+  # model.classifier_init_range — float; default: 0.02. Classifier initialization metadata retained in model/checkpoint configs.
+  # GLUE's native classifier uses glue.classifier_init_range instead. Resume and checkpoint-based native GLUE initialization restore this metadata; fresh contrastive initialization leaves it launch-controlled.
+  classifier_init_range: 0.02
+
+  # model.attn_backend — string; default: "sdpa". One of: sdpa | flash_attn_varlen.
+  # Effective flash_attn_varlen requires flash-attn and CUDA and is recommended for packed GPU pretraining. Missing package/CUDA, trainer.mixed_precision=no, or trainer.use_cpu=true falls back to sdpa; contrastive also falls back for a tokenizer that does not right-pad, and GLUE always forces sdpa.
+  # Resume restores the saved backend. Fresh pretrained-contrastive initialization keeps the launch value; native GLUE always forces sdpa.
+  attn_backend: sdpa
+
+  # model.kernel_backend — string; default: "auto". One of: auto | liger | torch.
+  # auto is recommended: eligible components use Liger when installed on CUDA and torch otherwise. Explicit liger errors only when an eligible Liger component is resolved or executed; a LayerNorm + GELU + masked-only-loss configuration can leave it unused.
+  # Resume and checkpoint-based native GLUE initialization restore the saved value; fresh pretrained-contrastive initialization keeps the launch value.
+  kernel_backend: auto
+
+  # model.pad_token_id — integer; nominal default: 0. Runtime-owned tokenizer metadata.
+  # Pretraining and contrastive replace it with tokenizer.pad_token_id and require that token to exist. Resume and fresh checkpoint-based native GLUE initialization restore it; fresh pretrained-contrastive initialization does so when the source contains config.yaml. Checkpoint-based evaluation requires an exact tokenizer/config match.
+  pad_token_id: 0
+
+  # model.from_hub — boolean; default: false. GLUE-only model-source switch.
+  # true loads model.name as a Hugging Face sequence classifier/tokenizer and bypasses native GLUE pretrained-source/random initialization. run_glue.py --model_name_or_path sets this true.
+  # With tokenizer.trust_remote_code=true, any resume is rejected; set trainer.save_model=false or trainer.save_strategy="no" to disable checkpoint creation and permit only a non-resumable comparison run.
+  from_hub: false
+
+# dataset — mapping; default: all DatasetConfig defaults below. Source, split, preprocessing, and loader settings.
+dataset:
+  # dataset.name — string; contrastive also accepts null | list[string]; default: "refinedweb".
+  # Pretraining passes it to load_dataset and operationally requires a loadable Hub name unless dataset.path exists. The config-driven preprocessor treats the exact value wikibook as a repository alias for the BookCorpus train split plus the text-only Wikipedia 20220301.en train split, concatenated and shuffled with seed 0; the trainer itself does not expand this alias, so train from the preprocessor's dataset.path output.
+  # Contrastive canonical selectors: ALLNLI | AMAZONQA | CONCURRENTQA | FEVER | GITHUBISSUE | GOOAQ | MSMARCO | PAQ | PUBMEDQA | QQP | SENTENCECOMP | STACKEXCHANGE | STACKOVERFLOW | STS12 | STSBENCHMARK | TRIVIAQA | WIKIHOW.
+  # Built-in contrastive Hub IDs: sentence-transformers/all-nli | embedding-data/Amazon-QA | stanfordnlp/concurrentqa-retrieval | mteb/fever | WhereIsAI/github-issue-similarity | tomaarsen/gooaq-hard-negatives | mteb/msmarco | embedding-data/PAQ_pairs | sentence-transformers/pubmedqa.
+  # More built-in IDs: embedding-data/QQP_triplets | embedding-data/sentence-compression | sentence-transformers/stackexchange-duplicates | mteb/stackoverflowdupquestions-reranking | mteb/sts12-sts | mteb/stsbenchmark-sts | sentence-transformers/trivia-qa-triplet | sentence-transformers/wikihow.
+  # Each full Hub ID and its trailing slug are accepted. ALL, the inherited refinedweb default, an empty string, or null select every registered source. Canonical values and aliases are case/punctuation-insensitive; a nonempty ordered YAML/nested-mapping list selects multiple sources, with duplicates removed after their first occurrence (dot overrides retain this field's string annotation). Arbitrary Hub names are not accepted.
+  # Resume keeps this launch-controlled. The config-driven pretraining preprocessor always loads this value's train split (or the exact wikibook alias) and writes its output to dataset.path.
+  name: refinedweb
+
+  # dataset.config — string | null; default: null. Pretraining-only Hugging Face dataset configuration/subset passed as load_dataset(name=...); ignored by contrastive and downstream tasks.
+  # Any nonempty string is passed through and Hub subset identifiers are case-sensitive; null uses that dataset's default configuration. Ignored when dataset.path loads a local trainer dataset and by scripts/pretraining/preprocess.py. Resume keeps it launch-controlled.
+  config: null
+
+  # dataset.path — string | null; default: "". Local dataset path; null and "" are both treated as unset.
+  # In trainer pretraining, a configured path takes precedence over dataset.name and must exist; a missing path fails before tokenizer/dataset setup so local-only requests cannot silently train on the default Hub corpus. Use null or "" explicitly to load dataset.name instead.
+  # Pretraining accepts a Hugging Face Dataset or DatasetDict directory created by save_to_disk, not a raw TXT/JSON/Parquet file. Raw datasets need text/sentence/content or the explicit dataset.text_column; pretokenized datasets need input_ids.
+  # Contrastive preprocessing (`python scripts/contrastive/preprocess.py CONFIG`) creates this root and writes <dataset.path>/all/<CANONICAL_NAME>. Training requires that all directory and discovers only split directories containing state.json.
+  # Each contrastive split also needs a matching tokenization_manifest.json and either query + corpus text, or input_ids_query + attention_mask_query + input_ids_corpus + attention_mask_corpus token fields; negative text/tokens are optional, and every token-ID field requires its matching attention mask.
+  # null is accepted from YAML/nested mappings; dot overrides follow the annotated string type, so use --dataset.path= to clear it rather than --dataset.path=null (which means a path literally named "null").
+  # scripts/pretraining/preprocess.py instead treats this as a new output directory and does not require it to exist; it always reads dataset.name. Resume keeps this launch-controlled.
+  path: ""
+
+  # dataset.num_workers — integer; default: 16; must be >= 0. Pretraining DataLoader worker count.
+  # GLUE uses glue.num_workers and contrastive uses trainer.dataloader_num_workers instead; the offline preprocessor ignores it. Tune to host CPU/storage; maintained GPU recipes commonly use 4. Resume keeps it launch-controlled.
+  num_workers: 16
+
+  # dataset.pin_memory — boolean; configured default: false. Pretraining/contrastive pinned CPU staging request.
+  # CUDA training computes an effective default of true even when false is configured; CPU keeps false. Resume keeps it launch-controlled.
+  pin_memory: false
+
+  # dataset.persistent_workers — boolean; default: true. Pretraining-only request to keep workers across epochs.
+  # Effective only when dataset.num_workers > 0; otherwise forced false. Resume keeps it launch-controlled.
+  persistent_workers: true
+
+  # dataset.prefetch_factor — integer | null; default: null. Pretraining batches prefetched per worker; when set it must be > 0.
+  # Ignored with dataset.num_workers=0. On CUDA with workers enabled, null computes to 4; on CPU, null leaves PyTorch's default behavior. Resume keeps it launch-controlled.
+  prefetch_factor: null
+
+  # dataset.streaming — boolean; default: true. Pretraining Hugging Face streaming mode.
+  # Ignored when dataset.path is set because load_from_disk datasets are non-streaming, and the offline preprocessor always loads non-streaming data. Hub streaming resume is best-effort batch skipping, not exact sample continuation; buffered/prefetched examples can move the boundary. dataset.validation_split is skipped in streaming mode.
+  # Same-corpus resume restores the checkpoint value; a changed pretraining corpus keeps the launch value.
+  streaming: true
+
+  # dataset.cache_dir — string | null; default: null. Pretraining-only Hugging Face datasets cache directory; ignored by contrastive and downstream tasks.
+  # Used only for trainer Hub loads; dataset.path and scripts/pretraining/preprocess.py ignore it. Resume keeps it launch-controlled.
+  cache_dir: null
+
+  # dataset.trust_remote_code — boolean; default: false. Pretraining-only permission for executable code supplied by a Hub dataset repository; ignored by contrastive and downstream tasks.
+  # Security warning: enable only for a repository/revision you trust; the dataset revision is not pinned by this schema. Used only for trainer Hub loads, not dataset.path or the offline preprocessor.
+  # Same-corpus resume restores the checkpoint value; a changed pretraining corpus keeps the launch value.
+  trust_remote_code: false
+
+  # dataset.max_seq_length — integer; default: 512; must be > 0 and >= dataset.min_length.
+  # For pretraining/contrastive it must be <= model.max_position_embeddings. Pretraining uses it as the default tokenization length; contrastive uses tokenizer.max_length at preprocessing/training and this field only for config-time floor/safety checks. Keep the two aligned for contrastive caches.
+  # Resume restores it for learned-position runs; pretraining/contrastive continuation may keep the launch value only when both checkpoint and launch use RoPE.
+  max_seq_length: 512
+
+  # dataset.text_column — string | null; default: null. Preferred raw text field for pretraining tokenization.
+  # null selects the first present field in this order: text | sentence | content. Any explicit field name is accepted if it exists; an incorrect name fails when tokenization begins. Pretokenized input_ids bypass text-column resolution. Resume keeps it launch-controlled.
+  text_column: null
+
+  # dataset.validation_split — float | null; default: null. Fraction reserved from a non-streaming training dataset when no explicit eval split is selected.
+  # Trainer pretraining only; the offline preprocessor ignores it. Use a fraction in (0, 1). Ignored with a warning for streaming data; dataset.eval_split takes precedence when present. Same-corpus resume restores it, while a changed corpus keeps the launch value.
+  validation_split: null
+
+  # dataset.train_split — string | null; default: null. Explicit training split or Hugging Face slice expression.
+  # Trainer pretraining only; the offline preprocessor always uses train. null loads the dataset's "train" split. For a local DatasetDict, this selects the named split; a local plain Dataset ignores it. Same-corpus resume restores it, while a changed corpus keeps the launch value.
+  train_split: null
+
+  # dataset.eval_split — string | null; default: null. Explicit evaluation split.
+  # Pretraining only. In streaming Hub pretraining, null attempts validation/eval/test/dev auto-detection. For a local DatasetDict this names a split. Do not set it for a local plain Dataset: that produces no named evaluation data and suppresses dataset.validation_split. If no split is found, dataset.eval_samples can reserve examples from the head of training data.
+  # The offline preprocessor ignores it. Same-corpus resume restores it, while a changed corpus keeps the launch value.
+  eval_split: null
+
+  # dataset.eval_samples — integer | null; default: null; when set must be > 0. Global cap/reservation size for pretraining evaluation.
+  # With no eval split, reserves this many head samples and excludes them from training. Non-streaming data must contain at least two rows; requests at or above its size are reduced to leave one training row. Leave null with no resolvable eval source to disable pretraining evaluation. A streaming eval requires this or trainer.eval_max_batches as an explicit budget.
+  # The offline preprocessor ignores it. Same-corpus resume restores it, while a changed corpus keeps the launch value.
+  eval_samples: null
+
+  # dataset.streaming_read_retries — integer; default: 4; must be >= 0. Outer retries after the underlying Hub client exhausts a transient streaming read.
+  # 0 disables NeoBERT's outer retries. Long-running iteration retries require the stream to expose state_dict/load_state_dict; otherwise training warns and leaves it unwrapped. Recovery of a shuffled stream discards its in-memory buffer and can skip up to dataset.shuffle_buffer_size examples. Resume keeps it launch-controlled.
+  streaming_read_retries: 4
+
+  # dataset.streaming_read_retry_backoff_seconds — float; default: 5.0; must be > 0. Initial exponential retry delay.
+  # Must be <= dataset.streaming_read_retry_max_backoff_seconds. Resume keeps it launch-controlled.
+  streaming_read_retry_backoff_seconds: 5.0
+
+  # dataset.streaming_read_retry_max_backoff_seconds — float; default: 60.0; must be > 0.
+  # Caps exponential retry delay and must be >= dataset.streaming_read_retry_backoff_seconds. Resume keeps it launch-controlled.
+  streaming_read_retry_max_backoff_seconds: 60.0
+
+  # dataset.num_proc — integer; default: 4; must be >= 0. Multiprocessing processes for non-streaming pretraining tokenization.
+  # Trainer only; scripts/pretraining/preprocess.py ignores it. 0 computes a worker count from CPU affinity; 1 runs mapping inline without forking; distributed runs reduce the count per rank. Streaming tokenization does not use process mapping; GLUE uses glue.preprocessing_num_proc. Resume keeps it launch-controlled.
+  num_proc: 4
+
+  # dataset.shuffle_buffer_size — integer; default: 10000. Streaming pretraining shuffle buffer; <= 0 disables shuffling and 1 has no meaningful mixing.
+  # Larger buffers improve mixing but consume memory and can increase the number of buffered examples crossed by an approximate resume boundary.
+  # Same-corpus resume restores the checkpoint value; a changed pretraining corpus keeps the launch value.
+  shuffle_buffer_size: 10000
+
+  # dataset.load_all_from_disk — boolean; default: false. Contrastive-preprocessing-only cache mode.
+  # true reuses selected manifest-validated splits under <dataset.path>/all; missing requested splits fail instead of silently downloading. Takes precedence over dataset.force_redownload when both are true.
+  # Resume restores the checkpoint value, although training itself does not consume this preprocessing switch.
+  load_all_from_disk: false
+
+  # dataset.force_redownload — boolean; default: false. Contrastive-preprocessing-only download/cache switch.
+  # true deletes each existing selected split before downloading it again; dataset.load_all_from_disk=true takes precedence and prevents deletion/download. It has no effect on the pretraining loader and remains launch-controlled on resume.
+  force_redownload: false
+
+  # dataset.min_length — integer; default: 5; must be > 0 and <= dataset.max_seq_length.
+  # Compatibility metadata preserved in resume source-of-truth checks; current trainers and contrastive preprocessing do not apply a min-length filter from this field.
+  # Resume restores the checkpoint value.
+  min_length: 5
+
+  # dataset.alpha — float; default: 1.0; must be > 0. Contrastive dataset sampling exponent.
+  # 1.0 samples proportional to split size; values below 1 flatten the distribution and values above 1 favor larger datasets.
+  # Resume restores the checkpoint value.
+  alpha: 1.0
+
+# tokenizer — mapping; default: all TokenizerConfig defaults below.
+tokenizer:
+  # tokenizer.name — string; default: "bert-base-uncased". Hugging Face tokenizer identifier or path.
+  # A nonempty tokenizer.path takes precedence; "" is unset. The pretraining preprocessor always uses name. Hub GLUE ignores both fields and uses model.name; random-weight GLUE uses bert-base-uncased; checkpoint-based native GLUE may restore checkpoint identity, as may pretrained contrastive when the source contains config.yaml.
+  # Resume restores the saved identity and uses the checkpoint-local tokenizer directory when present.
+  name: bert-base-uncased
+
+  # tokenizer.path — string | null; default: null. Explicit local tokenizer path, preferred over tokenizer.name.
+  # null and "" are unset. scripts/pretraining/preprocess.py and Hub GLUE ignore this field. Checkpoint-based native GLUE may replace it from its source checkpoint, as may pretrained contrastive when the source contains config.yaml; resume uses the selected checkpoint's tokenizer directory when present.
+  path: null
+
+  # tokenizer.max_length — integer; default: 512. Requested tokenizer metadata/limit; use a positive value.
+  # For pretraining/contrastive, values below dataset.max_seq_length are raised to match it. Pretraining raw-text tokenization instead uses datacollator.max_length or dataset.max_seq_length, and pretokenized input_ids bypass tokenization; GLUE always replaces this value with glue.max_seq_length.
+  # For MTEB this is the launch-controlled evaluation length: checkpoint-local tokenizer identity is retained, learned-position models reject lengths above their trained limit, and RoPE models may request a different length.
+  # Fresh pretrained-contrastive initialization restores it when the source contains config.yaml. Resume restores it for learned positions and GLUE; pretraining/contrastive continuation may keep the launch value only when both checkpoint and launch use RoPE.
+  max_length: 512
+
+  # tokenizer.padding — string; default: "max_length". Compatibility metadata only; current tokenization is unpadded and collators perform dynamic padding/packing.
+  # Changing this field has no runtime effect. Resume nevertheless restores the saved metadata value.
+  padding: max_length
+
+  # tokenizer.truncation — boolean; default: true. Truncates raw inputs to the active tokenization limit.
+  # false can yield overlength samples that later fail or exceed the model context; keep true for maintained training workflows. Resume and checkpoint-based native GLUE initialization restore the saved value.
+  truncation: true
+
+  # tokenizer.vocab_size — integer | null; nominal default: null. Runtime/checkpoint metadata, not an input vocabulary limit.
+  # Pretraining replaces it with the effective tokenizer length rounded to a multiple of 128. Resume loads the checkpoint tokenizer and recomputes this value; an incompatible effective vocabulary cannot load the saved model state. Fresh downstream initialization does not use it to resize a tokenizer.
+  vocab_size: null
+
+  # tokenizer.trust_remote_code — boolean; default: false. Allows executable tokenizer/model code from a Hub repository and custom tokenizer code from a checkpoint-local tokenizer/ where supported.
+  # Security warning: local dynamic modules still execute Python. Use only with trusted code and a preferably pinned tokenizer.revision. MTEB keeps this launch-controlled and includes it in the result-cache contract. Hub GLUE rejects true with resume or checkpoint creation; set trainer.save_model=false or trainer.save_strategy="no" to permit only a non-resumable comparison. Resume and checkpoint-based native GLUE initialization restore the saved value. Local pseudo-perplexity uses its separate --trust_remote_code CLI opt-in.
+  trust_remote_code: false
+
+  # tokenizer.revision — string | null; default: null. Optional Hub branch, tag, or commit for tokenizer/model loading.
+  # Pin a commit for reproducible remote assets; null follows the repository's default revision. Resume and checkpoint-based native GLUE initialization restore the saved value.
+  revision: null
+
+  # tokenizer.allow_special_token_rewrite — boolean; default: false. Opt-in MLM fallback for tokenizers without a mask token.
+  # It is consulted only when MLM special-token enforcement is active and the tokenizer lacks a mask token. Then true requires a fast backend, installs RoBERTa-style tokens, and installs a matching post-processor in place of any existing one; an existing mask token is left unchanged, and Hub GLUE disables this enforcement.
+  # Leave false unless you have inspected and accept that mutation. A missing pad token is still added as <pad> because batching requires one. Resume and checkpoint-based native GLUE initialization restore the saved value.
+  allow_special_token_rewrite: false
+
+# optimizer — mapping; default: all OptimizerConfig defaults below.
+optimizer:
+  # optimizer.name — string; default: "adamw". One of: adamw | adam | muonclip | muon-clip | muon_clip (case-insensitive).
+  # MuonClip requires a NeoBERT-style model exposing transformer_encoder directly or through a model, base, or backbone wrapper, with at least one layer and either a fused qkv projection or valid q_proj/k_proj names in clipping_layers_mapping. All pretraining FSDP runs require FSDP2; GLUE/contrastive require FSDP2 when using MuonClip. DeepSpeed runtime is unsupported for every task.
+  # Distributed MuonClip requires each prepared Muon parameter to use one Shard(0) placement on a one-dimensional FSDP2 mesh; a multi-rank FSDP run with no observable Muon DTensor is rejected. Under FSDP2, null muon_config computes enable_clipping=true and then errors, so supply a mapping with enable_clipping=false.
+  # Resume restores the checkpoint optimizer name and all optimizer fields below before loading state.
+  name: adamw
+
+  # optimizer.lr — float; default: 1e-4; must be > 0. Base learning rate for all optimizer families.
+  # MuonClip additionally requires it to be < 1 at optimizer construction. Resume restores the checkpoint value; changing it in the launch config does not change a continuation run.
+  lr: 1.0e-4
+
+  # optimizer.weight_decay — float; default: 0.01; must be >= 0.
+  # AdamW applies it only to selected decay groups; Adam passes it through as optimizer weight_decay; MuonClip uses it for its Adam-routed parameters, while muon_config.muon_decay controls Muon-routed matrices.
+  # Resume restores the checkpoint value.
+  weight_decay: 0.01
+
+  # optimizer.betas — list[float]; default: [0.9, 0.999]. Exactly two values, each in [0, 1).
+  # Used directly by Adam/AdamW and as MuonClip's Adam-routed betas; maintained MuonClip recipes use [0.9, 0.95]. Resume restores the checkpoint value.
+  betas: [0.9, 0.999]
+
+  # optimizer.eps — float; default: 1e-8; must be > 0. Adam-family numerical-stability epsilon, including MuonClip's Adam-routed parameters. Resume restores the checkpoint value.
+  eps: 1.0e-8
+
+  # optimizer.muon_config — mapping | null; default: null. Used only by MuonClip; Adam/AdamW warn and ignore a non-null mapping.
+  # With optimizer.name=muonclip, null computes the complete Muon defaults shown below; replace null with the mapping when any override is needed. Resume restores the entire checkpoint mapping.
+  muon_config: null
+  # muon_config:
+  #   # optimizer.muon_config.muon_beta — float; default: 0.95; must be in [0, 1). Muon momentum coefficient.
+  #   muon_beta: 0.95
+  #   # optimizer.muon_config.nesterov — boolean; default: true. Momentum first updates buffer = beta * buffer + grad; true orthogonalizes grad + beta * updated_buffer, while false orthogonalizes the updated buffer directly.
+  #   nesterov: true
+  #   # optimizer.muon_config.muon_decay — float; default: 0.0; must be in [0, 1). Weight decay for Muon-routed matrices, independent of optimizer.weight_decay.
+  #   muon_decay: 0.0
+  #   # optimizer.muon_config.ns_steps — integer; default: 5; must be in [1, 20]. Values below 3 warn; the implementation recommends 5-9.
+  #   ns_steps: 5
+  #   # optimizer.muon_config.enable_clipping — boolean; default: true. Enables MuonClip Q/K activation clipping, separate from trainer.gradient_clipping.
+  #   # FSDP2 sharded Muon rejects true; set false explicitly for distributed Muon-only runs. Clipping stores latest-microbatch activations during accumulation, and all clipping subfields remain validated even when this is false.
+  #   enable_clipping: true
+  #   # optimizer.muon_config.clipping_threshold — float; default: 50.0; must be in (0, 1000]. Used only when enable_clipping=true, although validation always applies. Values < 30 warn about over-constraint; values > 200 warn clipping may have little effect.
+  #   clipping_threshold: 50.0
+  #   # optimizer.muon_config.clipping_alpha — float; default: 0.5; must be in [0, 1]. Used only when enable_clipping=true; Q/K rescaling balance, with 0.5 splitting scaling equally.
+  #   clipping_alpha: 0.5
+  #   # optimizer.muon_config.clipping_warmup_steps — integer; default: 0; must be >= 0. Used only when enable_clipping=true and disables clipping before this many optimizer updates.
+  #   clipping_warmup_steps: 0
+  #   # optimizer.muon_config.clipping_interval — integer; default: 10; must be >= 1. Used only when enable_clipping=true and applies clipping every N optimizer updates after warmup.
+  #   clipping_interval: 10
+  #   # optimizer.muon_config.clipping_qk_chunk_size — integer; default: 1024; must be >= 1. Used only when enable_clipping=true; sequence chunk size used to bound QK logit-max memory.
+  #   clipping_qk_chunk_size: 1024
+  #   # optimizer.muon_config.detect_anomalies — boolean; default: false. true globally enables PyTorch autograd anomaly detection, skips non-finite parameter-gradient updates, and adds distributed topology checks; it is expensive and intended only for debugging.
+  #   detect_anomalies: false
+  #   # optimizer.muon_config.orthogonalization — string; default: "polar_express". One of: polar_express | newton_schulz; values are case-insensitive, trim whitespace, and normalize hyphens to underscores.
+  #   # polar_express uses the fast CUDA work dtype (normally bf16); newton_schulz upcasts bf16 input to fp32 for its iteration and casts back afterward.
+  #   orthogonalization: polar_express
+  #   # optimizer.muon_config.norm_factor — string; default: "neobert". One of: neobert | muon_reference | spectral | match_rms_adamw | none; values are case-insensitive, trim whitespace, and normalize hyphens to underscores.
+  #   # For matrix shape [d_out, d_in], scales are neobert=0.4*sqrt(max(d_out,d_in)), muon_reference=sqrt(max(1,d_out/d_in)), spectral=sqrt(d_out/d_in), match_rms_adamw=0.2*sqrt(max(d_out,d_in)), and none=1.
+  #   norm_factor: neobert
+  #   # optimizer.muon_config.param_policy — string; default: "hidden_2d". One of: hidden_2d | all_2d; values are case-insensitive, trim whitespace, and normalize hyphens to underscores.
+  #   # hidden_2d is recommended and excludes embeddings/output matrices; all_2d is compatibility scope and materially increases FSDP2 communication.
+  #   param_policy: hidden_2d
+  #   # optimizer.muon_config.clipping_layers_mapping — mapping[string, string] | null; default: {}. null normalizes to {}; otherwise maps projection roles to model attribute names for non-fused attention blocks.
+  #   # Supported mapping keys: q_proj | k_proj | v_proj; unknown keys warn. A non-fused block requires resolvable q_proj and k_proj entries even when clipping is disabled. Keep {} for NeoBERT's fused QKV blocks.
+  #   clipping_layers_mapping: {}
+
+# scheduler — mapping; default: all SchedulerConfig defaults below. Schedule phases do not change the trainer stop point.
+scheduler:
+  # scheduler.name — string; default: "cosine". One of: cosine | linear (case-insensitive). When resolved warmup is positive, both ramp linearly from 1e-4 * optimizer.lr to optimizer.lr, then decay to scheduler.final_lr_ratio and hold that ratio after the decay endpoint.
+  # cosine uses cosine annealing; linear uses a straight-line decay and requires final_lr_ratio in [0, 1]. Resume restores the checkpoint value.
+  name: cosine
+
+  # scheduler.warmup_steps — integer; default: 10000; must be >= 0. Absolute warmup length.
+  # Ignored when scheduler.warmup_percent is non-null; it is clamped to the resolved schedule total. Resume restores the checkpoint value.
+  warmup_steps: 10000
+
+  # scheduler.total_steps — integer | null; default: null; when set must be > 0. Denominator for percentage phases and default decay end.
+  # null computes from trainer.max_steps. It does not cap training; after decay ends, LR stays at scheduler.final_lr_ratio. Resume restores the checkpoint value.
+  total_steps: null
+
+  # scheduler.decay_steps — integer | null; default: null; when set must be > 0. Absolute update at which decay reaches the LR floor.
+  # Ignored when scheduler.decay_percent is non-null. Values before warmup completion are raised to warmup_end + 1. Resume restores the checkpoint value.
+  decay_steps: null
+
+  # scheduler.final_lr_ratio — float; default: 0.1. Final learning-rate multiplier after decay; must be >= 0 for cosine and in [0, 1] for linear.
+  # The maintained default is recommended as a conservative floor. Cosine values > 1 are accepted and make the schedule finish above optimizer.lr rather than decay. Resume restores the checkpoint value.
+  final_lr_ratio: 0.1
+
+  # scheduler.warmup_percent — float | null; default: null; when set must be in [0, 100]. Percentage of scheduler.total_steps, or trainer.max_steps when total_steps is null.
+  # Takes precedence over scheduler.warmup_steps; explicitly configuring both emits a NeoBERTWarning so the shadowed absolute value is visible. The derived update count is floored to an integer. Resume restores the checkpoint value.
+  warmup_percent: null
+
+  # scheduler.decay_percent — float | null; default: null; when set must be in [0, 100]. Percentage position of the decay end.
+  # Takes precedence over scheduler.decay_steps; this is an end position, not a decay duration, and the derived update is floored to an integer. Resume restores the checkpoint value.
+  decay_percent: null
+
+# trainer — mapping; default: all TrainerConfig defaults below.
+# Resume rule for trainer configuration: fields remain launch-controlled unless their key says otherwise. Pretraining restores only per_device_train_batch_size; GLUE restores per_device_train_batch_size and gradient_accumulation_steps; contrastive restores no trainer configuration fields, though every task restores applicable runtime state such as optimizer/scheduler/RNG state.
+trainer:
+  # trainer.per_device_train_batch_size — integer; default: 16; must be > 0. Train microbatch size on each process/device.
+  # Effective examples per optimizer update are this value * gradient_accumulation_steps * process count, except packing can make local row counts variable. Contrastive treats this as a target: SimCSE uses it directly, while each supervised source uses max(1, floor(value/divisor)).
+  # Contrastive divisors: ALLNLI/AMAZONQA/FEVER/GITHUBISSUE/MSMARCO/PAQ/SENTENCECOMP/STACKEXCHANGE/STS12/STSBENCHMARK/WIKIHOW=2; TRIVIAQA=3; GOOAQ=7; CONCURRENTQA=21; PUBMEDQA=22; QQP/STACKOVERFLOW=50.
+  # Pretraining and GLUE resume restore the checkpoint value; contrastive resume keeps the launch value.
+  per_device_train_batch_size: 16
+
+  # trainer.per_device_eval_batch_size — integer; default: 32; must be > 0. Pretraining/GLUE evaluation microbatch size per process/device; contrastive has no evaluation loop and ignores it.
+  per_device_eval_batch_size: 32
+
+  # trainer.gradient_accumulation_steps — integer; default: 1; must be > 0. Microbatches per optimizer update.
+  # GLUE resume restores the checkpoint value; pretraining/contrastive resume keep the launch value.
+  gradient_accumulation_steps: 1
+
+  # trainer.max_steps — integer | null; default: 1000000. Optimizer-update stop point; must be > 0 for pretraining/contrastive.
+  # In GLUE, null or <= 0 selects trainer.num_train_epochs; > 0 takes precedence and recomputes the needed epoch count. This stop point remains launch-controlled on resume even though scheduler state/config are restored.
+  max_steps: 1000000
+
+  # trainer.save_steps — integer; default: 10000; must be >= 0 and > 0 when trainer.save_strategy=steps.
+  # Pretraining/contrastive save every interval and at the terminal step; GLUE applies it only with the steps strategy.
+  save_steps: 10000
+
+  # trainer.eval_steps — integer; default: 10000; must be >= 0 and > 0 when trainer.eval_strategy=steps.
+  # Pretraining/GLUE step evaluation interval. Contrastive has no evaluation loop; GLUE replaces it with one epoch when eval_strategy=epoch and clamps a steps interval to at most the number of updates in one epoch.
+  eval_steps: 10000
+
+  # trainer.eval_max_batches — integer | null; default: null; when set must be > 0. Global pretraining evaluation batch target, rounded up to a whole per-rank batch count and then enforced per rank.
+  # Distributed evaluation can therefore process up to process_count - 1 batches more than this target. Required for a streaming eval dataset unless dataset.eval_samples supplies the budget; ignored by GLUE/contrastive.
+  eval_max_batches: null
+
+  # trainer.logging_steps — integer; default: 100; must be > 0. Pretraining/contrastive optimizer-update logging interval and W&B watch frequency; GLUE ignores it and logs at evaluation.
+  logging_steps: 100
+
+  # trainer.enforce_full_packed_batches — boolean; default: false. Experimental pretraining-only buffering of undersized packed rows.
+  # Applies only when datacollator.pack_sequences=true and is rejected in multi-process runs because rank-local buffering can desynchronize collectives/resume cursors.
+  enforce_full_packed_batches: false
+
+  # trainer.log_train_accuracy — boolean; default: false. Pretraining-only masked-token train accuracy.
+  # Keep false for throughput; enable for focused diagnostics because it adds reductions/work on the hot path.
+  log_train_accuracy: false
+
+  # trainer.log_grad_norm — boolean; default: true. Logs the global pre-clip gradient norm at logging updates in pretraining/contrastive.
+  log_grad_norm: true
+
+  # trainer.output_dir — string; default: "./output". Run root for checkpoints, metrics, and task artifacts.
+  # Resumable step checkpoints live under <output_dir>/checkpoints/<step>. run_glue.py --output_dir overrides this value; run_mteb.py --model_name_or_path also replaces it with the evaluated run/checkpoint root.
+  output_dir: ./output
+
+  # trainer.overwrite_output_dir — boolean; default: true. GLUE fresh-run output policy; ignored by pretraining/contrastive.
+  # WARNING: true deletes every existing child of a nonempty GLUE output directory when not resuming. false fails instead; resume never clears the directory.
+  overwrite_output_dir: true
+
+  # trainer.gradient_checkpointing — boolean; default: false. Pretraining-only activation recomputation to reduce model memory at extra compute cost; ignored by GLUE/contrastive.
+  gradient_checkpointing: false
+
+  # trainer.gradient_clipping — float | null; default: null. In pretraining/contrastive, positive values clip the global gradient norm after accumulation; null or <= 0 disables it. GLUE ignores this field.
+  # Independent of optimizer.muon_config QK activation clipping.
+  gradient_clipping: null
+
+  # trainer.mixed_precision — string or boolean; default: "bf16". String values: bf16 | no | fp32 (case-insensitive; surrounding whitespace is ignored). Actual YAML boolean true maps to bf16 and false maps to no; quoted strings "true" and "false" are invalid.
+  # fp32 normalizes to no. fp16 is explicitly unsupported. bf16 is recommended on compatible CUDA; no/FP32 forces flash attention back to sdpa.
+  mixed_precision: bf16
+
+  # trainer.masked_logits_only_loss — boolean | string; default: true. Pretraining-only MLM implementation selector. Quoted string aliases are true | 1 | yes | on and false | 0 | no | off (case-insensitive); prefer YAML booleans.
+  # true is recommended and computes only selected-token logits. false is a legacy full-vocabulary-logits ablation/debug path with materially higher memory use.
+  masked_logits_only_loss: true
+
+  # trainer.torch_compile — boolean; default: false. Enables torch.compile for pretraining/contrastive/GLUE model execution.
+  # Compilation adds startup cost and can recompile on changing shapes; test the actual workload before relying on a speedup.
+  torch_compile: false
+
+  # trainer.torch_compile_dynamic — boolean | null; default: null. NeoBERT maps null to false, so both request static-shape compilation; true requests dynamic shapes.
+  # This differs from passing dynamic=null directly to PyTorch. Static is the project recommendation for packed training unless shape churn proves otherwise.
+  torch_compile_dynamic: null
+
+  # trainer.torch_compile_backend — string; default: "inductor". NeoBERT-supported values: inductor | aot_eager | eager.
+  # Used only when trainer.torch_compile=true. Unknown values warn and fall back to inductor; aot_eager/eager are primarily compiler-debugging backends.
+  torch_compile_backend: inductor
+
+  # trainer.resume_from_checkpoint — string | boolean | null; default: null. null or false disables resume; true and strings true/latest/auto scan <output_dir>/checkpoints for numeric directories.
+  # Automatic selection starts fresh when the root is missing/empty or has no numeric directories, otherwise selects the highest complete resumable numeric step (skipping newer incomplete candidates). If numeric candidates exist but none is resumable, it fails with their validation errors.
+  # A numeric string explicitly selects <output_dir>/checkpoints/<step>; other strings are paths (relative paths try under output_dir first). Explicit selectors fail when missing/incomplete. Resume accepts only a complete current version-2 self-contained checkpoint with its completion inventory, config, tokenizer, portable model weights, Accelerate model/optimizer/scheduler/RNG state, exact task custom-state count, and optimizer manifests; older or partial checkpoints are errors.
+  # WARNING: resume restores checkpoint-owned model/tokenizer/objective/optimizer/scheduler semantics. It also restores pretraining microbatch size and GLUE microbatch/accumulation/seed; corpus identity and, with RoPE, context lengths remain launch-controlled.
+  # For same-corpus pretraining, the checkpoint restores dataset.trust_remote_code/streaming/validation_split/train_split/eval_split/eval_samples/shuffle_buffer_size/load_all_from_disk/min_length/alpha. Worker, pinning, prefetch, cache, retry, num_proc, and top-level seed settings remain launch-controlled. When corpus identity changes, trust_remote_code/streaming/validation_split/train_split/eval_split/eval_samples/shuffle_buffer_size remain launch-controlled and the data cursor resets.
+  # Ordered non-streaming continuation requires unchanged corpus, seed, and microbatch. Pretraining resume requires the same process count because rank-local batch-buffer state is checkpointed; streaming continuity remains approximate even with an unchanged process count.
+  # Contrastive resume restores temperature/pooling/pretraining_prob and training/RNG state, but contrastive.pretraining_dataset_path remains launch-controlled and every dataset iterator restarts from its beginning; per-dataset sample cursors are not restored.
+  resume_from_checkpoint: null
+
+  # trainer.num_train_epochs — integer; default: 3. GLUE-only epoch budget used when trainer.max_steps is null or <= 0; clamped to at least 1.
+  # Ignored by pretraining and contrastive, which are step-driven despite older recipes that may set this field.
+  num_train_epochs: 3
+
+  # trainer.eval_strategy — string; default: "steps". One of: steps | epoch (case-insensitive; surrounding whitespace is ignored).
+  # Used by pretraining and GLUE; contrastive has no eval loop. epoch evaluates after each traversed epoch and does not use eval_steps as a cadence.
+  eval_strategy: steps
+
+  # trainer.save_strategy — string; default: "steps". One of: steps | epoch | best | no (case-insensitive; surrounding whitespace is ignored).
+  # YAML footgun: write the disabled value as quoted "no"; bare no is parsed as boolean false and fails validation. Pretraining/contrastive accept only steps or "no". GLUE supports all four: best saves only metric improvements and requires evaluation; "no" disables scheduled/final model checkpoints.
+  save_strategy: steps
+
+  # trainer.save_total_limit — integer | null; default: 3; when set must be >= 0. Best-effort target for the number of newest numeric checkpoint directories retained.
+  # 0 or null disables pruning and keeps all checkpoints; it does not disable saving. Filesystem deletion failures only warn, and incomplete numeric directories count toward the target. Use trainer.save_model=false or save_strategy=no to disable saving.
+  save_total_limit: 3
+
+  # trainer.early_stopping — integer; default: 0. GLUE-only consecutive non-improving evaluation cycles before stopping.
+  # Any value <= 0 disables early stopping; use a positive value with an evaluation strategy. Resume restores the counter.
+  early_stopping: 0
+
+  # trainer.save_model — boolean; default: true. Master switch for scheduled and terminal checkpoints in all trainers.
+  # false leaves no ordinary resumable/portable output, but pretraining/contrastive still write an emergency synchronized checkpoint on SIGTERM to preserve preempted work.
+  save_model: true
+
+  # trainer.disable_tqdm — boolean; default: false. Disables task progress bars.
+  disable_tqdm: false
+
+  # trainer.dataloader_num_workers — integer; default: 0; must be >= 0. Contrastive DataLoader workers.
+  # Ignored by pretraining (dataset.num_workers) and GLUE (glue.num_workers).
+  dataloader_num_workers: 0
+
+  # trainer.use_cpu — boolean; default: false. Forces Accelerate CPU execution.
+  # CPU execution forces model.attn_backend=sdpa; choose trainer.mixed_precision=no unless the CPU/runtime explicitly supports the requested policy.
+  use_cpu: false
+
+  # trainer.tf32 — boolean; default: true. Allows TF32 matmuls on supported CUDA GPUs; no effect on unsupported hardware/CPU.
+  tf32: true
+
+  # trainer.log_weight_norms — boolean; default: true. Logs global parameter L2 norm after optimizer updates in pretraining/contrastive.
+  # Disable if the extra parameter scan is undesirable at logging intervals.
+  log_weight_norms: true
+
+# datacollator — mapping; default: all DataCollatorConfig defaults below.
+datacollator:
+  # datacollator.mlm_probability — float; default: 0.15; must be in [0, 1]. Pretraining MLM selection probability.
+  # With mask_all=false, selected tokens use 80% mask / 10% random / 10% unchanged; with true, every selected token becomes the mask token.
+  # Resume restores the checkpoint value.
+  mlm_probability: 0.15
+
+  # datacollator.pad_to_multiple_of — integer | null; default: null. Dynamic padding alignment for non-packed pretraining, contrastive, and GLUE batches.
+  # Use a positive value; maintained GPU recipes use 8. Ignored when datacollator.pack_sequences=true, where max_length determines row length.
+  # Resume restores the checkpoint value.
+  pad_to_multiple_of: null
+
+  # datacollator.mask_all — boolean; default: false. Pretraining corruption mode.
+  # false uses standard 80/10/10 replacement; true replaces 100% of selected MLM tokens with the mask token.
+  # Resume restores the checkpoint value.
+  mask_all: false
+
+  # datacollator.pack_sequences — boolean; default: false. Experimental pretraining sequence packing; ignored by GLUE/contrastive training.
+  # Raw text is tokenized without outer boundaries automatically. Pretokenized packed inputs must omit them or collation fails. flash_attn_varlen is recommended on GPU; sdpa works via a slower per-segment fallback.
+  # Resume restores the checkpoint value.
+  pack_sequences: false
+
+  # datacollator.max_length — integer | null; default: null; when set must be > 0. Packed/pretraining target length.
+  # Takes precedence over dataset.max_seq_length for raw-text tokenization and sets packed row length. Pretokenized input_ids bypass tokenization; non-packed collation dynamically pads them without enforcing this value, while packing rejects any segment that exceeds it.
+  # Packed length must leave room for the tokenizer's inserted boundary tokens plus at least one content token. Schema context validation compares only dataset.max_seq_length to the model limit; learned positions fail above model.max_position_embeddings, while RoPE builds a transient longer cache. Keep all three aligned for maintained workflows.
+  # Resume restores it for learned-position runs; pretraining/contrastive continuation may keep the launch value only when both checkpoint and launch use RoPE.
+  max_length: null
+
+# wandb — mapping; default: all WandbConfig defaults below. Used by pretraining, contrastive, and GLUE; MTEB does not initialize W&B.
+# In supported trainers, W&B runs are enabled only when both enabled=true and mode is not disabled.
+wandb:
+  # wandb.enabled — boolean; default: false. Enables W&B/Accelerate tracking; a populated section alone does not enable it.
+  enabled: false
+
+  # wandb.project — string; default: "neo-bert". W&B project name.
+  project: neo-bert
+
+  # wandb.entity — string | null; default: null. Optional W&B user/team; null uses the SDK/account default.
+  entity: null
+
+  # wandb.name — string | null; default: null. Optional display name; it is not a unique W&B run ID.
+  # Inline YAML variables are useful for sweep labels. This field cannot by itself make wandb.resume target an earlier run.
+  name: null
+
+  # wandb.tags — list[string]; default: []. Run tags.
+  tags: []
+
+  # wandb.mode — string; default: "online". One of: online | offline | disabled (case-insensitive).
+  # enabled=false bypasses tracking regardless of mode; disabled also bypasses it, while offline records locally without online watch.
+  mode: online
+
+  # wandb.watch — string | false | 0 | null; default: "gradients". One of: gradients | parameters | weights | all | off | none | disabled | false | 0 | null.
+  # Pretraining/contrastive online mode only. WANDB_WATCH has precedence; weights normalizes to parameters and false-like/null values disable watching. GLUE does not call wandb.watch.
+  watch: gradients
+
+  # wandb.resume — string | boolean | null; default: "never". W&B SDK values: allow | never | must | auto | true | false | null.
+  # NeoBERT does not validate this field and passes it to W&B. The SDK interprets allow as resume-or-create for a supplied ID, never as error-if-ID-exists, must as require-existing, auto as local-crash recovery, true/false as deprecated auto/unset aliases, and null as unset/new-run behavior.
+  # NeoBERT has no run-ID key and wandb.name is only a display name, so ID-based modes require WANDB_RUN_ID in the launch environment. Use trainer.resume_from_checkpoint—not this field—for training-state continuity.
+  resume: never
+
+  # wandb.dir — string; default: "logs/wandb". Local W&B run/artifact directory; pretraining/contrastive create it before tracker initialization and GLUE passes it to W&B for creation/use.
+  # No W&B directory is created by NeoBERT when tracking is disabled through wandb.enabled=false or wandb.mode=disabled.
+  dir: logs/wandb
+
+# glue — mapping; default: all GLUEConfig defaults below. Used only when task=glue.
+glue:
+  # glue.task_name — string; default: "cola". One of: allnli | cola | mnli | mrpc | qnli | qqp | rte | snli | sst2 | stsb | wnli.
+  # Values must use the exact lowercase spelling. run_glue.py --task_name overrides this field and sets glue.num_labels from the task registry. Checkpoint-selection/early-stopping metric by task: cola=matthews_correlation; mrpc/qqp=f1; stsb=pearson; allnli/mnli/qnli/rte/snli/sst2/wnli=accuracy. MNLI uses matched accuracy for selection and also reports mismatched accuracy.
+  # GLUE resume restores the saved task and rejects a checkpoint from another top-level task.
+  task_name: cola
+
+  # glue.num_labels — integer; default: 2. Must match task_name: mnli/snli=3, stsb=1, and all other supported tasks=2.
+  # The runtime may synchronize it from loaded data/model state, but preflight validation rejects a mismatched configured value. Resume restores the checkpoint value.
+  num_labels: 2
+
+  # glue.max_seq_length — integer; default: 128; must be > 0. GLUE tokenization/model length and the source of tokenizer.max_length.
+  # Also set tokenizer.max_length to this same value for a warning-free load; a mismatch is accepted but warns while being replaced. Values > 512 warn. For checkpoints with model.rope=false it must not exceed the checkpoint's model.max_position_embeddings. Resume restores the checkpoint value.
+  max_seq_length: 128
+
+  # glue.pretrained_model_path — string | null; default: null. Path to the source pretraining config.yaml.
+  # Unless resuming, using model.from_hub=true, or opting into random weights, this, pretrained_checkpoint_dir, and pretrained_checkpoint are all required and this path must be a file. Ignored after a resume selector resolves.
+  pretrained_model_path: null
+
+  # glue.pretrained_checkpoint_dir — string | null; default: null. Run/checkpoints root containing source weights.
+  # Required together with pretrained_model_path and pretrained_checkpoint for native checkpoint initialization; the path must exist. Accepts a run root, a current checkpoints root, a legacy model_checkpoints root, or a legacy run root; current checkpoints are preferred when both layouts exist.
+  # Portable model.safetensors is preferred; legacy DeepSpeed ZeRO shards fall back to fp32 conversion and require the optional legacy-checkpoints dependency. transfer_from_task uses this path as its search root. Ignored after resume resolves. model.from_hub=true bypasses ordinary native loading, but the invalid transfer_from_task=true combination still searches this root and can error before Hub loading.
+  pretrained_checkpoint_dir: null
+
+  # glue.pretrained_checkpoint — string | integer | null; default: null. Native source step/tag selector; latest selects a root latest target/direct step or the highest loadable numeric checkpoint.
+  # Required with the other native source fields unless resuming, loading from Hub, or allow_random_weights=true. Ignored after resume resolves. model.from_hub=true bypasses ordinary native loading, but the invalid transfer_from_task=true combination still searches this selector and can error before Hub loading.
+  pretrained_checkpoint: null
+
+  # glue.allow_random_weights — boolean; default: false. Explicitly permits a GLUE run without pretrained weights.
+  # Footgun: true skips pretrained_model_path and uses bert-base-uncased as the tokenizer, turning the run into a launch-config random-initialization experiment; intended for tests/ablations, not ordinary evaluation. Resume restores the saved value.
+  # Do not combine true with pretrained_checkpoint_dir/pretrained_checkpoint: those weights can still load into the launch-constructed model, creating a confusing partial-source run. model.from_hub=true bypasses this path.
+  allow_random_weights: false
+
+  # glue.classifier_dropout — float; default: 0.1. Dropout probability in the native GLUE classifier head; use [0, 1]. Ignored by model.from_hub=true; resume restores the checkpoint value.
+  classifier_dropout: 0.1
+
+  # glue.classifier_init_range — float; default: 0.02. Standard deviation for native GLUE classifier initialization; use a non-negative value. Ignored by model.from_hub=true; resume restores the checkpoint value.
+  classifier_init_range: 0.02
+
+  # glue.transfer_from_task — boolean; default: false. Enables task transfer search using glue.pretrained_checkpoint_dir and glue.pretrained_checkpoint.
+  # Native GLUE initialization only; do not combine with model.from_hub=true, and resume takes precedence. It searches <pretrained_checkpoint_dir>/glue/<pretrained_checkpoint> recursively for the source task's best metric checkpoint.
+  # Available targets/sources: mrpc<-mnli, stsb<-mnli, mnli<-snli, qnli<-mnli, rte<-mnli, wnli<-allnli. Other tasks error; classifier/decoder keys are filtered, so this transfers the encoder.
+  transfer_from_task: false
+
+  # glue.num_workers — integer; default: 4; must be >= 0. GLUE train/eval DataLoader workers.
+  # Positive values enable persistent workers; pretraining/contrastive use different worker keys.
+  num_workers: 4
+
+  # glue.preprocessing_num_proc — integer; default: 4; must be >= 0. GLUE dataset-map preprocessing processes.
+  # 0 selects the datasets library's single-process/default mapping path.
+  preprocessing_num_proc: 4
+
+# contrastive — mapping; default: all ContrastiveConfig defaults below. Used only when task=contrastive.
+contrastive:
+  # contrastive.temperature — float; default: 0.05. Divisor for cosine-similarity logits; must be > 0.
+  # The maintained recipe uses 0.05. Resume restores the checkpoint value.
+  temperature: 0.05
+
+  # contrastive.pooling — string; default: "avg". One of: avg | cls | max (case-insensitive).
+  # The maintained recipe uses avg. Resume restores the checkpoint value.
+  pooling: avg
+
+  # contrastive.pretraining_prob — float; default: 0.0; runtime requires [0, 1]. Fraction of steps drawn from the optional SimCSE anti-forgetting branch.
+  # Values > 0 require contrastive.pretraining_dataset_path and model.dropout_prob > 0.
+  # Resume restores the checkpoint value.
+  pretraining_prob: 0.0
+
+  # contrastive.pretraining_dataset_path — string | null; default: null. Tokenized SimCSE source.
+  # Conditionally required when contrastive.pretraining_prob > 0; ignored when the probability is 0. Must be a Hugging Face Dataset/DatasetDict directory created by save_to_disk; DatasetDict selects train or, if absent, its first split.
+  # Valid columns are input_ids + attention_mask for one stochastic two-view input, or input_ids_query/attention_mask_query + input_ids_corpus/attention_mask_corpus for explicit pairs. Explicit pairs may also include input_ids_negative + attention_mask_negative; every token field requires its matching mask.
+  # This path has no tokenizer manifest validation, so its token IDs must already match the checkpoint/runtime tokenizer. It remains launch-controlled on resume, and its iterator restarts from the beginning.
+  pretraining_dataset_path: null
+
+  # contrastive.pretrained_checkpoint_dir — string | null; default: null. Native pretraining run/checkpoint root used to initialize the encoder.
+  # Required unless trainer.resume_from_checkpoint resolves or allow_random_weights=true. Initialization precedence is resume > this pretrained source > random opt-in; run roots and checkpoints roots are accepted, while legacy model_checkpoints layouts are rejected.
+  # When the selected step has config.yaml, checkpoint values replace backbone shape/position/vocabulary fields and tokenizer identity/max_length; a checkpoint-local tokenizer directory takes precedence. Launch model.dropout_prob, model.attn_backend, and model.kernel_backend remain contrastive-specific. With no config.yaml, launch metadata is retained with a warning and encoder weights must still match strictly.
+  # Contrastive preprocessing does not apply this checkpoint synchronization. Before preprocessing, explicitly set tokenizer.path/identity/max_length to the selected checkpoint contract; training rejects a supervised cache whose manifest does not match the resolved runtime tokenizer.
+  pretrained_checkpoint_dir: null
+
+  # contrastive.pretrained_checkpoint — string | integer | null; default: null. Source step/tag under pretrained_checkpoint_dir.
+  # null falls back to top-level pretrained_checkpoint (default "latest").
+  pretrained_checkpoint: null
+
+  # contrastive.allow_random_weights — boolean; default: false. Explicitly permits training without resume/pretrained weights.
+  # Footgun: true starts a random encoder only when neither resume nor contrastive.pretrained_checkpoint_dir supplies weights; intended only for deliberate experiments/tests.
+  allow_random_weights: false
+
+# accelerate_config_file — string | null; default: null. Informational/logged metadata only; NeoBERT does not launch or configure Accelerate from this field.
+# Use the actual accelerate launch configuration/CLI for runtime backend selection.
+accelerate_config_file: null
+
+# mteb_task_type — string; default: "all". One of: all | classification | clustering | pair_classification | reranking | retrieval | sts | summarization (case-insensitive; surrounding whitespace is ignored).
+# Used only when task=mteb and no run_mteb.py --task_types override is supplied. Each value selects all registered English tasks in that family; the current MTEB runner is English-only and has no language config key.
+# run_mteb.py --task_types — optional comma-separated string; default: omitted, which uses mteb_task_type. Each nonempty token is one category above or one exact task/aggregation name below; matching is case-insensitive, category/aggregation aliases expand in registry order, and duplicates are removed after the first occurrence. An empty or unknown selection errors.
+# Classification task names: AmazonCounterfactualClassification | AmazonPolarityClassification | AmazonReviewsClassification | Banking77Classification | EmotionClassification | ImdbClassification | MassiveIntentClassification | MassiveScenarioClassification | MTOPDomainClassification | MTOPIntentClassification | ToxicConversationsClassification | TweetSentimentExtractionClassification.
+# Clustering task names: ArxivClusteringP2P | ArxivClusteringS2S | BiorxivClusteringP2P | BiorxivClusteringS2S | MedrxivClusteringP2P | MedrxivClusteringS2S | RedditClustering | RedditClusteringP2P | StackExchangeClustering | StackExchangeClusteringP2P | TwentyNewsgroupsClustering.
+# Pair-classification task names: SprintDuplicateQuestions | TwitterSemEval2015 | TwitterURLCorpus.
+# Reranking task names: AskUbuntuDupQuestions | MindSmallReranking | SciDocsRR | StackOverflowDupQuestions.
+# Retrieval task/aggregation names: MSMARCO | ArguAna | ClimateFEVER | CQADupstackRetrieval | DBPedia | FEVER | FiQA2018 | HotpotQA | NFCorpus | NQ | QuoraRetrieval | SCIDOCS | SciFact | Touche2020 | TRECCOVID.
+# CQADupstackRetrieval expands to: CQADupstackAndroidRetrieval | CQADupstackEnglishRetrieval | CQADupstackGamingRetrieval | CQADupstackGisRetrieval | CQADupstackMathematicaRetrieval | CQADupstackPhysicsRetrieval | CQADupstackProgrammersRetrieval | CQADupstackStatsRetrieval | CQADupstackTexRetrieval | CQADupstackUnixRetrieval | CQADupstackWebmastersRetrieval | CQADupstackWordpressRetrieval. Each expansion name is also accepted directly.
+# STS task names: BIOSSES | SICK-R | STS12 | STS13 | STS14 | STS15 | STS16 | STS17 | STS22 | STSBenchmark. Summarization task name: SummEval.
+mteb_task_type: all
+
+# mteb_batch_size — integer; default: 32; must be > 0 at MTEB encoding. Per-encode-call inference batch size; used only when task=mteb.
+mteb_batch_size: 32
+
+# mteb_pooling — string; default: "avg". One of: avg | mean | cls (case-insensitive); mean normalizes to avg. Used only when task=mteb.
+mteb_pooling: avg
+
+# mteb_overwrite_results — boolean; default: false. Used only when task=mteb; true allows MTEB to replace existing result files.
+# Results default to <model root>/mteb/<resolved checkpoint>/<tokenizer.max_length>; optional run_mteb.py --output_folder PATH takes precedence. Leave false to protect completed evaluations in that location unless intentionally rerunning them.
+mteb_overwrite_results: false
+
+# pretrained_checkpoint — string | integer; default: "latest". Top-level MTEB checkpoint selector and contrastive fallback selector; latest honors a root latest target, then a direct step directory, then the highest loadable numeric step.
+# MTEB resolves it under the run/checkpoint root supplied by required run_mteb.py --model_name_or_path, which overrides trainer.output_dir. The selected step must contain checkpoint-local config.yaml, tokenizer/, and model weights; launch model shape is ignored. Contrastive uses this field only when contrastive.pretrained_checkpoint is null.
+pretrained_checkpoint: latest
+
+# use_deepspeed — boolean; default: false. Legacy contrastive checkpoint-loading hint only; not a runtime backend switch.
+# Non-contrastive tasks warn when true. true forces legacy ZeRO conversion; false prefers model.safetensors but automatically falls back to ZeRO shards if portable weights are absent. This affects pretrained initialization only, not trainer.resume_from_checkpoint. DeepSpeed execution is unsupported; conversion requires the optional legacy-checkpoints dependency.
+use_deepspeed: false
+
+# pretraining_metadata — mapping[string, any]; default: {}. Downstream provenance carried mainly by generated GLUE configs and W&B payloads.
+# Metadata does not configure pretraining behavior; arbitrary nested YAML-safe values are accepted.
+pretraining_metadata: {}
+
+# seed — integer; default: 0. Pretraining/contrastive/GLUE task, data, and model random seed; MTEB ignores it.
+# Exact non-streaming pretraining resume assumes the same launch seed; streaming shuffle also derives epochs from it. GLUE resume restores the checkpoint seed.
+seed: 0
+
+# debug — boolean; default: false. Pretraining-only extra tokenizer/model vocabulary diagnostics; other tasks ignore it.
+debug: false
+
+# config_path — string | null; default: null. Internal loader metadata; do not set in a YAML file.
+# load_config_from_args overwrites it with the source YAML path so W&B can upload that file; ConfigLoader.save intentionally omits it.
+config_path: null
+
+# Copy-paste examples
+#
+# Each example below is commented so this file remains one valid ConfigLoader document. Copy one block into a new YAML file and remove the leading `# ` markers. These are complete task configurations rather than replacements for the per-key contracts above; rotated validation cases deliberately use different architectures, tasks, and schedules.
+#
+# Example: fresh pretraining from a public streaming corpus
+#
+# task: pretraining
+# model:
+#   hidden_size: 384              # Must divide evenly by 6 heads; per-head width 64 is even for RoPE.
+#   num_hidden_layers: 6
+#   num_attention_heads: 6
+#   intermediate_size: 1536
+#   max_position_embeddings: 512
+#   rope: true
+# dataset:
+#   name: allenai/c4
+#   config: en                   # Exact, case-sensitive Hub subset.
+#   streaming: true
+#   train_split: train
+#   eval_split: validation
+#   eval_samples: 2000           # Bounds streaming evaluation.
+#   max_seq_length: 512
+# tokenizer:
+#   name: bert-base-uncased
+#   max_length: 512
+# optimizer:
+#   name: adamw
+#   lr: 3.0e-4
+#   weight_decay: 0.01
+# scheduler:
+#   name: cosine
+#   total_steps: 100000
+#   warmup_percent: 2.0
+# trainer:
+#   per_device_train_batch_size: 16
+#   max_steps: 100000
+#   save_strategy: steps
+#   save_steps: 5000
+#   save_total_limit: 3
+#   eval_strategy: steps
+#   eval_steps: 5000
+#   logging_steps: 100
+#   output_dir: ./output/pretrain-small
+#   mixed_precision: bf16
+# datacollator:
+#   mlm_probability: 0.15
+#   max_length: 512
+# wandb:
+#   enabled: false
+#   mode: disabled
+# seed: 17
+#
+# Example: continue a RoPE checkpoint on a new corpus and longer context
+#
+# task: pretraining
+# model:
+#   rope: true
+#   max_position_embeddings: 1024 # Launch-controlled only because both checkpoint and continuation use RoPE.
+# dataset:
+#   name: HuggingFaceTB/smollm-corpus
+#   config: fineweb-edu-dedup     # Case-sensitive; the earlier corpus cursor is reset.
+#   streaming: true
+#   train_split: train
+#   eval_split: null
+#   eval_samples: 2000            # Reserves and excludes head samples because this source has no named eval split.
+#   max_seq_length: 1024
+# tokenizer:
+#   max_length: 1024              # Identity comes from the checkpoint; evaluation/training length stays launch-controlled.
+# scheduler:
+#   total_steps: 100000           # Match the source horizon if percentage phases must continue rather than restart.
+# trainer:
+#   max_steps: 120000
+#   output_dir: ./output/pretrain-continued
+#   resume_from_checkpoint: /absolute/path/to/source/checkpoints/80000
+#   save_strategy: steps
+#   save_steps: 5000
+#   save_total_limit: 3
+#   mixed_precision: bf16
+# datacollator:
+#   max_length: 1024
+# wandb:
+#   enabled: false
+#   mode: disabled
+#
+# Example: direct Hub GLUE fine-tuning without checkpoint output
+#
+# task: glue
+# model:
+#   name: bert-base-uncased
+#   from_hub: true
+# tokenizer:
+#   name: bert-base-uncased
+#   max_length: 128               # Keep equal to glue.max_seq_length.
+# optimizer:
+#   name: adamw
+#   lr: 2.0e-5
+#   weight_decay: 0.01
+# scheduler:
+#   name: linear
+#   warmup_percent: 6.0
+# trainer:
+#   per_device_train_batch_size: 16
+#   per_device_eval_batch_size: 32
+#   max_steps: 0                  # Select the epoch budget below.
+#   num_train_epochs: 3
+#   eval_strategy: epoch
+#   save_strategy: "no"          # Quotes are required; bare YAML `no` is boolean false.
+#   save_model: false
+#   output_dir: ./output/glue-sst2
+#   overwrite_output_dir: false
+#   mixed_precision: bf16
+# glue:
+#   task_name: sst2
+#   num_labels: 2
+#   max_seq_length: 128
+# wandb:
+#   enabled: false
+#   mode: disabled
+# seed: 23
+#
+# Example: contrastive fine-tuning from a native checkpoint with SimCSE anti-forgetting
+#
+# Before training, run `python scripts/contrastive/preprocess.py CONFIG` with this same file to populate dataset.path using the selected checkpoint tokenizer.
+#
+# task: contrastive
+# model:
+#   max_position_embeddings: 512
+#   dropout_prob: 0.1            # Launch-controlled for pretrained initialization and required by the SimCSE branch.
+#   attn_backend: sdpa
+# dataset:
+#   name: ALLNLI
+#   path: /absolute/path/to/contrastive-cache
+#   max_seq_length: 512
+#   alpha: 1.0
+# tokenizer:
+#   path: /absolute/path/to/pretraining-run/checkpoints/100000/tokenizer
+#   max_length: 512
+#   truncation: true
+# optimizer:
+#   name: adamw
+#   lr: 5.0e-5
+#   weight_decay: 0.01
+# scheduler:
+#   name: linear
+#   warmup_steps: 100
+#   total_steps: 10000
+# trainer:
+#   per_device_train_batch_size: 128
+#   gradient_accumulation_steps: 1
+#   max_steps: 10000
+#   save_strategy: steps
+#   save_steps: 1000
+#   save_total_limit: 3
+#   logging_steps: 100
+#   output_dir: ./output/contrastive
+#   mixed_precision: bf16
+#   dataloader_num_workers: 4
+# datacollator:
+#   pad_to_multiple_of: 8
+# contrastive:
+#   temperature: 0.05
+#   pooling: avg
+#   pretraining_prob: 0.1
+#   pretraining_dataset_path: /absolute/path/to/tokenized-simcse-train
+#   pretrained_checkpoint_dir: /absolute/path/to/pretraining-run
+#   pretrained_checkpoint: 100000
+#   allow_random_weights: false
+# wandb:
+#   enabled: false
+#   mode: disabled
+# seed: 29
+#
+# Example: MTEB evaluation from a local pretraining run
+#
+# Invoke as `python scripts/evaluation/run_mteb.py CONFIG --model_name_or_path /absolute/path/to/pretraining-run`; the required CLI path supplies the run/checkpoint root.
+#
+# task: mteb
+# tokenizer:
+#   max_length: 512                         # RoPE may change this; learned positions may not exceed their trained limit.
+# pretrained_checkpoint: latest
+# mteb_task_type: sts                       # Runs every registered English STS task; use another enumerated family as needed.
+# mteb_batch_size: 32
+# mteb_pooling: avg
+# mteb_overwrite_results: false

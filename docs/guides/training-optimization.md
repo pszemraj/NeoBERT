@@ -1,0 +1,110 @@
+# Training Optimization
+
+Field names and defaults live in the [YAML configuration reference](../reference/config_reference.yaml).
+
+## MuonClip Policy
+
+Selector defaults and accepted values are defined under `optimizer.muon_config` in the [YAML configuration reference](../reference/config_reference.yaml). The maintained recipe is tuned for encoder training rather than exact reference-Muon parity.
+
+### Parameter routing
+
+- Muon applies to hidden transformer matrices.
+- Embeddings, output/unembedding weights, biases, and norm parameters stay on Adam-style fallback groups.
+- This matches the usual Muon guidance and keeps FSDP2 owner-compute costs bounded.
+
+`all_2d` remains available for explicit compatibility or ablation runs.
+
+### Maintained selector policy
+
+- this encoder setup has trained better with the symmetric `neobert` scale than with reference Muon scaling,
+- the name reflects repo intent rather than compatibility baggage,
+- `muon_reference` is still available when exact reference behavior matters.
+
+The field reference defines the momentum recurrence, every normalization formula, and the compute-dtype behavior of each orthogonalization algorithm.
+
+### Fused QKV handling
+
+NeoBERT uses fused `qkv.weight` matrices, but Muon does not treat them as one big matrix.
+
+- the interleaved fused matrix is split into Q, K, and V projections,
+- Muon orthogonalizes and normalizes each projection separately,
+- the result is packed back into the model's fused row layout before the update is applied.
+
+## Clipping
+
+Two clipping systems exist and they are separate:
+
+- `trainer.gradient_clipping`: clips final accumulated gradients
+- `optimizer.muon_config.enable_clipping`: MuonClip QK activation clipping
+
+QK clipping is not supported for sharded FSDP2 Muon runs because the current owner-compute path does not support the activation-hook capture flow. Rather than silently downgrade a clipping run to Muon-only (which is a different optimizer recipe), the optimizer factory fails fast when `enable_clipping=true` is combined with FSDP2. For an FSDP2 Muon-only run, set `optimizer.muon_config.enable_clipping=false` explicitly (the `*_muonclip_noclip` configs do this). With gradient accumulation, Q/K activation statistics are captured on the final microbatch of each optimizer update to bound memory and recomputation. A scheduled step with no captures warns and skips clipping, but partial layer capture fails fast even on one process because mutating only some Q/K layers is invalid. Replicated DDP clipping globally reduces per-head finite-logit sums and valid-sample counts before deriving one shared clip factor; NaN or positive-infinite logits and projection failures abort the step instead of creating rank-local clipping behavior. The effective clipping mode and reduction rule are recorded in the optimizer resume manifest, so resuming under different clipping semantics fails fast instead of silently changing the recipe.
+
+## Gradient Accumulation and Logged Norms
+
+- `trainer.gradient_accumulation_steps` counts microbatches per optimizer update
+- pretraining rescales gradients by the global masked-token count after accumulation
+- `train/grad_norm` is logged after accumulation and masked-token rescaling, but before `trainer.gradient_clipping`
+- `train/weight_norm` is logged after the optimizer update
+
+For packed pretraining runs, compare `train/tokens_per_sec` and token counts, not only `steps/sec`.
+
+## Packed Training
+
+Enable packing with:
+
+```yaml
+datacollator:
+  pack_sequences: true
+```
+
+Recommended for throughput:
+
+- `model.attn_backend: flash_attn_varlen`
+- flash-attn installed via `pip install -e .[flash]`
+
+Single-process throughput control:
+
+- `trainer.enforce_full_packed_batches: true` buffers undersized packed outputs into full microbatches, usually at some cost to step rate. Distributed runs reject this option because each rank packs different examples and could otherwise skip a different number of model calls. Distributed packed training uses variable local microbatch sizes and normalizes gradients by the global masked-token count.
+
+Backend fallback and position behavior are described in [Attention Paths](../reference/architecture.md#attention-paths).
+
+## Dataloader and Streaming Throughput
+
+Primary throughput knobs:
+
+- `dataset.num_workers`
+- `dataset.pin_memory`
+- `dataset.persistent_workers`
+- `dataset.prefetch_factor`
+- `dataset.streaming_read_retries`
+- `dataset.streaming_read_retry_backoff_seconds`
+- `dataset.streaming_read_retry_max_backoff_seconds`
+
+NeoBERT keeps pinned CPU staging enabled on CUDA. When Accelerate owns device placement, loaders preserve `pin_memory=True` so unpacked batches stay pinned end to end; packed/manual-transfer paths instead re-pin the final CPU batch immediately before the non-blocking device copy.
+
+For hub-backed streaming datasets:
+
+- Hugging Face iterable streams are detected as streaming datasets before DataLoader construction, adapted to PyTorch's iterable API when needed, and not given map-style options such as DataLoader-level `shuffle`,
+- NeoBERT retries transient schema and metadata reads; only typed network-layer failures from built-in sockets and the `requests` and HTTPX transports used by the Hugging Face data stack (timeouts, connection, chunked-transfer, and remote-protocol errors, retryable HTTP statuses, and socket errnos) classify as transient, so permanent errors such as auth/config failures fail fast instead of consuming the retry budget,
+- long-running iteration retries require an underlying HF iterable dataset with `state_dict()/load_state_dict()`; streams without those hooks warn and remain unwrapped because restarting them could skip or duplicate examples. Recovery resumes from the last yielded example, and the wrapper remains visible to streaming detection and eval-budget checks, but its raw cursor is not checkpointed because the prepared dataloader is the safe resume boundary,
+- shuffled streams lose the in-memory shuffle buffer on retry recovery because HF `state_dict()` does not serialize buffer contents: the cursor rewinds correctly, but up to `dataset.shuffle_buffer_size` buffered-but-unyielded examples are skipped and the buffer refills from new data. The wrapper logs a warning whenever such a lossy recovery happens; unshuffled streams recover exactly-once.
+
+## Contrastive Objective Details
+
+Contrastive CE is still accumulated as a summed loss for logging, but the training loop divides by local query count before backward so gradient scale does not change just because a task uses a larger local batch size. `train/loss` remains a per-sample mean in metrics.
+
+`contrastive.pooling` is active in the trainer. Use `avg` for masked mean pooling, `cls` for the first token, or `max` for masked max pooling.
+
+When `contrastive.pretraining_prob > 0`, `model.dropout_prob` must be greater than zero so the SimCSE-style anti-forgetting branch has stochastic two-view corruption.
+
+## Distributed Muon
+
+The maintained distributed Muon path is:
+
+- Accelerate FSDP2
+- 1D row-sharded DTensor mesh
+- owner-compute update path
+
+Do not combine MuonClip with tensor parallelism, context parallelism, or other multi-axis DTensor layouts.
+
+Before long multi-rank runs, use the commands in [Manual Validation Scripts](../../tests/manual/README.md).

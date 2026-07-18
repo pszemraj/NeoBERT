@@ -5,12 +5,14 @@ helpers alone:
 
 - construct MuonClip via ``get_optimizer(...)``,
 - shard through Accelerate FSDP2 ``prepare`` / ``prepare_data_loader``,
-- run one step and ``accelerator.save_state(...)``,
-- rebuild fresh objects and ``accelerator.load_state(...)``,
+- run one step and save a production-layout step checkpoint (``accelerate/``
+  resume state plus portable ``model.safetensors``),
+- rebuild fresh objects and ``accelerator.load_state(...)`` via the resolved
+  accelerate state directory,
 - run the next step and compare against uninterrupted continuation.
 
 Run on a CUDA machine with 2 ranks:
-`conda run -s --name neobert torchrun --standalone --nproc_per_node=2 tests/manual/test_muonclip_accelerate_fsdp2_resume.py`
+`torchrun --standalone --nproc_per_node=2 tests/manual/test_muonclip_accelerate_fsdp2_resume.py`
 """
 
 from __future__ import annotations
@@ -33,6 +35,11 @@ from accelerate.utils import (
 )
 from torch.utils.data import DataLoader
 
+from neobert.checkpointing import (
+    resolve_accelerate_state_dir,
+    save_accelerate_state,
+    save_portable_checkpoint_weights,
+)
 from neobert.model import NeoBERT, NeoBERTConfig
 from neobert.optimizer import get_optimizer
 from neobert.training_utils import (
@@ -149,7 +156,8 @@ def _build_prepared_run(project_dir: Path):
         muon_config={
             "enable_clipping": False,
             "orthogonalization": "polar_express",
-            "norm_factor": "spectral",
+            "norm_factor": "neobert",
+            "param_policy": "hidden_2d",
         },
     )
     scheduler = torch.optim.lr_scheduler.LinearLR(
@@ -165,7 +173,6 @@ def _build_prepared_run(project_dir: Path):
     validate_muon_distributed_compatibility(
         accelerator=accelerator,
         optimizer_name="muonclip",
-        log=logger,
         context="manual accelerate fsdp2 muon resume smoke",
     )
     validate_muon_runtime_topology(
@@ -261,7 +268,15 @@ def main() -> None:
 
         _run_step(accelerator, model, optimizer, scheduler, batch_1)
         accelerator.wait_for_everyone()
-        accelerator.save_state(output_dir=str(checkpoint_dir))
+        save_accelerate_state(accelerator, checkpoint_dir)
+        accelerator.wait_for_everyone()
+        if not save_portable_checkpoint_weights(model, accelerator, checkpoint_dir):
+            if accelerator.is_main_process:
+                raise AssertionError(
+                    "Portable checkpoint weights were not saved beside the "
+                    "accelerate resume state."
+                )
+        accelerator.wait_for_everyone()
         metadata_after_save = _metadata_summary(optimizer)
 
         loss_2_reference = _run_step(accelerator, model, optimizer, scheduler, batch_2)
@@ -278,7 +293,7 @@ def main() -> None:
         accelerator2, model2, optimizer2, scheduler2, dataloader2 = _build_prepared_run(
             ckpt_root / "resume"
         )
-        accelerator2.load_state(str(checkpoint_dir))
+        accelerator2.load_state(str(resolve_accelerate_state_dir(checkpoint_dir)))
         loaded_inner = _unwrap_optimizer(optimizer2)
         if int(getattr(loaded_inner, "_step")) != 1:
             raise AssertionError(

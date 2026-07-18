@@ -3,12 +3,14 @@
 
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
+import pytest
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from neobert.config import Config
+from neobert.config import Config, ConfigLoader
 
 
 class TestGLUETaskSpecific:
@@ -46,10 +48,7 @@ class TestGLUETaskSpecific:
         collator_ctor.assert_called_once_with(tokenizer, pad_to_multiple_of=16)
 
         with mock.patch("neobert.glue.train.evaluate.load") as load_fn:
-            _load_glue_metric("multirc", "glue", "exp")
-        load_fn.assert_called_once_with("accuracy", experiment_id="exp")
-        with mock.patch("neobert.glue.train.evaluate.load") as load_fn:
-            _load_glue_metric("snli", "glue", "exp")
+            _load_glue_metric("snli", "exp")
         load_fn.assert_called_once_with("glue", "mnli", experiment_id="exp")
 
         created = []
@@ -61,8 +60,8 @@ class TestGLUETaskSpecific:
             return metric
 
         with mock.patch("neobert.glue.train.evaluate.load", side_effect=_fake_load):
-            train_tracker = _load_glue_metric("cola", "glue", "exp")
-            eval_tracker = _load_glue_metric("cola", "glue", "exp")
+            train_tracker = _load_glue_metric("cola", "exp")
+            eval_tracker = _load_glue_metric("cola", "exp")
         assert len(created) == 2
         assert train_tracker is created[0]
         assert eval_tracker is created[1]
@@ -120,16 +119,34 @@ class TestGLUETaskSpecific:
         assert torch.equal(out, binary_mask)
 
     def test_save_training_checkpoint_retention_behaviors(self):
-        """Ensure GLUE checkpoint retention handles keep-all and prune modes."""
-        from neobert.glue.train import save_training_checkpoint
+        """GLUE checkpoints handle retention and write the optimizer manifest.
+
+        The optimizer parameter-name manifest guards resume against positional
+        state corruption; GLUE saves lacked it (unlike pretraining/contrastive),
+        so this also pins that each kept checkpoint carries the manifest.
+        """
         from neobert.checkpointing import MODEL_WEIGHTS_NAME
+        from neobert.glue.train import save_training_checkpoint
+        from neobert.training_utils import (
+            OPTIMIZER_PARAM_NAMES_MANIFEST,
+            attach_optimizer_param_names,
+        )
 
         class DummyAccelerator:
             is_main_process = True
 
             @staticmethod
             def save_state(output_dir):
-                Path(output_dir).mkdir(parents=True, exist_ok=True)
+                output_dir = Path(output_dir)
+                output_dir.mkdir(parents=True, exist_ok=True)
+                for filename in (
+                    "model.safetensors",
+                    "optimizer.bin",
+                    "scheduler.bin",
+                    "random_states_0.pkl",
+                ):
+                    (output_dir / filename).write_bytes(b"x")
+                (output_dir / "custom_checkpoint_0.pkl").write_bytes(b"x")
 
             @staticmethod
             def wait_for_everyone():
@@ -144,6 +161,15 @@ class TestGLUETaskSpecific:
                 del unwrap
                 return model.state_dict()
 
+        class DummyTokenizer:
+            @staticmethod
+            def save_pretrained(output_dir):
+                output_dir = Path(output_dir)
+                output_dir.mkdir(parents=True, exist_ok=True)
+                (output_dir / "tokenizer_config.json").write_text(
+                    "{}", encoding="utf-8"
+                )
+
         cases = [
             (0, {"10": True, "20": True}),
             (1, {"10": False, "20": True}),
@@ -151,19 +177,32 @@ class TestGLUETaskSpecific:
         for save_total_limit, existence in cases:
             with tempfile.TemporaryDirectory() as tmpdir:
                 cfg = Config()
+                cfg.task = "glue"
                 cfg.trainer.output_dir = tmpdir
                 cfg.trainer.save_total_limit = save_total_limit
-                cfg.trainer.max_ckpt = None
 
                 model = torch.nn.Linear(8, 2)
+                optimizer = torch.optim.AdamW(model.parameters())
+                attach_optimizer_param_names(model, optimizer)
                 accelerator = DummyAccelerator()
+                tokenizer = DummyTokenizer()
 
                 with mock.patch("neobert.glue.train.logger.info"):
                     save_training_checkpoint(
-                        cfg, model, accelerator, completed_steps=10
+                        cfg,
+                        tokenizer,
+                        model,
+                        optimizer,
+                        accelerator,
+                        completed_steps=10,
                     )
                     save_training_checkpoint(
-                        cfg, model, accelerator, completed_steps=20
+                        cfg,
+                        tokenizer,
+                        model,
+                        optimizer,
+                        accelerator,
+                        completed_steps=20,
                     )
 
                 checkpoint_root = Path(tmpdir) / "checkpoints"
@@ -172,49 +211,235 @@ class TestGLUETaskSpecific:
                     assert step_dir.exists() is should_exist
                     if should_exist:
                         assert (step_dir / MODEL_WEIGHTS_NAME).exists()
+                        assert (step_dir / OPTIMIZER_PARAM_NAMES_MANIFEST).exists()
+                        assert (step_dir / "config.yaml").exists()
+                        assert (step_dir / "tokenizer").is_dir()
+                        assert (step_dir / "checkpoint_complete.json").exists()
                 assert not (Path(tmpdir) / "model_checkpoints").exists()
 
-    def test_save_portable_glue_checkpoint_weights_overwrites_prefixed_file(self):
-        """GLUE checkpoint export should refresh stale wrapper-prefixed weights."""
-        from safetensors.torch import save_file
+    def test_checkpoint_does_not_truncate_pending_train_metric_window(self, tmp_path):
+        """Train metrics should retain pre-checkpoint batches until evaluation."""
+        from datasets import Dataset as HFDataset
+        from datasets import DatasetDict
 
-        from neobert.checkpointing import MODEL_WEIGHTS_NAME, load_model_safetensors
-        from neobert.glue.train import _save_portable_glue_checkpoint_weights
+        from neobert.glue.train import trainer
 
-        class DummyAccelerator:
-            is_main_process = True
+        class TinyTokenizer:
+            pad_token_id = 0
 
-            @staticmethod
-            def get_state_dict(model, unwrap=True):
-                del unwrap
-                return model.state_dict()
+            def __len__(self):
+                return 32
 
-        model = torch.nn.Linear(8, 2)
-        stale_weight = torch.zeros_like(model.weight)
-        stale_bias = torch.ones_like(model.bias)
+            def __call__(self, sentences, *args, **kwargs):
+                del args, kwargs
+                return {
+                    "input_ids": [[1, 2, 3, 4] for _ in sentences],
+                    "attention_mask": [[1, 1, 1, 1] for _ in sentences],
+                }
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            checkpoint_path = Path(tmpdir)
-            save_file(
-                {
-                    "_orig_mod.weight": stale_weight,
-                    "_orig_mod.bias": stale_bias,
-                },
-                str(checkpoint_path / MODEL_WEIGHTS_NAME),
-                metadata={"format": "pt"},
+        class CountingMetric:
+            def __init__(self):
+                self.pending = 0
+                self.compute_counts = []
+
+            def add_batch(self, *, predictions, references):
+                assert predictions.shape == references.shape
+                self.pending += int(references.shape[0])
+
+            def compute(self):
+                self.compute_counts.append(self.pending)
+                self.pending = 0
+                return {"matthews_correlation": 0.0}
+
+        def collate(examples):
+            return {
+                key: torch.tensor([example[key] for example in examples])
+                for key in ("input_ids", "attention_mask", "labels")
+            }
+
+        raw_datasets = DatasetDict(
+            {
+                "train": HFDataset.from_dict(
+                    {
+                        "sentence": [f"train-{index}" for index in range(6)],
+                        "label": [0, 1, 0, 1, 0, 1],
+                    }
+                ),
+                "validation": HFDataset.from_dict(
+                    {
+                        "sentence": [f"eval-{index}" for index in range(4)],
+                        "label": [0, 1, 0, 1],
+                    }
+                ),
+            }
+        )
+        train_metric = CountingMetric()
+        eval_metric = CountingMetric()
+
+        cfg = Config()
+        cfg.task = "glue"
+        cfg.model.hidden_size = 16
+        cfg.model.num_hidden_layers = 1
+        cfg.model.num_attention_heads = 2
+        cfg.model.intermediate_size = 32
+        cfg.model.max_position_embeddings = 8
+        cfg.model.vocab_size = 32
+        cfg.model.hidden_act = "gelu"
+        cfg.model.kernel_backend = "torch"
+        cfg.dataset.max_seq_length = 8
+        cfg.tokenizer.max_length = 8
+        cfg.glue.task_name = "cola"
+        cfg.glue.num_labels = 2
+        cfg.glue.max_seq_length = 8
+        cfg.glue.allow_random_weights = True
+        cfg.glue.num_workers = 0
+        cfg.glue.preprocessing_num_proc = 0
+        cfg.trainer.output_dir = str(tmp_path)
+        cfg.trainer.max_steps = 3
+        cfg.trainer.num_train_epochs = 1
+        cfg.trainer.per_device_train_batch_size = 2
+        cfg.trainer.per_device_eval_batch_size = 2
+        cfg.trainer.eval_steps = 3
+        cfg.trainer.save_steps = 2
+        cfg.trainer.save_strategy = "steps"
+        cfg.trainer.save_model = True
+        cfg.trainer.mixed_precision = "no"
+        cfg.trainer.use_cpu = True
+        cfg.trainer.tf32 = False
+        cfg.trainer.disable_tqdm = True
+        cfg.scheduler.warmup_steps = 0
+
+        with (
+            mock.patch(
+                "neobert.glue.train.get_tokenizer", return_value=TinyTokenizer()
+            ),
+            mock.patch("neobert.glue.train.load_dataset", return_value=raw_datasets),
+            mock.patch(
+                "neobert.glue.train._create_glue_data_collator",
+                return_value=collate,
+            ),
+            mock.patch(
+                "neobert.glue.train._load_glue_metric",
+                side_effect=(train_metric, eval_metric),
+            ),
+            mock.patch("neobert.glue.train.save_training_checkpoint") as save_mock,
+        ):
+            trainer(cfg)
+
+        save_mock.assert_called_once()
+        assert train_metric.compute_counts == [6]
+
+    def test_glue_loop_state_preserves_negative_best_score_and_resume_counters(self):
+        """Ensure first negative task scores improve and state roundtrips exactly."""
+        from neobert.glue.state import GlueLoopState
+
+        state = GlueLoopState(world_size=2)
+        assert state.update_selection_score(-0.4)
+        assert state.best_selection_score == pytest.approx(-0.4)
+        assert state.early_stopping_counter == 0
+        assert not state.update_selection_score(-0.6)
+        assert state.early_stopping_counter == 1
+        with pytest.raises(ValueError, match="must be finite"):
+            state.update_selection_score(float("nan"))
+        state.record_update(
+            completed_steps=7,
+            epoch=1,
+            microbatches_in_epoch=3,
+            total_loss=2.5,
+        )
+        state.last_val_metrics = {"matthews_correlation": -0.6}
+
+        restored = GlueLoopState(world_size=2)
+        restored.load_state_dict(state.state_dict())
+
+        assert restored.state_dict() == state.state_dict()
+        with pytest.raises(ValueError, match="different world size"):
+            GlueLoopState(world_size=1).load_state_dict(state.state_dict())
+
+    def test_glue_loop_state_roundtrips_through_accelerate(self, tmp_path):
+        """Ensure Accelerate persists the custom GLUE state implementation."""
+        from accelerate import Accelerator
+
+        from neobert.glue.state import GlueLoopState
+
+        accelerator = Accelerator(cpu=True)
+        state = GlueLoopState(world_size=accelerator.num_processes)
+        accelerator.register_for_checkpointing(state)
+        state.record_update(
+            completed_steps=3,
+            epoch=1,
+            microbatches_in_epoch=2,
+            total_loss=1.25,
+        )
+
+        accelerator.save_state(tmp_path)
+        state.completed_steps = 0
+        accelerator.load_state(tmp_path)
+
+        assert state.completed_steps == 3
+        assert state.epoch == 1
+        assert state.microbatches_in_epoch == 2
+
+    def test_glue_output_setup_preserves_resume_artifacts(self, tmp_path):
+        """Ensure continuation never deletes prior metrics or checkpoint trees."""
+        from neobert.glue.train import _prepare_glue_output_dir
+
+        metrics_path = tmp_path / "all_results.json"
+        metrics_path.write_text("{}", encoding="utf-8")
+        checkpoint_path = tmp_path / "checkpoints" / "10"
+        checkpoint_path.mkdir(parents=True)
+
+        _prepare_glue_output_dir(
+            tmp_path,
+            resume_checkpoint_path=checkpoint_path,
+            overwrite=True,
+        )
+        assert metrics_path.exists()
+        assert checkpoint_path.exists()
+
+        with pytest.raises(FileExistsError, match="not empty"):
+            _prepare_glue_output_dir(
+                tmp_path,
+                resume_checkpoint_path=None,
+                overwrite=False,
             )
 
-            saved = _save_portable_glue_checkpoint_weights(
-                model,
-                DummyAccelerator(),
-                checkpoint_path,
-            )
-            loaded = load_model_safetensors(checkpoint_path, map_location="cpu")
+        _prepare_glue_output_dir(
+            tmp_path,
+            resume_checkpoint_path=None,
+            overwrite=True,
+        )
+        assert list(tmp_path.iterdir()) == []
 
-        assert saved is True
-        assert set(loaded) == {"weight", "bias"}
-        torch.testing.assert_close(loaded["weight"], model.weight.detach().cpu())
-        torch.testing.assert_close(loaded["bias"], model.bias.detach().cpu())
+    def test_glue_dataloader_uses_epoch_seeded_sampler(self):
+        """Ensure GLUE map-style shuffling can reconstruct a saved epoch order."""
+        from neobert.training_utils import build_dataloader_config
+
+        cfg = Config()
+        cfg.seed = 123
+        dataloader_config = build_dataloader_config(seed=cfg.seed)
+
+        assert dataloader_config.use_seedable_sampler
+        assert dataloader_config.data_seed == 123
+
+    def test_glue_terminal_resume_state_cannot_run_an_extra_update(self):
+        """Ensure completed budgets and early-stop thresholds remain terminal."""
+        from neobert.glue.state import GlueLoopState
+        from neobert.glue.train import _glue_terminal_resume_reason
+
+        state = GlueLoopState(world_size=1, completed_steps=10)
+        assert "max_steps" in _glue_terminal_resume_reason(
+            state, max_steps=10, early_stopping=0
+        )
+
+        state.completed_steps = 4
+        state.early_stopping_counter = 3
+        assert "early-stopping" in _glue_terminal_resume_reason(
+            state, max_steps=10, early_stopping=3
+        )
+        assert (
+            _glue_terminal_resume_reason(state, max_steps=10, early_stopping=4) is None
+        )
 
     def test_glue_schedule_and_save_strategy_semantics(self):
         """Ensure training schedule and checkpoint-save strategy semantics are stable."""
@@ -242,6 +467,18 @@ class TestGLUETaskSpecific:
         assert updates == 4
         assert max_steps == 11
         assert epochs == 3
+
+        from neobert.glue.train import _resolve_glue_scheduler_steps
+
+        cfg.scheduler.total_steps = 80
+        cfg.scheduler.warmup_percent = 10
+        cfg.scheduler.decay_percent = 75
+        cfg.scheduler.warmup_steps = 999
+        cfg.scheduler.decay_steps = 999
+        warmup, decay, constant = _resolve_glue_scheduler_steps(cfg)
+        assert (warmup, decay, constant) == (8, 60, 0)
+        assert cfg.scheduler.warmup_steps == 999
+        assert cfg.scheduler.decay_steps == 999
 
         assert _should_save_glue_checkpoint(
             save_strategy="steps",
@@ -277,25 +514,211 @@ class TestGLUETaskSpecific:
         )
 
     def test_validate_glue_config_accepts_from_hub_and_zero_checkpoint(self):
-        """Ensure GLUE validation accepts from-hub and explicit checkpoint zero."""
-        from neobert.validation.validators import validate_glue_config
+        """Accept valid sources and percentage warmup without a default warning."""
+        from neobert.glue.validation import validate_glue_config
 
         cfg = Config()
+        cfg.task = "glue"
         cfg.glue.task_name = "sst2"
         cfg.model.from_hub = True
         cfg.glue.pretrained_checkpoint_dir = None
         cfg.glue.pretrained_checkpoint = None
-        validate_glue_config(cfg)
+        cfg.scheduler.warmup_percent = 10
+        assert validate_glue_config(cfg) == ()
 
         with tempfile.TemporaryDirectory() as checkpoint_dir:
+            pretrained_config = Path(checkpoint_dir) / "config.yaml"
+            pretrained_config.write_text("task: pretraining\n", encoding="utf-8")
             cfg = Config()
+            cfg.task = "glue"
             cfg.glue.task_name = "sst2"
             cfg.model.from_hub = False
             cfg.glue.allow_random_weights = False
             cfg.glue.pretrained_checkpoint_dir = checkpoint_dir
             cfg.glue.pretrained_checkpoint = 0
+            cfg.glue.pretrained_model_path = str(pretrained_config)
 
             validate_glue_config(cfg)
+
+    def test_validate_glue_config_rejects_nonportable_remote_code_checkpoints(self):
+        """Ensure custom Hub modeling code cannot masquerade as self-contained."""
+        from neobert.glue.validation import GlueValidationError, validate_glue_config
+
+        cfg = Config()
+        cfg.task = "glue"
+        cfg.glue.task_name = "sst2"
+        cfg.model.from_hub = True
+        cfg.tokenizer.trust_remote_code = True
+
+        with pytest.raises(GlueValidationError, match="trust_remote_code=true"):
+            validate_glue_config(cfg)
+
+        cfg.trainer.save_model = False
+        validate_glue_config(cfg)
+
+    def test_validate_glue_config_is_side_effect_free(self, tmp_path):
+        """Ensure validation rejects bad labels without mutating config or paths."""
+        from neobert.glue.validation import GlueValidationError, validate_glue_config
+
+        cfg = Config()
+        cfg.task = "glue"
+        cfg.model.from_hub = True
+        cfg.glue.task_name = "sst2"
+        cfg.glue.num_labels = 3
+        cfg.trainer.output_dir = str(tmp_path / "not-created")
+
+        with pytest.raises(GlueValidationError, match="expects glue.num_labels=2"):
+            validate_glue_config(cfg)
+
+        assert cfg.glue.num_labels == 3
+        assert not (tmp_path / "not-created").exists()
+
+    @pytest.mark.parametrize(
+        ("source_task", "source_labels", "override_task", "expected_labels"),
+        (
+            ("sst2", 2, "mnli", 3),
+            ("mnli", 3, "stsb", 1),
+            ("stsb", 1, "sst2", 2),
+        ),
+    )
+    def test_glue_task_override_updates_registry_label_count(
+        self,
+        tmp_path,
+        source_task,
+        source_labels,
+        override_task,
+        expected_labels,
+    ):
+        """Ensure a fresh cross-task launch keeps task metadata consistent."""
+        from neobert.glue.validation import load_validated_glue_config
+
+        cfg = Config()
+        cfg.task = "glue"
+        cfg.model.from_hub = True
+        cfg.glue.task_name = source_task
+        cfg.glue.num_labels = source_labels
+        config_path = tmp_path / "glue.yaml"
+        ConfigLoader.save(cfg, config_path)
+
+        loaded, _ = load_validated_glue_config(
+            config_path,
+            task_name=override_task,
+        )
+
+        assert loaded.glue.task_name == override_task
+        assert loaded.glue.num_labels == expected_labels
+
+    def test_suite_dry_run_uses_production_validation(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Ensure suite dry-runs reject invalid configs after launch overrides."""
+        from scripts.evaluation.glue import run_glue_suite
+
+        cfg = Config()
+        cfg.task = "glue"
+        cfg.glue.task_name = "rte"
+        cfg.glue.num_labels = 2
+        cfg.glue.pretrained_checkpoint_dir = None
+        cfg.glue.pretrained_checkpoint = None
+        cfg.glue.pretrained_model_path = None
+        config_path = tmp_path / "rte.yaml"
+        ConfigLoader.save(cfg, config_path)
+
+        monkeypatch.setattr(run_glue_suite, "QUICK_TASKS", ("rte",))
+        args = SimpleNamespace(
+            config_dir=tmp_path,
+            suite="quick",
+            model_name_or_path=None,
+            log_dir=None,
+            dry_run=True,
+        )
+        assert run_glue_suite.run_suite(args) == 1
+        assert "GLUE requires pretrained weights" in capsys.readouterr().err
+
+        args.model_name_or_path = "example/model"
+        assert run_glue_suite.run_suite(args) == 0
+        output = capsys.readouterr()
+        assert "DRY-RUN rte" in output.out
+        assert "--model_name_or_path example/model" in output.out
+
+    def test_glue_resume_preflight_is_checkpoint_self_contained(self, tmp_path):
+        """Ensure continuation does not require the original pretraining source."""
+        from neobert.checkpointing import mark_checkpoint_complete
+        from neobert.glue.validation import load_validated_glue_config
+
+        output_dir = tmp_path / "run"
+        checkpoint_path = output_dir / "checkpoints" / "10"
+        (checkpoint_path / "accelerate").mkdir(parents=True)
+        for filename in (
+            "model.safetensors",
+            "optimizer.bin",
+            "scheduler.bin",
+            "random_states_0.pkl",
+        ):
+            (checkpoint_path / "accelerate" / filename).write_bytes(b"x")
+        (checkpoint_path / "accelerate" / "custom_checkpoint_0.pkl").write_bytes(b"x")
+        tokenizer_dir = checkpoint_path / "tokenizer"
+        tokenizer_dir.mkdir()
+        (tokenizer_dir / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+        model_config_dir = checkpoint_path / "model_config"
+        model_config_dir.mkdir()
+        (model_config_dir / "config.json").write_text("{}", encoding="utf-8")
+        (checkpoint_path / "model.safetensors").write_bytes(b"x")
+        (checkpoint_path / "optimizer_param_names.json").write_text(
+            '{"schema_version":1,"state_semantics":"adamw-v1","param_name_groups":[]}',
+            encoding="utf-8",
+        )
+
+        checkpoint_cfg = Config()
+        checkpoint_cfg.task = "glue"
+        checkpoint_cfg.glue.task_name = "sst2"
+        checkpoint_cfg.tokenizer.max_length = checkpoint_cfg.glue.max_seq_length
+        checkpoint_cfg.glue.pretrained_model_path = None
+        checkpoint_cfg.glue.pretrained_checkpoint_dir = None
+        checkpoint_cfg.glue.pretrained_checkpoint = None
+        ConfigLoader.save(checkpoint_cfg, checkpoint_path / "config.yaml")
+        mark_checkpoint_complete(checkpoint_path, task="glue")
+
+        launch_cfg = Config()
+        launch_cfg.task = "glue"
+        launch_cfg.trainer.output_dir = str(output_dir)
+        launch_cfg.trainer.resume_from_checkpoint = "latest"
+        launch_cfg.glue.pretrained_model_path = None
+        launch_cfg.glue.pretrained_checkpoint_dir = None
+        launch_cfg.glue.pretrained_checkpoint = None
+        launch_path = tmp_path / "launch.yaml"
+        ConfigLoader.save(launch_cfg, launch_path)
+
+        loaded, _ = load_validated_glue_config(launch_path)
+
+        assert loaded.glue.task_name == "sst2"
+        assert loaded.tokenizer.path == str(checkpoint_path / "tokenizer")
+
+    def test_task_registry_separates_selection_and_official_scores(self):
+        """Ensure checkpoint selection never masquerades as an official GLUE score."""
+        from neobert.glue.tasks import (
+            compute_official_glue_score,
+            get_checkpoint_selection_score,
+            get_glue_task_spec,
+        )
+
+        mrpc = get_glue_task_spec("mrpc")
+        assert mrpc.num_labels == 2
+        assert mrpc.sentence_keys == ("sentence1", "sentence2")
+        assert mrpc.checkpoint_metric == "f1"
+        assert (
+            get_checkpoint_selection_score(
+                "mrpc", {"eval_accuracy": 0.9, "eval_f1": 0.8}
+            )
+            == 0.8
+        )
+        assert compute_official_glue_score(
+            "mrpc", {"eval_accuracy": 0.9, "eval_f1": 0.8}
+        ) == pytest.approx(0.85)
+        assert compute_official_glue_score("mrpc", {"eval_f1": 0.8}) is None
+        assert compute_official_glue_score(
+            "mnli", {"accuracy": 0.8, "accuracy_mm": 0.6}
+        ) == pytest.approx(0.7)
 
     def test_sync_runtime_cfg_from_pretraining_uses_pretrained_values(self):
         """Ensure runtime GLUE config mirrors loaded pretraining architecture/tokenizer."""
@@ -319,8 +742,62 @@ class TestGLUETaskSpecific:
         assert cfg.model.hidden_size == 256
         assert cfg.model.norm_eps == 2e-5
         assert cfg.model.attn_backend == "sdpa"
-        assert cfg.tokenizer.max_length == 512
+        assert cfg.tokenizer.max_length == 128
         assert cfg.tokenizer.revision == "checkpoint-rev"
+
+    def test_glue_preprocessing_uses_task_context_length(self):
+        """Ensure checkpoint tokenizer defaults cannot override GLUE tokenization."""
+        from neobert.glue.process import process_function
+
+        cfg = Config()
+        cfg.task = "glue"
+        cfg.mode = "train"
+        cfg.glue.task_name = "sst2"
+        cfg.glue.max_seq_length = 96
+        cfg.tokenizer.max_length = 512
+        tokenizer = mock.MagicMock(return_value={"input_ids": [[1, 2]]})
+
+        result = process_function(
+            {"sentence": ["example"], "label": [1]}, cfg, tokenizer
+        )
+
+        assert result["labels"] == [1]
+        assert tokenizer.call_args.kwargs["max_length"] == 96
+
+    def test_glue_preflight_rejects_oversized_learned_position_context(self, tmp_path):
+        """Ensure dry validation uses checkpoint architecture for context limits."""
+        from neobert.glue.validation import (
+            GlueValidationError,
+            load_validated_glue_config,
+        )
+
+        pretrained_cfg = Config()
+        pretrained_cfg.model.rope = False
+        pretrained_cfg.model.max_position_embeddings = 128
+        pretrained_cfg.dataset.max_seq_length = 128
+        pretrained_cfg.tokenizer.max_length = 128
+        pretrained_path = tmp_path / "pretraining.yaml"
+        ConfigLoader.save(pretrained_cfg, pretrained_path)
+
+        checkpoint_root = tmp_path / "checkpoints"
+        checkpoint_root.mkdir()
+        cfg = Config()
+        cfg.task = "glue"
+        cfg.glue.task_name = "sst2"
+        cfg.glue.max_seq_length = 256
+        cfg.glue.pretrained_model_path = str(pretrained_path)
+        cfg.glue.pretrained_checkpoint_dir = str(checkpoint_root)
+        cfg.glue.pretrained_checkpoint = 10
+        config_path = tmp_path / "glue.yaml"
+        ConfigLoader.save(cfg, config_path)
+
+        with pytest.raises(GlueValidationError, match="learned position table"):
+            load_validated_glue_config(config_path)
+
+        pretrained_cfg.model.rope = True
+        ConfigLoader.save(pretrained_cfg, pretrained_path)
+        loaded, _ = load_validated_glue_config(config_path)
+        assert loaded.glue.max_seq_length == 256
 
     def test_get_evaluation_regression_keeps_vector_shapes(self):
         """Ensure STS-B style regression keeps predictions/labels 1D for batch=1."""

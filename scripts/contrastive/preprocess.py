@@ -1,44 +1,27 @@
 """Preprocess and tokenize contrastive datasets."""
 
-import json
 import shutil
 from pathlib import Path
 from typing import Any
 
 from datasets import DatasetDict
+from filelock import FileLock
 
 from neobert.config import load_config_from_args
 from neobert.contrastive.datasets import (
     CONTRASTIVE_DATASETS,
+    build_contrastive_tokenization_manifest,
     discover_cached_contrastive_dataset_names,
     load_cached_contrastive_datasets,
-    normalize_contrastive_dataset_name_token,
-    resolve_contrastive_dataset_name,
     resolve_contrastive_dataset_names,
+    resolve_contrastive_token_columns,
+)
+from neobert.tokenization_cache import (
+    validate_tokenized_cache_manifest,
+    write_json_atomic,
+    write_tokenized_cache_manifest,
 )
 from neobert.tokenizer import get_tokenizer, tokenize
-
-
-def _normalize_dataset_name_token(value: Any) -> str:
-    """Normalize a dataset selector token for registry matching.
-
-    :param Any value: Raw dataset selector.
-    :return str: Uppercase alphanumeric token.
-    """
-    return normalize_contrastive_dataset_name_token(value)
-
-
-def _resolve_single_dataset_name(requested: Any) -> str:
-    """Resolve one dataset selector to a canonical contrastive registry key.
-
-    Accepts canonical keys (for example ``ALLNLI``), class names, and common
-    built-in Hugging Face dataset IDs such as ``sentence-transformers/all-nli``.
-
-    :param Any requested: Raw selector value.
-    :return str: Canonical registry key.
-    :raises ValueError: If the selector cannot be resolved.
-    """
-    return resolve_contrastive_dataset_name(requested)
 
 
 def _resolve_dataset_names(cfg: Any) -> list[str]:
@@ -52,29 +35,19 @@ def _resolve_dataset_names(cfg: Any) -> list[str]:
     return resolve_contrastive_dataset_names(requested)
 
 
-def _discover_cached_dataset_names(all_dir: Path) -> list[str]:
-    """Return cached contrastive split names with complete on-disk payloads.
-
-    :param Path all_dir: Root ``all/`` directory containing cached split folders.
-    :return list[str]: Cached split names in registry order.
-    """
-    return discover_cached_contrastive_dataset_names(all_dir)
-
-
 def _write_cached_dataset_manifest(all_dir: Path) -> list[str]:
     """Write the cached contrastive split manifest from directories on disk.
 
     :param Path all_dir: Root ``all/`` directory containing cached split folders.
     :return list[str]: Manifest split names that were written.
     """
-    cached_names = _discover_cached_dataset_names(all_dir)
-    with (all_dir / "dataset_dict.json").open("w", encoding="utf-8") as handle:
-        json.dump({"splits": cached_names}, handle, indent=2)
+    cached_names = discover_cached_contrastive_dataset_names(all_dir)
+    write_json_atomic(all_dir / "dataset_dict.json", {"splits": cached_names})
     return cached_names
 
 
-def pipeline(cfg: Any) -> DatasetDict:
-    """Run dataset preprocessing and tokenization.
+def _pipeline_locked(cfg: Any) -> DatasetDict:
+    """Run preprocessing while the dataset-root cache lock is held.
 
     :param Any cfg: Configuration object with dataset/tokenizer settings.
     :return DatasetDict: Prepared dataset dictionary.
@@ -94,32 +67,36 @@ def pipeline(cfg: Any) -> DatasetDict:
     load_all_from_disk = bool(getattr(dataset_cfg, "load_all_from_disk", False))
     force_redownload = bool(getattr(dataset_cfg, "force_redownload", False))
     selected_names = _resolve_dataset_names(cfg)
+    tokenizer = get_tokenizer(
+        pretrained_model_name_or_path=getattr(cfg.tokenizer, "path", None)
+        or cfg.tokenizer.name,
+        max_length=getattr(cfg.tokenizer, "max_length", 512),
+        trust_remote_code=getattr(cfg.tokenizer, "trust_remote_code", False),
+        revision=getattr(cfg.tokenizer, "revision", None),
+        allow_special_token_rewrite=getattr(
+            cfg.tokenizer, "allow_special_token_rewrite", False
+        ),
+    )
 
     if load_all_from_disk:
         dataset = load_cached_contrastive_datasets(
             all_dir,
             selected_names=selected_names,
+            tokenizer=tokenizer,
+            max_length=getattr(cfg.tokenizer, "max_length", 512),
+            truncation=getattr(cfg.tokenizer, "truncation", True),
         )
 
     else:
         all_dir.mkdir(parents=True, exist_ok=True)
-        tokenizer = get_tokenizer(
-            pretrained_model_name_or_path=getattr(cfg.tokenizer, "path", None)
-            or cfg.tokenizer.name,
-            max_length=getattr(cfg.tokenizer, "max_length", 512),
-            trust_remote_code=getattr(cfg.tokenizer, "trust_remote_code", False),
-            revision=getattr(cfg.tokenizer, "revision", None),
-            allow_special_token_rewrite=getattr(
-                cfg.tokenizer, "allow_special_token_rewrite", False
-            ),
-        )
 
         # Load and tokenize subdatasets if necessary
         dataset_dict = {}
         for name in selected_names:
             dataset_cls = CONTRASTIVE_DATASETS[name]
             dataset_dir = all_dir / name
-            if dataset_dir.is_dir() and not force_redownload:
+            reuse_cached = dataset_dir.is_dir() and not force_redownload
+            if reuse_cached:
                 print(f"Loading tokenized {name} from disk...")
                 subdataset = dataset_cls.from_disk(dataset_dir).dataset
             else:
@@ -127,17 +104,20 @@ def pipeline(cfg: Any) -> DatasetDict:
                     shutil.rmtree(dataset_dir)
                 print(f"Loading {name} from huggingface and preprocessing...")
                 subdataset = dataset_cls().dataset
+            token_columns = resolve_contrastive_token_columns(subdataset.column_names)
+
+            manifest = build_contrastive_tokenization_manifest(
+                tokenizer,
+                dataset_name=name,
+                column_names=subdataset.column_names,
+                max_length=getattr(cfg.tokenizer, "max_length", 512),
+                truncation=getattr(cfg.tokenizer, "truncation", True),
+                token_columns=token_columns,
+            )
+            if reuse_cached:
+                validate_tokenized_cache_manifest(dataset_dir, manifest)
+            else:
                 print(f"Tokenizing {name}...")
-                token_columns = tuple(
-                    col
-                    for col in subdataset.column_names
-                    if col in {"query", "corpus", "negative"}
-                )
-                if not token_columns:
-                    raise ValueError(
-                        f"{name} has no tokenizable columns in "
-                        f"{subdataset.column_names!r}."
-                    )
                 subdataset = tokenize(
                     subdataset,
                     tokenizer,
@@ -149,6 +129,7 @@ def pipeline(cfg: Any) -> DatasetDict:
                     remove_columns=True,
                 )
                 subdataset.save_to_disk(dataset_dir)
+                write_tokenized_cache_manifest(dataset_dir, manifest)
 
             dataset_dict[name] = subdataset
 
@@ -161,6 +142,25 @@ def pipeline(cfg: Any) -> DatasetDict:
         )
 
     return dataset
+
+
+def pipeline(cfg: Any) -> DatasetDict:
+    """Run dataset preprocessing under a root-scoped interprocess lock.
+
+    :param Any cfg: Configuration object with dataset/tokenizer settings.
+    :return DatasetDict: Prepared dataset dictionary.
+    """
+    dataset_cfg = getattr(cfg, "dataset", None)
+    dataset_path = getattr(dataset_cfg, "path", None)
+    if not dataset_path:
+        raise ValueError(
+            "Contrastive preprocessing requires dataset.path pointing to a dataset root."
+        )
+    dataset_root = Path(dataset_path)
+    dataset_root.mkdir(parents=True, exist_ok=True)
+    lock_path = dataset_root / ".contrastive-preprocess.lock"
+    with FileLock(str(lock_path)):
+        return _pipeline_locked(cfg)
 
 
 def main() -> None:

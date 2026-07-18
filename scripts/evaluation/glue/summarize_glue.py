@@ -14,31 +14,7 @@ from pathlib import Path
 
 import pandas as pd
 
-# Official GLUE task scoring definitions.
-# For tasks with multiple metrics, GLUE uses the unweighted average.
-TASK_SCORES = {
-    "cola": {
-        "metrics": ("matthews_correlation",),
-        "label": "Matthews Corr",
-        "scale": 100,
-    },
-    "sst2": {"metrics": ("accuracy",), "label": "Accuracy", "scale": 100},
-    "mrpc": {"metrics": ("accuracy", "f1"), "label": "Acc/F1 (avg)", "scale": 100},
-    "stsb": {
-        "metrics": ("pearson", "spearmanr"),
-        "label": "Pearson/Spearman (avg)",
-        "scale": 100,
-    },
-    "qqp": {"metrics": ("accuracy", "f1"), "label": "Acc/F1 (avg)", "scale": 100},
-    "mnli": {
-        "metrics": ("accuracy", "accuracy_mm"),
-        "label": "MNLI-m/mm (avg)",
-        "scale": 100,
-    },
-    "qnli": {"metrics": ("accuracy",), "label": "Accuracy", "scale": 100},
-    "rte": {"metrics": ("accuracy",), "label": "Accuracy", "scale": 100},
-    "wnli": {"metrics": ("accuracy",), "label": "Accuracy", "scale": 100},
-}
+from neobert.glue.tasks import GLUE_TASK_SPECS, compute_official_glue_score
 
 # Baseline scores for reference (BERT-base scores from literature)
 BERT_BASE_SCORES = {
@@ -52,56 +28,6 @@ BERT_BASE_SCORES = {
     "rte": 66.4,
     "wnli": 65.1,
 }
-
-
-def _normalize_metrics(data: dict) -> dict[str, float]:
-    """Normalize metric keys for GLUE reporting.
-
-    :param dict data: Raw metric mapping.
-    :return dict[str, float]: Normalized metric mapping.
-    """
-    normalized: dict[str, float] = {}
-    for key, value in (data or {}).items():
-        if not isinstance(key, str) or not isinstance(value, (int, float)):
-            continue
-        metric_key = key[len("eval_") :] if key.startswith("eval_") else key
-        normalized[metric_key] = float(value)
-    return normalized
-
-
-def _compute_task_score(task: str, metrics: dict[str, float]) -> float | None:
-    """Compute the official GLUE score for a task.
-
-    :param str task: GLUE task name.
-    :param dict[str, float] metrics: Metric mapping for the task.
-    :return float | None: Task score or None if unavailable.
-    """
-    spec = TASK_SCORES.get(task)
-    if spec is None:
-        return None
-
-    required = list(spec["metrics"])
-    values: list[float] = []
-
-    for metric in required:
-        if metric in metrics:
-            values.append(metrics[metric])
-            continue
-        if task == "mnli" and metric == "accuracy_mm":
-            for alias in ("accuracy_mismatched", "mnli_mm", "accuracy-mm"):
-                if alias in metrics:
-                    values.append(metrics[alias])
-                    break
-
-    if not values:
-        return None
-
-    if len(values) != len(required):
-        combined = metrics.get("combined_score")
-        if combined is not None and isinstance(combined, (int, float)):
-            return float(combined)
-
-    return sum(values) / len(values)
 
 
 def get_task_results(task_dir: Path, task: str) -> float | None:
@@ -129,8 +55,7 @@ def get_task_results(task_dir: Path, task: str) -> float | None:
         if not isinstance(data, dict):
             continue
 
-        metrics = _normalize_metrics(data)
-        score = _compute_task_score(task, metrics)
+        score = compute_official_glue_score(task, data)
         if score is None:
             continue
         if best_score is None or score > best_score:
@@ -217,9 +142,8 @@ def main() -> None:
         baseline_name = None
 
     results = []
-    for task, spec in TASK_SCORES.items():
-        metric_name = spec["label"]
-        scale = spec["scale"]
+    for task, spec in GLUE_TASK_SPECS.items():
+        metric_name = spec.score_label
         task_dir = base_dir / task
         if not task_dir.exists():
             result_dict = {
@@ -253,7 +177,7 @@ def main() -> None:
                 )
             results.append(result_dict)
         else:
-            score_pct = score * scale
+            score_pct = score * 100
             bert_score = baseline_scores.get(task, 0) if baseline_scores else 0
             diff = score_pct - bert_score if baseline_scores else None
 
@@ -282,7 +206,7 @@ def main() -> None:
 
     # Calculate average if we have all results
     completed = [r for r in results if r["Status"] == "✅"]
-    if len(completed) == 9:
+    if len(completed) == len(GLUE_TASK_SPECS):
         scores = [float(r["Score"]) for r in completed if r["Score"] != "Not run"]
         avg_score = sum(scores) / len(scores)
         print("\n" + "-" * 60)
@@ -292,7 +216,7 @@ def main() -> None:
             print(f"{baseline_name} Average: {baseline_avg:.1f}")
             print(f"Difference: {avg_score - baseline_avg:+.1f}")
     else:
-        print(f"\nCompleted {len(completed)}/9 tasks")
+        print(f"\nCompleted {len(completed)}/{len(GLUE_TASK_SPECS)} tasks")
 
     print("=" * 60 + "\n")
 

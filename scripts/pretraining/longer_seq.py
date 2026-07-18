@@ -1,34 +1,28 @@
 """Filter datasets to longer sequence lengths."""
 
+import argparse
 import os
 from typing import Any
 
 from datasets import load_from_disk
 
-from neobert.config import DatasetConfig, load_config_from_args
+from neobert.config import ConfigLoader
 
 
-def longer_seq(cfg: Any) -> None:
+def longer_seq(cfg: Any, *, min_length: int) -> None:
     """Filter a dataset into longer-sequence variants.
 
     :param Any cfg: Configuration object with dataset settings.
+    :param int min_length: Explicit minimum length for the first output dataset.
+    :raises ValueError: If ``min_length`` is not positive.
     """
+    if min_length <= 0:
+        raise ValueError("min_length must be positive.")
+
     # Get the number of cpu cores available to the process
     num_proc = len(os.sched_getaffinity(0))
 
     dataset = load_from_disk(cfg.dataset.path)
-
-    # Keep this utility focused on long-sequence filtering. Global config defaults
-    # are short-text-oriented, so only honor cfg.dataset.min_length when explicitly
-    # changed away from the dataclass default.
-    configured_min_length = getattr(
-        cfg.dataset, "min_length", DatasetConfig().min_length
-    )
-    min_length = (
-        512
-        if configured_min_length == DatasetConfig().min_length
-        else int(configured_min_length)
-    )
 
     dataset = dataset.filter(
         lambda example: len(example["input_ids"]) >= min_length,
@@ -55,11 +49,18 @@ def longer_seq(cfg: Any) -> None:
 
 def main() -> None:
     """Run the longer sequence filtering CLI."""
-    # Load configuration from command line arguments
-    config = load_config_from_args(require_config=True)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("config", help="Path to the NeoBERT YAML configuration")
+    parser.add_argument(
+        "--min-length",
+        type=int,
+        required=True,
+        help="Minimum token length for the first output dataset",
+    )
+    args, overrides = parser.parse_known_args()
+    config = ConfigLoader.load(args.config, overrides=overrides)
 
-    # Run sequence length filtering
-    longer_seq(config)
+    longer_seq(config, min_length=args.min_length)
 
 
 if __name__ == "__main__":

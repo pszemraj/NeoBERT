@@ -10,7 +10,6 @@ model:
   max_position_embeddings: 512
   attn_backend: flash_attn_varlen
   kernel_backend: auto
-  ngpt: false
   hidden_act: "swiglu"
 
 dataset:
@@ -33,13 +32,15 @@ trainer:
   eval_steps: 1000
   save_steps: 1000
   dataloader_num_workers: 4
-  report_to: []
 
 contrastive:
   temperature: 0.05
   pooling: "avg"
-  loss_type: "simcse"
-  hard_negative_weight: 0.0
+  pretraining_prob: 0.0
+  pretraining_dataset_path: null
+  pretrained_checkpoint_dir: null
+  pretrained_checkpoint: latest
+  allow_random_weights: false
 
 optimizer:
   name: "adamw"

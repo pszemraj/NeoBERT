@@ -1,0 +1,36 @@
+# Deferred Work
+
+## Optimizer
+
+### Batch fused-QKV orthogonalization
+
+`_orthogonalize_fused_qkv_update` (`src/neobert/optimizer/muon_clip.py`) runs Newton-Schulz/Polar-Express on the split Q/K/V matrices as three sequential 2D calls, costing roughly `3 x ns_steps x 3` small square GEMM launches per fused parameter per optimizer step (~45 launches at the default `ns_steps=5`, versus ~15 if the three same-shape matrices were stacked into one `[3, hidden, hidden]` batch). Splitting per projection is the intended correctness behavior and must not change; this item is purely about doing the same math with batched kernels.
+
+Deferred because it is an overhead-only win (identical FLOPs, fewer launches) that requires modifying numerically sensitive shared code. Completing it requires:
+
+- teaching `_newton_schulz_update` and `_polar_express_update` to accept 3D batched input: `transpose(-2, -1)`/`.mT` instead of `.T`, and per-matrix norms (`dim=(-2, -1), keepdim=True`) instead of one scalar `torch.linalg.norm` that would mix Q/K/V magnitudes,
+- stacking the split matrices in `_orthogonalize_fused_qkv_update` and applying `_normalize_muon_update` per matrix (all three share one shape, so the scale is common),
+- verifying against `tests/test_muonclip_unit.py` reference implementations and the manual FSDP2 golden tests (`tests/manual/test_muonclip_fsdp2_golden.py`), plus a wall-clock benchmark demonstrating the win in eager mode.
+
+## Resume
+
+### Name-keyed optimizer-state transplant
+
+The `optimizer_param_names.json` manifest fails fast when optimizer parameter order or state semantics drift (see [Training](guides/training.md)). If the repo later needs optimizer resume across intentional parameter-registration refactors, replace the fail-fast check with a true name-keyed optimizer-state transplant: load saved per-parameter state by manifest name instead of group position, then validate semantics as today. Until that need exists, fail-fast is the correct behavior.
+
+## Streaming
+
+### Exact streaming resume via a stateful-dataloader boundary
+
+Current cross-restart behavior and the unsafe raw-dataset cursor boundary are described in [Checkpointing and Resume](guides/training.md#checkpointing-and-resume).
+
+Deferred because the correct boundary is the prepared dataloader, not the dataset, and wiring that up is a focused piece of work of its own. Completing it requires:
+
+- enabling Accelerate's `use_stateful_dataloader` (backed by torchdata `StatefulDataLoader`) via `DataLoaderConfiguration`, so the prepared loader accounts for its own prefetch/lookahead state,
+- checkpointing the prepared/stateful dataloader's `state_dict()` rather than the raw dataset while continuing to restore the trainer's existing rank-local `stored_batch` packed-fragment buffer,
+- an integration regression through `accelerator.prepare_data_loader()`: consume one yielded batch, save, rebuild, load, and assert resume yields the next untrained batch (not the batch after the loader's lookahead),
+- confirming behavior under both `num_workers=0` and `num_workers>0`, and with an active HF shuffle buffer (whose contents are not serialized).
+
+### Optional snapshot cadence for retry resume
+
+`RetryingStreamingDataset.__iter__` (`src/neobert/streaming.py`) calls `dataset.state_dict()` after every yielded example to provide exactly-once retry recovery for resumable, unshuffled streams. The payload is small (HF serializes cursor counters, never shuffle-buffer contents), so this is currently cheap; if profiling of a deep `.map()`/`.filter()` pipeline ever shows the per-yield snapshot mattering, add an opt-in snapshot-every-N-examples knob. That trades the exactly-once guarantee for "may re-yield up to N-1 examples on retry," so it must stay opt-in and documented. Shuffled streams remain lossy because their in-memory shuffle buffer is not serialized. Snapshot-on-failure is not an alternative: nested iterable state advances past the failed example before the exception surfaces.

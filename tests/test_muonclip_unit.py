@@ -5,36 +5,60 @@ Run: pytest tests/test_muonclip_unit.py -v
 """
 
 import copy
-import warnings
 from pathlib import Path
 
 import pytest
 import torch
 import torch.distributed.checkpoint as dist_cp
+import torch.nn.functional as F
 from torch.distributed.checkpoint.state_dict import (
     get_optimizer_state_dict,
     set_optimizer_state_dict,
 )
 
+from neobert.collator import get_collator
+from neobert.config import MuonConfig
 from neobert.model import NeoBERT, NeoBERTConfig, NeoBERTLMHead
 from neobert.optimizer import MuonClipConfig, MuonClipOptimizer
+from neobert.warnings import NeoBERTWarning
+from tests.tokenizer_utils import build_wordlevel_tokenizer
 
 
-def _legacy_polar_express_reference(
-    grad: torch.Tensor, *, steps: int = 5, eps: float = 1e-7
+def _max_param_diff(
+    model_a: torch.nn.Module, model_b: torch.nn.Module
+) -> tuple[float, str]:
+    """Return the largest corresponding parameter difference and its name."""
+    max_diff = 0.0
+    max_name = ""
+    for (name, param), (other_name, other_param) in zip(
+        model_a.named_parameters(), model_b.named_parameters(), strict=True
+    ):
+        assert other_name == name
+        diff = float((param - other_param).abs().max().item())
+        if diff > max_diff:
+            max_diff = diff
+            max_name = name
+    return max_diff, max_name
+
+
+def _neobert_polar_express_reference(
+    muon_input: torch.Tensor,
+    *,
+    steps: int = 5,
+    eps: float = 1e-7,
 ) -> torch.Tensor:
-    """Reproduce the pre-refactor Polar Express update with built-in scaling."""
-    if grad.ndim != 2:
-        return grad
+    """Reproduce NeoBERT's Polar Express transform for one Muon direction."""
+    if muon_input.ndim != 2:
+        return muon_input
 
     steps = max(1, int(steps))
-    is_transpose = grad.size(0) > grad.size(1)
-    working = grad.T if is_transpose else grad
+    is_transpose = muon_input.size(0) > muon_input.size(1)
+    working = muon_input.T if is_transpose else muon_input
 
     original_dtype = working.dtype
     spectral_norm = torch.linalg.norm(working)
     if spectral_norm == 0 or not torch.isfinite(spectral_norm):
-        return torch.zeros_like(grad)
+        return torch.zeros_like(muon_input)
 
     working = working / (spectral_norm * 1.01 + eps)
 
@@ -76,6 +100,277 @@ def _legacy_polar_express_reference(
     return working.T if is_transpose else working
 
 
+def _muon_update_reference(
+    grad: torch.Tensor,
+    momentum_buffer: torch.Tensor,
+    *,
+    steps: int = 5,
+    beta: float = 0.95,
+    nesterov: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute an independent heavy-ball recurrence and transformed Muon update."""
+    next_buffer = beta * momentum_buffer + grad
+    muon_input = grad + beta * next_buffer if nesterov else next_buffer
+    update = _neobert_polar_express_reference(muon_input, steps=steps)
+    return update, next_buffer
+
+
+def _split_interleaved_qkv_reference(
+    matrix: torch.Tensor, *, num_heads: int, head_dim: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Split a NeoBERT interleaved fused QKV matrix into Q/K/V references."""
+    hidden_size = num_heads * head_dim
+    view = matrix.view(num_heads, 3 * head_dim, hidden_size)
+    q_matrix = view[:, :head_dim].reshape(hidden_size, hidden_size).contiguous()
+    k_matrix = view[:, head_dim : 2 * head_dim].reshape(hidden_size, hidden_size)
+    k_matrix = k_matrix.contiguous()
+    v_matrix = view[:, 2 * head_dim : 3 * head_dim].reshape(hidden_size, hidden_size)
+    v_matrix = v_matrix.contiguous()
+    return q_matrix, k_matrix, v_matrix
+
+
+def _merge_interleaved_qkv_reference(
+    q_matrix: torch.Tensor,
+    k_matrix: torch.Tensor,
+    v_matrix: torch.Tensor,
+    *,
+    num_heads: int,
+    head_dim: int,
+) -> torch.Tensor:
+    """Merge Q/K/V references into NeoBERT's interleaved fused QKV layout."""
+    hidden_size = num_heads * head_dim
+    fused = q_matrix.new_empty((3 * hidden_size, q_matrix.shape[1]))
+    fused_view = fused.view(num_heads, 3 * head_dim, q_matrix.shape[1])
+    fused_view[:, :head_dim].copy_(q_matrix.view(num_heads, head_dim, -1))
+    fused_view[:, head_dim : 2 * head_dim].copy_(k_matrix.view(num_heads, head_dim, -1))
+    fused_view[:, 2 * head_dim : 3 * head_dim].copy_(
+        v_matrix.view(num_heads, head_dim, -1)
+    )
+    return fused
+
+
+class _OwnerComputeShard:
+    """Minimal row-shard placement stub for owner-compute DTensor tests."""
+
+    def __init__(self, dim: int) -> None:
+        """Store the sharded dimension."""
+        self.dim = dim
+
+
+class _OwnerComputeMesh:
+    """Single-axis device mesh stub that returns a supplied process group."""
+
+    ndim = 1
+
+    def __init__(self, process_group: object) -> None:
+        """Initialize the mesh with a fake process group."""
+        self._process_group = process_group
+
+    def get_group(self) -> object:
+        """Return the fake process group."""
+        return self._process_group
+
+
+class _OwnerComputeDTensor:
+    """DTensor stub used by owner-compute Muon update tests."""
+
+    expected_shape: torch.Size | None = None
+    expected_stride: tuple[int, ...] | None = None
+
+    def __init__(
+        self,
+        local: torch.Tensor,
+        *,
+        device_mesh: _OwnerComputeMesh,
+        placements: tuple[_OwnerComputeShard, ...],
+        shape: torch.Size,
+        stride: tuple[int, ...],
+    ) -> None:
+        """Initialize the fake DTensor payload and metadata."""
+        self._local = local
+        self.device_mesh = device_mesh
+        self.placements = placements
+        self.shape = torch.Size(shape)
+        self._stride = tuple(stride)
+
+    def to_local(self) -> torch.Tensor:
+        """Return the local shard tensor."""
+        return self._local
+
+    def stride(self) -> tuple[int, ...]:
+        """Return the logical global stride."""
+        return self._stride
+
+    @classmethod
+    def from_local(
+        cls,
+        local: torch.Tensor,
+        *,
+        device_mesh: _OwnerComputeMesh,
+        placements: tuple[_OwnerComputeShard, ...],
+        run_check: bool = False,
+        shape: torch.Size,
+        stride: tuple[int, ...],
+    ) -> "_OwnerComputeDTensor":
+        """Rebuild a fake DTensor from a local shard."""
+        assert not run_check
+        if cls.expected_shape is not None:
+            assert tuple(shape) == tuple(cls.expected_shape)
+        if cls.expected_stride is not None:
+            assert tuple(stride) == tuple(cls.expected_stride)
+        return cls(
+            local,
+            device_mesh=device_mesh,
+            placements=placements,
+            shape=shape,
+            stride=stride,
+        )
+
+
+class _FakeShapeParam:
+    """Parameter-like object with independent local shape and global numel."""
+
+    def __init__(self, shape: tuple[int, ...], numel: int) -> None:
+        """Initialize fake shape metadata."""
+        self.shape = torch.Size(shape)
+        self._numel = int(numel)
+
+    def numel(self) -> int:
+        """Return the global parameter element count."""
+        return self._numel
+
+
+class _TopologyMesh:
+    """Mesh metadata stub for loaded-state topology validation tests."""
+
+    def __init__(self, ranks: tuple[int, ...] = (0, 1)) -> None:
+        """Initialize rank metadata."""
+        self.ndim = 1
+        self.mesh = torch.tensor(ranks)
+
+
+class _TopologyShard:
+    """Shard placement stub for loaded-state topology validation tests."""
+
+    def __init__(self, dim: int) -> None:
+        """Store the sharded dimension."""
+        self.dim = dim
+
+
+class _TopologyDTensor:
+    """DTensor metadata stub for loaded-state topology validation tests."""
+
+    def __init__(
+        self,
+        ranks: tuple[int, ...] = (0, 1),
+        dim: int = 0,
+        shape: tuple[int, ...] | None = None,
+    ) -> None:
+        """Initialize fake mesh, placement, and optional shape metadata."""
+        self.device_mesh = _TopologyMesh(ranks)
+        self.placements = (_TopologyShard(dim),)
+        if shape is not None:
+            self.shape = torch.Size(shape)
+
+    @staticmethod
+    def to_local() -> torch.Tensor:
+        """Expose the DTensor-like local-shard protocol used by production checks."""
+        return torch.empty(0)
+
+
+def _set_single_muon_param_state(
+    optimizer: MuonClipOptimizer,
+    fake_param: object,
+    state: dict[str, object],
+) -> None:
+    """Install a single Muon param group and optimizer state for topology tests."""
+    optimizer.param_groups = [
+        {
+            "use_muon": True,
+            "params": [fake_param],
+            "param_info": [
+                {
+                    "name": "transformer_encoder.0.qkv.weight",
+                    "layer_idx": 0,
+                    "is_qkv": True,
+                    "proj_type": "qkv",
+                }
+            ],
+        }
+    ]
+    optimizer.state = {fake_param: state}
+
+
+def _install_owner_compute_dtensor_fakes(
+    monkeypatch: pytest.MonkeyPatch,
+    muon_clip_module: object,
+    *,
+    process_group: object,
+    remote_padded: torch.Tensor,
+    expected_shape: torch.Size,
+    expected_stride: tuple[int, ...],
+) -> tuple[_OwnerComputeMesh, tuple[_OwnerComputeShard, ...]]:
+    """Patch DTensor and distributed collectives for owner-compute tests."""
+    mesh = _OwnerComputeMesh(process_group)
+    placements = (_OwnerComputeShard(0),)
+    _OwnerComputeDTensor.expected_shape = torch.Size(expected_shape)
+    _OwnerComputeDTensor.expected_stride = tuple(expected_stride)
+
+    monkeypatch.setattr(muon_clip_module, "DTensor", _OwnerComputeDTensor)
+    monkeypatch.setattr(muon_clip_module, "Shard", _OwnerComputeShard)
+    monkeypatch.setattr(muon_clip_module.dist, "is_available", lambda: True)
+    monkeypatch.setattr(muon_clip_module.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(
+        muon_clip_module.dist,
+        "get_process_group_ranks",
+        lambda _group: [0, 1],
+    )
+    monkeypatch.setattr(
+        muon_clip_module.dist,
+        "get_world_size",
+        lambda _group=None: 2,
+    )
+    monkeypatch.setattr(
+        muon_clip_module.dist,
+        "get_rank",
+        lambda _group=None: 0,
+    )
+
+    def _unexpected_all_gather(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("row-count all_gather should not run in normal mode")
+
+    def _fake_gather(
+        tensor: torch.Tensor,
+        gather_list: list[torch.Tensor] | None,
+        *,
+        group: object,
+        group_dst: int,
+    ) -> None:
+        assert group is process_group
+        assert group_dst == 0
+        assert gather_list is not None
+        gather_list[0].copy_(tensor)
+        gather_list[1].copy_(remote_padded)
+
+    def _fake_scatter(
+        tensor: torch.Tensor,
+        scatter_list: list[torch.Tensor] | None,
+        *,
+        group: object,
+        group_src: int,
+    ) -> None:
+        assert group is process_group
+        assert group_src == 0
+        assert scatter_list is not None
+        tensor.copy_(scatter_list[0])
+
+    monkeypatch.setattr(muon_clip_module.dist, "all_gather", _unexpected_all_gather)
+    monkeypatch.setattr(muon_clip_module.dist, "gather", _fake_gather)
+    monkeypatch.setattr(muon_clip_module.dist, "scatter", _fake_scatter)
+    return mesh, placements
+
+
 class TestMuonClipConfig:
     """Test configuration validation."""
 
@@ -84,6 +379,22 @@ class TestMuonClipConfig:
         config = MuonClipConfig()
         assert config.lr > 0
         assert 0 <= config.muon_beta < 1
+        assert config.nesterov is True
+        assert config.norm_factor == "neobert"
+        assert config.param_policy == "hidden_2d"
+
+    def test_runtime_config_inherits_shared_muon_defaults(self):
+        """Runtime config should source shared fields from ``MuonConfig``."""
+        configured = MuonConfig()
+        runtime = MuonClipConfig()
+
+        assert isinstance(runtime, MuonConfig)
+        for field_name in configured.__dataclass_fields__:
+            assert getattr(runtime, field_name) == getattr(configured, field_name)
+
+        runtime_override = MuonClipConfig(muon_beta=0.8, lr=2e-4)
+        assert runtime_override.muon_beta == pytest.approx(0.8)
+        assert runtime_override.lr == pytest.approx(2e-4)
 
     def test_invalid_numeric_fields_raise(self):
         """Test invalid numeric config values fail fast."""
@@ -92,10 +403,12 @@ class TestMuonClipConfig:
             {"lr": -0.1},
             {"clipping_threshold": 0},
             {"clipping_threshold": 2000},
+            {"clipping_warmup_steps": -1},
             {"clipping_interval": 0},
             {"clipping_interval": -3},
             {"clipping_qk_chunk_size": 0},
             {"norm_factor": "unsupported"},
+            {"param_policy": "unsupported"},
         ]
         for kwargs in cases:
             with pytest.raises(ValueError):
@@ -103,23 +416,16 @@ class TestMuonClipConfig:
 
     def test_warnings_for_suboptimal(self):
         """Test warnings for suboptimal settings."""
-        with pytest.warns(UserWarning):
+        with pytest.warns(NeoBERTWarning):
             MuonClipConfig(ns_steps=2)  # Too few iterations
 
-    def test_algorithm_aliases(self):
-        """Test algorithm selection helpers."""
-        with pytest.warns(UserWarning, match="MuonClipConfig.algorithm is deprecated"):
-            cfg = MuonClipConfig(algorithm="newton_schulz")
-        assert cfg.orthogonalization == "newton_schulz"
-
-        with pytest.warns(
-            UserWarning, match="MuonClipConfig.polar_express is deprecated"
-        ):
-            cfg = MuonClipConfig(polar_express=False)
-        assert cfg.orthogonalization == "newton_schulz"
-
+    def test_orthogonalization_selection(self):
+        """Test canonical orthogonalization selection."""
         cfg = MuonClipConfig(orthogonalization="polar_express")
         assert cfg.orthogonalization == "polar_express"
+
+        cfg = MuonClipConfig(orthogonalization="newton_schulz")
+        assert cfg.orthogonalization == "newton_schulz"
 
         with pytest.raises(ValueError):
             MuonClipConfig(orthogonalization="unsupported")
@@ -270,6 +576,7 @@ class TestMuonClipOptimizer:
             max_length=128,
             attn_backend="sdpa",
             hidden_act="gelu",
+            dropout=0.0,
             rope=False,
         )
         return NeoBERT(config), config
@@ -290,33 +597,154 @@ class TestMuonClipOptimizer:
         assert optimizer._step == 0
         assert optimizer.config.orthogonalization == "polar_express"
 
-    def test_parameter_grouping(self, model):
-        """Test parameters are correctly grouped."""
+    def test_state_semantics_qualified_by_update_rule_config(self, model):
+        """Instance tags must record the update-rule selectors."""
         model_instance, config = model
+        optimizer = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(enable_clipping=False, norm_factor="spectral"),
+        )
 
-        muon_config = MuonClipConfig(enable_clipping=False)
-        optimizer = MuonClipOptimizer(model_instance, config, muon_config)
+        assert optimizer.STATE_SEMANTICS == (
+            "muonclip-heavyball-v2|norm_factor=spectral|param_policy=hidden_2d"
+            "|orthogonalization=polar_express|nesterov=True|clipping=False"
+        )
 
-        # Muon should only see transformer 2D weights.
-        muon_group = next(g for g in optimizer.param_groups if g["use_muon"])
-        muon_params = set(muon_group["params"])
-        for p in muon_group["params"]:
-            assert p.ndim == 2
+    @pytest.mark.parametrize(
+        ("selector", "saved_value", "resume_value"),
+        [
+            pytest.param("norm_factor", "spectral", "neobert", id="norm-factor"),
+            pytest.param("param_policy", "hidden_2d", "all_2d", id="param-policy"),
+            pytest.param(
+                "orthogonalization",
+                "polar_express",
+                "newton_schulz",
+                id="orthogonalization",
+            ),
+            pytest.param("nesterov", True, False, id="nesterov"),
+        ],
+    )
+    def test_resume_manifest_rejects_changed_update_rule_selector(
+        self,
+        model,
+        tmp_path,
+        selector,
+        saved_value,
+        resume_value,
+    ):
+        """A drifted update-rule selector must fail resume."""
+        from neobert.training_utils import (
+            attach_optimizer_param_names,
+            save_optimizer_param_name_manifest,
+            validate_optimizer_param_name_manifest,
+        )
 
-        assert model_instance.encoder.weight not in muon_params
-        if hasattr(model_instance, "positional_embedding"):
-            assert model_instance.positional_embedding.weight not in muon_params
-        assert model_instance.transformer_encoder[0].qkv.weight in muon_params
+        model_instance, config = model
+        saved = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(enable_clipping=False, **{selector: saved_value}),
+        )
+        attach_optimizer_param_names(model_instance, saved)
+        save_optimizer_param_name_manifest(saved, tmp_path)
+        validate_optimizer_param_name_manifest(saved, tmp_path)
 
-        # Adam groups include 1D params and non-transformer 2D weights.
-        adam_groups = [g for g in optimizer.param_groups if not g["use_muon"]]
-        adam_params = {param for group in adam_groups for param in group["params"]}
-        assert model_instance.encoder.weight in adam_params
-        if hasattr(model_instance, "positional_embedding"):
-            assert model_instance.positional_embedding.weight in adam_params
+        drifted = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(enable_clipping=False, **{selector: resume_value}),
+        )
+        attach_optimizer_param_names(model_instance, drifted)
 
-    def test_grouping_excludes_embeddings_and_lm_head(self):
-        """Embeddings/output projection must stay in Adam, never Muon."""
+        with pytest.raises(RuntimeError, match="state semantics changed"):
+            validate_optimizer_param_name_manifest(drifted, tmp_path)
+
+    @pytest.mark.parametrize(
+        ("tunable", "saved_value", "resume_value"),
+        [
+            pytest.param("lr", 1e-4, 3e-4, id="learning-rate"),
+            pytest.param("muon_beta", 0.95, 0.8, id="momentum"),
+        ],
+    )
+    def test_resume_manifest_accepts_changed_tunable(
+        self,
+        model,
+        tmp_path,
+        tunable,
+        saved_value,
+        resume_value,
+    ):
+        """Tunables that do not reinterpret optimizer state may change on resume."""
+        from neobert.training_utils import (
+            attach_optimizer_param_names,
+            save_optimizer_param_name_manifest,
+            validate_optimizer_param_name_manifest,
+        )
+
+        model_instance, config = model
+        saved = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(enable_clipping=False, **{tunable: saved_value}),
+        )
+        attach_optimizer_param_names(model_instance, saved)
+        save_optimizer_param_name_manifest(saved, tmp_path)
+
+        resumed = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(enable_clipping=False, **{tunable: resume_value}),
+        )
+        attach_optimizer_param_names(model_instance, resumed)
+
+        validate_optimizer_param_name_manifest(resumed, tmp_path)
+
+    def test_resume_manifest_rejects_changed_clipping_mode(self, model, tmp_path):
+        """Resuming a clipping run as Muon-only (or vice versa) must fail fast."""
+        from neobert.training_utils import (
+            attach_optimizer_param_names,
+            save_optimizer_param_name_manifest,
+            validate_optimizer_param_name_manifest,
+        )
+
+        model_instance, config = model
+        clipped = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(enable_clipping=True),
+        )
+        assert "clipping=True" in clipped.STATE_SEMANTICS
+        assert "clipping_reduction=global-v1" in clipped.STATE_SEMANTICS
+        attach_optimizer_param_names(model_instance, clipped)
+        save_optimizer_param_name_manifest(clipped, tmp_path)
+        validate_optimizer_param_name_manifest(clipped, tmp_path)
+
+        muon_only = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(enable_clipping=False),
+        )
+        attach_optimizer_param_names(model_instance, muon_only)
+
+        with pytest.raises(RuntimeError, match="state semantics changed"):
+            validate_optimizer_param_name_manifest(muon_only, tmp_path)
+
+    @pytest.mark.parametrize(
+        ("param_policy", "with_lm_head", "embeddings_use_muon"),
+        [
+            pytest.param("hidden_2d", False, False, id="hidden-base-model"),
+            pytest.param("hidden_2d", True, False, id="hidden-lm-head"),
+            pytest.param("all_2d", True, True, id="all-2d-lm-head"),
+        ],
+    )
+    def test_parameter_grouping(
+        self,
+        param_policy: str,
+        with_lm_head: bool,
+        embeddings_use_muon: bool,
+    ):
+        """Parameter policy should route embeddings and output weights correctly."""
         config = NeoBERTConfig(
             hidden_size=64,
             num_hidden_layers=2,
@@ -329,23 +757,34 @@ class TestMuonClipOptimizer:
             rope=False,
             tie_word_embeddings=False,
         )
-        model = NeoBERTLMHead(config)
+        model = NeoBERTLMHead(config) if with_lm_head else NeoBERT(config)
         optimizer = MuonClipOptimizer(
             model,
             config,
-            MuonClipConfig(enable_clipping=False),
+            MuonClipConfig(enable_clipping=False, param_policy=param_policy),
         )
 
         muon_group = next(g for g in optimizer.param_groups if g["use_muon"])
         muon_params = set(muon_group["params"])
         adam_groups = [g for g in optimizer.param_groups if not g["use_muon"]]
         adam_params = {param for group in adam_groups for param in group["params"]}
+        model_base = model.model if isinstance(model, NeoBERTLMHead) else model
 
-        assert model.model.encoder.weight not in muon_params
-        assert model.model.encoder.weight in adam_params
-        assert model.decoder.weight not in muon_params
-        assert model.decoder.weight in adam_params
-        assert model.model.transformer_encoder[0].qkv.weight in muon_params
+        assert muon_group["param_policy"] == param_policy
+        assert all(param.ndim == 2 for param in muon_params)
+        assert (model_base.encoder.weight in muon_params) is embeddings_use_muon
+        assert (model_base.encoder.weight in adam_params) is not embeddings_use_muon
+        if hasattr(model_base, "positional_embedding"):
+            assert (
+                model_base.positional_embedding.weight in muon_params
+            ) is embeddings_use_muon
+            assert (
+                model_base.positional_embedding.weight in adam_params
+            ) is not embeddings_use_muon
+        assert model_base.transformer_encoder[0].qkv.weight in muon_params
+        if isinstance(model, NeoBERTLMHead):
+            assert (model.decoder.weight in muon_params) is embeddings_use_muon
+            assert (model.decoder.weight in adam_params) is not embeddings_use_muon
 
     def test_adam_fallback_splits_decay_and_no_decay(self):
         """MuonClip Adam fallback should mirror the repo's AdamW decay policy."""
@@ -365,7 +804,11 @@ class TestMuonClipOptimizer:
         optimizer = MuonClipOptimizer(
             model,
             config,
-            MuonClipConfig(enable_clipping=False, adam_decay=0.1),
+            MuonClipConfig(
+                enable_clipping=False,
+                adam_decay=0.1,
+                param_policy="hidden_2d",
+            ),
         )
 
         adam_groups = [
@@ -416,9 +859,10 @@ class TestMuonClipOptimizer:
         param_shape = torch.Size([6, 3])
         expected_scales = {
             "none": 1.0,
+            "neobert": 0.4 * (6**0.5),
+            "muon_reference": max(1.0, 6 / 3) ** 0.5,
             "spectral": (6 / 3) ** 0.5,
             "match_rms_adamw": 0.2 * (6**0.5),
-            "legacy_compat": 0.4 * (6**0.5),
         }
 
         for mode, expected_scale in expected_scales.items():
@@ -430,8 +874,9 @@ class TestMuonClipOptimizer:
             normalized = optimizer._normalize_muon_update(update, param_shape)
             assert torch.allclose(normalized, update * expected_scale)
 
-    def test_legacy_compat_matches_pre_refactor_polar_step(self):
-        """Legacy normalization should match pre-refactor local Polar Express math."""
+    @pytest.mark.parametrize("nesterov", [True, False])
+    def test_muon_step_matches_neobert_polar_step(self, nesterov: bool):
+        """Muon momentum variants should match the NeoBERT reference step."""
         torch.manual_seed(0)
         config = NeoBERTConfig(
             hidden_size=16,
@@ -448,16 +893,18 @@ class TestMuonClipOptimizer:
         muon_config = MuonClipConfig(
             lr=1e-3,
             muon_beta=0.95,
+            nesterov=nesterov,
             muon_decay=0.0,
             adam_decay=0.0,
             ns_steps=5,
             enable_clipping=False,
             orthogonalization="polar_express",
-            norm_factor="legacy_compat",
         )
+        assert muon_config.norm_factor == "neobert"
+        assert muon_config.nesterov is nesterov
         optimizer = MuonClipOptimizer(model, config, muon_config)
 
-        target = model.transformer_encoder[0].qkv.weight
+        target = model.transformer_encoder[0].wo.weight
         grad = torch.randn_like(target)
         initial = target.detach().clone()
 
@@ -466,14 +913,98 @@ class TestMuonClipOptimizer:
                 param.grad = torch.zeros_like(param)
         target.grad = grad.clone()
 
-        momentum = (1 - muon_config.muon_beta) * grad
-        expected_update = _legacy_polar_express_reference(
-            momentum, steps=muon_config.ns_steps
+        expected_update, _ = _muon_update_reference(
+            grad,
+            torch.zeros_like(grad),
+            steps=muon_config.ns_steps,
+            beta=muon_config.muon_beta,
+            nesterov=muon_config.nesterov,
         )
         expected = initial - muon_config.lr * expected_update
 
         optimizer.step()
         assert torch.allclose(target, expected, atol=1e-6, rtol=1e-6)
+
+    @pytest.mark.parametrize("nesterov", [True, False])
+    def test_muon_momentum_matches_multistep_reference_from_nonzero_buffer(
+        self, nesterov: bool
+    ):
+        """Muon momentum should follow the heavy-ball recurrence across updates."""
+        torch.manual_seed(7)
+        config = NeoBERTConfig(
+            hidden_size=8,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=16,
+            vocab_size=32,
+            max_length=8,
+            attn_backend="sdpa",
+            hidden_act="gelu",
+            rope=False,
+        )
+        model = NeoBERT(config)
+        muon_config = MuonClipConfig(
+            lr=2e-3,
+            muon_beta=0.8,
+            nesterov=nesterov,
+            muon_decay=0.0,
+            adam_decay=0.0,
+            ns_steps=5,
+            enable_clipping=False,
+            orthogonalization="polar_express",
+        )
+        optimizer = MuonClipOptimizer(model, config, muon_config)
+        target = model.transformer_encoder[0].wo.weight
+        momentum = torch.randn_like(target)
+        optimizer.state[target] = {
+            "momentum_buffer": momentum.clone(),
+            "step": 4,
+        }
+        expected_param = target.detach().clone()
+        grads = [torch.randn_like(target) for _ in range(3)]
+
+        for grad in grads:
+            target.grad = grad.clone()
+            expected_update, momentum = _muon_update_reference(
+                grad,
+                momentum,
+                steps=muon_config.ns_steps,
+                beta=muon_config.muon_beta,
+                nesterov=nesterov,
+            )
+            expected_param.add_(expected_update, alpha=-muon_config.lr)
+
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+
+            torch.testing.assert_close(
+                optimizer.state[target]["momentum_buffer"], momentum
+            )
+            torch.testing.assert_close(target, expected_param, atol=1e-6, rtol=1e-6)
+
+    def test_muon_reference_norm_factor_matches_reference_scale(self):
+        """Reference Muon scaling should match the OpenAI/PyTorch shape rule."""
+        config = NeoBERTConfig(
+            hidden_size=8,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=16,
+            vocab_size=64,
+            max_length=16,
+            attn_backend="sdpa",
+            hidden_act="gelu",
+            rope=False,
+        )
+        model = NeoBERT(config)
+        optimizer = MuonClipOptimizer(
+            model,
+            config,
+            MuonClipConfig(enable_clipping=False, norm_factor="muon_reference"),
+        )
+        update = torch.ones(12, 3)
+        normalized = optimizer._normalize_muon_update(update, update.shape)
+        expected_scale = max(1.0, 12 / 3) ** 0.5
+        torch.testing.assert_close(normalized, update * expected_scale)
 
     def test_interleaved_qkv_scaling(self):
         """Ensure fused QKV scaling matches per-head interleaved layout."""
@@ -507,6 +1038,117 @@ class TestMuonClipOptimizer:
         view = expected.view(config.num_attention_heads, config.dim_head * 3, -1)
         view[:, : config.dim_head].mul_(eta.view(-1, 1, 1))
         assert torch.allclose(qkv_param, expected)
+
+    @pytest.mark.parametrize("projection_layout", ["fused", "separate"])
+    def test_projection_failures_abort_clipping(
+        self,
+        model,
+        monkeypatch: pytest.MonkeyPatch,
+        projection_layout: str,
+    ):
+        """Projection failures must not become rank-local clipping skips."""
+        model_instance, config = model
+        optimizer = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(enable_clipping=False),
+        )
+        inputs = torch.zeros(1, 2, config.hidden_size)
+        qkv_param = model_instance.transformer_encoder[0].qkv.weight
+
+        def _fail_matmul(*args, **kwargs):
+            del args, kwargs
+            raise RuntimeError("projection failed")
+
+        monkeypatch.setattr(torch, "matmul", _fail_matmul)
+        with pytest.raises(RuntimeError, match="refusing to skip rank-local"):
+            if projection_layout == "fused":
+                optimizer._compute_eta_for_fused(inputs, qkv_param, None, None, None)
+            else:
+                projection = torch.nn.Parameter(
+                    torch.zeros(config.hidden_size, config.hidden_size)
+                )
+                optimizer._compute_eta_for_separate(
+                    inputs,
+                    projection,
+                    projection,
+                    None,
+                    None,
+                    None,
+                )
+
+    def test_single_rank_partial_capture_fails_fast(self, model):
+        """Partial layer capture is invalid even without distributed replicas."""
+        model_instance, config = model
+        optimizer = MuonClipOptimizer(
+            model_instance,
+            config,
+            MuonClipConfig(enable_clipping=True),
+        )
+        assert optimizer.hook_system is not None
+        optimizer.hook_system.layer_inputs[0] = torch.zeros(1, 2, config.hidden_size)
+
+        with pytest.raises(RuntimeError, match="captured=1/1, complete=0/1"):
+            optimizer._synchronize_capture_readiness()
+
+    def test_fused_qkv_muon_splits_projections_before_orthogonalization(self):
+        """Fused QKV updates should apply Muon separately to Q, K, and V."""
+        torch.manual_seed(0)
+        config = NeoBERTConfig(
+            hidden_size=8,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=16,
+            vocab_size=32,
+            max_length=8,
+            attn_backend="sdpa",
+            hidden_act="gelu",
+            rope=False,
+        )
+        model = NeoBERT(config)
+        optimizer = MuonClipOptimizer(
+            model,
+            config,
+            MuonClipConfig(
+                lr=1e-3,
+                muon_beta=0.95,
+                nesterov=True,
+                enable_clipping=False,
+                orthogonalization="polar_express",
+            ),
+        )
+        qkv_weight = model.transformer_encoder[0].qkv.weight
+        grad = torch.randn_like(qkv_weight)
+
+        q_grad, k_grad, v_grad = _split_interleaved_qkv_reference(
+            grad,
+            num_heads=config.num_attention_heads,
+            head_dim=config.dim_head,
+        )
+        expected = _merge_interleaved_qkv_reference(
+            _neobert_polar_express_reference(
+                q_grad,
+                steps=optimizer.config.ns_steps,
+            ),
+            _neobert_polar_express_reference(
+                k_grad,
+                steps=optimizer.config.ns_steps,
+            ),
+            _neobert_polar_express_reference(
+                v_grad,
+                steps=optimizer.config.ns_steps,
+            ),
+            num_heads=config.num_attention_heads,
+            head_dim=config.dim_head,
+        )
+
+        actual = optimizer._orthogonalize_muon_input(
+            muon_input=grad,
+            param_shape=qkv_weight.shape,
+            param_info={"proj_type": "qkv"},
+        )
+
+        torch.testing.assert_close(actual, expected)
 
     def test_qkv_scaling_rejects_non_interleaved_layout(self):
         """Ensure fused QKV scaling fails fast on incompatible weight layouts."""
@@ -561,31 +1203,6 @@ class TestMuonClipOptimizer:
         assert per_step_max.shape == (1, 1)
         assert torch.allclose(per_step_max, torch.tensor([[1.0]]))
 
-    def test_ngpt_qk_clipping_runs(self):
-        """Ensure ngpt QK clipping path executes without errors."""
-        config = NeoBERTConfig(
-            hidden_size=16,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            intermediate_size=32,
-            vocab_size=64,
-            max_length=16,
-            attn_backend="sdpa",
-            hidden_act="gelu",
-            rope=False,
-            ngpt=True,
-        )
-        model = NeoBERTLMHead(config)
-        optimizer = MuonClipOptimizer(
-            model, config, MuonClipConfig(enable_clipping=True)
-        )
-
-        input_ids = torch.randint(0, 64, (2, 8))
-        output = model(input_ids)["logits"]
-        loss = output.sum()
-        loss.backward()
-        optimizer.step()
-
     def test_forward_backward_step(self, model):
         """Test full forward/backward/step cycle."""
         model_instance, config = model
@@ -619,13 +1236,79 @@ class TestMuonClipOptimizer:
         if muon_config.enable_clipping:
             assert "train/max_attention_logit" in metrics
 
+    def test_real_packed_collator_batch_runs_clipped_muon_step(self):
+        """Packed MLM batches should retain clipping metadata through MuonClip."""
+        tokenizer = build_wordlevel_tokenizer(
+            vocab={"alpha": 5, "beta": 6, "gamma": 7},
+            include_cls=True,
+            include_sep=True,
+        )
+        collator = get_collator(
+            tokenizer,
+            mlm_probability=1.0,
+            mask_all=True,
+            pack_sequences=True,
+            max_length=8,
+        )
+        features = [
+            {"input_ids": tokenizer.encode("alpha beta", add_special_tokens=False)},
+            {"input_ids": tokenizer.encode("gamma", add_special_tokens=False)},
+        ]
+        batch = collator(features)
+        packed_seqlens = batch["packed_seqlens"]
+        assert packed_seqlens[0, :2].tolist() == [4, 3]
+
+        config = NeoBERTConfig(
+            hidden_size=8,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=16,
+            vocab_size=len(tokenizer),
+            max_length=8,
+            pad_token_id=tokenizer.pad_token_id,
+            attn_backend="sdpa",
+            hidden_act="gelu",
+            dropout=0.0,
+            rope=False,
+            tie_word_embeddings=False,
+        )
+        model = NeoBERTLMHead(config)
+        optimizer = MuonClipOptimizer(
+            model,
+            config,
+            MuonClipConfig(
+                lr=1e-3,
+                enable_clipping=True,
+                clipping_threshold=50.0,
+            ),
+        )
+        qkv_weight = model.model.transformer_encoder[0].qkv.weight
+        initial_qkv = qkv_weight.detach().clone()
+
+        assert optimizer.prepare_for_forward(update_step=0, is_last_microbatch=True)
+        logits = model(
+            batch["input_ids"],
+            pad_mask=None,
+            packed_seqlens=packed_seqlens,
+        )["logits"]
+        loss = F.cross_entropy(
+            logits.flatten(0, 1),
+            batch["labels"].flatten(),
+            ignore_index=-100,
+        )
+        loss.backward()
+        optimizer.step()
+
+        assert torch.isfinite(loss)
+        assert not torch.equal(qkv_weight, initial_qkv)
+        assert "train/max_attention_logit" in optimizer.get_metrics()
+
     def test_hook_capture_gating_last_microbatch_only(self, model):
         """Hooks should only capture on the last microbatch when enabled."""
         model_instance, config = model
         muon_config = MuonClipConfig(
             enable_clipping=True,
             clipping_interval=1,
-            capture_last_microbatch_only=True,
         )
         optimizer = MuonClipOptimizer(model_instance, config, muon_config)
         hook_system = optimizer.hook_system
@@ -660,6 +1343,79 @@ class TestMuonClipOptimizer:
 
         assert torch.allclose(full_max, chunked_max)
 
+    def test_logit_max_ignores_padded_query_positions(self, model):
+        """Clipping metric must exclude PAD-token query rows, not just PAD keys."""
+        model_instance, config = model
+        muon_config = MuonClipConfig(enable_clipping=False, clipping_qk_chunk_size=2)
+        optimizer = MuonClipOptimizer(model_instance, config, muon_config)
+
+        heads = config.num_attention_heads
+        dim_head = config.dim_head
+        # Seq len 4: positions 0,1 are real; 2,3 are right-padding.
+        xq = torch.zeros(1, heads, 4, dim_head)
+        xk = torch.zeros(1, heads, 4, dim_head)
+        # Real query/key pairs produce a modest logit of 1.0.
+        xq[:, :, 0:2, 0] = 1.0
+        xk[:, :, 0:2, 0] = 1.0
+        # Padded query position 2 aligns hugely with real key 0. The key axis
+        # does not mask it (key 0 is valid), so only query-axis masking prevents
+        # this PAD-token query from dominating the per-head max.
+        xq[:, :, 2, 0] = 1000.0
+
+        # Additive key-padding mask (B, S): keys/positions 2,3 are padding.
+        pad_mask = torch.tensor([[0.0, 0.0, float("-inf"), float("-inf")]])
+
+        per_step_max = optimizer._attention_logit_max(
+            xq_heads=xq, xk_heads=xk, scale=1.0, pad_mask=pad_mask
+        )
+
+        # The real-token max is 1.0; the PAD-query logit of 1000 must be excluded.
+        assert torch.allclose(per_step_max, torch.ones(1, heads))
+
+    def test_eta_ignores_fully_padded_samples(self):
+        """One all-pad sample must not disable clipping for the whole head.
+
+        A fully padded example yields ``-inf`` in ``per_step_max``; a naive mean
+        over the batch propagates it and the downstream clamp turns eta into 1.0
+        (clipping off) for that head across every sample in the batch. The
+        reduction must average over valid samples so a real large logit is still
+        clipped.
+        """
+        # Head 0: one padded sample (-inf) plus a real logit of 200.
+        # Head 1: two real logits (40, 60).
+        per_step_max = torch.tensor(
+            [
+                [float("-inf"), 40.0],
+                [200.0, 60.0],
+            ]
+        )
+        eta = MuonClipOptimizer._eta_from_per_step_max(per_step_max, 50.0)
+        # Head 0 uses the real logit (200), not -inf: eta = 50 / 200 = 0.25.
+        assert eta[0].item() == pytest.approx(0.25)
+        # Head 1: mean(40, 60) = 50, eta = 50 / 50 = 1.0.
+        assert eta[1].item() == pytest.approx(1.0)
+
+    def test_eta_all_padded_head_is_noop(self):
+        """A head with no valid samples has nothing to clip, so eta = 1.0."""
+        per_step_max = torch.tensor([[float("-inf")], [float("-inf")]])
+        eta = MuonClipOptimizer._eta_from_per_step_max(per_step_max, 50.0)
+        assert eta[0].item() == pytest.approx(1.0)
+
+    def test_eta_matches_plain_mean_without_padding(self):
+        """With no padding the reduction equals the plain per-head mean factor."""
+        per_step_max = torch.tensor([[40.0, 10.0], [60.0, 30.0]])
+        eta = MuonClipOptimizer._eta_from_per_step_max(per_step_max, 50.0)
+        expected = (50.0 / per_step_max.mean(dim=0)).clamp(max=1.0)
+        assert torch.allclose(eta, expected)
+
+    @pytest.mark.parametrize("invalid_value", [float("nan"), float("inf")])
+    def test_eta_rejects_invalid_attention_logits(self, invalid_value: float):
+        """NaN and positive infinity must fail instead of disabling clipping."""
+        per_step_max = torch.tensor([[200.0], [invalid_value]])
+
+        with pytest.raises(FloatingPointError, match="attention head"):
+            MuonClipOptimizer._eta_from_per_step_max(per_step_max, 50.0)
+
     def test_state_dict_persists_step(self, model):
         """Ensure MuonClip step counter persists across state dicts."""
         model_instance, config = model
@@ -685,7 +1441,10 @@ class TestMuonClipOptimizer:
     def test_distributed_checkpoint_api_restores_step_and_next_update(self, model):
         """Distributed checkpoint APIs should preserve Muon step semantics."""
         model_instance, config = model
-        muon_config = MuonClipConfig(enable_clipping=False)
+        muon_config = MuonClipConfig(
+            enable_clipping=False,
+            param_policy="hidden_2d",
+        )
         optimizer = MuonClipOptimizer(model_instance, config, muon_config)
 
         for _ in range(3):
@@ -719,24 +1478,14 @@ class TestMuonClipOptimizer:
         optimizer_clone.step()
         optimizer_clone.zero_grad()
 
-        max_diff = 0.0
-        max_name = ""
-        for (name, param), (clone_name, clone_param) in zip(
-            model_instance.named_parameters(),
-            model_clone.named_parameters(),
-            strict=True,
-        ):
-            assert clone_name == name
-            diff = float((param - clone_param).abs().max().item())
-            if diff > max_diff:
-                max_diff = diff
-                max_name = name
+        max_diff, max_name = _max_param_diff(model_instance, model_clone)
 
         assert max_diff <= 5e-5, (
             "Distributed checkpoint optimizer restore drifted on the next update: "
             f"param={max_name} max_diff={max_diff:.6e}"
         )
 
+    @pytest.mark.filterwarnings("ignore:TypedStorage is deprecated:UserWarning")
     def test_distributed_checkpoint_filesystem_roundtrip_restores_muon_state(
         self,
         model,
@@ -744,7 +1493,10 @@ class TestMuonClipOptimizer:
     ):
         """Filesystem DCP round-trips should use the FQN optimizer schema."""
         model_instance, config = model
-        muon_config = MuonClipConfig(enable_clipping=False)
+        muon_config = MuonClipConfig(
+            enable_clipping=False,
+            param_policy="hidden_2d",
+        )
         optimizer = MuonClipOptimizer(model_instance, config, muon_config)
 
         for _ in range(3):
@@ -763,27 +1515,20 @@ class TestMuonClipOptimizer:
         loaded_optim_state = {
             "optimizer": get_optimizer_state_dict(model_clone, optimizer_clone)
         }
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message=(
-                    "torch.distributed is disabled, unavailable or uninitialized, "
-                    "assuming the intent is to save in a single process."
-                ),
-            )
-            warnings.filterwarnings(
-                "ignore",
-                message=(
-                    "torch.distributed is disabled, unavailable or uninitialized, "
-                    "assuming the intent is to load in a single process."
-                ),
-            )
+        with pytest.warns(
+            UserWarning,
+            match="assuming the intent is to save in a single process",
+        ):
             dist_cp.save(
                 state_dict={
                     "optimizer": get_optimizer_state_dict(model_instance, optimizer)
                 },
                 storage_writer=dist_cp.FileSystemWriter(str(checkpoint_dir)),
             )
+        with pytest.warns(
+            UserWarning,
+            match="assuming the intent is to load in a single process",
+        ):
             dist_cp.load(
                 loaded_optim_state,
                 checkpoint_id=str(checkpoint_dir),
@@ -809,18 +1554,7 @@ class TestMuonClipOptimizer:
         optimizer_clone.step()
         optimizer_clone.zero_grad()
 
-        max_diff = 0.0
-        max_name = ""
-        for (name, param), (clone_name, clone_param) in zip(
-            model_instance.named_parameters(),
-            model_clone.named_parameters(),
-            strict=True,
-        ):
-            assert clone_name == name
-            diff = float((param - clone_param).abs().max().item())
-            if diff > max_diff:
-                max_diff = diff
-                max_name = name
+        max_diff, max_name = _max_param_diff(model_instance, model_clone)
 
         assert max_diff < 1e-6, (
             f"Next Muon step diverged after DCP reload at {max_name}"
@@ -845,6 +1579,7 @@ class TestMuonClipOptimizer:
             group.pop("use_muon", None)
             group.pop("param_info", None)
             group.pop("beta", None)
+            group.pop("nesterov", None)
 
         model_ref = NeoBERT(config)
         model_ref.load_state_dict(model_instance.state_dict())
@@ -862,6 +1597,7 @@ class TestMuonClipOptimizer:
             group for group in optimizer_clone.param_groups if group["use_muon"]
         )
         assert "beta" in muon_group
+        assert "nesterov" in muon_group
         assert len(muon_group["param_info"]) == len(muon_group["params"])
 
         input_ids = torch.randint(0, 1000, (2, 64))
@@ -877,27 +1613,14 @@ class TestMuonClipOptimizer:
         optimizer_clone.step()
         optimizer_clone.zero_grad()
 
-        max_diff = 0.0
-        max_name = ""
-        for (name, param), (clone_name, clone_param) in zip(
-            model_ref.named_parameters(),
-            model_clone.named_parameters(),
-            strict=True,
-        ):
-            assert clone_name == name
-            diff = float((param - clone_param).abs().max().item())
-            if diff > max_diff:
-                max_diff = diff
-                max_name = name
+        max_diff, max_name = _max_param_diff(model_ref, model_clone)
 
         assert max_diff <= 5e-5, (
             "MuonClip stripped-group resume drifted on the next update: "
             f"param={max_name} max_diff={max_diff:.6e}"
         )
 
-    def test_loaded_state_rejects_tensor_momentum_for_dtensor_param(
-        self, model, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_loaded_state_rejects_tensor_momentum_for_dtensor_param(self, model):
         """Sharded Muon params must not accept local Tensor momentum buffers."""
         model_instance, config = model
         optimizer = MuonClipOptimizer(
@@ -906,47 +1629,16 @@ class TestMuonClipOptimizer:
             MuonClipConfig(enable_clipping=False),
         )
 
-        class _FakeMesh:
-            ndim = 1
-            mesh = torch.tensor([0, 1])
-
-        class _FakeShard:
-            def __init__(self, dim: int):
-                self.dim = dim
-
-        class _FakeDTensor:
-            def __init__(self):
-                self.device_mesh = _FakeMesh()
-                self.placements = (_FakeShard(0),)
-
-        fake_param = _FakeDTensor()
-        optimizer.param_groups = [
-            {
-                "use_muon": True,
-                "params": [fake_param],
-                "param_info": [
-                    {
-                        "name": "transformer_encoder.0.qkv.weight",
-                        "layer_idx": 0,
-                        "is_qkv": True,
-                        "proj_type": "qkv",
-                    }
-                ],
-            }
-        ]
-        optimizer.state = {fake_param: {"momentum_buffer": torch.zeros(2, 2)}}
-        monkeypatch.setattr(
+        fake_param = _TopologyDTensor()
+        _set_single_muon_param_state(
             optimizer,
-            "_is_dtensor",
-            lambda tensor: isinstance(tensor, _FakeDTensor),
+            fake_param,
+            {"momentum_buffer": torch.zeros(2, 2)},
         )
-
         with pytest.raises(RuntimeError, match="local Tensor momentum buffer"):
             optimizer._validate_loaded_muon_state_topology()
 
-    def test_loaded_state_rejects_mismatched_dtensor_topology(
-        self, model, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_loaded_state_rejects_mismatched_dtensor_topology(self, model):
         """Sharded Muon state must match the target DTensor mesh and placement."""
         model_instance, config = model
         optimizer = MuonClipOptimizer(
@@ -955,49 +1647,17 @@ class TestMuonClipOptimizer:
             MuonClipConfig(enable_clipping=False),
         )
 
-        class _FakeMesh:
-            def __init__(self, ranks: list[int]):
-                self.ndim = 1
-                self.mesh = torch.tensor(ranks)
-
-        class _FakeShard:
-            def __init__(self, dim: int):
-                self.dim = dim
-
-        class _FakeDTensor:
-            def __init__(self, ranks: list[int], dim: int):
-                self.device_mesh = _FakeMesh(ranks)
-                self.placements = (_FakeShard(dim),)
-
-        fake_param = _FakeDTensor([0, 1], 0)
-        fake_buffer = _FakeDTensor([0, 1], 1)
-        optimizer.param_groups = [
-            {
-                "use_muon": True,
-                "params": [fake_param],
-                "param_info": [
-                    {
-                        "name": "transformer_encoder.0.qkv.weight",
-                        "layer_idx": 0,
-                        "is_qkv": True,
-                        "proj_type": "qkv",
-                    }
-                ],
-            }
-        ]
-        optimizer.state = {fake_param: {"momentum_buffer": fake_buffer}}
-        monkeypatch.setattr(
+        fake_param = _TopologyDTensor((0, 1), 0)
+        fake_buffer = _TopologyDTensor((0, 1), 1)
+        _set_single_muon_param_state(
             optimizer,
-            "_is_dtensor",
-            lambda tensor: isinstance(tensor, _FakeDTensor),
+            fake_param,
+            {"momentum_buffer": fake_buffer},
         )
-
         with pytest.raises(RuntimeError, match="mesh/placement metadata"):
             optimizer._validate_loaded_muon_state_topology()
 
-    def test_loaded_state_rejects_mismatched_momentum_shape(
-        self, model, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_loaded_state_rejects_mismatched_momentum_shape(self, model):
         """Muon state should fail fast when momentum-buffer shape mismatches param."""
         model_instance, config = model
         optimizer = MuonClipOptimizer(
@@ -1006,44 +1666,13 @@ class TestMuonClipOptimizer:
             MuonClipConfig(enable_clipping=False),
         )
 
-        class _FakeMesh:
-            def __init__(self, ranks: list[int]):
-                self.ndim = 1
-                self.mesh = torch.tensor(ranks)
-
-        class _FakeShard:
-            def __init__(self, dim: int):
-                self.dim = dim
-
-        class _FakeDTensor:
-            def __init__(self, ranks: list[int], dim: int, shape: tuple[int, int]):
-                self.device_mesh = _FakeMesh(ranks)
-                self.placements = (_FakeShard(dim),)
-                self.shape = torch.Size(shape)
-
-        fake_param = _FakeDTensor([0, 1], 0, (8, 4))
-        fake_buffer = _FakeDTensor([0, 1], 0, (7, 4))
-        optimizer.param_groups = [
-            {
-                "use_muon": True,
-                "params": [fake_param],
-                "param_info": [
-                    {
-                        "name": "transformer_encoder.0.qkv.weight",
-                        "layer_idx": 0,
-                        "is_qkv": True,
-                        "proj_type": "qkv",
-                    }
-                ],
-            }
-        ]
-        optimizer.state = {fake_param: {"momentum_buffer": fake_buffer}}
-        monkeypatch.setattr(
+        fake_param = _TopologyDTensor((0, 1), 0, (8, 4))
+        fake_buffer = _TopologyDTensor((0, 1), 0, (7, 4))
+        _set_single_muon_param_state(
             optimizer,
-            "_is_dtensor",
-            lambda tensor: isinstance(tensor, _FakeDTensor),
+            fake_param,
+            {"momentum_buffer": fake_buffer},
         )
-
         with pytest.raises(RuntimeError, match="momentum state with shape"):
             optimizer._validate_loaded_muon_state_topology()
 
@@ -1065,8 +1694,8 @@ class TestMuonClipOptimizer:
                     {"name", "layer_idx", "is_qkv", "proj_type"}
                 )
 
-    def test_sharded_runtime_clipping_disable_preserves_config_intent(self, model):
-        """Runtime disable should not rewrite user config intent."""
+    def test_sharded_runtime_clipping_rejects_instead_of_downgrading(self, model):
+        """Sharded Muon params with clipping enabled must fail fast, not downgrade."""
         model_instance, config = model
         optimizer = MuonClipOptimizer(
             model_instance,
@@ -1076,13 +1705,8 @@ class TestMuonClipOptimizer:
         assert optimizer.config.enable_clipping
         assert optimizer.should_clip_update(0)
 
-        optimizer._disable_clipping_for_sharded_runtime()
-
-        assert optimizer.config.enable_clipping
-        assert not optimizer.should_clip_update(0)
-        assert not optimizer._runtime_clipping_enabled
-        if optimizer.hook_system is not None:
-            assert not optimizer.hook_system.enabled
+        with pytest.raises(RuntimeError, match="enable_clipping=false"):
+            optimizer._reject_clipping_under_sharded_runtime()
 
     def test_dtensor_update_rejects_multidim_device_mesh(self, model, monkeypatch):
         """DTensor Muon path should fail fast on unsupported multi-axis meshes."""
@@ -1116,7 +1740,7 @@ class TestMuonClipOptimizer:
         target = model_instance.transformer_encoder[0].qkv.weight
         with pytest.raises(RuntimeError, match="device_mesh.ndim=2"):
             optimizer._orthogonalize_dtensor_update(
-                momentum_buffer=_FakeDTensor(),
+                muon_input=_FakeDTensor(),
                 param=target,
                 group_params=[target],
             )
@@ -1144,137 +1768,29 @@ class TestMuonClipOptimizer:
         local_shard = full_matrix[:2].clone()
         remote_shard = full_matrix[2:].clone()
         process_group = object()
-
-        class _FakeShard:
-            def __init__(self, dim: int):
-                self.dim = dim
-
-        class _FakeMesh:
-            ndim = 1
-
-            def get_group(self):
-                return process_group
-
-        class _FakeDTensor:
-            def __init__(
-                self,
-                local: torch.Tensor,
-                *,
-                device_mesh: _FakeMesh,
-                placements: tuple[_FakeShard, ...],
-                shape: torch.Size,
-                stride: tuple[int, ...],
-            ):
-                self._local = local
-                self.device_mesh = device_mesh
-                self.placements = placements
-                self.shape = torch.Size(shape)
-                self._stride = tuple(stride)
-
-            def to_local(self) -> torch.Tensor:
-                return self._local
-
-            def stride(self) -> tuple[int, ...]:
-                return self._stride
-
-            @staticmethod
-            def from_local(
-                local: torch.Tensor,
-                *,
-                device_mesh: _FakeMesh,
-                placements: tuple[_FakeShard, ...],
-                run_check: bool = False,
-                shape: torch.Size,
-                stride: tuple[int, ...],
-            ) -> "_FakeDTensor":
-                assert not run_check
-                assert tuple(shape) == tuple(full_matrix.shape)
-                assert tuple(stride) == tuple(full_matrix.stride())
-                return _FakeDTensor(
-                    local,
-                    device_mesh=device_mesh,
-                    placements=placements,
-                    shape=shape,
-                    stride=stride,
-                )
-
-        class _FakeParam:
-            shape = torch.Size([2, 2])
-
-            @staticmethod
-            def numel() -> int:
-                return int(full_matrix.numel())
-
-        fake_mesh = _FakeMesh()
-        fake_placements = (_FakeShard(0),)
-        momentum_buffer = _FakeDTensor(
+        remote_padded = torch.cat(
+            (remote_shard, torch.zeros_like(local_shard[:1])),
+            dim=0,
+        )
+        fake_mesh, fake_placements = _install_owner_compute_dtensor_fakes(
+            monkeypatch,
+            muon_clip_module,
+            process_group=process_group,
+            remote_padded=remote_padded,
+            expected_shape=full_matrix.shape,
+            expected_stride=full_matrix.stride(),
+        )
+        muon_input = _OwnerComputeDTensor(
             local_shard,
             device_mesh=fake_mesh,
             placements=fake_placements,
             shape=full_matrix.shape,
             stride=full_matrix.stride(),
         )
-        fake_param = _FakeParam()
-        remote_padded = torch.cat(
-            (remote_shard, torch.zeros_like(local_shard[:1])),
-            dim=0,
-        )
-
-        monkeypatch.setattr(muon_clip_module, "DTensor", _FakeDTensor)
-        monkeypatch.setattr(muon_clip_module, "Shard", _FakeShard)
-        monkeypatch.setattr(muon_clip_module.dist, "is_available", lambda: True)
-        monkeypatch.setattr(muon_clip_module.dist, "is_initialized", lambda: True)
-        monkeypatch.setattr(
-            muon_clip_module.dist,
-            "get_process_group_ranks",
-            lambda _group: [0, 1],
-        )
-        monkeypatch.setattr(
-            muon_clip_module.dist,
-            "get_world_size",
-            lambda _group=None: 2,
-        )
-        monkeypatch.setattr(
-            muon_clip_module.dist,
-            "get_rank",
-            lambda _group=None: 0,
-        )
-
-        def _unexpected_all_gather(*args, **kwargs):
-            del args, kwargs
-            raise AssertionError("row-count all_gather should not run in normal mode")
-
-        def _fake_gather(
-            tensor: torch.Tensor,
-            gather_list: list[torch.Tensor] | None,
-            *,
-            group: object,
-            group_dst: int,
-        ) -> None:
-            assert group is process_group
-            assert group_dst == 0
-            assert gather_list is not None
-            gather_list[0].copy_(tensor)
-            gather_list[1].copy_(remote_padded)
-
-        def _fake_scatter(
-            tensor: torch.Tensor,
-            scatter_list: list[torch.Tensor] | None,
-            *,
-            group: object,
-            group_src: int,
-        ) -> None:
-            assert group is process_group
-            assert group_src == 0
-            assert scatter_list is not None
-            tensor.copy_(scatter_list[0])
-
-        monkeypatch.setattr(muon_clip_module.dist, "all_gather", _unexpected_all_gather)
-        monkeypatch.setattr(muon_clip_module.dist, "gather", _fake_gather)
-        monkeypatch.setattr(muon_clip_module.dist, "scatter", _fake_scatter)
+        fake_param = _FakeShapeParam((2, 2), full_matrix.numel())
 
         update = optimizer._orthogonalize_dtensor_update(
-            momentum_buffer=momentum_buffer,
+            muon_input=muon_input,
             param=fake_param,
             group_params=[fake_param],
         )
@@ -1286,6 +1802,91 @@ class TestMuonClipOptimizer:
         torch.testing.assert_close(update.to_local(), expected_full[:2])
         assert tuple(update.shape) == tuple(full_matrix.shape)
         assert tuple(update.stride()) == tuple(full_matrix.stride())
+
+    def test_dtensor_owner_compute_splits_fused_qkv_projections(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Owner-compute DTensor Muon should split fused QKV by projection."""
+        import neobert.optimizer.muon_clip as muon_clip_module
+
+        config = NeoBERTConfig(
+            hidden_size=3,
+            num_hidden_layers=1,
+            num_attention_heads=1,
+            intermediate_size=16,
+            vocab_size=32,
+            max_length=8,
+            attn_backend="sdpa",
+            hidden_act="gelu",
+            rope=False,
+        )
+        model = NeoBERT(config)
+        optimizer = MuonClipOptimizer(
+            model,
+            config,
+            MuonClipConfig(
+                enable_clipping=False,
+                orthogonalization="polar_express",
+            ),
+        )
+        full_matrix = torch.arange(27, dtype=torch.float32).view(9, 3) / 10.0
+        local_shard = full_matrix[:5].clone()
+        remote_shard = full_matrix[5:].clone()
+        process_group = object()
+        remote_padded = torch.cat(
+            (
+                remote_shard,
+                torch.zeros((1, remote_shard.shape[1]), dtype=remote_shard.dtype),
+            ),
+            dim=0,
+        )
+        fake_mesh, fake_placements = _install_owner_compute_dtensor_fakes(
+            monkeypatch,
+            muon_clip_module,
+            process_group=process_group,
+            remote_padded=remote_padded,
+            expected_shape=full_matrix.shape,
+            expected_stride=full_matrix.stride(),
+        )
+        muon_input = _OwnerComputeDTensor(
+            local_shard,
+            device_mesh=fake_mesh,
+            placements=fake_placements,
+            shape=full_matrix.shape,
+            stride=full_matrix.stride(),
+        )
+        fake_param = _FakeShapeParam(tuple(full_matrix.shape), full_matrix.numel())
+
+        update = optimizer._orthogonalize_dtensor_update(
+            muon_input=muon_input,
+            param=fake_param,
+            group_params=[fake_param],
+            param_info={"proj_type": "qkv"},
+        )
+
+        q_full, k_full, v_full = _split_interleaved_qkv_reference(
+            full_matrix,
+            num_heads=config.num_attention_heads,
+            head_dim=config.dim_head,
+        )
+        expected_full = _merge_interleaved_qkv_reference(
+            optimizer._normalize_muon_update(
+                optimizer._orthogonalize_update(q_full),
+                q_full.shape,
+            ),
+            optimizer._normalize_muon_update(
+                optimizer._orthogonalize_update(k_full),
+                k_full.shape,
+            ),
+            optimizer._normalize_muon_update(
+                optimizer._orthogonalize_update(v_full),
+                v_full.shape,
+            ),
+            num_heads=config.num_attention_heads,
+            head_dim=config.dim_head,
+        )
+
+        torch.testing.assert_close(update.to_local(), expected_full[:5])
 
     def test_owner_rank_tie_breaks_on_param_name(
         self, model, monkeypatch: pytest.MonkeyPatch
@@ -1335,7 +1936,7 @@ class TestMuonClipOptimizer:
         """Test QK-clipping actually modifies weights."""
         model_instance, config = model
 
-        with pytest.warns(UserWarning, match="clipping_threshold"):
+        with pytest.warns(NeoBERTWarning, match="clipping_threshold"):
             muon_config = MuonClipConfig(
                 lr=1e-3,
                 enable_clipping=True,
@@ -1413,7 +2014,7 @@ class TestNewtonSchulz:
         """Test orthogonalization produces orthogonal matrix."""
         from neobert.optimizer.muon_clip import MuonClipOptimizer
 
-        # Create random matrix
+        torch.manual_seed(0)
         G = torch.randn(64, 64)
 
         # Create dummy optimizer to access method
@@ -1427,14 +2028,15 @@ class TestNewtonSchulz:
         muon_config = MuonClipConfig()
         optimizer = MuonClipOptimizer(model, config, muon_config)
 
-        # Orthogonalize
         X = optimizer._newton_schulz_update(G, steps=5)
 
-        # Check that the result has proper scaling
-        # After Newton-Schulz + RMS scaling, the matrix should have
-        # reasonable norm
-        assert X.norm() > 0
-        assert X.norm() < G.norm() * 10  # Should not explode
+        identity = torch.eye(X.shape[0], dtype=X.dtype)
+        orthogonality_error = torch.linalg.matrix_norm(X @ X.T - identity)
+        normalized_input = G / (torch.linalg.norm(G) + 1e-7)
+        input_error = torch.linalg.matrix_norm(
+            normalized_input @ normalized_input.T - identity
+        )
+        assert orthogonality_error < input_error * 0.5
 
     def test_orthogonalization_rejects_fp16(self):
         """Ensure MuonClip orthogonalization rejects unsupported fp16 grads."""

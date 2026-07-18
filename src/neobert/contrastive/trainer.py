@@ -3,11 +3,10 @@
 import logging
 import os
 import signal
-import sys
 from contextlib import nullcontext
+from copy import deepcopy
 from pathlib import Path
-from types import FrameType
-from typing import Any
+from typing import Any, Literal
 
 import numpy
 
@@ -16,7 +15,6 @@ import torch
 import wandb
 from accelerate.utils import ProjectConfiguration, set_seed
 from datasets import DatasetDict, load_from_disk
-
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -27,33 +25,22 @@ from transformers import DataCollatorWithPadding
 from neobert.checkpointing import (
     MODEL_WEIGHTS_NAME,
     load_deepspeed_fp32_state_dict,
-    load_model_safetensors,
+    load_step_checkpoint_state_dict,
+    resolve_accelerate_state_dir,
+    resolve_step_checkpoint_selector,
+    strip_runtime_prefixes,
+)
+from neobert.checkpointing import (
     prune_step_checkpoints as _prune_step_checkpoints,
+)
+from neobert.checkpointing import (
     resolve_checkpoint_retention_limit as _resolve_checkpoint_retention_limit,
-    save_portable_checkpoint_weights as _save_portable_checkpoint_weights,
 )
 from neobert.collator.collator import (
     _is_right_padded_mask,
     attention_mask_to_packed_seqlens,
 )
-from neobert.config import Config, resolve_mixed_precision
-from neobert.kernels.attention import resolve_runtime_attn_backend
-from neobert.model import NeoBERT, NeoBERTConfig
-from neobert.optimizer import get_optimizer
-from neobert.scheduler import get_scheduler, resolve_scheduler_steps
-from neobert.tokenizer import get_tokenizer
-from neobert.training_utils import (
-    _maybe_compile_model,
-    _maybe_prepare_for_forward,
-    _resolve_resume_checkpoint,
-    _update_global_norm_metric_for_logging,
-    create_accelerator,
-    resolve_runtime_mixed_precision_and_attn_backend,
-    resolve_wandb_watch_mode,
-    validate_distributed_runtime_policy,
-    validate_muon_distributed_compatibility,
-    validate_muon_runtime_topology,
-)
+from neobert.config import Config, ConfigLoader, resolve_mixed_precision
 from neobert.contrastive.datasets import (
     get_bsz,
     load_cached_contrastive_datasets,
@@ -61,7 +48,39 @@ from neobert.contrastive.datasets import (
 )
 from neobert.contrastive.loss import SupConLoss
 from neobert.contrastive.metrics import Metrics
-from neobert.utils import configure_tf32, format_resolved_config, prepare_wandb_config
+from neobert.kernels.attention import resolve_runtime_attn_backend
+from neobert.model import NeoBERT, NeoBERTConfig
+from neobert.optimizer import get_optimizer
+from neobert.scheduler import get_scheduler, resolve_scheduler_steps
+from neobert.tokenizer import get_tokenizer
+from neobert.training_utils import (
+    PreemptionState,
+    _maybe_compile_model,
+    _maybe_prepare_for_forward,
+    _resolve_cuda_pin_memory,
+    _resolve_resume_checkpoint,
+    _update_global_norm_metric_for_logging,
+    attach_optimizer_param_names,
+    build_dataloader_config,
+    create_accelerator,
+    initialize_wandb_trackers,
+    preserve_sigterm_handler,
+    resolve_runtime_mixed_precision_and_attn_backend,
+    resolve_wandb_watch_mode,
+    save_training_checkpoint,
+    should_save_step_checkpoint,
+    sync_resume_source_of_truth,
+    validate_distributed_runtime_policy,
+    validate_muon_distributed_compatibility,
+    validate_muon_runtime_topology,
+    validate_optimizer_param_name_manifest,
+)
+from neobert.utils import (
+    additive_attention_mask,
+    configure_tf32,
+    format_resolved_config,
+    prepare_wandb_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +113,275 @@ def _normalize_contrastive_pretrained_checkpoint_root(
     return root / "checkpoints"
 
 
+def _resolve_checkpoint_tag(checkpoint_dir: Path, checkpoint: str | int | None) -> str:
+    """Resolve a checkpoint tag to a concrete step directory name.
+
+    Resolution delegates to :func:`neobert.checkpointing.resolve_step_checkpoint_selector`
+    so ``latest`` handling (latest file, direct step dirs, loadability scan) stays
+    identical across tasks; this wrapper only adds ``None`` coercion.
+
+    :param Path checkpoint_dir: Base directory that holds checkpoint step folders.
+    :param str | int | None checkpoint: Tag or step to resolve, or ``None``/"latest".
+    :return str: Resolved checkpoint step tag.
+    """
+    requested = "latest" if checkpoint is None else str(checkpoint)
+    return resolve_step_checkpoint_selector(checkpoint_dir, requested)
+
+
+def _resolve_contrastive_pooling(pooling: str) -> str:
+    """Normalize and validate contrastive sequence pooling.
+
+    :param str pooling: Configured pooling mode.
+    :return str: Normalized pooling mode.
+    :raises ValueError: If the pooling mode is unsupported.
+    """
+    normalized = str(pooling).strip().lower()
+    if normalized not in {"avg", "cls", "max"}:
+        raise ValueError(
+            "contrastive.pooling must be one of {'avg', 'cls', 'max'}, "
+            f"got {pooling!r}."
+        )
+    return normalized
+
+
+def _pool_sequence(
+    hidden: torch.Tensor,
+    attention_mask: torch.Tensor,
+    pooling: str,
+) -> torch.Tensor:
+    """Pool token embeddings using the configured contrastive strategy.
+
+    :param torch.Tensor hidden: Sequence embeddings of shape ``[batch, seq, hidden]``.
+    :param torch.Tensor attention_mask: 0/1 attention mask of shape ``[batch, seq]``.
+    :param str pooling: Pooling mode, one of ``avg``, ``cls``, or ``max``.
+    :return torch.Tensor: Pooled embeddings of shape ``[batch, hidden]``.
+    """
+    mask = attention_mask.bool()
+    if pooling == "avg":
+        weights = mask.unsqueeze(-1).to(dtype=hidden.dtype)
+        denom = mask.sum(dim=1, keepdim=True).clamp_min(1).to(dtype=hidden.dtype)
+        return (hidden * weights).sum(dim=1) / denom
+    if pooling == "cls":
+        return hidden[:, 0]
+    if pooling == "max":
+        floor = torch.finfo(hidden.dtype).min
+        masked = hidden.masked_fill(~mask.unsqueeze(-1), floor)
+        pooled = masked.max(dim=1).values
+        return torch.where(
+            mask.any(dim=1, keepdim=True), pooled, torch.zeros_like(pooled)
+        )
+    raise ValueError(f"Unknown contrastive.pooling={pooling!r}")
+
+
+def _contrastive_loss_for_backward(
+    loss_sum: torch.Tensor,
+    *,
+    query_count: int,
+) -> torch.Tensor:
+    """Normalize summed contrastive loss before backpropagation.
+
+    :param torch.Tensor loss_sum: Summed query loss.
+    :param int query_count: Number of local query examples in the microbatch.
+    :return torch.Tensor: Per-query loss used for gradients.
+    """
+    return loss_sum / max(int(query_count), 1)
+
+
+def _save_contrastive_checkpoint_metadata(
+    cfg: Config,
+    tokenizer: Any,
+    checkpoint_path: Path,
+) -> None:
+    """Save contrastive resume/export metadata beside checkpoint state.
+
+    :param Config cfg: Runtime config.
+    :param Any tokenizer: Tokenizer with ``save_pretrained``.
+    :param Path checkpoint_path: Checkpoint step directory.
+    """
+    ConfigLoader.save(cfg, str(checkpoint_path / "config.yaml"))
+    tokenizer_dir = checkpoint_path / "tokenizer"
+    tokenizer.save_pretrained(tokenizer_dir)
+
+
+def _save_contrastive_step_checkpoint(
+    cfg: Config,
+    tokenizer: Any,
+    model: torch.nn.Module,
+    optimizer: Any,
+    accelerator: Any,
+    checkpoint_dir: Path,
+    step: int,
+) -> Path:
+    """Save one complete contrastive checkpoint at an optimizer boundary.
+
+    :param Config cfg: Runtime configuration.
+    :param Any tokenizer: Runtime tokenizer.
+    :param torch.nn.Module model: Prepared contrastive model.
+    :param Any optimizer: Prepared optimizer.
+    :param Any accelerator: Active Accelerator instance.
+    :param Path checkpoint_dir: Root checkpoint directory.
+    :param int step: Completed optimizer step.
+    :return Path: Completed step checkpoint directory.
+    """
+    return save_training_checkpoint(
+        task="contrastive",
+        checkpoint_path=checkpoint_dir / str(int(step)),
+        accelerator=accelerator,
+        model=model,
+        optimizer=optimizer,
+        save_metadata=lambda path: _save_contrastive_checkpoint_metadata(
+            cfg, tokenizer, path
+        ),
+    )
+
+
+def _sync_contrastive_runtime_from_pretraining(
+    cfg: Config,
+    model_pretraining_config: Config,
+    *,
+    checkpoint_step_dir: Path,
+) -> None:
+    """Align contrastive runtime backbone/tokenizer settings with a checkpoint.
+
+    Contrastive training intentionally keeps its own runtime-only knobs such as
+    dropout and attention backend selection, but the checkpoint remains the
+    source of truth for backbone tensor shapes and tokenizer semantics.
+
+    :param Config cfg: Mutable contrastive runtime config.
+    :param Config model_pretraining_config: Checkpoint-saved pretraining config.
+    :param Path checkpoint_step_dir: Concrete checkpoint step directory.
+    """
+    model_keys = (
+        "hidden_size",
+        "num_hidden_layers",
+        "num_attention_heads",
+        "intermediate_size",
+        "max_position_embeddings",
+        "vocab_size",
+        "rope",
+        "rms_norm",
+        "hidden_act",
+        "norm_eps",
+        "embedding_init_range",
+        "decoder_init_range",
+        "pad_token_id",
+    )
+    model_mismatches: list[str] = []
+    for key in model_keys:
+        if not hasattr(cfg.model, key) or not hasattr(
+            model_pretraining_config.model, key
+        ):
+            continue
+        pretraining_value = deepcopy(getattr(model_pretraining_config.model, key))
+        if getattr(cfg.model, key) != pretraining_value:
+            model_mismatches.append(key)
+        setattr(cfg.model, key, pretraining_value)
+    if model_mismatches:
+        logger.warning(
+            "Contrastive model config differs from pretrained checkpoint config for %s; "
+            "using pretrained backbone values as runtime source of truth.",
+            ", ".join(sorted(model_mismatches)),
+        )
+
+    tokenizer_mismatches: list[str] = []
+    if hasattr(cfg.tokenizer, "max_length") and hasattr(
+        model_pretraining_config.tokenizer, "max_length"
+    ):
+        pretraining_max_length = deepcopy(model_pretraining_config.tokenizer.max_length)
+        if cfg.tokenizer.max_length != pretraining_max_length:
+            tokenizer_mismatches.append("max_length")
+        cfg.tokenizer.max_length = pretraining_max_length
+
+    checkpoint_tokenizer_dir = checkpoint_step_dir / "tokenizer"
+    if checkpoint_tokenizer_dir.is_dir():
+        tokenizer_path = str(checkpoint_tokenizer_dir)
+        if getattr(cfg.tokenizer, "path", None) != tokenizer_path:
+            logger.warning(
+                "Using tokenizer saved in pretrained checkpoint step directory: %s",
+                tokenizer_path,
+            )
+        cfg.tokenizer.path = tokenizer_path
+    else:
+        tokenizer_keys = (
+            "name",
+            "path",
+            "trust_remote_code",
+            "revision",
+            "allow_special_token_rewrite",
+        )
+        for key in tokenizer_keys:
+            if not hasattr(cfg.tokenizer, key) or not hasattr(
+                model_pretraining_config.tokenizer, key
+            ):
+                continue
+            pretraining_value = deepcopy(
+                getattr(model_pretraining_config.tokenizer, key)
+            )
+            if getattr(cfg.tokenizer, key) != pretraining_value:
+                tokenizer_mismatches.append(key)
+            setattr(cfg.tokenizer, key, pretraining_value)
+    if tokenizer_mismatches:
+        logger.warning(
+            "Contrastive tokenizer config differs from pretrained checkpoint config for %s; "
+            "using pretrained tokenizer values.",
+            ", ".join(sorted(tokenizer_mismatches)),
+        )
+
+
+def _normalize_contrastive_pretrained_backbone_state_dict(
+    state_dict: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """Convert a checkpoint payload into an exact encoder-backbone state dict.
+
+    Portable pretraining checkpoints are saved from ``NeoBERTLMHead``, so encoder
+    weights live under ``model.*`` and the MLM head lives under ``decoder.*``.
+    Contrastive training consumes the bare encoder backbone and must therefore
+    strip the wrapper prefix while dropping the decoder head intentionally.
+
+    :param dict[str, torch.Tensor] state_dict: Loaded checkpoint tensor mapping.
+    :return dict[str, torch.Tensor]: Normalized encoder-only state dict.
+    :raises ValueError: If key normalization would collide.
+    """
+    normalized: dict[str, torch.Tensor] = {}
+    for raw_key, value in state_dict.items():
+        key = strip_runtime_prefixes(str(raw_key))
+        if key.startswith("decoder."):
+            continue
+        if key.startswith("model."):
+            key = key[len("model.") :]
+        if key in normalized:
+            raise ValueError(
+                "Contrastive pretrained checkpoint contains duplicate normalized key "
+                f"'{key}' (for example from raw key '{raw_key}')."
+            )
+        normalized[key] = value
+    return normalized
+
+
+def _load_contrastive_pretrained_backbone_weights(
+    model: torch.nn.Module,
+    state_dict: dict[str, torch.Tensor],
+) -> None:
+    """Load an exact pretrained encoder backbone for contrastive training.
+
+    :param torch.nn.Module model: Target encoder backbone.
+    :param dict[str, torch.Tensor] state_dict: Loaded checkpoint tensor mapping.
+    :raises ValueError: If the normalized checkpoint does not match the encoder.
+    """
+    normalized_state_dict = _normalize_contrastive_pretrained_backbone_state_dict(
+        state_dict
+    )
+    try:
+        model.load_state_dict(normalized_state_dict, strict=True)
+    except RuntimeError as exc:
+        raise ValueError(
+            "Pretrained checkpoint does not match the configured NeoBERT backbone "
+            "exactly after dropping the MLM decoder head. Check that the "
+            "checkpoint comes from a compatible NeoBERT pretraining run and "
+            "that tokenizer/model architecture settings match."
+        ) from exc
+
+
 def _build_packed_seqlens(attention_mask: torch.Tensor, *, name: str) -> torch.Tensor:
     """Build packed sequence lengths from a right-padded attention mask.
 
@@ -116,6 +404,32 @@ def _build_packed_seqlens(attention_mask: torch.Tensor, *, name: str) -> torch.T
             "model.attn_backend='sdpa'."
         )
     return attention_mask_to_packed_seqlens(mask_cpu)
+
+
+def _resolve_contrastive_dataloader_kwargs(
+    cfg: Config,
+    *,
+    device: torch.device,
+) -> tuple[dict[str, Any], list[str]]:
+    """Resolve contrastive dataloader kwargs while preserving CUDA pinning.
+
+    Contrastive training relies on Accelerate device placement, so pinned CPU
+    staging needs to remain on when running on CUDA.
+
+    :param Config cfg: Training configuration.
+    :param torch.device device: Active accelerator device.
+    :return tuple[dict[str, Any], list[str]]: Dataloader kwargs plus notes.
+    """
+    pin_memory, notes = _resolve_cuda_pin_memory(
+        cfg.dataset.pin_memory,
+        device=device,
+    )
+    dataloader_kwargs: dict[str, Any] = {
+        "num_workers": max(0, int(cfg.trainer.dataloader_num_workers)),
+        "pin_memory": pin_memory,
+        "shuffle": True,
+    }
+    return dataloader_kwargs, notes
 
 
 class CustomDataCollatorWithPadding(DataCollatorWithPadding):
@@ -170,15 +484,106 @@ class CustomDataCollatorWithPadding(DataCollatorWithPadding):
         return batch
 
 
+def _resolve_contrastive_initialization_source(
+    *,
+    resume_checkpoint_path: str | Path | None,
+    pretrained_checkpoint_dir: str | None,
+    allow_random_weights: bool,
+) -> Literal["resume", "pretrained", "random"]:
+    """Resolve the single source used to initialize contrastive model weights.
+
+    :param str | Path | None resume_checkpoint_path: Resolved contrastive checkpoint.
+    :param str | None pretrained_checkpoint_dir: Pretraining checkpoint root.
+    :param bool allow_random_weights: Whether random initialization is permitted.
+    :return Literal["resume", "pretrained", "random"]: Initialization source.
+    :raises ValueError: If no permitted initialization source is configured.
+    """
+    if resume_checkpoint_path is not None:
+        return "resume"
+    if pretrained_checkpoint_dir:
+        return "pretrained"
+    if allow_random_weights:
+        return "random"
+    raise ValueError(
+        "Contrastive training requires pretrained_checkpoint_dir or a resumable "
+        "contrastive checkpoint. Set contrastive.allow_random_weights=true only "
+        "for an intentional random-initialization experiment."
+    )
+
+
+def _prepare_contrastive_components(
+    accelerator: Any,
+    dataloaders: dict[str, DataLoader],
+    model: torch.nn.Module,
+    optimizer: Any,
+    scheduler: Any,
+) -> tuple[dict[str, DataLoader], torch.nn.Module, Any, Any]:
+    """Prepare the model, optimizer, scheduler, and every contrastive dataloader.
+
+    :param Any accelerator: Active Accelerator instance.
+    :param dict[str, DataLoader] dataloaders: Task dataloaders keyed by source.
+    :param torch.nn.Module model: Contrastive backbone.
+    :param Any optimizer: Optimizer instance.
+    :param Any scheduler: Scheduler instance.
+    :return tuple[dict[str, DataLoader], torch.nn.Module, Any, Any]: Prepared components.
+    :raises ValueError: If no dataloaders were constructed.
+    """
+    if not dataloaders:
+        raise ValueError("Contrastive training requires at least one dataloader.")
+    first_key = next(iter(dataloaders))
+    dataloaders[first_key], model, optimizer, scheduler = accelerator.prepare(
+        dataloaders[first_key],
+        model,
+        optimizer,
+        scheduler,
+    )
+    for key, dataloader in dataloaders.items():
+        if key != first_key:
+            dataloaders[key] = accelerator.prepare(dataloader)
+    return dataloaders, model, optimizer, scheduler
+
+
+@preserve_sigterm_handler()
 def trainer(cfg: Config) -> None:
     """Run contrastive training loop.
 
     :param Config cfg: Training configuration.
     """
-    # Check if dropout is non zero
-    if cfg.model.dropout_prob <= 0:
+    output_dir = Path(cfg.trainer.output_dir)
+    checkpoint_dir = output_dir / "checkpoints"
+    resume_checkpoint_path, iteration = _resolve_resume_checkpoint(
+        cfg.trainer.resume_from_checkpoint,
+        str(checkpoint_dir),
+        str(output_dir),
+    )
+    if cfg.trainer.resume_from_checkpoint and resume_checkpoint_path:
+        sync_resume_source_of_truth(
+            cfg,
+            resume_checkpoint_path,
+            task="contrastive",
+            log=logger,
+        )
+
+    cfg.contrastive.pooling = _resolve_contrastive_pooling(cfg.contrastive.pooling)
+    pretraining_mix_prob = float(cfg.contrastive.pretraining_prob)
+    if pretraining_mix_prob < 0.0 or pretraining_mix_prob > 1.0:
         raise ValueError(
-            "Dropout needs to be positive in order to perform steps of SimCSE."
+            "contrastive.pretraining_prob must be in [0, 1], got "
+            f"{pretraining_mix_prob}."
+        )
+    if pretraining_mix_prob > 0.0 and cfg.model.dropout_prob <= 0:
+        raise ValueError(
+            "contrastive.pretraining_prob > 0 requires model.dropout_prob > 0 "
+            "for SimCSE-style two-view corruption."
+        )
+    pretraining_dataset_path = getattr(
+        cfg.contrastive, "pretraining_dataset_path", None
+    )
+    if pretraining_mix_prob > 0.0 and not pretraining_dataset_path:
+        raise ValueError(
+            "contrastive.pretraining_prob > 0 requires "
+            "contrastive.pretraining_dataset_path to identify the tokenized "
+            "SimCSE source."
         )
     if not cfg.dataset.path:
         raise ValueError(
@@ -189,23 +594,48 @@ def trainer(cfg: Config) -> None:
         cfg.model.attn_backend,
         fallback_to_sdpa=True,
     )
-    pretraining_mix_prob = float(cfg.contrastive.pretraining_prob)
-    if pretraining_mix_prob < 0.0 or pretraining_mix_prob > 1.0:
-        raise ValueError(
-            "contrastive.pretraining_prob must be in [0, 1], got "
-            f"{pretraining_mix_prob}."
-        )
 
-    # Checkpoint layout: contrastive now writes all artifacts under
-    # output_dir/checkpoints/<step>/. Legacy model_checkpoints roots are not
-    # supported for new runs or initialization.
-    output_dir = Path(cfg.trainer.output_dir)
-    checkpoint_dir = output_dir / "checkpoints"
-    resume_checkpoint_path, iteration = _resolve_resume_checkpoint(
-        cfg.trainer.resume_from_checkpoint,
-        str(checkpoint_dir),
-        str(output_dir),
+    pretrained_checkpoint_dir = getattr(
+        cfg.contrastive, "pretrained_checkpoint_dir", None
     )
+    pretrained_checkpoint = getattr(cfg.contrastive, "pretrained_checkpoint", None)
+    allow_random_weights = bool(getattr(cfg.contrastive, "allow_random_weights", False))
+    use_deepspeed = getattr(cfg, "use_deepspeed", False)
+    initialization_source = _resolve_contrastive_initialization_source(
+        resume_checkpoint_path=resume_checkpoint_path,
+        pretrained_checkpoint_dir=pretrained_checkpoint_dir,
+        allow_random_weights=allow_random_weights,
+    )
+
+    resolved_pretrained_checkpoint_dir: Path | None = None
+    resolved_pretrained_checkpoint_tag: str | None = None
+    if initialization_source == "pretrained":
+        resolved_pretrained_checkpoint_dir = (
+            _normalize_contrastive_pretrained_checkpoint_root(pretrained_checkpoint_dir)
+        )
+        resolved_pretrained_checkpoint_tag = _resolve_checkpoint_tag(
+            resolved_pretrained_checkpoint_dir,
+            pretrained_checkpoint
+            if pretrained_checkpoint is not None
+            else cfg.pretrained_checkpoint,
+        )
+        checkpoint_step_dir = (
+            resolved_pretrained_checkpoint_dir / resolved_pretrained_checkpoint_tag
+        )
+        checkpoint_config_path = checkpoint_step_dir / "config.yaml"
+        if checkpoint_config_path.is_file():
+            model_pretraining_config = ConfigLoader.load(str(checkpoint_config_path))
+            _sync_contrastive_runtime_from_pretraining(
+                cfg,
+                model_pretraining_config,
+                checkpoint_step_dir=checkpoint_step_dir,
+            )
+        else:
+            logger.warning(
+                "Pretrained checkpoint step %s is missing config.yaml; contrastive "
+                "trainer cannot verify tokenizer/backbone metadata beyond weight keys.",
+                checkpoint_step_dir,
+            )
 
     project_config = ProjectConfiguration(
         str(output_dir),
@@ -234,16 +664,15 @@ def trainer(cfg: Config) -> None:
         gradient_accumulation_steps=cfg.trainer.gradient_accumulation_steps,
         log_with="wandb" if wandb_enabled else None,
         project_config=project_config,
+        dataloader_config=build_dataloader_config(seed=cfg.seed),
     )
     validate_distributed_runtime_policy(
         accelerator=accelerator,
-        log=logger,
         context="contrastive",
     )
     validate_muon_distributed_compatibility(
         accelerator=accelerator,
         optimizer_name=cfg.optimizer.name,
-        log=logger,
         context="contrastive",
     )
     tracker_config_dict = prepare_wandb_config(cfg)
@@ -259,39 +688,12 @@ def trainer(cfg: Config) -> None:
 
     # Initialise the wandb run and pass wandb parameters
     if wandb_enabled:
-        Path(cfg.wandb.dir).mkdir(parents=True, exist_ok=True)
-        accelerator.init_trackers(
-            project_name=cfg.wandb.project,
-            init_kwargs={
-                "wandb": {
-                    "name": cfg.wandb.name,
-                    "entity": cfg.wandb.entity,
-                    "config": tracker_config_dict,
-                    "tags": cfg.wandb.tags,
-                    "dir": cfg.wandb.dir,
-                    "mode": cfg.wandb.mode,
-                    "resume": cfg.wandb.resume,
-                }
-            },
+        initialize_wandb_trackers(
+            cfg=cfg,
+            accelerator=accelerator,
+            tracker_config=tracker_config_dict,
+            log=logger,
         )
-        if accelerator.is_main_process and wandb.run is not None:
-            wandb.run.config.update(tracker_config_dict, allow_val_change=True)
-            config_path = getattr(cfg, "config_path", None)
-            if config_path:
-                abs_config_path = Path(config_path).expanduser().resolve()
-                if abs_config_path.is_file():
-                    artifact = wandb.Artifact(
-                        name=f"{wandb.run.id}-config",
-                        type="config",
-                        metadata={"source": str(abs_config_path)},
-                    )
-                    artifact.add_file(str(abs_config_path))
-                    wandb.run.log_artifact(artifact)
-                else:
-                    logger.warning(
-                        f"Configured config_path '{config_path}' not found; "
-                        "skipping wandb artifact upload"
-                    )
 
     # Set the seed
     set_seed(cfg.seed)
@@ -306,6 +708,7 @@ def trainer(cfg: Config) -> None:
     log_grad_norm = bool(getattr(cfg.trainer, "log_grad_norm", False))
     save_strategy = str(getattr(cfg.trainer, "save_strategy", "steps"))
     save_model = bool(getattr(cfg.trainer, "save_model", True))
+    checkpoint_retention_limit = _resolve_checkpoint_retention_limit(cfg)
 
     # Tokenizer
     tokenizer = get_tokenizer(
@@ -329,66 +732,48 @@ def trainer(cfg: Config) -> None:
     dataset = load_cached_contrastive_datasets(
         dataset_path / "all",
         selected_names=selected_dataset_names,
+        tokenizer=tokenizer,
+        max_length=cfg.tokenizer.max_length,
+        truncation=cfg.tokenizer.truncation,
     )
     logger.info(
         "Loaded contrastive dataset selection %s from %s.",
         list(dataset.keys()),
         dataset_path / "all",
     )
-    pretraining_dataset_raw = load_from_disk(
-        os.fspath(dataset_path)
-    )  # Base dataset for pretraining SimCSE
-    if isinstance(pretraining_dataset_raw, DatasetDict):
-        if "train" in pretraining_dataset_raw:
-            pretraining_dataset = pretraining_dataset_raw["train"]
-        elif len(pretraining_dataset_raw) > 0:
-            first_split = next(iter(pretraining_dataset_raw.keys()))
-            logger.warning(
-                "Contrastive pretraining dataset is a DatasetDict without a 'train' "
-                f"split; using first split '{first_split}'."
-            )
-            pretraining_dataset = pretraining_dataset_raw[first_split]
+    pretraining_dataset = None
+    if pretraining_mix_prob > 0.0:
+        pretraining_dataset_raw = load_from_disk(os.fspath(pretraining_dataset_path))
+        if isinstance(pretraining_dataset_raw, DatasetDict):
+            if "train" in pretraining_dataset_raw:
+                pretraining_dataset = pretraining_dataset_raw["train"]
+            elif len(pretraining_dataset_raw) > 0:
+                first_split = next(iter(pretraining_dataset_raw.keys()))
+                logger.warning(
+                    "Contrastive pretraining dataset is a DatasetDict without a "
+                    f"'train' split; using first split '{first_split}'."
+                )
+                pretraining_dataset = pretraining_dataset_raw[first_split]
+            else:
+                raise ValueError(
+                    "Pretraining dataset at "
+                    f"'{pretraining_dataset_path}' contains no splits."
+                )
         else:
-            raise ValueError(
-                f"Pretraining dataset at '{dataset_path}' contains no splits."
-            )
-    else:
-        pretraining_dataset = pretraining_dataset_raw
+            pretraining_dataset = pretraining_dataset_raw
 
     data_collator = CustomDataCollatorWithPadding(
         tokenizer=tokenizer,
         return_tensors="pt",
         pad_to_multiple_of=cfg.datacollator.pad_to_multiple_of,
     )
-    pretraining_column_names = set(getattr(pretraining_dataset, "column_names", []))
-    if {"input_ids", "attention_mask"}.issubset(pretraining_column_names):
-        pretraining_collator: DataCollatorWithPadding = DataCollatorWithPadding(
-            tokenizer=tokenizer,
-            return_tensors="pt",
-            pad_to_multiple_of=cfg.datacollator.pad_to_multiple_of,
-        )
-    elif {
-        "input_ids_query",
-        "attention_mask_query",
-        "input_ids_corpus",
-        "attention_mask_corpus",
-    }.issubset(pretraining_column_names):
-        pretraining_collator = data_collator
-    else:
-        logger.warning(
-            "Pretraining dataset columns do not match known SimCSE schemas; "
-            "falling back to CustomDataCollatorWithPadding. Found columns: "
-            f"{sorted(pretraining_column_names)}."
-        )
-        pretraining_collator = data_collator
-    target_bsz = (
-        cfg.trainer.per_device_train_batch_size or cfg.trainer.train_batch_size or 16
+    target_bsz = cfg.trainer.per_device_train_batch_size
+    dataloader_kwargs, loader_perf_notes = _resolve_contrastive_dataloader_kwargs(
+        cfg,
+        device=accelerator.device,
     )
-    dataloader_kwargs = {
-        "num_workers": cfg.trainer.dataloader_num_workers,
-        "pin_memory": accelerator.device.type == "cuda",
-        "shuffle": True,
-    }
+    for note in loader_perf_notes:
+        logger.info(note)
     dataloaders = {
         key: DataLoader(
             dataset[key],
@@ -398,12 +783,34 @@ def trainer(cfg: Config) -> None:
         )
         for key in dataset.keys()
     }
-    dataloaders["pretraining"] = DataLoader(
-        pretraining_dataset,
-        batch_size=target_bsz,
-        collate_fn=pretraining_collator,
-        **dataloader_kwargs,
-    )
+    if pretraining_dataset is not None:
+        pretraining_column_names = set(getattr(pretraining_dataset, "column_names", []))
+        if {"input_ids", "attention_mask"}.issubset(pretraining_column_names):
+            pretraining_collator: DataCollatorWithPadding = DataCollatorWithPadding(
+                tokenizer=tokenizer,
+                return_tensors="pt",
+                pad_to_multiple_of=cfg.datacollator.pad_to_multiple_of,
+            )
+        elif {
+            "input_ids_query",
+            "attention_mask_query",
+            "input_ids_corpus",
+            "attention_mask_corpus",
+        }.issubset(pretraining_column_names):
+            pretraining_collator = data_collator
+        else:
+            logger.warning(
+                "Pretraining dataset columns do not match known SimCSE schemas; "
+                "falling back to CustomDataCollatorWithPadding. Found columns: "
+                f"{sorted(pretraining_column_names)}."
+            )
+            pretraining_collator = data_collator
+        dataloaders["pretraining"] = DataLoader(
+            pretraining_dataset,
+            batch_size=target_bsz,
+            collate_fn=pretraining_collator,
+            **dataloader_kwargs,
+        )
 
     alpha = getattr(cfg.dataset, "alpha", 1.0)
     total = sum(x**alpha for x in dataset.num_rows.values())
@@ -418,141 +825,52 @@ def trainer(cfg: Config) -> None:
 
     # Model
     max_length = cfg.tokenizer.max_length or cfg.model.max_position_embeddings
-    model_config = NeoBERTConfig(
-        hidden_size=cfg.model.hidden_size,
-        num_hidden_layers=cfg.model.num_hidden_layers,
-        num_attention_heads=cfg.model.num_attention_heads,
-        intermediate_size=cfg.model.intermediate_size,
+    model_config = NeoBERTConfig.from_model_config(
+        cfg.model,
         max_length=max_length,
-        vocab_size=cfg.model.vocab_size,
-        rope=cfg.model.rope,
-        rms_norm=cfg.model.rms_norm,
-        hidden_act=cfg.model.hidden_act,
-        dropout=cfg.model.dropout_prob,
-        norm_eps=cfg.model.norm_eps,
-        embedding_init_range=cfg.model.embedding_init_range,
-        decoder_init_range=cfg.model.decoder_init_range,
         attn_backend=cfg.model.attn_backend if use_packed else "sdpa",
-        kernel_backend=cfg.model.kernel_backend,
-        ngpt=cfg.model.ngpt,
-        base_scale=cfg.model.base_scale,
         pad_token_id=tokenizer.pad_token_id,
     )
-    model = NeoBERT(config=model_config)
+    model = NeoBERT(model_config)
 
-    def _resolve_checkpoint_tag(
-        checkpoint_dir: Path, checkpoint: str | int | None
-    ) -> str:
-        """Resolve a checkpoint tag to a concrete step directory name.
-
-        :param Path checkpoint_dir: Base directory that holds checkpoint step folders.
-        :param str | int | None checkpoint: Tag or step to resolve, or ``None``/"latest".
-        :return str: Resolved checkpoint step tag.
-        """
-        if checkpoint is None or str(checkpoint).lower() == "latest":
-            latest_path = checkpoint_dir / "latest"
-            if latest_path.is_file():
-                return latest_path.read_text(encoding="utf-8").strip()
-            steps = [
-                int(entry.name)
-                for entry in checkpoint_dir.iterdir()
-                if entry.is_dir() and entry.name.isdigit()
-            ]
-            if not steps:
-                raise ValueError(
-                    f"No checkpoint steps found in {checkpoint_dir} to resolve 'latest'."
-                )
-            return str(max(steps))
-        return str(checkpoint)
-
-    # Load weights if provided
-    pretrained_checkpoint_dir = getattr(
-        cfg.contrastive, "pretrained_checkpoint_dir", None
-    )
-    pretrained_checkpoint = getattr(cfg.contrastive, "pretrained_checkpoint", None)
-    allow_random_weights = bool(getattr(cfg.contrastive, "allow_random_weights", False))
-    use_deepspeed = getattr(cfg, "use_deepspeed", False)
-    if hasattr(cfg, "_raw_model_dict") and cfg._raw_model_dict:
-        if pretrained_checkpoint_dir is None:
-            pretrained_checkpoint_dir = cfg._raw_model_dict.get(
-                "pretrained_checkpoint_dir"
-            )
-            if pretrained_checkpoint_dir is not None:
-                logger.warning(
-                    "Using legacy model.pretrained_checkpoint_dir from _raw_model_dict; "
-                    "migrate to contrastive.pretrained_checkpoint_dir."
-                )
-        if pretrained_checkpoint is None:
-            pretrained_checkpoint = cfg._raw_model_dict.get("pretrained_checkpoint")
-            if pretrained_checkpoint is not None:
-                logger.warning(
-                    "Using legacy model.pretrained_checkpoint from _raw_model_dict; "
-                    "migrate to contrastive.pretrained_checkpoint."
-                )
-        if not allow_random_weights:
-            legacy_allow_random = cfg._raw_model_dict.get("allow_random_weights")
-            if legacy_allow_random is not None:
-                allow_random_weights = bool(legacy_allow_random)
-                logger.warning(
-                    "Using legacy model.allow_random_weights from _raw_model_dict; "
-                    "migrate to contrastive.allow_random_weights."
-                )
-        if "deepspeed" in cfg._raw_model_dict and not getattr(
-            cfg, "use_deepspeed", False
-        ):
-            use_deepspeed = cfg._raw_model_dict.get("deepspeed")
-
-    if pretrained_checkpoint_dir:
-        pretrained_checkpoint_dir = _normalize_contrastive_pretrained_checkpoint_root(
-            pretrained_checkpoint_dir
-        )
-        tag = _resolve_checkpoint_tag(
-            pretrained_checkpoint_dir,
-            pretrained_checkpoint
-            if pretrained_checkpoint is not None
-            else cfg.pretrained_checkpoint,
-        )
+    if initialization_source == "pretrained":
+        assert resolved_pretrained_checkpoint_dir is not None
+        assert resolved_pretrained_checkpoint_tag is not None
         if use_deepspeed:
             state_dict = load_deepspeed_fp32_state_dict(
-                pretrained_checkpoint_dir,
-                tag=str(tag),
+                resolved_pretrained_checkpoint_dir,
+                tag=resolved_pretrained_checkpoint_tag,
             )
-            model.load_state_dict(state_dict, strict=False)
+            _load_contrastive_pretrained_backbone_weights(model, state_dict)
         else:
-            state_dict_path = pretrained_checkpoint_dir / str(tag) / MODEL_WEIGHTS_NAME
+            state_dict_path = (
+                resolved_pretrained_checkpoint_dir
+                / resolved_pretrained_checkpoint_tag
+                / MODEL_WEIGHTS_NAME
+            )
+            try:
+                state_dict = load_step_checkpoint_state_dict(
+                    resolved_pretrained_checkpoint_dir,
+                    resolved_pretrained_checkpoint_tag,
+                    map_location="cpu",
+                )
+            except ModuleNotFoundError:
+                raise
+            except Exception as exc:
+                raise ValueError(
+                    f"Expected {MODEL_WEIGHTS_NAME} at {state_dict_path}. "
+                    "Set pretrained_checkpoint_dir or enable legacy DeepSpeed "
+                    "checkpoint loading."
+                ) from exc
             if not state_dict_path.exists():
-                try:
-                    state_dict = load_deepspeed_fp32_state_dict(
-                        pretrained_checkpoint_dir,
-                        tag=str(tag),
-                    )
-                except ModuleNotFoundError:
-                    raise
-                except Exception as exc:
-                    raise ValueError(
-                        f"Expected {MODEL_WEIGHTS_NAME} at {state_dict_path}. "
-                        "Set pretrained_checkpoint_dir or enable legacy DeepSpeed "
-                        "checkpoint loading."
-                    ) from exc
                 logger.warning(
                     f"{MODEL_WEIGHTS_NAME} not found at {state_dict_path}; "
                     "loaded fp32 weights from DeepSpeed checkpoint shards instead."
                 )
-            else:
-                state_dict = load_model_safetensors(
-                    pretrained_checkpoint_dir / str(tag),
-                    map_location="cpu",
-                )
-            # NOTE: We allow partial loads for flexibility; checkpoint/config mismatches
-            # are not validated beyond this strict=False load.
-            model.load_state_dict(state_dict, strict=False)
-    elif allow_random_weights:
+            _load_contrastive_pretrained_backbone_weights(model, state_dict)
+    elif initialization_source == "random":
         logger.warning(
             "allow_random_weights=true: contrastive training will start from random initialization."
-        )
-    else:
-        logger.warning(
-            "No pretrained checkpoint provided. Contrastive training will start from random initialization."
         )
 
     # Log the number of parameters
@@ -574,6 +892,7 @@ def trainer(cfg: Config) -> None:
         eps=cfg.optimizer.eps,
         muon_config=cfg.optimizer.muon_config,
     )
+    attach_optimizer_param_names(model, optimizer)
 
     # Scheduler
     _, warmup_steps, decay_steps, constant_steps = resolve_scheduler_steps(
@@ -596,17 +915,13 @@ def trainer(cfg: Config) -> None:
     )
 
     # Accelerate
-    keys = list(dataset.keys())
-
-    dataloaders[keys[0]], model, optimizer, scheduler = accelerator.prepare(
-        dataloaders[keys[0]],
+    dataloaders, model, optimizer, scheduler = _prepare_contrastive_components(
+        accelerator,
+        dataloaders,
         model,
         optimizer,
         scheduler,
     )
-
-    for key in keys[1:]:
-        dataloaders[key] = accelerator.prepare(dataloaders[key])
 
     validate_muon_runtime_topology(
         accelerator=accelerator,
@@ -646,7 +961,8 @@ def trainer(cfg: Config) -> None:
                 raise FileNotFoundError(
                     f"resume_from_checkpoint path not found: {resume_checkpoint_path}"
                 )
-            accelerator.load_state(str(resume_checkpoint))
+            validate_optimizer_param_name_manifest(optimizer, resume_checkpoint)
+            accelerator.load_state(str(resolve_accelerate_state_dir(resume_checkpoint)))
             validate_muon_runtime_topology(
                 accelerator=accelerator,
                 optimizer=optimizer,
@@ -669,26 +985,8 @@ def trainer(cfg: Config) -> None:
                 f"{checkpoint_dir}"
             )
 
-    # Signal handler that save the accelerate state
-    def handler(signum: int, frame: FrameType | None) -> None:
-        """Handle termination signals by checkpointing state.
-
-        :param int signum: Signal number received.
-        :param FrameType | None frame: Current stack frame.
-        """
-        print(
-            f"Signal {signum} received on rank {accelerator.process_index}, checkpointing..."
-        )
-        step_tag = str(int(metrics["train/steps"]))
-        checkpoint_path = checkpoint_dir / step_tag
-        accelerator.save_state(output_dir=str(checkpoint_path))
-        _save_portable_checkpoint_weights(model, accelerator, checkpoint_path)
-        accelerator.wait_for_everyone()
-        print(f"Done on rank {accelerator.process_index}")
-        sys.exit(0)
-
-    # Register handler to the signal SIGTERM
-    signal.signal(signal.SIGTERM, handler)
+    preemption = PreemptionState()
+    signal.signal(signal.SIGTERM, preemption.request)
 
     # Progress bar
     pbar = tqdm(
@@ -742,19 +1040,15 @@ def trainer(cfg: Config) -> None:
         :raises KeyError: If required keys are missing.
         """
         if "input_ids_queries" not in batch:
-            if "input_ids_query" in batch:
-                batch["input_ids_queries"] = batch["input_ids_query"]
-            elif allow_single_view and "input_ids" in batch:
+            if allow_single_view and "input_ids" in batch:
                 batch["input_ids_queries"] = batch["input_ids"]
             else:
                 raise KeyError(
                     "Missing query token ids in contrastive batch. Expected "
-                    "'input_ids_queries', 'input_ids_query', or (single-view) 'input_ids'."
+                    "'input_ids_queries' or (single-view) 'input_ids'."
                 )
         if "input_ids_corpus" not in batch:
-            if "input_ids_query" in batch:
-                batch["input_ids_corpus"] = batch["input_ids_query"]
-            elif allow_single_view and "input_ids" in batch:
+            if allow_single_view and "input_ids" in batch:
                 batch["input_ids_corpus"] = batch["input_ids"]
             else:
                 raise KeyError(
@@ -763,20 +1057,15 @@ def trainer(cfg: Config) -> None:
                 )
 
         if "attention_mask_queries" not in batch:
-            if "attention_mask_query" in batch:
-                batch["attention_mask_queries"] = batch["attention_mask_query"]
-            elif allow_single_view and "attention_mask" in batch:
+            if allow_single_view and "attention_mask" in batch:
                 batch["attention_mask_queries"] = batch["attention_mask"]
             else:
                 raise KeyError(
                     "Missing query attention mask in contrastive batch. Expected "
-                    "'attention_mask_queries', 'attention_mask_query', or "
-                    "(single-view) 'attention_mask'."
+                    "'attention_mask_queries' or (single-view) 'attention_mask'."
                 )
         if "attention_mask_corpus" not in batch:
-            if "attention_mask_query" in batch:
-                batch["attention_mask_corpus"] = batch["attention_mask_query"]
-            elif allow_single_view and "attention_mask" in batch:
+            if allow_single_view and "attention_mask" in batch:
                 batch["attention_mask_corpus"] = batch["attention_mask"]
             else:
                 raise KeyError(
@@ -825,17 +1114,23 @@ def trainer(cfg: Config) -> None:
         else:
             negatives = None
 
-        pooled_queries = (queries * batch["attention_mask_queries"].unsqueeze(-1)).sum(
-            dim=1
-        ) / batch["attention_mask_queries"].sum(dim=1, keepdim=True)
-        pooled_corpus = (corpus * batch["attention_mask_corpus"].unsqueeze(-1)).sum(
-            dim=1
-        ) / batch["attention_mask_corpus"].sum(dim=1, keepdim=True)
+        pooled_queries = _pool_sequence(
+            queries,
+            batch["attention_mask_queries"],
+            cfg.contrastive.pooling,
+        )
+        pooled_corpus = _pool_sequence(
+            corpus,
+            batch["attention_mask_corpus"],
+            cfg.contrastive.pooling,
+        )
 
         if negatives is not None:
-            pooled_negatives = (
-                negatives * batch["attention_mask_negative"].unsqueeze(-1)
-            ).sum(dim=1) / batch["attention_mask_negative"].sum(dim=1, keepdim=True)
+            pooled_negatives = _pool_sequence(
+                negatives,
+                batch["attention_mask_negative"],
+                cfg.contrastive.pooling,
+            )
         else:
             pooled_negatives = None
 
@@ -858,10 +1153,7 @@ def trainer(cfg: Config) -> None:
             """
             if use_packed:
                 return None, _build_packed_seqlens(mask, name=name)
-            pad_mask = torch.where(mask == 1, float(0.0), float("-inf")).type(
-                dtype_pad_mask
-            )
-            return pad_mask, None
+            return additive_attention_mask(mask, dtype=dtype_pad_mask), None
 
         if coin_flip > pretraining_mix_prob:
             # Randomly select which task to draw a batch from
@@ -887,7 +1179,8 @@ def trainer(cfg: Config) -> None:
             # Update specific number of batches
             metrics[f"train/{task_name}_batches"] += 1
 
-        # Else, we do a step of SimCSE with the original pretraing dataset in order to avoid catastrophic forgetting. Warning: dropout needs to be greater than zero!
+        # Else, run a SimCSE-style step on the original pretraining dataset
+        # to reduce catastrophic forgetting.
         else:
             batch = _next_batch("pretraining")
             batch = _normalize_batch(batch, allow_single_view=True)
@@ -922,7 +1215,7 @@ def trainer(cfg: Config) -> None:
         )
         with sync_context:
             with accelerator.autocast():
-                train_loss = _forward_and_loss(
+                train_loss_sum = _forward_and_loss(
                     batch,
                     pad_mask_queries=pad_mask_queries,
                     packed_queries=packed_queries,
@@ -931,11 +1224,16 @@ def trainer(cfg: Config) -> None:
                     pad_mask_negatives=pad_mask_negatives,
                     packed_negatives=packed_negatives,
                 )
+            query_count = int(batch["input_ids_queries"].shape[0])
+            train_loss = _contrastive_loss_for_backward(
+                train_loss_sum,
+                query_count=query_count,
+            )
             accelerator.backward(train_loss)
 
         # Log local metrics for this microbatch
-        metrics["train/local_samples"] += batch["input_ids_queries"].shape[0]
-        metrics["train/local_sum_loss"] += train_loss.item()
+        metrics["train/local_samples"] += query_count
+        metrics["train/local_sum_loss"] += float(train_loss_sum.detach().float().item())
 
         if is_last_microbatch:
             should_log = (metrics["train/steps"] + 1) % log_interval == 0
@@ -976,24 +1274,40 @@ def trainer(cfg: Config) -> None:
                 metrics["train/learning_rate"] = optimizer.param_groups[0]["lr"]
                 metrics.log(accelerator)
 
-            should_save = (
-                save_model
-                and save_strategy == "steps"
-                and metrics["train/steps"] % cfg.trainer.save_steps == 0
+            should_save = should_save_step_checkpoint(
+                step=metrics["train/steps"],
+                max_steps=cfg.trainer.max_steps,
+                save_steps=cfg.trainer.save_steps,
+                save_model=save_model,
+                save_strategy=save_strategy,
             )
-            if should_save:
-                step_tag = str(metrics["train/steps"])
-                checkpoint_path = checkpoint_dir / step_tag
-                # Save resumable optimizer/scheduler/metric state + portable weights
-                # to a single step directory.
-                accelerator.save_state(output_dir=str(checkpoint_path))
-                accelerator.wait_for_everyone()
-                _save_portable_checkpoint_weights(model, accelerator, checkpoint_path)
+            preemption_requested = preemption.synchronize(accelerator)
+            if should_save or preemption_requested:
+                _save_contrastive_step_checkpoint(
+                    cfg,
+                    tokenizer,
+                    model,
+                    optimizer,
+                    accelerator,
+                    checkpoint_dir,
+                    int(metrics["train/steps"]),
+                )
+
+                if checkpoint_retention_limit > 0 and accelerator.is_main_process:
+                    _prune_step_checkpoints(
+                        checkpoint_dir,
+                        retention_limit=checkpoint_retention_limit,
+                    )
                 accelerator.wait_for_everyone()
 
-                limit = _resolve_checkpoint_retention_limit(cfg)
-                if limit > 0 and accelerator.is_main_process:
-                    _prune_step_checkpoints(checkpoint_dir, retention_limit=limit)
+            if preemption_requested:
+                accelerator.print(
+                    "SIGTERM received; saved a synchronized checkpoint at "
+                    f"completed optimizer step {metrics['train/steps']}."
+                )
+                pbar.close()
+                accelerator.end_training()
+                raise SystemExit(128 + signal.SIGTERM)
 
             if metrics["train/steps"] >= cfg.trainer.max_steps:
                 break

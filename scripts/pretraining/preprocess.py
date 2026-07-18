@@ -12,7 +12,35 @@ from typing import Any
 from datasets import concatenate_datasets, load_dataset
 
 from neobert.config import load_config_from_args
-from neobert.tokenizer import get_tokenizer, resolve_text_column, tokenize
+from neobert.tokenizer import (
+    get_tokenizer,
+    resolve_text_column,
+    tokenize_pretraining_dataset,
+)
+
+
+def _load_pretraining_dataset(dataset_name: str) -> Any:
+    """Load a configured preprocessing source, including repository aliases.
+
+    :param str dataset_name: Configured dataset selector.
+    :raises ValueError: If the fixed ``wikibook`` sources have incompatible schemas.
+    :return Any: Loaded training dataset.
+    """
+    if dataset_name != "wikibook":
+        return load_dataset(dataset_name, split="train")
+
+    bookcorpus = load_dataset("bookcorpus", split="train")
+    wikipedia = load_dataset("wikipedia", "20220301.en", split="train")
+    wikipedia = wikipedia.remove_columns(
+        [column for column in wikipedia.column_names if column != "text"]
+    )
+    if bookcorpus.features.type != wikipedia.features.type:
+        raise ValueError(
+            "wikibook sources have mismatched schema types: "
+            f"bookcorpus={bookcorpus.features.type} vs "
+            f"wikipedia={wikipedia.features.type}"
+        )
+    return concatenate_datasets([bookcorpus, wikipedia]).shuffle(seed=0)
 
 
 def preprocess(cfg: Any) -> None:
@@ -27,19 +55,7 @@ def preprocess(cfg: Any) -> None:
     print(tokenizer)
 
     print("Loading dataset")
-    if cfg.dataset.name == "wikibook":
-        bookcorpus = load_dataset("bookcorpus", split="train")
-        wiki = load_dataset("wikipedia", "20220301.en", split="train")
-        wiki = wiki.remove_columns([col for col in wiki.column_names if col != "text"])
-
-        if bookcorpus.features.type != wiki.features.type:
-            raise ValueError(
-                "wikibook sources have mismatched schema types: "
-                f"bookcorpus={bookcorpus.features.type} vs wiki={wiki.features.type}"
-            )
-        dataset = concatenate_datasets([bookcorpus, wiki]).shuffle(seed=0)
-    else:
-        dataset = load_dataset(cfg.dataset.name, split="train")
+    dataset = _load_pretraining_dataset(cfg.dataset.name)
 
     text_column = resolve_text_column(
         dataset,
@@ -47,14 +63,20 @@ def preprocess(cfg: Any) -> None:
         preferred=getattr(cfg.dataset, "text_column", None),
     )
 
+    pack_sequences = bool(cfg.datacollator.pack_sequences)
+    # Match the trainer/collator target length; tokenizer.max_length is metadata and a safety ceiling.
+    max_length = cfg.dataset.max_seq_length
+    if pack_sequences:
+        max_length = cfg.datacollator.max_length or max_length
+
     print(f"Tokenizing dataset (column={text_column})")
-    dataset = tokenize(
+    dataset = tokenize_pretraining_dataset(
         dataset,
         tokenizer,
         column_name=text_column,
-        max_length=cfg.tokenizer.max_length,
+        max_length=max_length,
         truncation=cfg.tokenizer.truncation,
-        remove_columns=True,
+        pack_sequences=pack_sequences,
         return_special_tokens_mask=True,
     )
 

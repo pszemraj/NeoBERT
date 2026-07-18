@@ -6,15 +6,13 @@ math consistent across implementations. Packed/varlen sequences are
 intentionally unsupported here.
 """
 
-import inspect
-import math
 from importlib import import_module
 from typing import Any, Optional, Union
 
 import torch
 from torch import nn
-from torch.nn.functional import scaled_dot_product_attention
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+from torch.nn.functional import scaled_dot_product_attention
 from transformers import PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import (
     BaseModelOutput,
@@ -48,6 +46,10 @@ def _import_symbol(candidates: tuple[str, ...], symbol: str) -> Any:
     raise last_exc
 
 
+# Keep small math/runtime helpers local in this file. The exporter copies
+# ``modeling_neobert.py`` as standalone Hugging Face remote code, so importing
+# these from ``neobert.modeling_utils`` would make exported model folders depend
+# on an installed NeoBERT package.
 def swiglu_intermediate_size(intermediate_size: int, multiple_of: int = 8) -> int:
     """Compute reduced SwiGLU hidden size rounded to alignment multiple.
 
@@ -59,14 +61,6 @@ def swiglu_intermediate_size(intermediate_size: int, multiple_of: int = 8) -> in
     return multiple_of * ((reduced + multiple_of - 1) // multiple_of)
 
 
-try:
-    _SDPA_SUPPORTS_SCALE = (
-        "scale" in inspect.signature(scaled_dot_product_attention).parameters
-    )
-except (TypeError, ValueError):  # pragma: no cover - defensive fallback.
-    _SDPA_SUPPORTS_SCALE = False
-
-
 def scaled_dot_product_attention_compat(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -76,7 +70,7 @@ def scaled_dot_product_attention_compat(
     scale: Optional[float] = None,
     is_causal: bool = False,
 ) -> torch.Tensor:
-    """Run SDPA with backward-compatible ``scale`` handling.
+    """Run SDPA with the explicit softmax scale.
 
     :param torch.Tensor query: Query tensor of shape (B, H, M, K).
     :param torch.Tensor key: Key tensor of shape (B, H, N, K).
@@ -87,30 +81,6 @@ def scaled_dot_product_attention_compat(
     :param bool is_causal: Whether to apply causal mask.
     :return torch.Tensor: Attention output.
     """
-    if scale is None:
-        return scaled_dot_product_attention(
-            query=query,
-            key=key,
-            value=value,
-            attn_mask=attn_mask,
-            dropout_p=dropout_p,
-            is_causal=is_causal,
-        )
-
-    if _SDPA_SUPPORTS_SCALE:
-        return scaled_dot_product_attention(
-            query=query,
-            key=key,
-            value=value,
-            attn_mask=attn_mask,
-            dropout_p=dropout_p,
-            is_causal=is_causal,
-            scale=scale,
-        )
-
-    head_dim = query.size(-1)
-    default_scale = 1.0 / math.sqrt(head_dim)
-    query = query * (scale / default_scale)
     return scaled_dot_product_attention(
         query=query,
         key=key,
@@ -118,6 +88,7 @@ def scaled_dot_product_attention_compat(
         attn_mask=attn_mask,
         dropout_p=dropout_p,
         is_causal=is_causal,
+        scale=scale,
     )
 
 
@@ -140,6 +111,34 @@ precompute_freqs_cis = _import_symbol(
 )
 
 
+def _external_to_internal_learned_position_ids(
+    position_ids: torch.Tensor,
+    *,
+    keep_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Convert zero-based HF position IDs to the one-based learned table.
+
+    :param torch.Tensor position_ids: External zero-based position IDs.
+    :param torch.Tensor keep_mask: Boolean mask selecting non-padding tokens.
+    :raises ValueError: If shapes differ or a position ID is negative.
+    :return torch.Tensor: One-based IDs with zero reserved for padding.
+    """
+    if position_ids.shape != keep_mask.shape:
+        raise ValueError(
+            "position_ids and keep_mask must have identical shapes "
+            f"({tuple(position_ids.shape)} != {tuple(keep_mask.shape)})."
+        )
+    if torch.any(position_ids < 0):
+        raise ValueError("position_ids must be non-negative.")
+
+    internal_ids = position_ids.to(dtype=torch.long) + 1
+    return torch.where(
+        keep_mask.to(device=position_ids.device, dtype=torch.bool),
+        internal_ids,
+        torch.zeros_like(internal_ids),
+    )
+
+
 class NeoBERTConfig(PretrainedConfig):
     """Configuration class for NeoBERT model.
 
@@ -157,8 +156,6 @@ class NeoBERTConfig(PretrainedConfig):
         vocab_size: Size of the vocabulary.
         pad_token_id: Token ID used for padding.
         max_length: Maximum sequence length the model can handle.
-        ngpt: Whether nGPT-style normalization is enabled (unsupported in HF export).
-        base_scale: Base scaling factor for nGPT (retained for config parity).
         **kwargs: Additional configuration parameters.
 
     Attributes:
@@ -184,10 +181,7 @@ class NeoBERTConfig(PretrainedConfig):
         rope: bool = True,
         hidden_act: str = "swiglu",
         dropout: float = 0.0,
-        flash_attention: bool = False,
         tie_word_embeddings: bool = True,
-        ngpt: bool = False,
-        base_scale: float = 1.0 / (960.0**0.5),
         **kwargs: Any,
     ) -> None:
         """Initialize the NeoBERT configuration.
@@ -206,12 +200,20 @@ class NeoBERTConfig(PretrainedConfig):
         :param bool rope: Whether to use RoPE (otherwise learned positional embeddings).
         :param str hidden_act: Activation name ("swiglu" or "gelu").
         :param float dropout: Dropout probability for residual/MLP blocks.
-        :param bool flash_attention: Whether to prefer flash attention backends.
         :param bool tie_word_embeddings: Whether to tie input/output embeddings.
-        :param bool ngpt: Whether to enable nGPT-style normalization (unsupported here).
-        :param float base_scale: Base scaling factor for nGPT compatibility.
         :param Any kwargs: Additional configuration parameters.
         """
+        removed_fields = {"ngpt", "base_scale"}.intersection(kwargs)
+        if removed_fields:
+            raise TypeError(
+                "Unsupported removed NeoBERT config field(s): "
+                + ", ".join(sorted(removed_fields))
+            )
+        if "flash_attention" in kwargs:
+            raise TypeError(
+                "NeoBERTConfig does not support 'flash_attention'; the standalone "
+                "HF model selects standard attention internally."
+            )
         super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
 
         self.hidden_size = hidden_size
@@ -239,16 +241,11 @@ class NeoBERTConfig(PretrainedConfig):
             )
         self.hidden_act = normalized_act
         self.dropout = dropout
-        # Retained for config.json compatibility with training configs; silently ignored.
-        self.flash_attention = flash_attention
-        self.ngpt = ngpt
-        self.base_scale = base_scale
         self.tie_word_embeddings = tie_word_embeddings
         self.vocab_size = vocab_size
         self.pad_token_id = pad_token_id
         self.max_length = max_length
         self.max_position_embeddings = self.max_length
-        self.kwargs = kwargs
 
 
 class UnpackedSwiGLU(nn.Module):
@@ -529,11 +526,6 @@ class NeoBERT(NeoBERTPreTrainedModel):
         super().__init__(config)
 
         self.config = config
-        if getattr(config, "ngpt", False):
-            raise ValueError(
-                "ngpt/NormNeoBERT is not supported in the HF export path. "
-                "Export a non-ngpt checkpoint or use the training model."
-            )
 
         # Token embeddings
         self.encoder = nn.Embedding(
@@ -589,13 +581,13 @@ class NeoBERT(NeoBERTPreTrainedModel):
             return attention_mask
         if attention_mask.numel() == 0:
             return attention_mask.to(torch.bool)
-        # Float masks are ambiguous between binary (1/0) and additive (0/-inf).
-        # Treat all-nonpositive float masks (including all-zero) as additive so
-        # 0/-inf callers on unpadded inputs keep all keys.
+        # Float masks are binary unless a negative value explicitly selects
+        # additive 0/-inf semantics. Thus all-zero floats follow the HF binary
+        # convention and mask every key; use None or all ones to keep every key.
         if attention_mask.is_floating_point():
             if torch.isnan(attention_mask).any():
                 raise ValueError("attention_mask must not contain NaN values.")
-            if attention_mask.min() < 0 or attention_mask.max() <= 0:
+            if attention_mask.min() < 0:
                 return attention_mask >= 0
         return attention_mask != 0
 
@@ -613,8 +605,9 @@ class NeoBERT(NeoBERTPreTrainedModel):
 
         Args:
             input_ids: Token indices of shape (batch_size, seq_len).
-            position_ids: Position indices of shape (batch_size, seq_len).
-                If None, positions are assumed to be consecutive starting from 0.
+            position_ids: Zero-based position indices of shape (batch_size, seq_len).
+                Learned-position models translate kept tokens to their internal
+                one-based table; RoPE consumes these IDs directly.
             attention_mask: Attention mask of shape (batch_size, seq_len).
                 HF convention: 1=keep, 0=mask. Also accepts additive masks (0/-inf).
             output_hidden_states: Whether to return hidden states from all layers.
@@ -664,17 +657,22 @@ class NeoBERT(NeoBERTPreTrainedModel):
         # Prepare key keep-mask for multi-head attention.
         # Shape: (batch, seq_len) -> (batch, 1, 1, seq_len).
         # SDPA expects a bool mask where True entries participate in attention.
+        if self.config.pad_token_id is None:
+            position_keep_mask = torch.ones_like(input_ids, dtype=torch.bool)
+        else:
+            position_keep_mask = input_ids.ne(self.config.pad_token_id)
+
         if attention_mask is not None:
-            attention_mask = self._normalize_attention_mask(attention_mask)
-            if attention_mask.shape != input_ids.shape:
+            key_keep_mask = self._normalize_attention_mask(attention_mask)
+            if key_keep_mask.shape != input_ids.shape:
                 raise ValueError(
                     "attention_mask must match input_ids shape for HF export "
-                    f"(got {attention_mask.shape} vs {input_ids.shape})."
+                    f"(got {key_keep_mask.shape} vs {input_ids.shape})."
                 )
             # Encoder-only key padding mask, broadcast across query positions.
             # Keep mask in (B, 1, 1, S) form to avoid O(S^2) materialization.
-            attention_mask = attention_mask.to(device=input_ids.device)
-            attention_mask = attention_mask[:, None, None, :]
+            key_keep_mask = key_keep_mask.to(device=input_ids.device)
+            attention_mask = key_keep_mask[:, None, None, :]
 
         # Get rotary position embeddings
         freqs_cis = None
@@ -708,14 +706,23 @@ class NeoBERT(NeoBERTPreTrainedModel):
         # Add learned positional embeddings if RoPE is disabled (ablations/tests).
         if not self.config.rope:
             if position_ids is not None:
-                pos_ids = position_ids
+                max_external_position = self.positional_embedding.num_embeddings - 2
+                if position_ids.numel() > 0:
+                    max_position_id = int(position_ids.max().item())
+                    if max_position_id > max_external_position:
+                        raise ValueError(
+                            "Zero-based position_ids exceed configured max_length for "
+                            "learned positional embeddings "
+                            f"({max_position_id} > {max_external_position})."
+                        )
+                pos_ids = _external_to_internal_learned_position_ids(
+                    position_ids,
+                    keep_mask=position_keep_mask,
+                )
             else:
                 # Content-based positions: padding stays at index 0, and left-padding
                 # does not shift token positions (padding-invariant positional IDs).
-                if self.config.pad_token_id is None:
-                    mask = torch.ones_like(input_ids, dtype=torch.int32)
-                else:
-                    mask = input_ids.ne(self.config.pad_token_id).int()
+                mask = position_keep_mask.to(dtype=torch.long)
                 incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask)) * mask
                 pos_ids = incremental_indices.long()
             if pos_ids.numel() > 0:
@@ -773,6 +780,7 @@ class NeoBERTLMHead(NeoBERTPreTrainedModel):
     """
 
     config_class = NeoBERTConfig
+    _tied_weights_keys = {"decoder.weight": "model.encoder.weight"}
 
     def __init__(self, config: NeoBERTConfig) -> None:
         """Initialize the NeoBERT model with language modeling head.
@@ -929,17 +937,14 @@ class NeoBERTForSequenceClassification(NeoBERTPreTrainedModel):
         self.classifier = nn.Linear(self.config.hidden_size, self.num_labels)
 
         self.post_init()
-
-    def _init_weights(self, module: nn.Module) -> None:
-        """Initialize weights for classification layers.
-
-        Args:
-            module: The module to initialize weights for.
-        """
-        if isinstance(module, nn.Linear):
-            module.weight.data.normal_(mean=0.0, std=self.classifier_init_range)
-            if module.bias is not None:
-                module.bias.data.zero_()
+        for layer in (self.dense, self.classifier):
+            nn.init.normal_(
+                layer.weight,
+                mean=0.0,
+                std=self.classifier_init_range,
+            )
+            if layer.bias is not None:
+                nn.init.zeros_(layer.bias)
 
     def forward(
         self,

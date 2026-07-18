@@ -12,79 +12,13 @@ from typing import Dict, Iterable, Optional
 
 import yaml
 
+from neobert.checkpointing import resolve_step_checkpoint_selector
+from neobert.glue.tasks import GLUE_TASK_SPECS
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "configs" / "glue" / "generated"
 DEFAULT_RESULTS_ROOT = Path("outputs/glue")
 DEFAULT_WANDB_PROJECT = "neobert-glue"
-
-
-# Task-specific overrides relative to the shared GLUE configuration
-TASK_SETTINGS: Dict[str, Dict[str, Dict[str, object]]] = {
-    "cola": {
-        "glue": {"num_labels": 2, "max_seq_length": 512},
-        "trainer": {
-            "metric_for_best_model": "eval_matthews_correlation",
-            "eval_steps": 200,
-            "logging_steps": 50,
-        },
-    },
-    "sst2": {
-        "glue": {"num_labels": 2, "max_seq_length": 512},
-        "trainer": {
-            "metric_for_best_model": "eval_accuracy",
-            "eval_steps": 500,
-        },
-    },
-    "mrpc": {
-        "glue": {"num_labels": 2, "max_seq_length": 512},
-        "trainer": {
-            "metric_for_best_model": "eval_f1",
-            "eval_steps": 100,
-        },
-    },
-    "stsb": {
-        "glue": {"num_labels": 1, "max_seq_length": 512},
-        "trainer": {
-            "metric_for_best_model": "eval_pearson",
-            "eval_steps": 150,
-        },
-    },
-    "qqp": {
-        "glue": {"num_labels": 2, "max_seq_length": 512},
-        "trainer": {
-            "metric_for_best_model": "eval_f1",
-            "eval_steps": 1000,
-        },
-    },
-    "mnli": {
-        "glue": {"num_labels": 3, "max_seq_length": 512},
-        "trainer": {
-            "metric_for_best_model": "eval_accuracy",
-            "eval_steps": 1000,
-        },
-    },
-    "qnli": {
-        "glue": {"num_labels": 2, "max_seq_length": 512},
-        "trainer": {
-            "metric_for_best_model": "eval_accuracy",
-            "eval_steps": 500,
-        },
-    },
-    "rte": {
-        "glue": {"num_labels": 2, "max_seq_length": 512},
-        "trainer": {
-            "metric_for_best_model": "eval_accuracy",
-            "eval_steps": 50,
-        },
-    },
-    "wnli": {
-        "glue": {"num_labels": 2, "max_seq_length": 512},
-        "trainer": {
-            "metric_for_best_model": "eval_accuracy",
-            "eval_steps": 20,
-        },
-    },
-}
 
 
 BASE_TRAINER = {
@@ -100,8 +34,6 @@ BASE_TRAINER = {
     "save_total_limit": 0,
     "logging_steps": 100,
     "early_stopping": 5,
-    "greater_is_better": True,
-    "load_best_model_at_end": True,
     "mixed_precision": "bf16",
     "tf32": True,
 }
@@ -211,28 +143,6 @@ def relpath(path: Path, base: Path) -> str:
         return Path(path).resolve().as_posix()
 
 
-def find_checkpoint_step(checkpoint_dir: Path, requested_step: Optional[str]) -> str:
-    """Resolve the checkpoint step.
-
-    :param Path checkpoint_dir: Directory containing model checkpoints.
-    :param str | None requested_step: Requested step or "latest".
-    :return str: Resolved checkpoint step.
-    """
-
-    if requested_step and requested_step != "latest":
-        return requested_step
-
-    checkpoint_root = checkpoint_dir / "checkpoints"
-    candidates = [
-        p.name for p in checkpoint_root.glob("*") if p.is_dir() and p.name.isdigit()
-    ]
-    if not candidates:
-        raise FileNotFoundError(
-            f"No numbered checkpoints found under: {checkpoint_root}"
-        )
-    return max(candidates, key=lambda name: int(name))
-
-
 def load_pretraining_config(config_path: Path) -> Dict[str, object]:
     """Load and validate a pretraining config file.
 
@@ -260,7 +170,6 @@ def build_trainer_section(
     """
     trainer_cfg = deepcopy(BASE_TRAINER)
     trainer_cfg.update(overrides)
-    trainer_cfg.setdefault("metric_for_best_model", "eval_accuracy")
     trainer_cfg["output_dir"] = str(base_output_dir / task_name)
     return trainer_cfg
 
@@ -389,14 +298,20 @@ def build_configs(args: BuildArgs) -> Dict[str, Dict[str, object]]:
 
     configs: Dict[str, Dict[str, object]] = {}
     for task in args.tasks:
-        settings = TASK_SETTINGS[task]
+        spec = GLUE_TASK_SPECS[task]
+        trainer_overrides: Dict[str, object] = {
+            "eval_steps": spec.config_eval_steps,
+        }
+        if spec.config_logging_steps is not None:
+            trainer_overrides["logging_steps"] = spec.config_logging_steps
 
-        trainer_cfg = build_trainer_section(
-            output_dir_root, task, settings.get("trainer", {})
-        )
+        trainer_cfg = build_trainer_section(output_dir_root, task, trainer_overrides)
 
-        glue_cfg = {"task_name": task}
-        glue_cfg.update(settings.get("glue", {}))
+        glue_cfg = {
+            "task_name": task,
+            "num_labels": spec.num_labels,
+            "max_seq_length": 512,
+        }
         glue_cfg.update(glue_pretrain_section)
 
         config_dict: Dict[str, object] = {
@@ -504,8 +419,8 @@ def parse_args() -> argparse.Namespace:
         "--tasks",
         type=str,
         nargs="*",
-        default=sorted(TASK_SETTINGS.keys()),
-        choices=sorted(TASK_SETTINGS.keys()),
+        default=sorted(GLUE_TASK_SPECS),
+        choices=sorted(GLUE_TASK_SPECS),
         help="Subset of GLUE tasks to generate (default: all)",
     )
     parser.add_argument(
@@ -530,7 +445,10 @@ def main() -> None:
     if not checkpoint_dir.exists():
         raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_dir}")
 
-    checkpoint_step = find_checkpoint_step(checkpoint_dir, args.checkpoint_step)
+    checkpoint_step = resolve_step_checkpoint_selector(
+        checkpoint_dir / "checkpoints",
+        args.checkpoint_step or "latest",
+    )
 
     pretrain_config_path = (
         args.pretrain_config.resolve()
@@ -564,7 +482,7 @@ def main() -> None:
         entry = override
         if ":" in override:
             prefix, rest = override.split(":", 1)
-            if prefix in TASK_SETTINGS:
+            if prefix in GLUE_TASK_SPECS:
                 target = task_overrides.setdefault(prefix, {})  # type: ignore[assignment]
                 entry = rest
         parsed = parse_overrides([entry])
@@ -594,7 +512,8 @@ def main() -> None:
 
     print(
         "\nExample command:"
-        f"\n  bash scripts/evaluation/glue/run_all_glue.sh {final_output_dir}"
+        "\n  python scripts/evaluation/glue/run_glue_suite.py"
+        f" {final_output_dir} --suite all"
     )
 
 
