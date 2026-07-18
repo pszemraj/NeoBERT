@@ -50,6 +50,9 @@ def load_validated_glue_config(
 
     if task_name:
         cfg.glue.task_name = task_name
+        task_spec = SUPPORTED_GLUE_TASK_SPECS.get(task_name)
+        if task_spec is not None:
+            cfg.glue.num_labels = task_spec.num_labels
     if model_name_or_path:
         cfg.model.name = model_name_or_path
         cfg.model.from_hub = True

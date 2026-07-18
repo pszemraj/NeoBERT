@@ -573,6 +573,41 @@ class TestGLUETaskSpecific:
         assert cfg.glue.num_labels == 3
         assert not (tmp_path / "not-created").exists()
 
+    @pytest.mark.parametrize(
+        ("source_task", "source_labels", "override_task", "expected_labels"),
+        (
+            ("sst2", 2, "mnli", 3),
+            ("mnli", 3, "stsb", 1),
+            ("stsb", 1, "sst2", 2),
+        ),
+    )
+    def test_glue_task_override_updates_registry_label_count(
+        self,
+        tmp_path,
+        source_task,
+        source_labels,
+        override_task,
+        expected_labels,
+    ):
+        """Ensure a fresh cross-task launch keeps task metadata consistent."""
+        from neobert.glue.validation import load_validated_glue_config
+
+        cfg = Config()
+        cfg.task = "glue"
+        cfg.model.from_hub = True
+        cfg.glue.task_name = source_task
+        cfg.glue.num_labels = source_labels
+        config_path = tmp_path / "glue.yaml"
+        ConfigLoader.save(cfg, config_path)
+
+        loaded, _ = load_validated_glue_config(
+            config_path,
+            task_name=override_task,
+        )
+
+        assert loaded.glue.task_name == override_task
+        assert loaded.glue.num_labels == expected_labels
+
     def test_suite_dry_run_uses_production_validation(
         self, tmp_path, monkeypatch, capsys
     ):

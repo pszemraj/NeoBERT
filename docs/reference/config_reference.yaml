@@ -556,7 +556,7 @@ wandb:
 # glue — mapping; default: all GLUEConfig defaults below. Used only when task=glue.
 glue:
   # glue.task_name — string; default: "cola". One of: allnli | cola | mnli | mrpc | qnli | qqp | rte | snli | sst2 | stsb | wnli.
-  # Values must use the exact lowercase spelling. run_glue.py --task_name overrides this field. Checkpoint-selection/early-stopping metric by task: cola=matthews_correlation; mrpc/qqp=f1; stsb=pearson; allnli/mnli/qnli/rte/snli/sst2/wnli=accuracy. MNLI uses matched accuracy for selection and also reports mismatched accuracy.
+  # Values must use the exact lowercase spelling. run_glue.py --task_name overrides this field and sets glue.num_labels from the task registry. Checkpoint-selection/early-stopping metric by task: cola=matthews_correlation; mrpc/qqp=f1; stsb=pearson; allnli/mnli/qnli/rte/snli/sst2/wnli=accuracy. MNLI uses matched accuracy for selection and also reports mismatched accuracy.
   # GLUE resume restores the saved task and rejects a checkpoint from another top-level task.
   task_name: cola
 
